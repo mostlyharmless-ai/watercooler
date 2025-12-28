@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "watercooler-cloud"
-version = "0.1.4-dev"
+version = "0.1.5-dev"
 description = "File-based collaboration protocol for agentic coding projects"
 readme = "README.md"
 requires-python = ">=3.10"
