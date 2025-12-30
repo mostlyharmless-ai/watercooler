@@ -395,16 +395,18 @@ class TestLeanRAGSmoke:
         graph_name = f"pytest__{work_dir.name}"
         try:
             from falkordb import FalkorDB
+            from redis.exceptions import ResponseError
             db = FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
             try:
                 graph = db.select_graph(graph_name)
                 graph.delete()
                 print(f"Cleaned up FalkorDB graph: {graph_name}")
-            except Exception as delete_err:
-                # Graph doesn't exist yet - expected for fresh test
-                if "unknown graph" not in str(delete_err).lower():
-                    print(f"FalkorDB cleanup note: {delete_err}")
-        except Exception as e:
+            except ResponseError as e:
+                # Expected errors when graph doesn't exist yet
+                err_msg = str(e).lower()
+                if "unknown graph" not in err_msg and "empty key" not in err_msg:
+                    print(f"FalkorDB cleanup note: {e}")
+        except (ImportError, ConnectionError) as e:
             print(f"FalkorDB cleanup skipped: {e}")
 
         config = LeanRAGConfig(work_dir=work_dir, test_mode=True)
@@ -418,14 +420,15 @@ class TestLeanRAGSmoke:
         # (tmp_path is automatically cleaned by pytest)
         try:
             from falkordb import FalkorDB
+            from redis.exceptions import ResponseError
             db = FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
             try:
                 graph = db.select_graph(graph_name)
                 graph.delete()
                 print(f"Post-test cleanup: deleted FalkorDB graph {graph_name}")
-            except Exception:
+            except ResponseError:
                 pass  # Graph might not exist if test didn't reach indexing
-        except Exception:
+        except (ImportError, ConnectionError):
             pass
 
     def test_healthcheck(self, leanrag_backend):
