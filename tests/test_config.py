@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from watercooler.config import resolve_templates_dir, load_template
+from watercooler.path_resolver import resolve_templates_dir, load_template
 
 
 def test_resolve_templates_dir_cli_arg():

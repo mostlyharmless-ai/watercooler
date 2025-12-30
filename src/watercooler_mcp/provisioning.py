@@ -1,12 +1,11 @@
 """Provisioning helpers for watercooler threads repositories.
 
-This module centralises the logic for opt-in auto-provisioning of the
+This module centralises the logic for auto-provisioning of the
 `<repo>-threads` repositories when they do not yet exist on the remote.
 
-The workflow is intentionally conservative:
+The workflow:
 
-* Disabled by default – requires the operator to set
-  `WATERCOOLER_THREADS_AUTO_PROVISION=1` (or another truthy value).
+* Enabled by default – set `WATERCOOLER_THREADS_AUTO_PROVISION=0` to disable.
 * Requires an explicit provisioning command via
   `WATERCOOLER_THREADS_CREATE_CMD`. This allows organisations to plug in the
   mechanism they trust (`gh repo create`, an internal API wrapper, etc.).
@@ -26,8 +25,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Dict
 
-
-TRUE_VALUES = {"1", "true", "yes", "on"}
+from watercooler.config_facade import config
 
 AUTO_PROVISION_ENV = "WATERCOOLER_THREADS_AUTO_PROVISION"
 PROVISION_CMD_ENV = "WATERCOOLER_THREADS_CREATE_CMD"
@@ -79,9 +77,7 @@ def is_auto_provision_requested() -> bool:
     Auto-provisioning is enabled by default. Set WATERCOOLER_THREADS_AUTO_PROVISION=0
     to disable it.
     """
-
-    value = os.getenv(AUTO_PROVISION_ENV, "1").strip().lower()
-    return value in TRUE_VALUES
+    return config.env.get_bool(AUTO_PROVISION_ENV, True)
 
 
 def _build_context(repo_url: str, slug: str | None, code_repo: str | None) -> ProvisioningContext:
@@ -235,7 +231,7 @@ def provision_threads_repo(
                 pass
 
     # Fall back to CLI command (works for SSH and HTTPS if gh CLI is configured)
-    template = os.getenv(PROVISION_CMD_ENV, DEFAULT_PROVISION_CMD)
+    template = config.env.get(PROVISION_CMD_ENV, DEFAULT_PROVISION_CMD)
     if not template:
         raise ProvisioningError(
             "Auto-provisioning requested but WATERCOOLER_THREADS_CREATE_CMD is not set"

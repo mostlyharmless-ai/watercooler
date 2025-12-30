@@ -33,6 +33,7 @@ from git import Repo, InvalidGitRepositoryError, GitCommandError
 
 # Local application imports
 from watercooler import commands, fs
+from watercooler.config_facade import config
 from watercooler.metadata import thread_meta
 from watercooler.thread_entries import ThreadEntry, parse_thread_entries
 from watercooler.baseline_graph.reader import (
@@ -102,7 +103,7 @@ if sys.platform == "win32":
 
 # Initialize FastMCP server with configurable transport
 # WATERCOOLER_MCP_TRANSPORT: "http" or "stdio" (default: "stdio" for backward compatibility)
-_TRANSPORT = os.getenv("WATERCOOLER_MCP_TRANSPORT", "stdio").lower()
+_TRANSPORT = config.env.get("WATERCOOLER_MCP_TRANSPORT", "stdio").lower()
 mcp = FastMCP(name="Watercooler Cloud")
 
 
@@ -191,7 +192,7 @@ def _format_warnings_for_response(response: str) -> str:
 
 
 def _should_auto_branch() -> bool:
-    return os.getenv("WATERCOOLER_AUTO_BRANCH", "1") != "0"
+    return config.env.get_bool("WATERCOOLER_AUTO_BRANCH", True)
 
 
 def _require_context(code_path: str) -> tuple[str | None, ThreadContext | None]:
@@ -207,8 +208,8 @@ def _require_context(code_path: str) -> tuple[str | None, ThreadContext | None]:
         drive = code_path[1]
         if drive.isalpha() and code_path[2] == "/":
             code_path = f"{drive}:{code_path[2:].replace('/', os.sep)}"
-    if os.getenv("WATERCOOLER_DEBUG_CODE_PATH", "0") not in {"0", "false", "off"}:
-        log_dir = os.getenv("WATERCOOLER_DEBUG_LOG_DIR")
+    if config.env.get_bool("WATERCOOLER_DEBUG_CODE_PATH", False):
+        log_dir = config.env.get("WATERCOOLER_DEBUG_LOG_DIR", "")
         log_path = Path(log_dir).resolve() if log_dir else Path.home() / ".watercooler-codepath-debug.log"
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -229,7 +230,7 @@ def _require_context(code_path: str) -> tuple[str | None, ThreadContext | None]:
 
 def _dynamic_context_missing(context: ThreadContext) -> bool:
     dynamic_env = any(
-        os.getenv(key)
+        config.env.get(key, "")
         for key in (
             "WATERCOOLER_THREADS_BASE",
             "WATERCOOLER_THREADS_PATTERN",
@@ -686,11 +687,11 @@ def _use_graph_for_reads(threads_dir: Path) -> bool:
     This allows graceful fallback - if graph doesn't exist or is broken,
     we fall back to markdown parsing.
     """
-    explicit_opt_in = os.getenv("WATERCOOLER_USE_GRAPH", "0") == "1"
+    explicit_opt_in = config.env.get("WATERCOOLER_USE_GRAPH", "0") == "1"
     if explicit_opt_in:
         return is_graph_available(threads_dir)
     # Auto-use graph if available and not explicitly disabled
-    auto_use = os.getenv("WATERCOOLER_USE_GRAPH", "auto") == "auto"
+    auto_use = config.env.get("WATERCOOLER_USE_GRAPH", "auto") == "auto"
     if auto_use:
         return is_graph_available(threads_dir)
     return False

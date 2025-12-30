@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 import threading
 import time
@@ -11,6 +10,8 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from watercooler.config_facade import config
 
 
 LOGGER_NAME = "watercooler_mcp"
@@ -74,23 +75,14 @@ def _get_logging_config_safe() -> Dict[str, Any]:
     try:
         from watercooler_mcp.config import get_logging_config
         _cached_logging_config = get_logging_config()
-    except ImportError:
-        # Config system not available, use defaults with env var overrides
-        _cached_logging_config = {
-            "level": os.getenv(ENV_LOG_LEVEL, DEFAULT_LOG_LEVEL),
-            "dir": os.getenv(ENV_LOG_DIR, ""),
-            "max_bytes": int(os.getenv(ENV_LOG_MAX_BYTES, str(DEFAULT_MAX_BYTES))),
-            "backup_count": int(os.getenv(ENV_LOG_BACKUP_COUNT, str(DEFAULT_BACKUP_COUNT))),
-            "disable_file": os.getenv(ENV_LOG_DISABLE_FILE, "").lower() in ("1", "true", "yes"),
-        }
     except Exception:
-        # Config loading failed, use defaults with env var overrides
+        # Config system not available or failed, use defaults with env var overrides
         _cached_logging_config = {
-            "level": os.getenv(ENV_LOG_LEVEL, DEFAULT_LOG_LEVEL),
-            "dir": os.getenv(ENV_LOG_DIR, ""),
-            "max_bytes": int(os.getenv(ENV_LOG_MAX_BYTES, str(DEFAULT_MAX_BYTES))),
-            "backup_count": int(os.getenv(ENV_LOG_BACKUP_COUNT, str(DEFAULT_BACKUP_COUNT))),
-            "disable_file": os.getenv(ENV_LOG_DISABLE_FILE, "").lower() in ("1", "true", "yes"),
+            "level": config.env.get(ENV_LOG_LEVEL, DEFAULT_LOG_LEVEL),
+            "dir": config.env.get(ENV_LOG_DIR, ""),
+            "max_bytes": config.env.get_int(ENV_LOG_MAX_BYTES, DEFAULT_MAX_BYTES),
+            "backup_count": config.env.get_int(ENV_LOG_BACKUP_COUNT, DEFAULT_BACKUP_COUNT),
+            "disable_file": config.env.get_bool(ENV_LOG_DISABLE_FILE, False),
         }
 
     return _cached_logging_config
