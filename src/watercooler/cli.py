@@ -208,7 +208,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "init-thread":
         from pathlib import Path
         from .fs import read_body
-        from .config import resolve_threads_dir, resolve_templates_dir
+        from .path_resolver import resolve_threads_dir, resolve_templates_dir
         from .commands import init_thread
 
         body = read_body(args.body)
@@ -229,7 +229,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "append-entry":
         from pathlib import Path
         from .fs import read_body
-        from .config import resolve_threads_dir, resolve_templates_dir
+        from .path_resolver import resolve_threads_dir, resolve_templates_dir
         from .commands import append_entry
         from .agents import _load_agents_registry
 
@@ -254,7 +254,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "set-status":
         from pathlib import Path
         from .commands import set_status
-        from .config import resolve_threads_dir
+        from .path_resolver import resolve_threads_dir
 
         out = set_status(args.topic, threads_dir=resolve_threads_dir(args.threads_dir), status=args.status)
         print(str(out))
@@ -263,7 +263,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "set-ball":
         from pathlib import Path
         from .commands import set_ball
-        from .config import resolve_threads_dir
+        from .path_resolver import resolve_threads_dir
 
         out = set_ball(args.topic, threads_dir=resolve_threads_dir(args.threads_dir), ball=args.ball)
         print(str(out))
@@ -271,7 +271,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "sync":
         from pathlib import Path
-        from .config import resolve_threads_dir
+        from .path_resolver import resolve_threads_dir
         from watercooler_mcp.config import (
             resolve_thread_context,
             get_git_sync_manager_from_context,
@@ -347,7 +347,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "list":
         from pathlib import Path
         from .commands import list_threads
-        from .config import resolve_threads_dir
+        from .path_resolver import resolve_threads_dir
 
         oo: bool | None = None
         if args.open_only and args.closed:
@@ -365,7 +365,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "reindex":
         from pathlib import Path
         from .commands import reindex
-        from .config import resolve_threads_dir
+        from .path_resolver import resolve_threads_dir
 
         oo: bool | None = True
         if args.open_only and args.closed:
@@ -381,7 +381,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "search":
         from pathlib import Path
         from .commands import search
-        from .config import resolve_threads_dir
+        from .path_resolver import resolve_threads_dir
 
         hits = search(threads_dir=resolve_threads_dir(args.threads_dir), query=args.query)
         for p, ln, line in hits:
@@ -391,7 +391,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "unlock":
         from pathlib import Path
         from .commands import unlock
-        from .config import resolve_threads_dir
+        from .path_resolver import resolve_threads_dir
 
         unlock(
             args.topic,
@@ -403,7 +403,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "web-export":
         from pathlib import Path
         from .commands import web_export
-        from .config import resolve_threads_dir
+        from .path_resolver import resolve_threads_dir
 
         oo: bool | None = True
         if args.open_only and args.closed:
@@ -419,7 +419,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "say":
         from pathlib import Path
         from .fs import read_body
-        from .config import resolve_threads_dir, resolve_templates_dir
+        from .path_resolver import resolve_threads_dir, resolve_templates_dir
         from .commands import say
         from .agents import _load_agents_registry
 
@@ -445,7 +445,7 @@ def main(argv: list[str] | None = None) -> None:
         from pathlib import Path
         from .fs import read_body
         from .commands import ack
-        from .config import resolve_threads_dir, resolve_templates_dir
+        from .path_resolver import resolve_threads_dir, resolve_templates_dir
         from .agents import _load_agents_registry
 
         body = read_body(args.body) if args.body else None
@@ -469,7 +469,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "handoff":
         from pathlib import Path
         from .commands import handoff
-        from .config import resolve_threads_dir, resolve_templates_dir
+        from .path_resolver import resolve_threads_dir, resolve_templates_dir
         from .agents import _load_agents_registry
 
         registry = _load_agents_registry(args.agents_file) if hasattr(args, 'agents_file') and args.agents_file else None
@@ -691,7 +691,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "memory":
         from pathlib import Path
-        from .config import resolve_threads_dir
+        from .path_resolver import resolve_threads_dir
 
         if not args.memory_cmd:
             print("Usage: watercooler memory {build|export|stats}")
@@ -815,7 +815,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "baseline-graph":
         from pathlib import Path
-        from .config import resolve_threads_dir
+        from .path_resolver import resolve_threads_dir
 
         if not args.baseline_cmd:
             print("Usage: watercooler baseline-graph {build|stats}")

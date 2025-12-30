@@ -353,3 +353,35 @@ def resolve_templates_dir(cli_value: Optional[str] = None) -> Path:
     # This returns src/watercooler/templates/ in development
     # or site-packages/watercooler/templates/ when installed
     return Path(__file__).parent / "templates"
+
+
+def load_template(template_name: str, templates_dir: Path | None = None) -> str:
+    """Load a template file with fallback to package bundled templates.
+
+    Args:
+        template_name: Name of template file (e.g., "_TEMPLATE_entry_block.md")
+        templates_dir: Optional templates directory (uses resolve_templates_dir if None)
+
+    Returns:
+        Template content as string
+
+    Raises:
+        FileNotFoundError: If template not found in any location
+    """
+    if templates_dir is None:
+        templates_dir = resolve_templates_dir()
+
+    template_path = templates_dir / template_name
+
+    # Try requested location first
+    if template_path.exists():
+        return template_path.read_text(encoding="utf-8")
+
+    # Fallback to package bundled templates
+    bundled_path = Path(__file__).parent / "templates" / template_name
+    if bundled_path.exists():
+        return bundled_path.read_text(encoding="utf-8")
+
+    raise FileNotFoundError(
+        f"Template '{template_name}' not found in {templates_dir} or bundled templates"
+    )

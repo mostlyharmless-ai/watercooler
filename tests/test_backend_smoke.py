@@ -19,6 +19,10 @@ CI Configuration:
 
 from __future__ import annotations
 
+import os
+import re
+import uuid
+
 import pytest
 from pathlib import Path
 from typing import Generator
@@ -30,6 +34,11 @@ from watercooler_memory.backends import (
 )
 from watercooler_memory.backends.registry import get_backend
 from watercooler_memory.graph import MemoryGraph
+
+
+# FalkorDB connection configuration (configurable via env vars for CI flexibility)
+FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
+FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 
 
 # Fixtures
@@ -47,7 +56,7 @@ def cleanup_test_databases() -> None:
     """
     try:
         import redis
-        r = redis.Redis(host='localhost', port=6379, socket_connect_timeout=2)
+        r = redis.Redis(host=FALKORDB_HOST, port=FALKORDB_PORT, socket_connect_timeout=2)
 
         # First, delete FalkorDB graphs with pytest__ prefix
         # Use SCAN to find all keys, then check if they're graphs and delete
@@ -362,21 +371,65 @@ class TestLeanRAGSmoke:
 
     @pytest.fixture
     def leanrag_backend(self, tmp_path: Path) -> Generator[LeanRAGBackend, None, None]:
-        """LeanRAG backend with persistent working directory for inspection."""
-        from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
-        from pathlib import Path
+        """LeanRAG backend with unique working directory per test for isolation.
 
-        # Use persistent directory in project root so we can inspect artifacts
-        # Backend will add pytest__ prefix automatically when test_mode=True
-        work_dir = Path("tests/test_artifacts/leanrag_work")
+        Uses pytest's tmp_path fixture to create a unique directory per test.
+        This avoids Milvus-lite file lock issues that occur when multiple tests
+        share the same work directory.
+
+        Why unique directories per test:
+        - Milvus-lite uses SQLite under the hood with file locks
+        - MilvusClient instances in LeanRAG don't explicitly close()
+        - File locks persist after test completion, causing cleanup failures
+        - Subsequent tests may read stale entities with wrong source_id hashes
+        - Using unique directories eliminates all cleanup/isolation issues
+        """
+        from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
+
+        # Use pytest's tmp_path with a unique subdirectory for this test
+        # This ensures complete isolation - no file lock issues, no stale data
+        work_dir = tmp_path / f"leanrag_{uuid.uuid4().hex[:8]}"
+
+        # Clean up FalkorDB graph with matching name (graph name = work_dir.name)
+        # The pytest__ prefix is applied by the backend when test_mode=True
+        graph_name = f"pytest__{work_dir.name}"
+        try:
+            from falkordb import FalkorDB
+            from redis.exceptions import ResponseError
+            db = FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
+            try:
+                graph = db.select_graph(graph_name)
+                graph.delete()
+                print(f"Cleaned up FalkorDB graph: {graph_name}")
+            except ResponseError as e:
+                # Expected errors when graph doesn't exist yet
+                err_msg = str(e).lower()
+                if "unknown graph" not in err_msg and "empty key" not in err_msg:
+                    print(f"FalkorDB cleanup note: {e}")
+        except (ImportError, ConnectionError) as e:
+            print(f"FalkorDB cleanup skipped: {e}")
 
         config = LeanRAGConfig(work_dir=work_dir, test_mode=True)
         backend = LeanRAGBackend(config)
-        
+
         print(f"\n*** LeanRAG working directory: {work_dir.absolute()} ***\n")
-        
+
         yield backend
-        # Don't cleanup - leave artifacts for inspection
+
+        # Cleanup: Delete FalkorDB graph after test to avoid accumulation
+        # (tmp_path is automatically cleaned by pytest)
+        try:
+            from falkordb import FalkorDB
+            from redis.exceptions import ResponseError
+            db = FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
+            try:
+                graph = db.select_graph(graph_name)
+                graph.delete()
+                print(f"Post-test cleanup: deleted FalkorDB graph {graph_name}")
+            except ResponseError:
+                pass  # Graph might not exist if test didn't reach indexing
+        except (ImportError, ConnectionError):
+            pass
 
     def test_healthcheck(self, leanrag_backend):
         """LeanRAG healthcheck should succeed."""
@@ -385,7 +438,7 @@ class TestLeanRAGSmoke:
         assert "LeanRAG available" in health.details
         # Note: FalkorDB connectivity might fail if not running locally
 
-    def test_prepare_only(self, leanrag_backend, minimal_corpus):
+    def test_prepare_only(self, leanrag_backend, minimal_corpus, tmp_path):
         """LeanRAG prepare should create export files."""
         result = leanrag_backend.prepare(minimal_corpus)
 
@@ -393,10 +446,14 @@ class TestLeanRAGSmoke:
         assert result.prepared_count == 5  # 5 entries
         assert "Prepared corpus at" in result.message
 
+        # Extract actual work directory from result message
+        # Format: "Prepared corpus at /path/to/pytest__leanrag_xxx"
+        match = re.search(r"Prepared corpus at (.+)", result.message)
+        assert match, f"Could not extract work directory from: {result.message}"
+        actual_dir = Path(match.group(1))
+
         # Verify pytest__ prefix applied to work_dir when test_mode=True
-        # Backend modifies work_dir internally, check actual directory created
-        actual_dir = Path("tests/test_artifacts/pytest__leanrag_work")
-        assert actual_dir.exists(), f"Expected pytest__ prefixed directory at {actual_dir}"
+        assert actual_dir.exists(), f"Expected work directory to exist at {actual_dir}"
         assert actual_dir.name.startswith("pytest__"), "Work directory should have pytest__ prefix"
 
         # Verify export files exist in pytest__ prefixed directory

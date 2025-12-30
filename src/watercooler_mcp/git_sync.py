@@ -43,6 +43,7 @@ from git import Repo, GitCommandError, InvalidGitRepositoryError
 
 # Unified logging (replaces old _diag system)
 from .observability import log_debug, log_action, log_warning, log_error
+from watercooler.config_facade import config
 
 try:  # pragma: no cover - fallback for direct module import (tests)
     from .provisioning import ProvisioningError, provision_threads_repo
@@ -79,41 +80,14 @@ def _iso_from_epoch(value: Optional[float]) -> Optional[str]:
         return None
 
 
-def _normalize_bool(value: Optional[str]) -> Optional[bool]:
-    if value is None:
-        return None
-    lowered = value.strip().lower()
-    if lowered in {"1", "true", "yes", "on"}:
-        return True
-    if lowered in {"0", "false", "no", "off"}:
-        return False
-    return None
+def _positive_float(value: float, default: float) -> float:
+    """Return value if positive, otherwise default."""
+    return value if value > 0 else default
 
 
-def _parse_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-        if value <= 0:
-            return default
-        return value
-    except ValueError:
-        return default
-
-
-def _parse_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-        if value <= 0:
-            return default
-        return value
-    except ValueError:
-        return default
+def _positive_int(value: int, default: int) -> int:
+    """Return value if positive, otherwise default."""
+    return value if value > 0 else default
 
 
 @dataclass
@@ -305,7 +279,7 @@ class GitSyncManager:
             # SSH URL without explicit key - ensure BatchMode to prevent hangs
             self._env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
 
-        self._log_enabled = os.getenv("WATERCOOLER_SYNC_LOG", "0") not in {"0", "false", "off"}
+        self._log_enabled = config.env.get_bool("WATERCOOLER_SYNC_LOG", False)
         self._log_path = self.local_path.parent / ".watercooler-sync.log"
         self._async_enabled = self._resolve_async_enabled()
         self._async_config = self._load_async_config()
@@ -508,51 +482,37 @@ class GitSyncManager:
         self._configure_git()
 
     def _resolve_async_enabled(self) -> bool:
-        override = _normalize_bool(os.getenv("WATERCOOLER_ASYNC_SYNC"))
-        if override is not None:
-            return override
-        return sys.platform == "win32"
+        # Default: async on Windows (avoids subprocess stdio hangs)
+        return config.env.get_bool("WATERCOOLER_ASYNC_SYNC", sys.platform == "win32")
 
     def _load_async_config(self) -> dict:
         """Load async sync configuration from config system with env var overrides."""
-        # Late import to avoid circular dependency (config.py imports GitSyncManager)
+        # Get defaults from config system
         try:
             from .config import get_sync_config
             sync_config = get_sync_config()
         except Exception:
-            # Fallback if config system unavailable
             sync_config = {}
 
+        # Helper to get float with positive validation
+        def get_positive_float(key: str, cfg_key: str, default: float) -> float:
+            cfg_default = sync_config.get(cfg_key, default)
+            return _positive_float(config.env.get_float(key, cfg_default), cfg_default)
+
+        # Helper to get int with positive validation
+        def get_positive_int(key: str, cfg_key: str, default: int) -> int:
+            cfg_default = sync_config.get(cfg_key, default)
+            return _positive_int(config.env.get_int(key, cfg_default), cfg_default)
+
         return {
-            "batch_window": _parse_float_env(
-                "WATERCOOLER_BATCH_WINDOW",
-                sync_config.get("batch_window", 5.0)
-            ),
-            "max_delay": _parse_float_env(
-                "WATERCOOLER_MAX_BATCH_DELAY",
-                sync_config.get("max_delay", 30.0)
-            ),
-            "max_batch_size": _parse_int_env(
-                "WATERCOOLER_MAX_BATCH_SIZE",
-                sync_config.get("max_batch_size", 50)
-            ),
-            "max_sync_retries": _parse_int_env(
-                "WATERCOOLER_MAX_SYNC_RETRIES",
-                sync_config.get("max_retries", 5)
-            ),
-            "max_backoff": _parse_float_env(
-                "WATERCOOLER_MAX_BACKOFF",
-                sync_config.get("max_backoff", 300.0)
-            ),
+            "batch_window": get_positive_float("WATERCOOLER_BATCH_WINDOW", "batch_window", 5.0),
+            "max_delay": get_positive_float("WATERCOOLER_MAX_BATCH_DELAY", "max_delay", 30.0),
+            "max_batch_size": get_positive_int("WATERCOOLER_MAX_BATCH_SIZE", "max_batch_size", 50),
+            "max_sync_retries": get_positive_int("WATERCOOLER_MAX_SYNC_RETRIES", "max_retries", 5),
+            "max_backoff": get_positive_float("WATERCOOLER_MAX_BACKOFF", "max_backoff", 300.0),
             "log_enabled": self._log_enabled,
-            "sync_interval": _parse_float_env(
-                "WATERCOOLER_SYNC_INTERVAL",
-                sync_config.get("interval", 30.0)
-            ),
-            "stale_threshold": _parse_float_env(
-                "WATERCOOLER_STALE_THRESHOLD",
-                sync_config.get("stale_threshold", 60.0)
-            ),
+            "sync_interval": get_positive_float("WATERCOOLER_SYNC_INTERVAL", "interval", 30.0),
+            "stale_threshold": get_positive_float("WATERCOOLER_STALE_THRESHOLD", "stale_threshold", 60.0),
         }
 
     def _init_async(self) -> None:
