@@ -8,7 +8,7 @@ from .lock import AdvisoryLock
 from .header import bump_header
 from .metadata import thread_meta, is_closed, last_entry_by
 from .agents import _counterpart_of, _canonical_agent, _default_agent_and_role
-from .config import load_template, resolve_templates_dir
+from .path_resolver import load_template, resolve_templates_dir
 from .templates import _fill_template
 
 try:
@@ -1003,7 +1003,7 @@ def install_hooks(*, code_root: Path | None = None, hooks_dir: Path | None = Non
         hooks_path.mkdir(parents=True, exist_ok=True)
         
         # Get template directory
-        from .config import resolve_templates_dir
+        from .path_resolver import resolve_templates_dir
         templates_dir = resolve_templates_dir()
         
         installed = []
