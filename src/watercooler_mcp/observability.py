@@ -75,8 +75,12 @@ def _get_logging_config_safe() -> Dict[str, Any]:
     try:
         from watercooler_mcp.config import get_logging_config
         _cached_logging_config = get_logging_config()
-    except Exception:
+    except Exception as e:
         # Config system not available or failed, use defaults with env var overrides
+        # Use standard logging directly (not log_debug) to avoid circular dependency
+        logging.getLogger(LOGGER_NAME).debug(
+            "Config system unavailable, using env defaults: %s", e
+        )
         _cached_logging_config = {
             "level": config.env.get(ENV_LOG_LEVEL, DEFAULT_LOG_LEVEL),
             "dir": config.env.get(ENV_LOG_DIR, ""),

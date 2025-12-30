@@ -14,6 +14,8 @@ from watercooler_mcp.git_sync import (
     _find_main_branch,
     _detect_behind_main_divergence,
     _rebase_branch_onto,
+    _positive_float,
+    _positive_int,
     BranchSyncResult,
 )
 
@@ -1161,3 +1163,34 @@ def test_sync_write_no_commit_skips_push(tmp_path, monkeypatch):
     assert result == "no changes"
     # push_after_commit should NOT be called if no commit was made
     assert len(push_called) == 0
+
+
+# --- Validation helper tests ---
+
+
+def test_positive_float_returns_value_when_positive():
+    """Test that _positive_float returns the value when it's positive."""
+    assert _positive_float(5.0, 1.0) == 5.0
+    assert _positive_float(0.1, 1.0) == 0.1
+    assert _positive_float(100.5, 1.0) == 100.5
+
+
+def test_positive_float_returns_default_when_zero_or_negative():
+    """Test that _positive_float returns default for zero or negative values."""
+    assert _positive_float(0.0, 1.0) == 1.0
+    assert _positive_float(-1.0, 1.0) == 1.0
+    assert _positive_float(-100.5, 2.5) == 2.5
+
+
+def test_positive_int_returns_value_when_positive():
+    """Test that _positive_int returns the value when it's positive."""
+    assert _positive_int(5, 1) == 5
+    assert _positive_int(1, 10) == 1
+    assert _positive_int(100, 1) == 100
+
+
+def test_positive_int_returns_default_when_zero_or_negative():
+    """Test that _positive_int returns default for zero or negative values."""
+    assert _positive_int(0, 1) == 1
+    assert _positive_int(-1, 1) == 1
+    assert _positive_int(-100, 5) == 5

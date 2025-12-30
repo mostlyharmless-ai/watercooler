@@ -19,6 +19,10 @@ CI Configuration:
 
 from __future__ import annotations
 
+import os
+import re
+import uuid
+
 import pytest
 from pathlib import Path
 from typing import Generator
@@ -30,6 +34,11 @@ from watercooler_memory.backends import (
 )
 from watercooler_memory.backends.registry import get_backend
 from watercooler_memory.graph import MemoryGraph
+
+
+# FalkorDB connection configuration (configurable via env vars for CI flexibility)
+FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
+FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 
 
 # Fixtures
@@ -47,7 +56,7 @@ def cleanup_test_databases() -> None:
     """
     try:
         import redis
-        r = redis.Redis(host='localhost', port=6379, socket_connect_timeout=2)
+        r = redis.Redis(host=FALKORDB_HOST, port=FALKORDB_PORT, socket_connect_timeout=2)
 
         # First, delete FalkorDB graphs with pytest__ prefix
         # Use SCAN to find all keys, then check if they're graphs and delete
@@ -376,7 +385,6 @@ class TestLeanRAGSmoke:
         - Using unique directories eliminates all cleanup/isolation issues
         """
         from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
-        import uuid
 
         # Use pytest's tmp_path with a unique subdirectory for this test
         # This ensures complete isolation - no file lock issues, no stale data
@@ -387,7 +395,7 @@ class TestLeanRAGSmoke:
         graph_name = f"pytest__{work_dir.name}"
         try:
             from falkordb import FalkorDB
-            db = FalkorDB(host="localhost", port=6379)
+            db = FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
             try:
                 graph = db.select_graph(graph_name)
                 graph.delete()
@@ -410,7 +418,7 @@ class TestLeanRAGSmoke:
         # (tmp_path is automatically cleaned by pytest)
         try:
             from falkordb import FalkorDB
-            db = FalkorDB(host="localhost", port=6379)
+            db = FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
             try:
                 graph = db.select_graph(graph_name)
                 graph.delete()
@@ -437,7 +445,6 @@ class TestLeanRAGSmoke:
 
         # Extract actual work directory from result message
         # Format: "Prepared corpus at /path/to/pytest__leanrag_xxx"
-        import re
         match = re.search(r"Prepared corpus at (.+)", result.message)
         assert match, f"Could not extract work directory from: {result.message}"
         actual_dir = Path(match.group(1))
