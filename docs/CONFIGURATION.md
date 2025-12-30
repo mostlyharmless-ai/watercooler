@@ -369,6 +369,95 @@ Credentials files must have secure permissions:
 chmod 600 ~/.watercooler/credentials.toml
 ```
 
+## Programmatic Configuration (Python API)
+
+For developers building on Watercooler, use the unified `config_facade` module:
+
+### Basic Usage
+
+```python
+from watercooler.config_facade import config
+
+# Path resolution (lightweight, stdlib-only)
+threads_dir = config.paths.threads_dir
+templates_dir = config.paths.templates_dir
+
+# Full config (lazy-loads TOML + Pydantic)
+cfg = config.full()
+log_level = cfg.mcp.logging.level
+sync_enabled = cfg.mcp.sync.async_sync
+
+# Environment variables with type coercion
+level = config.env.get("WATERCOOLER_LOG_LEVEL", "INFO")
+debug = config.env.get_bool("DEBUG", False)
+port = config.env.get_int("WATERCOOLER_PORT", 8080)
+timeout = config.env.get_float("TIMEOUT", 30.0)
+
+# Runtime context (for MCP server)
+ctx = config.context(code_root="/path/to/repo")
+print(ctx.code_branch)
+print(ctx.threads_repo_url)
+
+# Credentials
+token = config.get_github_token()
+```
+
+### Environment Variable Helpers
+
+The `config.env` class provides type-safe access:
+
+| Method | Description | Example |
+|--------|-------------|---------|
+| `get(key, default)` | String value | `config.env.get("MY_VAR", "default")` |
+| `get_bool(key, default)` | Boolean (1/true/yes/on) | `config.env.get_bool("DEBUG", False)` |
+| `get_int(key, default)` | Integer | `config.env.get_int("PORT", 8080)` |
+| `get_float(key, default)` | Float | `config.env.get_float("TIMEOUT", 30.0)` |
+| `get_path(key, default)` | Path with ~ expansion | `config.env.get_path("DATA_DIR")` |
+
+### Testing Support
+
+Reset cached state for test isolation:
+
+```python
+def test_something():
+    config.reset()  # Clear cached config
+    # ... test code ...
+    config.reset()  # Clean up
+```
+
+For more advanced testing utilities, see `watercooler.testing`:
+
+```python
+from watercooler.testing import temp_config, mock_env_vars
+
+# Temporarily override configuration
+with temp_config(threads_dir=Path("/tmp/test-threads")):
+    assert config.paths.threads_dir == Path("/tmp/test-threads")
+
+# Temporarily set environment variables
+with mock_env_vars(WATERCOOLER_LOG_LEVEL="DEBUG"):
+    assert config.env.get("WATERCOOLER_LOG_LEVEL") == "DEBUG"
+```
+
+### Architecture
+
+The config facade provides a single entry point while maintaining:
+
+- **Lazy loading**: Config components loaded only when accessed
+- **Thread-safe**: Uses locks in underlying modules
+- **Backward compatible**: Old imports continue working
+- **Testable**: Easy reset for test isolation
+
+**Module hierarchy:**
+```
+config_facade.py    → Unified entry point
+├── path_resolver.py   → Git-aware path discovery
+├── config_loader.py   → TOML loading + Pydantic validation
+├── config_schema.py   → Pydantic models
+├── credentials.py     → Credential management
+└── testing.py         → Test utilities
+```
+
 ## See Also
 
 - [Environment Variables Reference](ENVIRONMENT_VARS.md) - All environment variables

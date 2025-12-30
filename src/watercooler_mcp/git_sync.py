@@ -14,20 +14,19 @@ from a background worker that batches git operations.
 """
 
 import atexit
+import hashlib
 import json
 import os
-import re
 import shlex
 import subprocess
-from subprocess import TimeoutExpired
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional, TypeVar, List, Dict, Any
-import sys
-import hashlib
+from subprocess import TimeoutExpired
+from typing import Callable, List, Optional, TypeVar
 
 # Import importlib.resources for accessing package data
 try:
@@ -42,7 +41,7 @@ import git
 from git import Repo, GitCommandError, InvalidGitRepositoryError
 
 # Unified logging (replaces old _diag system)
-from .observability import log_debug, log_action, log_warning, log_error
+from .observability import log_debug, log_warning
 from watercooler.config_facade import config
 
 try:  # pragma: no cover - fallback for direct module import (tests)

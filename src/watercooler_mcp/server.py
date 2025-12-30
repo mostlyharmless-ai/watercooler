@@ -40,10 +40,7 @@ from watercooler.baseline_graph.reader import (
     is_graph_available,
     list_threads_from_graph,
     read_thread_from_graph,
-    get_entry_from_graph,
-    get_entries_range_from_graph,
     increment_access_count,
-    GraphThread,
     GraphEntry,
 )
 from .config import (
@@ -60,10 +57,7 @@ from .git_sync import (
     BranchMismatch,
     BranchPairingResult,
     validate_branch_pairing,
-    GitSyncManager,
     sync_branch_history,
-    BranchSyncResult,
-    BranchDivergenceInfo,
     _find_main_branch,
 )
 from .branch_parity import (
@@ -72,11 +66,10 @@ from .branch_parity import (
     write_parity_state,
     get_branch_health,
     ensure_readable,
-    PreflightResult,
     ParityStatus,
     auto_merge_to_main,
 )
-from .observability import log_debug, log_action, log_warning, log_error, timeit
+from .observability import log_debug, log_action, log_warning, log_error
 
 # Workaround for Windows stdio hang: Force auto-flush on every stdout write
 # On Windows, FastMCP's stdio transport gets stuck after subprocess operations
