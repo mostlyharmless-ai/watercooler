@@ -2584,7 +2584,7 @@ wheels = [
 
 [[package]]
 name = "watercooler-cloud"
-version = "0.1.4.dev0"
+version = "0.1.5.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },

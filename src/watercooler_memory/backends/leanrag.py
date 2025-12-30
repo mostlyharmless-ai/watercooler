@@ -395,7 +395,9 @@ class LeanRAGBackend(MemoryBackend):
         work_dir = self.config.work_dir or Path(tempfile.mkdtemp(prefix="leanrag-query-"))
         # Convert to absolute path for reliability
         work_dir = work_dir.resolve()
-        
+        # Apply pytest__ prefix if in test mode (consistent with prepare/index)
+        work_dir = self._apply_test_prefix(work_dir)
+
         if not (work_dir / "threads_chunk.json").exists():
             raise ConfigError(
                 f"threads_chunk.json not found in {work_dir}. "
