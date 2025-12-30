@@ -455,11 +455,16 @@ python3 -m watercooler_mcp
   - `agents.py` - Agent registry and canonicalization
   - `cli.py` - CLI entry point
   - `commands.py` - High-level command implementations
-  - `config.py` - Configuration resolution
+  - `config_facade.py` - Unified configuration facade (single entry point)
+  - `config_loader.py` - TOML loading & merging
+  - `config_schema.py` - Pydantic configuration models
+  - `credentials.py` - Credential management
+  - `path_resolver.py` - Git-aware path resolution
   - `fs.py` - File system operations
   - `header.py` - Header parsing/updating
   - `lock.py` - Advisory file locking
   - `metadata.py` - Thread metadata parsing
+  - `testing.py` - Test utilities (context managers, fixtures)
   - `templates/` - Built-in templates
 - **MCP server**: `src/watercooler_mcp/` - MCP integration
   - `server.py` - FastMCP server implementation
