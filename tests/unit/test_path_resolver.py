@@ -71,7 +71,7 @@ class TestDiscoverGitInfo:
     def test_discover_git_info_real_repo(self):
         """Test discover_git_info with real git repository (integration test)."""
         # This test runs against the actual watercooler-cloud repo
-        repo_root = Path(__file__).parent.parent
+        repo_root = Path(__file__).parent.parent.parent
         result = discover_git_info(repo_root)
 
         # Should discover the repo

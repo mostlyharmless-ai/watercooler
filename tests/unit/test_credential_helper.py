@@ -18,7 +18,7 @@ def temp_home(tmp_path):
 @pytest.fixture
 def script_path():
     """Get the path to the credential helper script."""
-    return Path(__file__).parent.parent / "scripts" / "git-credential-watercooler"
+    return Path(__file__).parent.parent.parent / "scripts" / "git-credential-watercooler"
 
 
 def run_credential_helper(script_path, action, input_data="", env=None):
