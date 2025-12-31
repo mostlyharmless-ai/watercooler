@@ -18,6 +18,7 @@ from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
 from ..observability import log_action, log_error, log_warning
+from .. import validation  # Import module for runtime access (enables test patching)
 
 
 # Module-level references to registered tools (populated by register_memory_tools)
@@ -27,13 +28,6 @@ get_entity_edge = None
 search_memory_facts = None
 get_episodes = None
 diagnose_memory = None
-
-
-# Runtime accessors for patchable functions (tests patch via server module)
-def _require_context(code_path: str):
-    """Access _require_context at runtime for test patching."""
-    from .. import server
-    return server._require_context(code_path)
 
 
 async def _query_memory_impl(
@@ -187,7 +181,7 @@ async def _query_memory_impl(
                 )])
 
         # Resolve threads directory (for context logging, not directly used in query)
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             log_warning(f"MEMORY: Could not resolve context: {error}")
             # Continue anyway - query may work with existing index

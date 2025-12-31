@@ -5,7 +5,7 @@ from textwrap import dedent
 
 import pytest
 
-from watercooler_mcp import server
+from watercooler_mcp import server, validation
 from watercooler_mcp.config import ThreadContext
 
 
@@ -62,9 +62,10 @@ def patched_context(tmp_path, monkeypatch):
     def fake_require_context(code_path: str):
         return (None, context)
 
-    monkeypatch.setattr(server, "_require_context", fake_require_context)
-    monkeypatch.setattr(server, "_dynamic_context_missing", lambda ctx: False)
-    monkeypatch.setattr(server, "_refresh_threads", lambda ctx: None)
+    # Patch validation module directly (not server) to break circular import pattern
+    monkeypatch.setattr(validation, "_require_context", fake_require_context)
+    monkeypatch.setattr(validation, "_dynamic_context_missing", lambda ctx: False)
+    monkeypatch.setattr(validation, "_refresh_threads", lambda ctx: None)
 
     return thread_path
 

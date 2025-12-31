@@ -122,66 +122,16 @@ def _should_auto_branch() -> bool:
 
 
 # ============================================================================
-# Context Resolution Helpers
+# Context Resolution Helpers (re-exported from validation.py)
 # ============================================================================
+# These functions are now defined in validation.py to break circular imports.
+# They are re-exported here for backward compatibility.
 
-
-def _require_context(code_path: str) -> tuple[str | None, ThreadContext | None]:
-    import os
-
-    log_debug(f"_require_context: entry with code_path={code_path!r}")
-    if not code_path:
-        return (
-            "code_path required: pass the code repository root (e.g., '.') so the "
-            "server can resolve the correct threads repo/branch.",
-            None,
-        )
-
-    # Handle WSL-style absolute paths on Windows (e.g., /C/Users/...)
-    if os.name == "nt" and code_path.startswith("/") and len(code_path) > 2:
-        drive = code_path[1]
-        if drive.isalpha() and code_path[2] == "/":
-            code_path = f"{drive}:{code_path[2:].replace('/', os.sep)}"
-    if config.env.get_bool("WATERCOOLER_DEBUG_CODE_PATH", False):
-        log_dir = config.env.get("WATERCOOLER_DEBUG_LOG_DIR", "")
-        log_path = (
-            Path(log_dir).resolve()
-            if log_dir
-            else Path.home() / ".watercooler-codepath-debug.log"
-        )
-        try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with log_path.open("a", encoding="utf-8") as fh:
-                fh.write(f"cwd={Path.cwd()} input={code_path!r}\n")
-        except Exception:
-            pass
-    try:
-        log_debug(f"_require_context: calling resolve_thread_context({code_path!r})")
-        context = resolve_thread_context(Path(code_path))
-        log_debug("_require_context: resolve_thread_context returned")
-    except Exception as exc:
-        log_debug(f"_require_context: exception from resolve_thread_context: {exc}")
-        return (f"Error resolving code context: {exc}", None)
-    log_debug("_require_context: exit, returning context")
-    return (None, context)
-
-
-def _dynamic_context_missing(context: ThreadContext) -> bool:
-    dynamic_env = any(
-        config.env.get(key, "")
-        for key in (
-            "WATERCOOLER_THREADS_BASE",
-            "WATERCOOLER_THREADS_PATTERN",
-            "WATERCOOLER_GIT_REPO",
-            "WATERCOOLER_CODE_REPO",
-        )
-    )
-    return dynamic_env and not context.explicit_dir and context.threads_slug is None
-
-
-# Note: _validate_thread_context is intentionally kept in server.py (not here)
-# to allow tests to patch _require_context and _dynamic_context_missing
-# via the server module namespace.
+from .validation import (
+    _require_context,
+    _dynamic_context_missing,
+    _validate_thread_context,
+)
 
 
 # ============================================================================
@@ -473,28 +423,8 @@ def _validate_and_sync_branches(
             log_debug(f"Branch validation warning: {e}")
 
 
-def _refresh_threads(context: ThreadContext, skip_validation: bool = False) -> None:
-    """Refresh threads repo by validating branch pairing and pulling latest changes.
-
-    Args:
-        context: Thread context with repo information
-        skip_validation: If True, skip branch validation (used for recovery operations)
-
-    Raises:
-        BranchPairingError: If branch validation fails and skip_validation=False
-    """
-    # Validate and sync branches (will raise if validation fails)
-    _validate_and_sync_branches(context, skip_validation=skip_validation)
-
-    sync = get_git_sync_manager_from_context(context)
-    if not sync:
-        return
-
-    status = sync.get_async_status()
-    if status.get("mode") == "async":
-        # Async mode relies on background pulls; avoid blocking operations.
-        return
-    sync.pull()
+# _refresh_threads is now in validation.py - re-export for backward compatibility
+from .validation import _refresh_threads  # noqa: F401 (re-export)
 
 
 # ============================================================================

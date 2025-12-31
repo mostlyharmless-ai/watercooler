@@ -44,34 +44,7 @@ from ..helpers import (
 )
 from ..branch_parity import ensure_readable
 from ..observability import log_debug, log_error
-
-
-# Runtime accessors for patchable functions (tests patch via server module)
-def _require_context(code_path: str):
-    """Access _require_context at runtime for test patching.
-
-    Tests patch server._require_context, so we look it up from server at runtime.
-    """
-    from .. import server
-    return server._require_context(code_path)
-
-
-def _dynamic_context_missing(context):
-    """Access _dynamic_context_missing at runtime for test patching.
-
-    Tests patch server._dynamic_context_missing, so we look it up from server at runtime.
-    """
-    from .. import server
-    return server._dynamic_context_missing(context)
-
-
-def _refresh_threads(context):
-    """Access _refresh_threads at runtime for test patching.
-
-    Tests patch server._refresh_threads, so we look it up from server at runtime.
-    """
-    from .. import server
-    return server._refresh_threads(context)
+from .. import validation  # Import module for runtime access (enables test patching)
 
 
 # Module-level references to registered tools (populated by register_thread_query_tools)
@@ -80,36 +53,6 @@ read_thread = None
 list_thread_entries = None
 get_thread_entry = None
 get_thread_entry_range = None
-
-
-def _validate_thread_context(code_path: str) -> tuple[str | None, "ThreadContext | None"]:
-    """Validate and resolve thread context for MCP tools.
-
-    Args:
-        code_path: Path to code repository
-
-    Returns:
-        Tuple of (error_message, context). If error_message is not None,
-        context will be None.
-    """
-    from ..config import ThreadContext
-
-    error, context = _require_context(code_path)
-    if error:
-        return (error, None)
-    if context is None:
-        return (
-            "Error: Unable to resolve code context for the provided code_path.",
-            None,
-        )
-    if _dynamic_context_missing(context):
-        return (
-            "Dynamic threads repo was not resolved from your git context.\n"
-            "Run from inside your code repo or set "
-            "WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO.",
-            None,
-        )
-    return (None, context)
 
 
 def _list_threads_impl(
@@ -149,13 +92,13 @@ def _list_threads_impl(
         if format != "markdown":
             return ToolResult(content=[TextContent(type="text", text=f"Error: Phase 1A only supports format='markdown'. JSON support coming in Phase 1B.")])
 
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return ToolResult(content=[TextContent(type="text", text=error)])
         if context is None:
             return ToolResult(content=[TextContent(type="text", text="Error: Unable to resolve code context for the provided code_path.")])
         log_debug(f"list_threads start code_path={code_path!r} open_only={open_only}")
-        if context and _dynamic_context_missing(context):
+        if context and validation._dynamic_context_missing(context):
             log_debug("list_threads dynamic context missing")
             return ToolResult(content=[TextContent(type="text", text=(
                 "Dynamic threads repo was not resolved from your git context.\n"
@@ -173,7 +116,7 @@ def _list_threads_impl(
 
         log_debug("list_threads refreshing git state")
         git_start = time.time()
-        _refresh_threads(context)
+        validation._refresh_threads(context)
         git_elapsed = time.time() - git_start
         log_debug(f"list_threads git refreshed in {git_elapsed:.2f}s")
         threads_dir = context.threads_dir
@@ -329,13 +272,13 @@ def _read_thread_impl(
         if fmt_error:
             return fmt_error
 
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None:
             return "Error: Unable to resolve code context for the provided code_path."
 
-        if _dynamic_context_missing(context):
+        if validation._dynamic_context_missing(context):
             return (
                 "Dynamic threads repo was not resolved from your git context.\n"
                 "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO."
@@ -346,7 +289,7 @@ def _read_thread_impl(
         if sync_actions:
             log_debug(f"read_thread read sync: {sync_actions}")
 
-        _refresh_threads(context)
+        validation._refresh_threads(context)
         threads_dir = context.threads_dir
 
         # Create threads directory if it doesn't exist
@@ -411,7 +354,7 @@ def _list_thread_entries_impl(
     if fmt_error:
         return ToolResult(content=[TextContent(type="text", text=fmt_error)])
 
-    error, context = _validate_thread_context(code_path)
+    error, context = validation._validate_thread_context(code_path)
     if error or context is None:
         return ToolResult(content=[TextContent(type="text", text=error or "Unknown error")])
 
@@ -429,7 +372,7 @@ def _list_thread_entries_impl(
     if sync_actions:
         log_debug(f"list_thread_entries read sync: {sync_actions}")
 
-    _refresh_threads(context)
+    validation._refresh_threads(context)
     load_error, entries = _load_thread_entries_graph_first(topic, context)
     if load_error:
         return ToolResult(content=[TextContent(type="text", text=load_error)])
@@ -481,7 +424,7 @@ def _get_thread_entry_impl(
     if index is None and entry_id is None:
         return ToolResult(content=[TextContent(type="text", text="Error: provide either index or entry_id to select an entry.")])
 
-    error, context = _validate_thread_context(code_path)
+    error, context = validation._validate_thread_context(code_path)
     if error or context is None:
         return ToolResult(content=[TextContent(type="text", text=error or "Unknown error")])
 
@@ -490,7 +433,7 @@ def _get_thread_entry_impl(
     if sync_actions:
         log_debug(f"get_thread_entry read sync: {sync_actions}")
 
-    _refresh_threads(context)
+    validation._refresh_threads(context)
     load_error, entries = _load_thread_entries_graph_first(topic, context)
     if load_error:
         return ToolResult(content=[TextContent(type="text", text=load_error)])
@@ -553,7 +496,7 @@ def _get_thread_entry_range_impl(
     if end_index is not None and (end_index - start_index) > _MAX_LIMIT:
         return ToolResult(content=[TextContent(type="text", text=f"Error: requested range size must not exceed {_MAX_LIMIT} entries.")])
 
-    error, context = _validate_thread_context(code_path)
+    error, context = validation._validate_thread_context(code_path)
     if error or context is None:
         return ToolResult(content=[TextContent(type="text", text=error or "Unknown error")])
 
@@ -562,7 +505,7 @@ def _get_thread_entry_range_impl(
     if sync_actions:
         log_debug(f"get_thread_entry_range read sync: {sync_actions}")
 
-    _refresh_threads(context)
+    validation._refresh_threads(context)
     load_error, entries = _load_thread_entries_graph_first(topic, context)
     if load_error:
         return ToolResult(content=[TextContent(type="text", text=load_error)])

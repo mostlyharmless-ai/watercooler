@@ -16,6 +16,7 @@ from watercooler.metadata import thread_meta
 from ..config import get_agent_name
 from ..helpers import _format_warnings_for_response
 from ..middleware import run_with_sync
+from .. import validation  # Import module for runtime access (enables test patching)
 
 
 # Module-level references to registered tools (populated by register_thread_write_tools)
@@ -23,19 +24,6 @@ say = None
 ack = None
 handoff = None
 set_status = None
-
-
-# Runtime accessors for patchable functions (tests patch via server module)
-def _require_context(code_path: str):
-    """Access _require_context at runtime for test patching."""
-    from .. import server
-    return server._require_context(code_path)
-
-
-def _dynamic_context_missing(context):
-    """Access _dynamic_context_missing at runtime for test patching."""
-    from .. import server
-    return server._dynamic_context_missing(context)
 
 
 def _say_impl(
@@ -88,7 +76,7 @@ def _say_impl(
             agent_func="Cursor:Composer 1:implementer")
     """
     try:
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None:
@@ -180,12 +168,12 @@ def _ack_impl(
             code_path="/path/to/repo", agent_func="Claude Code:sonnet-4:reviewer")
     """
     try:
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None:
             return "Error: Unable to resolve code context for the provided code_path."
-        if _dynamic_context_missing(context):
+        if validation._dynamic_context_missing(context):
             return (
                 "Dynamic threads repo was not resolved from your git context.\n"
                 "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO."
@@ -267,12 +255,12 @@ def _handoff_impl(
                 code_path="/path/to/repo", agent_func="Cursor:Composer 1:implementer")
     """
     try:
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None:
             return "Error: Unable to resolve code context for the provided code_path."
-        if _dynamic_context_missing(context):
+        if validation._dynamic_context_missing(context):
             return (
                 "Dynamic threads repo was not resolved from your git context.\n"
                 "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO."
@@ -379,12 +367,12 @@ def _set_status_impl(
                    agent_func="Claude Code:sonnet-4:pm")
     """
     try:
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None:
             return "Error: Unable to resolve code context for the provided code_path."
-        if _dynamic_context_missing(context):
+        if validation._dynamic_context_missing(context):
             return (
                 "Dynamic threads repo was not resolved from your git context.\n"
                 "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO."

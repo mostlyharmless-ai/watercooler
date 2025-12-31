@@ -12,18 +12,12 @@ from watercooler import commands
 from ..config import get_agent_name, get_threads_dir, get_git_sync_manager_from_context
 from ..git_sync import GitPushError
 from ..observability import log_debug
+from .. import validation  # Import module for runtime access (enables test patching)
 
 
 # Module-level references to registered tools (populated by register_sync_tools)
 force_sync = None
 reindex = None
-
-
-# Runtime accessors for patchable functions (tests patch via server module)
-def _require_context(code_path: str):
-    """Access _require_context at runtime for test patching."""
-    from .. import server
-    return server._require_context(code_path)
 
 
 def _force_sync_impl(
@@ -44,7 +38,7 @@ def _force_sync_impl(
     log_debug(f"TOOL_ENTRY: watercooler_sync(code_path={code_path!r}, action={action!r})")
     try:
         log_debug("TOOL_STEP: calling _require_context")
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         log_debug(f"TOOL_STEP: _require_context returned (error={error!r}, context={'present' if context else 'None'})")
         if error:
             return error

@@ -24,6 +24,14 @@ from watercooler.config_facade import config
 from .config import ThreadContext
 from .startup import check_first_run, ensure_ollama_running
 
+# Import validation functions (extracted to break circular imports)
+from .validation import (
+    _require_context,
+    _dynamic_context_missing,
+    _refresh_threads,
+    _validate_thread_context,
+)
+
 # Import helpers (extracted for modularity)
 from .helpers import (
     # Constants
@@ -37,12 +45,9 @@ from .helpers import (
     _format_warnings_for_response,
     # Context helpers
     _should_auto_branch,
-    _require_context,
-    _dynamic_context_missing,
     # Branch helpers
     _attempt_auto_fix_divergence,
     _validate_and_sync_branches,
-    _refresh_threads,
     # Thread parsing
     _normalize_status,
     _extract_thread_metadata,
@@ -88,37 +93,6 @@ from .tools import graph as _graph_tools
 from .tools import branch_parity as _branch_parity_tools
 from .tools import memory as _memory_tools
 
-
-# Keep _validate_thread_context in server.py to allow test patching of _require_context
-def _validate_thread_context(code_path: str) -> tuple[str | None, ThreadContext | None]:
-    """Validate and resolve thread context for MCP tools.
-
-    Note: This function is kept in server.py (not helpers.py) so that tests can
-    patch _require_context and _dynamic_context_missing via the server module.
-
-    Args:
-        code_path: Path to code repository
-
-    Returns:
-        Tuple of (error_message, context). If error_message is not None,
-        context will be None.
-    """
-    error, context = _require_context(code_path)
-    if error:
-        return (error, None)
-    if context is None:
-        return (
-            "Error: Unable to resolve code context for the provided code_path.",
-            None,
-        )
-    if _dynamic_context_missing(context):
-        return (
-            "Dynamic threads repo was not resolved from your git context.\n"
-            "Run from inside your code repo or set "
-            "WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO.",
-            None,
-        )
-    return (None, context)
 
 # Workaround for Windows stdio hang: Force auto-flush on every stdout write
 # On Windows, FastMCP's stdio transport gets stuck after subprocess operations

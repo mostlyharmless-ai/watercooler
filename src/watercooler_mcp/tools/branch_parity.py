@@ -16,6 +16,7 @@ from mcp.types import TextContent
 from git import Repo, InvalidGitRepositoryError, GitCommandError
 
 from ..git_sync import validate_branch_pairing, sync_branch_history
+from .. import validation  # Import module for runtime access (enables test patching)
 
 
 # Module-level references to registered tools (populated by register_branch_parity_tools)
@@ -23,13 +24,6 @@ validate_branch_pairing_tool = None
 sync_branch_state_tool = None
 audit_branch_pairing_tool = None
 recover_branch_state_tool = None
-
-
-# Runtime accessors for patchable functions (tests patch via server module)
-def _require_context(code_path: str):
-    """Access _require_context at runtime for test patching."""
-    from .. import server
-    return server._require_context(code_path)
 
 
 def _validate_branch_pairing_impl(
@@ -52,7 +46,7 @@ def _validate_branch_pairing_impl(
         JSON result with validation status, branch names, mismatches, and warnings.
     """
     try:
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return ToolResult(content=[TextContent(type="text", text=error)])
         if context is None or not context.code_root or not context.threads_dir:
@@ -135,7 +129,7 @@ def _sync_branch_state_impl(
         >>> sync_branch_state(ctx, code_path=".", branch="staging", operation="recover", force=True)
     """
     try:
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return ToolResult(content=[TextContent(type="text", text=error)])
         if context is None or not context.code_root or not context.threads_dir:
@@ -443,7 +437,7 @@ def _audit_branch_pairing_impl(
         JSON report with categorized branches and recommendations.
     """
     try:
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return ToolResult(content=[TextContent(type="text", text=error)])
         if context is None or not context.code_root or not context.threads_dir:
@@ -560,7 +554,7 @@ def _recover_branch_state_impl(
         Diagnostic report with detected issues and recommended fixes.
     """
     try:
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return ToolResult(content=[TextContent(type="text", text=error)])
         if context is None or not context.code_root or not context.threads_dir:

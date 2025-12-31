@@ -18,6 +18,7 @@ from fastmcp import Context
 
 from ..git_sync import BranchPairingError
 from ..middleware import run_with_graph_sync
+from .. import validation  # Import module for runtime access (enables test patching)
 
 
 # Module-level references to registered tools (populated by register_graph_tools)
@@ -28,13 +29,6 @@ find_similar_entries_tool = None
 graph_health_tool = None
 reconcile_graph_tool = None
 access_stats_tool = None
-
-
-# Runtime accessors for patchable functions (tests patch via server module)
-def _require_context(code_path: str):
-    """Access _require_context at runtime for test patching."""
-    from .. import server
-    return server._require_context(code_path)
 
 
 def _baseline_graph_stats_impl(
@@ -55,7 +49,7 @@ def _baseline_graph_stats_impl(
     try:
         from watercooler.baseline_graph import get_thread_stats
 
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None or not context.threads_dir:
@@ -103,7 +97,7 @@ def _baseline_graph_build_impl(
         from watercooler.baseline_graph import export_all_threads, SummarizerConfig
         from watercooler_mcp.config import get_watercooler_config
 
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None or not context.threads_dir:
@@ -204,7 +198,7 @@ def _search_graph_impl(
         from watercooler.baseline_graph.search import SearchQuery, search_graph
         from watercooler.baseline_graph.reader import is_graph_available
 
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None or not context.threads_dir:
@@ -321,7 +315,7 @@ def _find_similar_entries_impl(
         from watercooler.baseline_graph.search import find_similar_entries
         from watercooler.baseline_graph.reader import is_graph_available
 
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None or not context.threads_dir:
@@ -401,7 +395,7 @@ def _graph_health_impl(
         from watercooler.baseline_graph.sync import check_graph_health
         from watercooler.baseline_graph.reader import is_graph_available
 
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None or not context.threads_dir:
@@ -478,7 +472,7 @@ def _reconcile_graph_impl(
         from watercooler.baseline_graph.sync import reconcile_graph
         from watercooler_mcp.config import get_watercooler_config
 
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None or not context.threads_dir:
@@ -559,7 +553,7 @@ def _access_stats_impl(
     try:
         from watercooler.baseline_graph.reader import get_most_accessed
 
-        error, context = _require_context(code_path)
+        error, context = validation._require_context(code_path)
         if error:
             return error
         if context is None or not context.threads_dir:
