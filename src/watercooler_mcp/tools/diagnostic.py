@@ -6,6 +6,314 @@ Tools:
 - watercooler_reconcile_parity: Branch parity reconciliation
 """
 
+import sys
+import json
+from pathlib import Path
+
+from fastmcp import Context
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
+from git import Repo, InvalidGitRepositoryError
+
+from ..config import (
+    get_agent_name,
+    get_version,
+    resolve_thread_context,
+)
+from ..helpers import (
+    _should_auto_branch,
+    _require_context,
+    _format_warnings_for_response,
+)
+from ..branch_parity import get_branch_health
+from ..observability import log_debug
+
+
+# Module-level references to registered tools (populated by register_diagnostic_tools)
+health = None
+whoami = None
+reconcile_parity = None
+
+
+def _health_impl(ctx: Context, code_path: str = "") -> str:
+    """Check server health and configuration including branch parity status.
+
+    Returns server version, configured agent identity, threads directory,
+    and branch parity health status.
+
+    Args:
+        code_path: Optional path to code repository for parity checks.
+
+    Example output:
+        Watercooler MCP Server v0.1.0
+        Status: Healthy
+        Agent: Codex
+        Threads Dir: /path/to/project/.watercooler
+        Threads Dir Exists: True
+        Branch Parity: clean
+    """
+    try:
+        agent = get_agent_name(ctx.client_id)
+        context = resolve_thread_context(Path(code_path) if code_path else None)
+        threads_dir = context.threads_dir
+        version = get_version()
+
+        # Create threads directory if it doesn't exist
+        if not threads_dir.exists():
+            threads_dir.mkdir(parents=True, exist_ok=True)
+
+        # Lightweight diagnostics to help average users verify env
+        py_exec = sys.executable or "unknown"
+        try:
+            import fastmcp as _fm
+            fm_ver = getattr(_fm, "__version__", "unknown")
+        except Exception:
+            fm_ver = "not-importable"
+
+        status_lines = [
+            f"Watercooler MCP Server v{version}",
+            f"Status: Healthy",
+            f"Agent: {agent}",
+            f"Threads Dir: {threads_dir}",
+            f"Threads Dir Exists: {threads_dir.exists()}",
+            f"Threads Repo URL: {context.threads_repo_url or 'local-only'}",
+            f"Code Branch: {context.code_branch or 'n/a'}",
+            f"Auto-Branch: {'enabled' if _should_auto_branch() else 'disabled'}",
+            f"Python: {py_exec}",
+            f"fastmcp: {fm_ver}",
+        ]
+
+        # Add graph service status
+        try:
+            from watercooler_mcp.config import get_watercooler_config
+            from watercooler.baseline_graph.summarizer import (
+                SummarizerConfig,
+                is_llm_service_available,
+                create_summarizer_config,
+            )
+            from watercooler.baseline_graph.sync import (
+                EmbeddingConfig,
+                is_embedding_available,
+            )
+
+            wc_config = get_watercooler_config()
+            graph_config = wc_config.mcp.graph
+
+            # Check service availability
+            summarizer_cfg = create_summarizer_config()
+            llm_available = is_llm_service_available(summarizer_cfg)
+            embed_cfg = EmbeddingConfig.from_env()
+            embed_available = is_embedding_available(embed_cfg)
+
+            status_lines.extend([
+                "",
+                "Graph Services:",
+                f"  Summaries Enabled: {graph_config.generate_summaries}",
+                f"  LLM Service: {'available' if llm_available else 'unavailable'} ({summarizer_cfg.api_base})",
+                f"  Embeddings Enabled: {graph_config.generate_embeddings}",
+                f"  Embedding Service: {'available' if embed_available else 'unavailable'} ({embed_cfg.api_base})",
+                f"  Auto-Detect Services: {graph_config.auto_detect_services}",
+            ])
+        except Exception as e:
+            status_lines.append(f"\nGraph Services: Error - {e}")
+
+        # Add branch parity health if code and threads repos are available
+        if context.code_root and context.threads_dir:
+            try:
+                parity_health = get_branch_health(context.code_root, context.threads_dir)
+                status_lines.extend([
+                    "",
+                    "Branch Parity:",
+                    f"  Status: {parity_health.get('status', 'unknown')}",
+                    f"  Code Branch: {parity_health.get('code_branch', 'n/a')}",
+                    f"  Threads Branch: {parity_health.get('threads_branch', 'n/a')}",
+                    f"  Code Ahead/Behind: {parity_health.get('code_ahead_origin', 0)}/{parity_health.get('code_behind_origin', 0)}",
+                    f"  Threads Ahead/Behind: {parity_health.get('threads_ahead_origin', 0)}/{parity_health.get('threads_behind_origin', 0)}",
+                    f"  Pending Push: {parity_health.get('pending_push', False)}",
+                ])
+                if parity_health.get('last_error'):
+                    status_lines.append(f"  Last Error: {parity_health.get('last_error')}")
+                if parity_health.get('actions_taken'):
+                    status_lines.append(f"  Actions Taken: {', '.join(parity_health.get('actions_taken', []))}")
+                if parity_health.get('lock_holder'):
+                    status_lines.append(f"  Lock Holder: PID {parity_health.get('lock_holder')}")
+            except Exception as e:
+                status_lines.append(f"\nBranch Parity: Error - {e}")
+
+        return _format_warnings_for_response("\n".join(status_lines))
+    except Exception as e:
+        return _format_warnings_for_response(f"Watercooler MCP Server\nStatus: Error\nError: {str(e)}")
+
+
+def _whoami_impl(ctx: Context) -> str:
+    """Get your resolved agent identity.
+
+    Returns the agent name that will be used when you create entries.
+    Automatically detects your identity from the MCP client.
+
+    Example:
+        You are: Claude
+    """
+    try:
+        agent = get_agent_name(ctx.client_id)
+        debug_info = f"\nClient ID: {ctx.client_id or 'None'}\nSession ID: {ctx.session_id or 'None'}"
+        return f"You are: {agent}{debug_info}"
+    except Exception as e:
+        return f"Error determining identity: {str(e)}"
+
+
+def _reconcile_parity_impl(
+    ctx: Context,
+    code_path: str = "",
+) -> ToolResult:
+    """Rerun branch parity preflight with auto-remediation and retry pending push.
+
+    Use this tool to:
+    - Recover from failed pushes (e.g., network issues, conflicts)
+    - Sync threads branch when it's behind origin
+    - Force a sync after manual thread edits outside MCP
+    - Proactively ensure parity before starting work on a branch
+    - Debug branch state issues by inspecting the detailed response
+
+    Args:
+        code_path: Path to code repository directory (default: current directory)
+
+    Returns:
+        JSON with parity status, actions taken, and push result if applicable.
+    """
+    try:
+        error, context = _require_context(code_path)
+        if error:
+            return ToolResult(content=[TextContent(type="text", text=error)])
+        if context is None or not context.code_root or not context.threads_dir:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text="Error: Unable to resolve code and threads repo paths."
+            )])
+
+        from watercooler_mcp.branch_parity import (
+            get_branch_health,
+            run_preflight,
+            push_after_commit,
+            read_parity_state,
+            write_parity_state,
+            _pull_ff_only,
+            _pull_rebase,
+            ParityStatus,
+        )
+
+        # First, try to sync threads if behind origin (the reconcile part)
+        threads_repo = Repo(context.threads_dir, search_parent_directories=True)
+        code_repo = Repo(context.code_root, search_parent_directories=True)
+        actions_taken = []
+
+        # Get current health before reconcile
+        health_before = get_branch_health(context.code_root, context.threads_dir)
+
+        # Check if CODE is behind origin - this requires user action, we can't auto-fix
+        code_behind = health_before.get('code_behind_origin', 0)
+        if code_behind > 0:
+            code_branch = health_before.get('code_branch', 'unknown')
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "status": "code_behind_origin",
+                    "error": f"Code branch '{code_branch}' is {code_behind} commits behind origin. "
+                             f"Please pull the code repo first: git pull",
+                    "code_behind": code_behind,
+                    "code_branch": code_branch,
+                    "code_root": str(context.code_root),
+                    "suggested_commands": [
+                        f"cd {context.code_root}",
+                        "git pull --rebase",
+                    ],
+                    "actions_taken": [],
+                }, indent=2)
+            )])
+
+        # If threads is behind, pull it (this is the "reconcile" operation)
+        threads_behind = health_before.get('threads_behind_origin', 0)
+        if threads_behind > 0:
+            log_debug(f"[RECONCILE] Threads behind origin by {threads_behind} commits, pulling")
+            if _pull_ff_only(threads_repo):
+                actions_taken.append(f"Pulled threads (ff-only, {threads_behind} commits)")
+            else:
+                log_debug("[RECONCILE] FF-only pull failed, trying rebase")
+                if _pull_rebase(threads_repo):
+                    actions_taken.append(f"Pulled threads (rebase, {threads_behind} commits)")
+                else:
+                    # Pull failed - let run_preflight handle any conflicts (including graph-only conflicts)
+                    log_debug("[RECONCILE] Pull with rebase failed, will check for conflicts in preflight")
+                    actions_taken.append(f"Pull with rebase failed (conflicts may exist)")
+
+        # Run preflight with auto-fix enabled
+        preflight_result = run_preflight(
+            context.code_root,
+            context.threads_dir,
+            auto_fix=True,
+            fetch_first=True,
+        )
+
+        # Collect preflight actions
+        if preflight_result.state.actions_taken:
+            actions_taken.extend(preflight_result.state.actions_taken)
+
+        # Get updated health status
+        health_status = get_branch_health(context.code_root, context.threads_dir)
+
+        # If there are pending commits, try to push them
+        push_result = None
+        if health_status.get('pending_push') or health_status.get('threads_ahead_origin', 0) > 0:
+            try:
+                # Use threads_branch from health (correct branch)
+                branch_name = health_status.get('threads_branch') or context.code_branch or "main"
+                push_success, push_error = push_after_commit(
+                    context.threads_dir,
+                    branch_name,
+                    max_retries=3
+                )
+                if push_success:
+                    push_result = "pushed successfully"
+                    actions_taken.append(f"Pushed threads to origin/{branch_name}")
+                else:
+                    push_result = f"push failed: {push_error}"
+                # Refresh health after push
+                health_status = get_branch_health(context.code_root, context.threads_dir)
+            except Exception as push_err:
+                push_result = f"push error: {push_err}"
+
+        output = {
+            "status": health_status.get('status', 'unknown'),
+            "code_branch": health_status.get('code_branch', 'unknown'),
+            "threads_branch": health_status.get('threads_branch', 'unknown'),
+            "code_ahead_origin": health_status.get('code_ahead_origin', 0),
+            "code_behind_origin": health_status.get('code_behind_origin', 0),
+            "threads_ahead_origin": health_status.get('threads_ahead_origin', 0),
+            "threads_behind_origin": health_status.get('threads_behind_origin', 0),
+            "pending_push": health_status.get('pending_push', False),
+            "actions_taken": actions_taken,
+            "push_result": push_result,
+            "last_error": health_status.get('last_error'),
+            "preflight_success": preflight_result.success,
+            "preflight_can_proceed": preflight_result.can_proceed,
+        }
+
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps(output, indent=2)
+        )])
+
+    except InvalidGitRepositoryError as e:
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=f"Error: Not a git repository: {str(e)}"
+        )])
+    except Exception as e:
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=f"Error reconciling parity: {str(e)}"
+        )])
+
 
 def register_diagnostic_tools(mcp):
     """Register diagnostic tools with the MCP server.
@@ -13,5 +321,9 @@ def register_diagnostic_tools(mcp):
     Args:
         mcp: The FastMCP server instance
     """
-    # Tools will be moved here from server.py
-    pass
+    global health, whoami, reconcile_parity
+
+    # Register tools and store references for testing
+    health = mcp.tool(name="watercooler_health")(_health_impl)
+    whoami = mcp.tool(name="watercooler_whoami")(_whoami_impl)
+    reconcile_parity = mcp.tool(name="watercooler_reconcile_parity")(_reconcile_parity_impl)
