@@ -12,7 +12,7 @@ import pytest
 
 
 # Import the module - deps availability is checked via DEPS_AVAILABLE flag
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 try:
     from visualize_graph import (
         load_graph,

@@ -4,16 +4,24 @@ This document outlines the testing strategy for the Watercooler project, includi
 
 ## Test Organization
 
-Tests are organized in the `tests/` directory following these conventions:
+Tests are organized in the `tests/` directory with the following structure:
 
-- `test_*.py` - Python unit and integration tests using pytest
-- `conftest.py` - Shared pytest fixtures and configuration
+```
+tests/
+├── conftest.py           # Shared pytest fixtures and configuration
+├── fixtures/             # Shared test data (e.g., sample threads)
+├── unit/                 # Unit tests (fast, isolated, no external deps)
+└── integration/          # Integration tests (CLI, MCP, external services)
+```
+
+- **Unit tests** (`tests/unit/`) - Fast, isolated tests for individual functions/classes
+- **Integration tests** (`tests/integration/`) - CLI tests, smoke tests, tests requiring infrastructure
 
 ## Test Categories
 
 ### 1. Core Watercooler Tests
 
-**Command-line Interface Tests:**
+**Command-line Interface Tests** (`tests/integration/`):
 - `test_cli.py` - General CLI functionality
 - `test_cli_init_thread.py` - Thread initialization
 - `test_cli_say_ack.py` - Say and acknowledge operations
@@ -24,7 +32,7 @@ Tests are organized in the `tests/` directory following these conventions:
 - `test_cli_unlock.py` - Lock management
 - `test_cli_web_export.py` - Web export functionality
 
-**Core Functionality Tests:**
+**Core Functionality Tests** (`tests/unit/`):
 - `test_agents.py` - Agent management
 - `test_fs.py` - Filesystem operations
 - `test_header.py` - Thread header parsing
@@ -34,12 +42,12 @@ Tests are organized in the `tests/` directory following these conventions:
 - `test_observability.py` - Logging and monitoring
 
 **Git Synchronization Tests:**
-- `test_git_sync.py` - Unit tests for git sync operations
-- `test_git_sync_integration.py` - Integration tests for git workflows
+- `tests/unit/test_git_sync.py` - Unit tests for git sync operations
+- `tests/integration/test_git_sync_integration.py` - Integration tests for git workflows
 
 **MCP Tests:**
-- `test_mcp_directory_creation.py` - MCP directory management
-- `test_smoke.py` - Basic smoke tests
+- `tests/unit/test_mcp_directory_creation.py` - MCP directory management
+- `tests/integration/test_smoke.py` - Basic smoke tests
 
 ### 2. Remote MCP Tests
 
@@ -78,16 +86,24 @@ pytest
 
 ### Run Specific Test Categories
 
-**Core watercooler tests:**
+**Unit tests only (fast):**
 ```bash
-pytest tests/test_cli*.py
-pytest tests/test_git_sync*.py
+pytest tests/unit/
 ```
 
-**Remote MCP tests:**
+**Integration tests only:**
 ```bash
-pytest tests/test_http_facade_auth.py
-pytest tests/test_http_facade_acl.py
+pytest tests/integration/
+```
+
+**CLI tests:**
+```bash
+pytest tests/integration/test_cli*.py
+```
+
+**Git sync tests:**
+```bash
+pytest tests/unit/test_git_sync.py tests/integration/test_git_sync_integration.py
 ```
 
 ### Run with Coverage
@@ -102,19 +118,19 @@ View coverage report: `open htmlcov/index.html`
 
 ```bash
 # Run a specific test file
-pytest tests/test_http_facade_auth.py
+pytest tests/unit/test_header.py
 
 # Run a specific test class
-pytest tests/test_http_facade_auth.py::TestAuthFlow
+pytest tests/integration/test_cli.py::TestCliHelp
 
 # Run a specific test method
-pytest tests/test_http_facade_auth.py::TestAuthFlow::test_correct_auth_secret_accepted
+pytest tests/unit/test_agents.py::test_canonicalize_agent_name
 
 # Run tests matching a pattern
 pytest -k "auth"
 
-# Skip HTTP facade tests (they require [http] dependencies)
-pytest -m "not http"
+# Skip tests requiring external infrastructure
+pytest -m "not integration_falkor and not integration_leanrag_llm"
 
 # Run only HTTP facade tests (requires: pip install -e ".[http]")
 pytest -m http

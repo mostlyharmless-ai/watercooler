@@ -97,7 +97,7 @@ def watercooler_threads_dir() -> Path:
     The 38 entries are sufficient for hierarchical clustering validation: LeanRAG's
     GMM + UMAP clustering typically requires 30+ samples for reliable community detection.
     """
-    return Path(__file__).parent / "fixtures" / "threads"
+    return Path(__file__).parent.parent / "fixtures" / "threads"
 
 
 @pytest.fixture

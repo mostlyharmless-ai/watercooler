@@ -19,7 +19,7 @@ from watercooler_memory.backends import UnsupportedOperationError
 @pytest.fixture
 def leanrag_backend():
     """Create LeanRAG backend with test-run database."""
-    project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).parent.parent.parent
     leanrag_path = project_root / "external/LeanRAG"
 
     # Skip if LeanRAG submodule not initialized
