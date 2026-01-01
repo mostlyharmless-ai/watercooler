@@ -1131,11 +1131,10 @@ def sync_to_memory_backend(
         import asyncio
 
         if backend == "graphiti":
-            # Run async function synchronously
+            # Determine async context and schedule appropriately
             try:
                 loop = asyncio.get_running_loop()
-                # Already in async context - can't use asyncio.run()
-                # Schedule as task and return optimistically (fire-and-forget)
+                # Already in async context - schedule as fire-and-forget task
                 task = loop.create_task(_call_graphiti_add_episode(
                     content=entry_body,
                     group_id=topic,
@@ -1145,21 +1144,36 @@ def sync_to_memory_backend(
                 ))
                 # Add error callback to log failures (non-blocking)
                 def _on_task_done(t: asyncio.Task) -> None:
-                    if t.exception() is not None:
-                        logger.warning(f"MEMORY: Background Graphiti sync failed for {topic}/{entry_id}: {t.exception()}")
+                    try:
+                        exc = t.exception()
+                        if exc is not None:
+                            logger.warning(f"MEMORY: Background Graphiti sync failed for {topic}/{entry_id}: {exc}")
+                    except asyncio.CancelledError:
+                        logger.debug(f"MEMORY: Graphiti sync cancelled for {topic}/{entry_id}")
                 task.add_done_callback(_on_task_done)
                 logger.debug(f"MEMORY: Scheduled Graphiti sync for {topic}/{entry_id}")
                 return True
             except RuntimeError:
-                # No running loop - use asyncio.run()
-                result = asyncio.run(_call_graphiti_add_episode(
-                    content=entry_body,
-                    group_id=topic,
-                    entry_id=entry_id,
-                    timestamp=timestamp,
-                    title=entry_title,
-                ))
-                return result.get("success", False)
+                # No running loop - safe to use asyncio.run() which creates a new loop
+                # This handles the normal sync context case
+                try:
+                    result = asyncio.run(_call_graphiti_add_episode(
+                        content=entry_body,
+                        group_id=topic,
+                        entry_id=entry_id,
+                        timestamp=timestamp,
+                        title=entry_title,
+                    ))
+                    return result.get("success", False)
+                except RuntimeError as loop_error:
+                    # Edge case: thread has an event loop but it's not running
+                    # This can happen in certain embedding contexts (e.g., Jupyter, some frameworks)
+                    # Log and return False rather than crashing
+                    logger.warning(
+                        f"MEMORY: Cannot run Graphiti sync for {topic}/{entry_id} - "
+                        f"event loop conflict: {loop_error}"
+                    )
+                    return False
 
         elif backend == "leanrag":
             # LeanRAG is a pipeline trigger - it processes batches, not individual entries

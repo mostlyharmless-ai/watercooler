@@ -113,8 +113,8 @@ def _parse_thread_entries_from_file(thread_path: Path) -> List[Dict[str, Any]]:
         List of entry dicts with id, content, timestamp, etc.
     """
     try:
-        content = thread_path.read_text()
-    except (OSError, IOError) as e:
+        content = thread_path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, IOError, UnicodeDecodeError) as e:
         logger.warning(f"Failed to read thread file {thread_path}: {e}")
         return []
 
@@ -161,11 +161,11 @@ def _get_thread_status(thread_path: Path) -> str:
         Status string or "UNKNOWN"
     """
     try:
-        content = thread_path.read_text()
+        content = thread_path.read_text(encoding="utf-8", errors="replace")
         status_match = re.search(r"^Status:\s*(\w+)", content, re.MULTILINE)
         if status_match:
             return status_match.group(1).upper()
-    except Exception:
+    except (OSError, IOError, UnicodeDecodeError):
         pass
     return "UNKNOWN"
 
@@ -335,8 +335,19 @@ async def _migrate_to_memory_backend_impl(
     migrated_entries: List[str] = []
     if resume:
         checkpoint = _load_checkpoint(threads_dir)
-        if checkpoint.get("backend") == backend:
+        checkpoint_backend = checkpoint.get("backend")
+        if checkpoint_backend == backend:
             migrated_entries = checkpoint.get("migrated_entries", [])
+            result["resumed_from_checkpoint"] = True
+            result["checkpoint_entries"] = len(migrated_entries)
+        elif checkpoint_backend:
+            # Checkpoint exists but for different backend - warn user
+            logger.warning(
+                f"Checkpoint found for backend '{checkpoint_backend}' but targeting '{backend}'. "
+                f"Starting fresh migration. Delete .migration_checkpoint.json to suppress this warning."
+            )
+            result["checkpoint_backend_mismatch"] = True
+            result["checkpoint_backend"] = checkpoint_backend
 
     # Collect entries to migrate
     would_migrate: List[Dict[str, Any]] = []
