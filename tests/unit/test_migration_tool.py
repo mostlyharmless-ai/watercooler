@@ -35,37 +35,37 @@ class TestMigrationPreflight:
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
-        # Create sample thread files
+        # Create sample thread files using correct Entry: format
         thread1 = threads_dir / "auth-feature.md"
-        thread1.write_text("""# Thread: Auth Feature
+        thread1.write_text("""# auth-feature — Thread
+
 Status: OPEN
-Ball: Claude
+Ball: Claude (dev)
 
 ---
 
-## Entry 1
-
-**Agent**: Claude (dev)
-**Role**: implementer
-**Type**: Note
-**Timestamp**: 2025-01-15T10:00:00Z
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: Test entry
+<!-- Entry-ID: 01ABC123 -->
 
 Test content here.
 """)
 
         thread2 = threads_dir / "api-design.md"
-        thread2.write_text("""# Thread: API Design
+        thread2.write_text("""# api-design — Thread
+
 Status: CLOSED
 Ball: -
 
 ---
 
-## Entry 1
-
-**Agent**: Human (dev)
-**Role**: planner
-**Type**: Plan
-**Timestamp**: 2025-01-14T09:00:00Z
+Entry: Human (dev) 2025-01-14T09:00:00Z
+Role: planner
+Type: Plan
+Title: API design notes
+<!-- Entry-ID: 01DEF456 -->
 
 API design notes.
 """)
@@ -149,18 +149,18 @@ class TestMigrationDryRun:
         threads_dir.mkdir()
 
         thread = threads_dir / "test-thread.md"
-        thread.write_text("""# Thread: Test Thread
+        thread.write_text("""# test-thread — Thread
+
 Status: OPEN
-Ball: Claude
+Ball: Claude (dev)
 
 ---
 
-## Entry 1
-
-**Agent**: Claude (dev)
-**Role**: implementer
-**Type**: Note
-**Timestamp**: 2025-01-15T10:00:00Z
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: Test entry
+<!-- Entry-ID: 01TEST01 -->
 
 Test entry content.
 """)
@@ -242,31 +242,28 @@ class TestMigrationExecution:
         threads_dir.mkdir()
 
         thread = threads_dir / "test-thread.md"
-        thread.write_text("""# Thread: Test Thread
+        thread.write_text("""# test-thread — Thread
+
 Status: OPEN
-Ball: Claude
+Ball: Claude (dev)
 
 ---
 
-## Entry 1
-
-**Agent**: Claude (dev)
-**Role**: implementer
-**Type**: Note
-**Timestamp**: 2025-01-15T10:00:00Z
-**ID**: 01ABC123
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: First entry
+<!-- Entry-ID: 01ABC123 -->
 
 First entry content.
 
 ---
 
-## Entry 2
-
-**Agent**: Human (dev)
-**Role**: reviewer
-**Type**: Note
-**Timestamp**: 2025-01-15T11:00:00Z
-**ID**: 01ABC456
+Entry: Human (dev) 2025-01-15T11:00:00Z
+Role: reviewer
+Type: Note
+Title: Second entry
+<!-- Entry-ID: 01ABC456 -->
 
 Second entry content.
 """)
@@ -350,19 +347,18 @@ class TestMigrationCheckpoint:
 
         # Create a thread
         thread = mock_threads_dir / "test-thread.md"
-        thread.write_text("""# Thread: Test
+        thread.write_text("""# test-thread — Thread
+
 Status: OPEN
-Ball: Claude
+Ball: Claude (dev)
 
 ---
 
-## Entry 1
-
-**Agent**: Claude
-**Role**: implementer
-**Type**: Note
-**Timestamp**: 2025-01-15T10:00:00Z
-**ID**: 01ABC123
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: Test entry
+<!-- Entry-ID: 01ABC123 -->
 
 Content.
 """)
@@ -404,19 +400,18 @@ Content.
 
         # Create thread with the already-migrated entry
         thread = mock_threads_dir / "test-thread.md"
-        thread.write_text("""# Thread: Test
+        thread.write_text("""# test-thread — Thread
+
 Status: OPEN
-Ball: Claude
+Ball: Claude (dev)
 
 ---
 
-## Entry 1
-
-**Agent**: Claude
-**Role**: implementer
-**Type**: Note
-**Timestamp**: 2025-01-15T10:00:00Z
-**ID**: 01ABC123
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: Already migrated
+<!-- Entry-ID: 01ABC123 -->
 
 Already migrated content.
 """)
@@ -460,37 +455,35 @@ class TestMigrationFilters:
         threads_dir.mkdir()
 
         # Open thread
-        (threads_dir / "open-thread.md").write_text("""# Thread: Open
+        (threads_dir / "open-thread.md").write_text("""# open-thread — Thread
+
 Status: OPEN
-Ball: Claude
+Ball: Claude (dev)
 
 ---
 
-## Entry 1
-
-**Agent**: Claude
-**Role**: implementer
-**Type**: Note
-**Timestamp**: 2025-01-15T10:00:00Z
-**ID**: 01OPEN123
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: Open entry
+<!-- Entry-ID: 01OPEN123 -->
 
 Open thread content.
 """)
 
         # Closed thread
-        (threads_dir / "closed-thread.md").write_text("""# Thread: Closed
+        (threads_dir / "closed-thread.md").write_text("""# closed-thread — Thread
+
 Status: CLOSED
 Ball: -
 
 ---
 
-## Entry 1
-
-**Agent**: Claude
-**Role**: implementer
-**Type**: Note
-**Timestamp**: 2025-01-14T10:00:00Z
-**ID**: 01CLOSED123
+Entry: Claude (dev) 2025-01-14T10:00:00Z
+Role: implementer
+Type: Note
+Title: Closed entry
+<!-- Entry-ID: 01CLOSED123 -->
 
 Closed thread content.
 """)

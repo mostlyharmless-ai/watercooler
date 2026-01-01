@@ -16,12 +16,33 @@ from typing import Any, Dict, List, Optional
 
 from fastmcp import Context
 
+from watercooler.thread_entries import parse_thread_entries, ThreadEntry
+
 logger = logging.getLogger(__name__)
+
+# Valid backend names for migration
+VALID_BACKENDS = frozenset({"graphiti", "leanrag"})
 
 
 # Module-level references to registered tools
 migrate_to_memory_backend = None
 migration_preflight = None
+
+
+def _validate_backend(backend: str) -> Optional[str]:
+    """Validate the backend parameter.
+
+    Args:
+        backend: Backend name to validate
+
+    Returns:
+        Error message if invalid, None if valid
+    """
+    if not backend:
+        return "Backend parameter is required"
+    if backend not in VALID_BACKENDS:
+        return f"Invalid backend '{backend}'. Valid options: {', '.join(sorted(VALID_BACKENDS))}"
+    return None
 
 
 def _check_backend_availability(backend: str) -> Dict[str, Any]:
@@ -33,6 +54,11 @@ def _check_backend_availability(backend: str) -> Dict[str, Any]:
     Returns:
         Dict with "available" bool and optional version/error info
     """
+    # Validate backend first
+    validation_error = _validate_backend(backend)
+    if validation_error:
+        return {"available": False, "error": validation_error}
+
     if backend == "graphiti":
         try:
             from .. import memory as mem
@@ -53,6 +79,7 @@ def _check_backend_availability(backend: str) -> Dict[str, Any]:
         # LeanRAG availability check
         return {"available": False, "error": "LeanRAG migration not yet implemented"}
 
+    # Unreachable after validation, but kept for safety
     return {"available": False, "error": f"Unknown backend: {backend}"}
 
 
@@ -73,8 +100,11 @@ def _get_migration_backend(backend: str):
     return None
 
 
-def _parse_thread_entries(thread_path: Path) -> List[Dict[str, Any]]:
-    """Parse entries from a thread markdown file.
+def _parse_thread_entries_from_file(thread_path: Path) -> List[Dict[str, Any]]:
+    """Parse entries from a thread markdown file using the robust parser.
+
+    Uses the well-tested parse_thread_entries() from watercooler.thread_entries
+    which properly handles code blocks, deduplication, and edge cases.
 
     Args:
         thread_path: Path to thread file
@@ -82,47 +112,41 @@ def _parse_thread_entries(thread_path: Path) -> List[Dict[str, Any]]:
     Returns:
         List of entry dicts with id, content, timestamp, etc.
     """
-    content = thread_path.read_text()
-    entries = []
+    try:
+        content = thread_path.read_text()
+    except (OSError, IOError) as e:
+        logger.warning(f"Failed to read thread file {thread_path}: {e}")
+        return []
 
-    # Split by entry separator
-    parts = re.split(r"\n---\n", content)
+    # Use the robust parser from thread_entries module
+    parsed_entries: List[ThreadEntry] = parse_thread_entries(content)
+    entries: List[Dict[str, Any]] = []
 
-    for i, part in enumerate(parts[1:], 1):  # Skip header
-        entry = {"index": i, "topic": thread_path.stem}
+    for entry in parsed_entries:
+        # Skip entries without body content
+        if not entry.body or not entry.body.strip():
+            continue
 
-        # Parse entry metadata
-        id_match = re.search(r"\*\*ID\*\*:\s*(\S+)", part)
-        if id_match:
-            entry["id"] = id_match.group(1)
-        else:
-            entry["id"] = f"{thread_path.stem}-{i}"
+        entry_dict: Dict[str, Any] = {
+            "index": entry.index,
+            "topic": thread_path.stem,
+            "id": entry.entry_id or f"{thread_path.stem}-{entry.index}",
+            "body": entry.body.strip(),
+        }
 
-        timestamp_match = re.search(r"\*\*Timestamp\*\*:\s*(\S+)", part)
-        if timestamp_match:
-            entry["timestamp"] = timestamp_match.group(1)
+        # Add optional fields if present
+        if entry.timestamp:
+            entry_dict["timestamp"] = entry.timestamp
+        if entry.agent:
+            entry_dict["agent"] = entry.agent
+        if entry.role:
+            entry_dict["role"] = entry.role
+        if entry.entry_type:
+            entry_dict["entry_type"] = entry.entry_type
+        if entry.title:
+            entry_dict["title"] = entry.title
 
-        agent_match = re.search(r"\*\*Agent\*\*:\s*(.+)", part)
-        if agent_match:
-            entry["agent"] = agent_match.group(1).strip()
-
-        role_match = re.search(r"\*\*Role\*\*:\s*(\w+)", part)
-        if role_match:
-            entry["role"] = role_match.group(1)
-
-        type_match = re.search(r"\*\*Type\*\*:\s*(\w+)", part)
-        if type_match:
-            entry["entry_type"] = type_match.group(1)
-
-        # Extract body content (everything after metadata block)
-        body_match = re.search(r"\n\n(.+)", part, re.DOTALL)
-        if body_match:
-            entry["body"] = body_match.group(1).strip()
-        else:
-            entry["body"] = ""
-
-        if entry.get("body"):  # Only include entries with content
-            entries.append(entry)
+        entries.append(entry_dict)
 
     return entries
 
@@ -222,7 +246,7 @@ async def _migration_preflight_impl(
         total_entries = 0
         for thread_file in thread_files:
             try:
-                entries = _parse_thread_entries(thread_file)
+                entries = _parse_thread_entries_from_file(thread_file)
                 total_entries += len(entries)
             except Exception as e:
                 result["issues"].append(f"Error parsing {thread_file.name}: {e}")
@@ -323,7 +347,7 @@ async def _migrate_to_memory_backend_impl(
             continue
 
         try:
-            entries = _parse_thread_entries(thread_file)
+            entries = _parse_thread_entries_from_file(thread_file)
             for entry in entries:
                 entry_id = entry.get("id", "")
 
@@ -365,7 +389,7 @@ async def _migrate_to_memory_backend_impl(
             continue
 
         try:
-            entries = _parse_thread_entries(thread_file)
+            entries = _parse_thread_entries_from_file(thread_file)
             for entry in entries:
                 entry_id = entry.get("id", "")
 
