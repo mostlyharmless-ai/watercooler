@@ -2406,6 +2406,13 @@ def get_branch_health(
     rather than relying on potentially stale cached state from
     branch_parity_state.json.
 
+    Note:
+        This is a best-effort snapshot for health reporting. There is no
+        locking mechanism, so external git operations could modify state
+        between reading and returning. For operations requiring strict
+        consistency, use BranchParityManager from the sync package which
+        provides proper locking via run_with_sync().
+
     Returns dict with:
     - status: Current parity status (computed LIVE)
     - code_branch, threads_branch: Branch names (LIVE)

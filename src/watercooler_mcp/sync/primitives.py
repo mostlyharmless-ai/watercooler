@@ -106,7 +106,8 @@ def get_branch_name(repo: Repo) -> Optional[str]:
         if repo.head.is_detached:
             return None
         return repo.active_branch.name
-    except Exception:
+    except Exception as e:
+        log_debug(f"[PRIMITIVES] Error getting branch name: {e}")
         return None
 
 
@@ -114,7 +115,8 @@ def is_detached_head(repo: Repo) -> bool:
     """Check if repo is in detached HEAD state."""
     try:
         return repo.head.is_detached
-    except Exception:
+    except Exception as e:
+        log_debug(f"[PRIMITIVES] Error checking detached HEAD: {e}")
         return True  # Assume detached if we can't check
 
 
@@ -130,7 +132,8 @@ def is_dirty(repo: Repo, untracked: bool = True) -> bool:
     """
     try:
         return repo.is_dirty(untracked_files=untracked)
-    except Exception:
+    except Exception as e:
+        log_debug(f"[PRIMITIVES] Error checking dirty state: {e}")
         return False
 
 

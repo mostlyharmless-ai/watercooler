@@ -12,7 +12,7 @@ across the sync package.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -94,7 +94,7 @@ class ConflictError(SyncError):
         conflict_type: Type of conflict (merge, rebase, cherry-pick)
     """
 
-    conflicting_files: list = field(default_factory=list)
+    conflicting_files: List[str] = field(default_factory=list)
     conflict_type: str = "merge"
     is_retryable: bool = False  # Conflicts require manual resolution
 
