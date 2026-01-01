@@ -70,6 +70,23 @@ from .state import (
     get_state_file_path,
 )
 
+from .conflict import (
+    # Enums
+    ConflictType,
+    ConflictScope,
+    # Data classes
+    ConflictInfo,
+    # Classes
+    ConflictResolver,
+    # Pure merge functions
+    merge_manifest_content,
+    merge_jsonl_content,
+    merge_thread_content,
+    # Convenience functions
+    has_graph_conflicts_only,
+    has_thread_conflicts_only,
+)
+
 __all__ = [
     # Errors
     "SyncError",
@@ -118,4 +135,18 @@ __all__ = [
     "read_parity_state",
     "write_parity_state",
     "get_state_file_path",
+    # Conflict - Enums
+    "ConflictType",
+    "ConflictScope",
+    # Conflict - Data classes
+    "ConflictInfo",
+    # Conflict - Classes
+    "ConflictResolver",
+    # Conflict - Pure merge functions
+    "merge_manifest_content",
+    "merge_jsonl_content",
+    "merge_thread_content",
+    # Conflict - Convenience functions
+    "has_graph_conflicts_only",
+    "has_thread_conflicts_only",
 ]
