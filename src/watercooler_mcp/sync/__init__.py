@@ -115,6 +115,16 @@ from .async_coordinator import (
     get_queue_file_path,
 )
 
+from .branch_parity import (
+    # Enums
+    StateClass,
+    # Data classes
+    PreflightResult,
+    BranchPairingResult,
+    # Classes
+    BranchParityManager,
+)
+
 __all__ = [
     # Errors
     "SyncError",
@@ -199,4 +209,11 @@ __all__ = [
     "AsyncSyncCoordinator",
     # Async Coordinator - Convenience functions
     "get_queue_file_path",
+    # Branch Parity - Enums
+    "StateClass",
+    # Branch Parity - Data classes
+    "PreflightResult",
+    "BranchPairingResult",
+    # Branch Parity - Classes
+    "BranchParityManager",
 ]
