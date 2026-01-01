@@ -54,6 +54,22 @@ from .primitives import (
     restore_stash,
 )
 
+from .state import (
+    # Constants
+    STATE_FILE_NAME,
+    STATE_FILE_VERSION,
+    # Enums
+    ParityStatus,
+    # Data classes
+    ParityState,
+    # Classes
+    StateManager,
+    # Convenience functions
+    read_parity_state,
+    write_parity_state,
+    get_state_file_path,
+)
+
 __all__ = [
     # Errors
     "SyncError",
@@ -89,4 +105,17 @@ __all__ = [
     "detect_stash",
     "stash_changes",
     "restore_stash",
+    # State - Constants
+    "STATE_FILE_NAME",
+    "STATE_FILE_VERSION",
+    # State - Enums
+    "ParityStatus",
+    # State - Data classes
+    "ParityState",
+    # State - Classes
+    "StateManager",
+    # State - Convenience functions
+    "read_parity_state",
+    "write_parity_state",
+    "get_state_file_path",
 ]
