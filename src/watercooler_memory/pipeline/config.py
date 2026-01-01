@@ -66,11 +66,17 @@ class LLMConfig:
 
 @dataclass
 class EmbeddingConfig:
-    """Embedding service configuration."""
+    """Embedding service configuration.
 
-    model: str = field(default_factory=lambda: os.environ.get("GLM_MODEL", "bge_m3"))
+    Standard env vars (per MEMORY_INTEGRATION_ROADMAP.md):
+    - EMBEDDING_API_BASE=http://localhost:8080/v1
+    - EMBEDDING_MODEL=bge-m3
+    - EMBEDDING_DIM=1024
+    """
+
+    model: str = field(default_factory=lambda: os.environ.get("EMBEDDING_MODEL", "bge-m3"))
     base_url: str = field(default_factory=get_embedding_api_base)
-    embedding_dim: int = 1024  # BGE-M3 dimension
+    embedding_dim: int = field(default_factory=lambda: int(os.environ.get("EMBEDDING_DIM", "1024")))
     batch_size: int = field(default_factory=lambda: max(1, int(os.environ.get("EMBEDDING_BATCH_SIZE", "8"))))
 
     def validate(self) -> list[str]:
