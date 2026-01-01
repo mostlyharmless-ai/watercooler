@@ -195,6 +195,44 @@ The checkpoint file (`.migration_checkpoint.json`) tracks:
 - Target backend
 - Last update timestamp
 
+**Checkpoint File Structure:**
+```json
+{
+  "migrated_entries": ["01ABC123", "01ABC456", ...],
+  "backend": "graphiti",
+  "last_updated": "2025-01-15T10:30:00Z"
+}
+```
+
+**Recovering from Checkpoint Issues:**
+
+If the checkpoint becomes corrupted or you need to switch backends mid-migration:
+
+1. Delete the checkpoint file:
+   ```bash
+   rm /path/to/threads/.migration_checkpoint.json
+   ```
+
+2. Run a dry-run to preview the full migration scope:
+   ```python
+   watercooler_migrate_to_memory_backend(
+       code_path="/path/to/repo",
+       backend="graphiti",
+       dry_run=True
+   )
+   ```
+
+3. Execute the migration from scratch:
+   ```python
+   watercooler_migrate_to_memory_backend(
+       code_path="/path/to/repo",
+       backend="graphiti",
+       dry_run=False
+   )
+   ```
+
+Note: Re-migrating already-indexed entries is safe - the backend handles deduplication.
+
 ## Post-Migration
 
 ### Verify Migration

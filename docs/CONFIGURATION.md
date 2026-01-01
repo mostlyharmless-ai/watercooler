@@ -291,6 +291,44 @@ When memory backend is enabled, the following MCP tools become available:
 | `watercooler_search_nodes` | Search for entity nodes |
 | `watercooler_search_memory_facts` | Search for facts/relationships |
 
+#### Example: Adding an Episode to Graphiti
+
+```python
+# Add content to Graphiti with entity extraction
+result = watercooler_graphiti_add_episode(
+    code_path="/path/to/repo",
+    content="Implemented OAuth2 authentication using JWT tokens",
+    group_id="auth-feature",           # Thread topic for grouping
+    source_id="01ABC123",              # Optional: entry ID for provenance
+    timestamp="2025-01-15T10:00:00Z",  # Optional: defaults to now
+)
+
+# Response includes extracted entities
+{
+  "success": true,
+  "episode_uuid": "ep-abc-123",
+  "entities_extracted": ["OAuth2", "JWT", "authentication"]
+}
+```
+
+#### Example: Triggering LeanRAG Pipeline
+
+```python
+# Run LeanRAG clustering on Graphiti data
+result = watercooler_leanrag_run_pipeline(
+    code_path="/path/to/repo",
+    group_id="auth-feature",           # Optional: filter by topic
+    force_rebuild=False,               # Optional: rebuild from scratch
+)
+
+# Response includes clustering stats
+{
+  "success": true,
+  "clusters_created": 5,
+  "entities_processed": 42
+}
+```
+
 See [Memory Documentation](MEMORY.md) for full usage guide.
 
 ## Migrating from Environment Variables
