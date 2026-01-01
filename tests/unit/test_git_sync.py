@@ -1023,7 +1023,7 @@ def test_sync_write_uses_push_after_commit(tmp_path, monkeypatch):
         })
         return (True, None)
 
-    with patch('watercooler_mcp.branch_parity.push_after_commit', mock_push_after_commit):
+    with patch('watercooler_mcp.sync.push_after_commit', mock_push_after_commit):
         # Execute a sync write operation
         def write_op():
             touch(tmp_path / "threads" / "test.md", "test content")
@@ -1042,7 +1042,7 @@ def test_sync_write_push_failure_marks_pending(tmp_path, monkeypatch):
     """Test that push failure marks pending_push=True in parity state."""
     from unittest.mock import patch
     from watercooler_mcp.git_sync import GitSyncManager, GitPushError
-    from watercooler_mcp.branch_parity import read_parity_state, ParityState
+    from watercooler_mcp.sync import read_parity_state, ParityState
 
     remote = tmp_path / "remote.git"
     seed_remote_with_main(remote)
@@ -1060,7 +1060,7 @@ def test_sync_write_push_failure_marks_pending(tmp_path, monkeypatch):
     def mock_push_after_commit(repo_path, branch, max_retries=3):
         return (False, "Simulated push failure")
 
-    with patch('watercooler_mcp.branch_parity.push_after_commit', mock_push_after_commit):
+    with patch('watercooler_mcp.sync.push_after_commit', mock_push_after_commit):
         def write_op():
             touch(tmp_path / "threads" / "test.md", "test content")
             mgr._repo.index.add(["test.md"])
@@ -1082,7 +1082,7 @@ def test_sync_write_push_success_clears_pending(tmp_path, monkeypatch):
     """Test that push success clears pending_push in parity state."""
     from unittest.mock import patch
     from watercooler_mcp.git_sync import GitSyncManager
-    from watercooler_mcp.branch_parity import (
+    from watercooler_mcp.sync import (
         read_parity_state,
         write_parity_state,
         ParityState,
@@ -1111,7 +1111,7 @@ def test_sync_write_push_success_clears_pending(tmp_path, monkeypatch):
     def mock_push_after_commit(repo_path, branch, max_retries=3):
         return (True, None)
 
-    with patch('watercooler_mcp.branch_parity.push_after_commit', mock_push_after_commit):
+    with patch('watercooler_mcp.sync.branch_parity.push_after_commit', mock_push_after_commit):
         def write_op():
             touch(tmp_path / "threads" / "test.md", "test content")
             mgr._repo.index.add(["test.md"])
@@ -1152,7 +1152,7 @@ def test_sync_write_no_commit_skips_push(tmp_path, monkeypatch):
         # Simulate no changes to commit
         return False
 
-    with patch('watercooler_mcp.branch_parity.push_after_commit', mock_push_after_commit):
+    with patch('watercooler_mcp.sync.branch_parity.push_after_commit', mock_push_after_commit):
         with patch.object(mgr, 'commit_local', mock_commit_local):
             # Operation that doesn't make any changes
             def noop():

@@ -15,10 +15,12 @@ from .config import (
     get_git_sync_manager_from_context,
     get_watercooler_config,
 )
-# Import from new sync package where possible
-from .sync import BranchPairingError, ParityStatus, read_parity_state, write_parity_state
-# Legacy imports (still needed until full migration)
-from .branch_parity import (
+# Import from sync package
+from .sync import (
+    BranchPairingError,
+    ParityStatus,
+    read_parity_state,
+    write_parity_state,
     run_preflight,
     acquire_topic_lock,
     _now_iso,

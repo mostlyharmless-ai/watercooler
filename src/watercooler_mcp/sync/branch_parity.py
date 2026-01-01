@@ -37,6 +37,7 @@ from .primitives import (
     stash_changes,
     restore_stash,
     validate_branch_name,
+    MAX_PUSH_RETRIES,
 )
 from .state import (
     ParityStatus,
@@ -628,7 +629,7 @@ class BranchParityManager:
             # Check for conflicts FIRST
             if has_conflicts(self.code_repo):
                 state.status = ParityStatus.DIVERGED.value
-                state.last_error = "Code repository has unresolved merge conflicts"
+                state.last_error = "Code repository has unresolved merge conflicts. Resolve manually, then git add and commit"
                 write_parity_state(self.threads_repo_path, state)
                 return PreflightResult(
                     success=False,
@@ -668,7 +669,7 @@ class BranchParityManager:
                         )
                 else:
                     state.status = ParityStatus.DIVERGED.value
-                    state.last_error = "Threads repository has unresolved merge conflicts"
+                    state.last_error = "Threads repository has unresolved merge conflicts. Resolve manually"
                     write_parity_state(self.threads_repo_path, state)
                     return PreflightResult(
                         success=False,
@@ -745,7 +746,12 @@ class BranchParityManager:
                             actions_taken.append(f"Stashed changes: {stash_ref}")
 
                     # Checkout to match code branch
-                    if checkout_branch(self.threads_repo, code_branch, create=True):
+                    # First try without create (if branch exists), then with create
+                    checkout_success = checkout_branch(self.threads_repo, code_branch, create=False)
+                    if not checkout_success:
+                        checkout_success = checkout_branch(self.threads_repo, code_branch, create=True)
+
+                    if checkout_success:
                         actions_taken.append(f"Checked out threads to {code_branch}")
                         threads_branch = code_branch
                         state.threads_branch = threads_branch
@@ -779,6 +785,41 @@ class BranchParityManager:
                         blocking_reason=state.last_error,
                     )
 
+            # Check for orphan branch: threads on origin but code not on origin
+            code_on_origin = branch_exists_on_origin(self.code_repo, code_branch)
+            threads_on_origin = branch_exists_on_origin(self.threads_repo, threads_branch)
+            if threads_on_origin and not code_on_origin:
+                state.status = ParityStatus.ORPHAN_BRANCH.value
+                state.last_error = (
+                    f"Orphan threads branch: '{threads_branch}' exists on origin "
+                    f"but code branch was deleted or never pushed"
+                )
+                write_parity_state(self.threads_repo_path, state)
+                return PreflightResult(
+                    success=False,
+                    state=state,
+                    can_proceed=False,
+                    blocking_reason=state.last_error,
+                )
+
+            # Check and set upstream tracking for threads branch if missing
+            if auto_fix:
+                try:
+                    tracking = self.threads_repo.active_branch.tracking_branch()
+                    remote_ref = f"origin/{threads_branch}"
+                    has_remote = False
+                    try:
+                        has_remote = remote_ref in [
+                            r.name for r in self.threads_repo.remotes.origin.refs
+                        ]
+                    except Exception:
+                        pass
+                    if tracking is None and has_remote:
+                        self.threads_repo.git.branch("--set-upstream-to", remote_ref)
+                        actions_taken.append(f"Set upstream tracking: {threads_branch} -> {remote_ref}")
+                except Exception as e:
+                    log_debug(f"[PARITY] Could not check/set upstream (non-fatal): {e}")
+
             # Get ahead/behind status
             code_ahead, code_behind = get_ahead_behind(self.code_repo, code_branch)
             threads_ahead, threads_behind = get_ahead_behind(
@@ -792,7 +833,7 @@ class BranchParityManager:
             # Code behind origin: BLOCK
             if code_behind > 0:
                 state.status = ParityStatus.CODE_BEHIND_ORIGIN.value
-                state.last_error = f"Code is {code_behind} commits behind origin"
+                state.last_error = f"Code is {code_behind} commits behind origin. Run 'git pull' in code repo"
                 write_parity_state(self.threads_repo_path, state)
                 return PreflightResult(
                     success=False,
@@ -855,6 +896,24 @@ class BranchParityManager:
                 )
                 state.threads_ahead_origin = threads_ahead
                 state.threads_behind_origin = threads_behind
+
+            # Threads ahead of origin: AUTO-PUSH
+            if threads_ahead > 0 and auto_fix:
+                pushed = push_with_retry(
+                    self.threads_repo, threads_branch, max_retries=MAX_PUSH_RETRIES
+                )
+                if pushed:
+                    actions_taken.append(f"Pushed threads to origin ({threads_ahead} commits)")
+                    # Update ahead/behind
+                    threads_ahead, threads_behind = get_ahead_behind(
+                        self.threads_repo, threads_branch
+                    )
+                    state.threads_ahead_origin = threads_ahead
+                    state.threads_behind_origin = threads_behind
+                else:
+                    # Push failed - still allow proceeding but mark pending
+                    state.pending_push = True
+                    actions_taken.append("Push failed (marked pending)")
 
             # All checks passed
             state.status = ParityStatus.CLEAN.value
@@ -1910,3 +1969,410 @@ def sync_branch_history(
             details=f"Unexpected error: {str(e)}",
             needs_manual_resolution=True,
         )
+
+
+# =============================================================================
+# Locking utilities (moved from branch_parity.py)
+# =============================================================================
+
+LOCK_TIMEOUT_SECONDS = 30  # How long to wait for lock acquisition
+LOCK_TTL_SECONDS = 60  # How long before a lock is considered stale
+LOCK_QUICK_RETRIES = 3  # Quick retries before full timeout (handles transient contention)
+LOCK_QUICK_RETRY_DELAY = 0.1  # Delay between quick retries in seconds
+LOCKS_DIR_NAME = ".watercooler/locks"  # Subdirectory for lock files
+
+# Topic validation constants
+MAX_TOPIC_LENGTH = 200
+UNSAFE_TOPIC_CHARS_PATTERN = r'[^\w\-.]'  # Characters not allowed in topic names
+
+
+def _lock_dir(threads_dir: Path) -> Path:
+    """Get the directory for lock files."""
+    return threads_dir / ".watercooler" / "locks"
+
+
+def _sanitize_topic_for_filename(topic: str) -> str:
+    """Sanitize topic name for use as filename.
+
+    Security: Neutralizes path traversal attempts (../, ..) and
+    replaces dangerous filesystem characters. Also strips leading dots
+    to avoid hidden files on Unix systems.
+
+    Long names are truncated to MAX_TOPIC_LENGTH with a hash suffix
+    for uniqueness.
+    """
+    import hashlib
+    import re
+    # First, neutralize path traversal attempts by replacing .. with _
+    safe = re.sub(r'\.\.', '_', topic)
+    # Replace path separators and other problematic chars
+    safe = re.sub(r'[<>:"/\\|?*]', '_', safe)
+    # Collapse multiple underscores
+    safe = re.sub(r'_+', '_', safe)
+    # Trim underscores and leading dots from edges
+    safe = safe.strip('_').lstrip('.')
+    # Handle empty result (from empty input or all-special-char input)
+    if not safe:
+        return '_empty_'
+    # Truncate long names with hash suffix for uniqueness
+    if len(safe) > MAX_TOPIC_LENGTH:
+        hash_suffix = hashlib.sha256(topic.encode()).hexdigest()[:8]
+        # Leave room for underscore + hash suffix
+        truncate_at = MAX_TOPIC_LENGTH - len(hash_suffix) - 1
+        safe = f"{safe[:truncate_at]}_{hash_suffix}"
+    return safe
+
+
+def _topic_lock_path(threads_dir: Path, topic: str) -> Path:
+    """Get path to per-topic lock file."""
+    lock_dir = _lock_dir(threads_dir)
+    safe_topic = _sanitize_topic_for_filename(topic)
+    return lock_dir / f"{safe_topic}.lock"
+
+
+def acquire_topic_lock(
+    threads_dir: Path, topic: str, timeout: int = LOCK_TIMEOUT_SECONDS
+) -> "AdvisoryLock":
+    """Acquire lock for a specific topic. Returns lock (caller must release).
+
+    Args:
+        threads_dir: Path to threads repository
+        topic: Topic name to lock (will be sanitized for filename safety)
+        timeout: Seconds to wait for lock acquisition
+
+    Returns:
+        AdvisoryLock instance (caller must call release() or use as context manager)
+
+    Raises:
+        TimeoutError: If lock cannot be acquired within timeout period
+    """
+    import time
+    from watercooler.lock import AdvisoryLock
+
+    lock_path = _topic_lock_path(threads_dir, topic)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Quick retries for transient contention
+    for attempt in range(LOCK_QUICK_RETRIES):
+        lock = AdvisoryLock(lock_path, ttl=LOCK_TTL_SECONDS, timeout=0)
+        if lock.acquire():
+            return lock
+        time.sleep(LOCK_QUICK_RETRY_DELAY)
+
+    # Quick retries failed, fall back to full timeout
+    lock = AdvisoryLock(lock_path, ttl=LOCK_TTL_SECONDS, timeout=timeout)
+    if not lock.acquire():
+        lock_info = lock.get_lock_info()
+        if lock_info:
+            holder_pid = lock_info.get("pid", "unknown")
+            holder_time = lock_info.get("time", "unknown")
+            holder_user = lock_info.get("user", "unknown")
+            raise TimeoutError(
+                f"Failed to acquire lock for topic '{topic}' within {timeout}s. "
+                f"Lock held by: pid={holder_pid}, user={holder_user}, since={holder_time}. "
+                f"If stale, it will auto-expire after TTL ({LOCK_TTL_SECONDS}s)."
+            )
+        raise TimeoutError(
+            f"Failed to acquire lock for topic '{topic}' within {timeout}s."
+        )
+    return lock
+
+
+# =============================================================================
+# Timestamp utility
+# =============================================================================
+
+def _now_iso() -> str:
+    """Return current UTC timestamp in ISO format."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# =============================================================================
+# Standalone function wrappers for backward compatibility
+# =============================================================================
+
+def run_preflight(
+    code_repo_path: Path,
+    threads_repo_path: Path,
+    auto_fix: bool = True,
+    fetch_first: bool = True,
+) -> PreflightResult:
+    """Run preflight checks for branch parity.
+
+    Standalone wrapper around BranchParityManager.run_preflight().
+
+    Args:
+        code_repo_path: Path to code repository
+        threads_repo_path: Path to threads repository
+        auto_fix: Whether to auto-fix issues
+        fetch_first: Whether to fetch from origin before checking
+
+    Returns:
+        PreflightResult with can_proceed, blocking_reason, etc.
+    """
+    manager = BranchParityManager(code_repo_path, threads_repo_path)
+    return manager.run_preflight(auto_fix=auto_fix, fetch_first=fetch_first)
+
+
+def ensure_readable(threads_repo_path: Path, code_repo_path: Optional[Path] = None) -> Tuple[bool, List[str]]:
+    """Ensure threads repo is readable (lightweight sync for reads).
+
+    Standalone wrapper around BranchParityManager.ensure_readable().
+
+    Args:
+        threads_repo_path: Path to threads repository
+        code_repo_path: Optional path to code repository (for context)
+
+    Returns:
+        Tuple of (success, list of actions taken)
+    """
+    # For ensure_readable, we only need the threads repo
+    # Use threads path for both if code path not provided
+    code_path = code_repo_path if code_repo_path else threads_repo_path.parent / threads_repo_path.name.replace("-threads", "")
+    manager = BranchParityManager(code_path, threads_repo_path)
+    return manager.ensure_readable()
+
+
+def get_branch_health(
+    code_repo_path: Path,
+    threads_repo_path: Path,
+    fetch_first: bool = True,
+) -> dict:
+    """Get health status of branch parity.
+
+    Standalone wrapper around BranchParityManager.get_health().
+
+    Args:
+        code_repo_path: Path to code repository
+        threads_repo_path: Path to threads repository
+        fetch_first: Whether to fetch from origin before checking (note: get_health
+            always performs live checks with non-blocking fetch)
+
+    Returns:
+        Dict with health status information
+    """
+    manager = BranchParityManager(code_repo_path, threads_repo_path)
+    # Note: get_health() always does live checks with non-blocking fetch internally
+    # The fetch_first parameter is kept for backward compatibility but is effectively ignored
+    return manager.get_health()
+
+
+def push_after_commit(
+    threads_repo_path: Path,
+    branch_name: Optional[str] = None,  # Backward compat - ignored, branch auto-detected
+    *,
+    max_retries: int = 5,
+    code_repo_path: Optional[Path] = None,
+) -> Tuple[bool, str]:
+    """Push threads repo after a commit.
+
+    Standalone wrapper around BranchParityManager.push_after_commit().
+
+    Args:
+        threads_repo_path: Path to threads repository
+        branch_name: Deprecated - branch is auto-detected from repo
+        max_retries: Maximum push retry attempts
+        code_repo_path: Optional path to code repository
+
+    Returns:
+        Tuple of (success, message)
+    """
+    code_path = code_repo_path if code_repo_path else threads_repo_path.parent / threads_repo_path.name.replace("-threads", "")
+    manager = BranchParityManager(code_path, threads_repo_path)
+    return manager.push_after_commit(max_retries=max_retries)
+
+
+def auto_merge_to_main(
+    threads_repo: Repo,
+    feature_branch: str,
+    main_branch: str,
+) -> Tuple[bool, str]:
+    """Merge threads feature branch to main after code PR merge.
+
+    This is called when the code branch has been merged to main but the
+    threads branch hasn't. Per the branch pairing contract, threads follows
+    code, so we auto-merge the threads branch to main.
+
+    Args:
+        threads_repo: GitPython Repo object for threads repository
+        feature_branch: Name of the feature branch to merge
+        main_branch: Name of the main branch
+
+    Returns:
+        Tuple of (success: bool, message: str describing what happened)
+    """
+    from .conflict import has_thread_conflicts_only, has_graph_conflicts_only
+
+    try:
+        validate_branch_name(feature_branch)
+        validate_branch_name(main_branch)
+    except ValueError as e:
+        return (False, f"Invalid branch name: {e}")
+
+    original_branch = get_branch_name(threads_repo)
+    actions: List[str] = []
+    stash_ref = None
+
+    try:
+        # 0. Stash any uncommitted changes
+        stash_ref = stash_changes(threads_repo, prefix="watercooler-merge")
+        if stash_ref:
+            actions.append("Stashed uncommitted changes")
+
+        # 1. Fetch latest from origin
+        if not fetch_with_timeout(threads_repo):
+            log_debug("[PARITY] auto_merge_to_main: fetch failed, proceeding anyway")
+
+        # 2. Checkout main branch
+        if not checkout_branch(threads_repo, main_branch):
+            if stash_ref:
+                restore_stash(threads_repo, stash_ref)
+            return (False, f"Failed to checkout {main_branch}")
+        actions.append(f"Checked out {main_branch}")
+
+        # 3. Pull latest main
+        if pull_ff_only(threads_repo, main_branch):
+            actions.append(f"Pulled latest {main_branch}")
+        elif pull_rebase(threads_repo, main_branch):
+            actions.append(f"Pulled {main_branch} (rebase)")
+        else:
+            log_debug("[PARITY] auto_merge_to_main: pull main failed, proceeding anyway")
+
+        # 4. Merge the feature branch into main
+        try:
+            threads_repo.git.merge(feature_branch, "--no-edit")
+            actions.append(f"Merged {feature_branch} into {main_branch}")
+        except GitCommandError as e:
+            if has_conflicts(threads_repo):
+                # Try auto-resolve for thread-only or graph-only conflicts
+                if has_thread_conflicts_only(threads_repo):
+                    try:
+                        # Accept ours strategy for thread conflicts (append-only semantics)
+                        threads_repo.git.checkout("--ours", ".")
+                        threads_repo.git.add("-A")
+                        threads_repo.git.commit("--no-edit")
+                        actions.append("Auto-resolved thread conflicts during merge")
+                    except Exception:
+                        try:
+                            threads_repo.git.merge("--abort")
+                        except Exception:
+                            pass
+                        if original_branch:
+                            checkout_branch(threads_repo, original_branch)
+                        if stash_ref:
+                            restore_stash(threads_repo, stash_ref)
+                        return (False, f"Merge conflict could not be auto-resolved: {e}")
+                elif has_graph_conflicts_only(threads_repo):
+                    try:
+                        # Accept theirs for graph (regeneratable)
+                        threads_repo.git.checkout("--theirs", ".")
+                        threads_repo.git.add("-A")
+                        threads_repo.git.commit("--no-edit")
+                        actions.append("Auto-resolved graph conflicts during merge")
+                    except Exception:
+                        try:
+                            threads_repo.git.merge("--abort")
+                        except Exception:
+                            pass
+                        if original_branch:
+                            checkout_branch(threads_repo, original_branch)
+                        if stash_ref:
+                            restore_stash(threads_repo, stash_ref)
+                        return (False, f"Graph conflict could not be auto-resolved: {e}")
+                else:
+                    # Mixed conflicts - abort
+                    try:
+                        threads_repo.git.merge("--abort")
+                    except Exception:
+                        pass
+                    if original_branch:
+                        checkout_branch(threads_repo, original_branch)
+                    if stash_ref:
+                        restore_stash(threads_repo, stash_ref)
+                    return (False, f"Merge conflict requiring manual resolution: {e}")
+            else:
+                if stash_ref:
+                    restore_stash(threads_repo, stash_ref)
+                return (False, f"Merge failed: {e}")
+
+        # 5. Push main to origin
+        if push_with_retry(threads_repo, main_branch):
+            actions.append(f"Pushed {main_branch} to origin")
+        else:
+            if stash_ref:
+                restore_stash(threads_repo, stash_ref)
+            return (False, f"Merge succeeded locally but push failed. Run: git push origin {main_branch}")
+
+        # 6. Restore stash if we created one
+        if stash_ref:
+            if restore_stash(threads_repo, stash_ref):
+                actions.append("Restored stashed changes")
+            else:
+                actions.append("Warning: stash restore failed, run 'git stash pop' manually")
+
+        message = f"Auto-merged threads branch to main: {'; '.join(actions)}"
+        log_debug(f"[PARITY] {message}")
+        return (True, message)
+
+    except Exception as e:
+        log_debug(f"[PARITY] auto_merge_to_main failed: {e}")
+        if original_branch:
+            try:
+                checkout_branch(threads_repo, original_branch)
+            except Exception:
+                pass
+        if stash_ref:
+            try:
+                restore_stash(threads_repo, stash_ref)
+            except Exception:
+                pass
+        return (False, f"Auto-merge failed: {e}")
+
+
+def _detect_squash_merge(code_repo_obj: Repo, branch: str) -> Tuple[bool, Optional[str]]:
+    """Detect if a code branch was squash-merged to main.
+
+    Args:
+        code_repo_obj: GitPython Repo object for code repository
+        branch: Branch name to check
+
+    Returns:
+        Tuple of (is_squash_merged, squash_commit_sha)
+        Returns (False, None) if branch doesn't exist or wasn't merged
+    """
+    try:
+        if branch not in [b.name for b in code_repo_obj.heads]:
+            return (False, None)
+
+        if "main" not in [b.name for b in code_repo_obj.heads]:
+            return (False, None)
+
+        # Get commits on feature branch that aren't on main
+        feature_commits = list(code_repo_obj.iter_commits(f"main..{branch}"))
+        if not feature_commits:
+            return (False, None)
+
+        # Check if any of these commits exist on main (by message or content)
+        main_commits = list(code_repo_obj.iter_commits("main", max_count=50))
+        main_commit_shas = {c.hexsha for c in main_commits}
+        main_commit_messages = {c.message.strip() for c in main_commits}
+
+        # Check if feature branch commits exist on main
+        feature_commits_on_main = 0
+        for commit in feature_commits[:10]:
+            if commit.hexsha in main_commit_shas:
+                feature_commits_on_main += 1
+            elif commit.message.strip() in main_commit_messages:
+                feature_commits_on_main += 1
+
+        # If no feature commits exist on main, likely squash merge
+        if feature_commits_on_main == 0 and len(feature_commits) > 1:
+            for commit in main_commits[:20]:
+                if branch.lower() in commit.message.lower() or "squash" in commit.message.lower():
+                    return (True, commit.hexsha[:7])
+            return (True, None)
+
+        return (False, None)
+    except Exception:
+        return (False, None)

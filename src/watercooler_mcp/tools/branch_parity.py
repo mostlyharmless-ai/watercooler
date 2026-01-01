@@ -268,7 +268,7 @@ def _sync_branch_state_impl(
             squash_info = None
             if context.code_root:
                 try:
-                    from watercooler_mcp.git_sync import _detect_squash_merge
+                    from watercooler_mcp.sync import _detect_squash_merge
                     code_repo_obj = Repo(context.code_root, search_parent_directories=True)
                     is_squash, squash_sha = _detect_squash_merge(code_repo_obj, target_branch)
                     if is_squash:

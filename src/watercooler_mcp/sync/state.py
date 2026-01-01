@@ -113,6 +113,25 @@ class ParityStatus(str, Enum):
 
 
 @dataclass
+class ParityError:
+    """Represents an error in parity operations.
+
+    Attributes:
+        state_class: The StateClass value (e.g., 'detached_head', 'behind_dirty')
+        message: Human-readable error message
+        requires_human: Whether human intervention is required
+        suggested_commands: List of git commands to run for recovery
+        recovery_refs: Dict of refs needed for recovery (e.g., stash refs)
+    """
+
+    state_class: str
+    message: str
+    requires_human: bool = False
+    suggested_commands: List[str] = field(default_factory=list)
+    recovery_refs: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ParityState:
     """Parity state persisted to branch_parity_state.json.
 

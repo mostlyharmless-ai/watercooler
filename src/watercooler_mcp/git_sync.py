@@ -1162,7 +1162,7 @@ class GitSyncManager:
             self._log(f"[GRAPH-COMMIT] Committed graph changes: {message}")
 
             # Push with retry
-            from watercooler_mcp.branch_parity import push_after_commit
+            from watercooler_mcp.sync import push_after_commit
 
             try:
                 branch_name = repo.active_branch.name
@@ -1237,7 +1237,7 @@ class GitSyncManager:
             self._log(f"[GRAPH-COMMIT-SYNC] Committed: {commit_msg}")
 
             # Push with retry (BLOCKING)
-            from watercooler_mcp.branch_parity import push_after_commit
+            from watercooler_mcp.sync import push_after_commit
 
             try:
                 branch_name = repo.active_branch.name
@@ -1474,7 +1474,7 @@ class GitSyncManager:
             return result
 
         # Push with rebase-on-reject retry using branch parity helper
-        from watercooler_mcp.branch_parity import (
+        from watercooler_mcp.sync import (
             push_after_commit,
             read_parity_state,
             write_parity_state,

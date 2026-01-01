@@ -40,10 +40,8 @@ from .sync import (
     BranchPairingResult,
     validate_branch_pairing,
     sync_branch_history,
-    _find_main_branch,
-)
-from .branch_parity import (
     auto_merge_to_main,
+    _find_main_branch,
 )
 from .observability import log_debug
 

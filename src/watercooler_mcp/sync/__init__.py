@@ -61,6 +61,7 @@ from .state import (
     # Enums
     ParityStatus,
     # Data classes
+    ParityError,
     ParityState,
     # Classes
     StateManager,
@@ -129,8 +130,28 @@ from .branch_parity import (
     # Standalone functions
     validate_branch_pairing,
     sync_branch_history,
+    run_preflight,
+    ensure_readable,
+    get_branch_health,
+    push_after_commit,
+    acquire_topic_lock,
+    auto_merge_to_main,
+    _detect_squash_merge,
+    _now_iso,
     # Helper functions (re-exported for backward compat)
     _find_main_branch,
+    _sanitize_topic_for_filename,
+    _lock_dir,
+    _topic_lock_path,
+    # Locking constants
+    LOCK_TIMEOUT_SECONDS,
+    LOCK_TTL_SECONDS,
+    LOCK_QUICK_RETRIES,
+    LOCK_QUICK_RETRY_DELAY,
+    LOCKS_DIR_NAME,
+    # Topic validation constants
+    MAX_TOPIC_LENGTH,
+    UNSAFE_TOPIC_CHARS_PATTERN,
 )
 
 __all__ = [
@@ -174,6 +195,7 @@ __all__ = [
     # State - Enums
     "ParityStatus",
     # State - Data classes
+    "ParityError",
     "ParityState",
     # State - Classes
     "StateManager",
@@ -230,6 +252,26 @@ __all__ = [
     # Branch Parity - Standalone functions
     "validate_branch_pairing",
     "sync_branch_history",
+    "run_preflight",
+    "ensure_readable",
+    "get_branch_health",
+    "push_after_commit",
+    "acquire_topic_lock",
+    "auto_merge_to_main",
+    "_detect_squash_merge",
+    "_now_iso",
     # Branch Parity - Helper functions
     "_find_main_branch",
+    "_sanitize_topic_for_filename",
+    "_lock_dir",
+    "_topic_lock_path",
+    # Branch Parity - Locking constants
+    "LOCK_TIMEOUT_SECONDS",
+    "LOCK_TTL_SECONDS",
+    "LOCK_QUICK_RETRIES",
+    "LOCK_QUICK_RETRY_DELAY",
+    "LOCKS_DIR_NAME",
+    # Branch Parity - Topic validation constants
+    "MAX_TOPIC_LENGTH",
+    "UNSAFE_TOPIC_CHARS_PATTERN",
 ]

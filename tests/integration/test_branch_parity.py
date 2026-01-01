@@ -16,7 +16,7 @@ from pathlib import Path
 from git import Repo, Actor
 from git.exc import GitCommandError
 
-from watercooler_mcp.branch_parity import (
+from watercooler_mcp.sync import (
     ParityStatus,
     ParityState,
     PreflightResult,
@@ -32,11 +32,11 @@ from watercooler_mcp.branch_parity import (
     merge_jsonl_content,
     merge_thread_content,
     ensure_readable,
-    _detect_stash,
-    _preserve_stash,
-    _restore_stash,
-    _has_conflicts,
-    _has_thread_conflicts_only,
+    detect_stash,
+    stash_changes,
+    restore_stash,
+    has_conflicts,
+    has_thread_conflicts_only,
     STATE_FILE_NAME,
     LOCKS_DIR_NAME,
     LOCK_TIMEOUT_SECONDS,
@@ -49,10 +49,10 @@ from watercooler_mcp.branch_parity import (
     INVALID_BRANCH_PATTERNS,
     UNSAFE_TOPIC_CHARS_PATTERN,
     _sanitize_topic_for_filename,
-    _validate_branch_name,
-    _pull_ff_only,
-    _pull_rebase,
-    _checkout_branch,
+    validate_branch_name,
+    pull_ff_only,
+    pull_rebase,
+    checkout_branch,
     auto_merge_to_main,
 )
 
@@ -467,7 +467,7 @@ def test_validate_branch_name_valid() -> None:
     ]
     for name in valid_names:
         # Should not raise
-        _validate_branch_name(name)
+        validate_branch_name(name)
 
 
 def test_validate_branch_name_flag_injection() -> None:
@@ -482,7 +482,7 @@ def test_validate_branch_name_flag_injection() -> None:
     ]
     for name in dangerous_names:
         with pytest.raises(ValueError, match="starts with hyphen"):
-            _validate_branch_name(name)
+            validate_branch_name(name)
 
 
 def test_validate_branch_name_path_traversal() -> None:
@@ -495,7 +495,7 @@ def test_validate_branch_name_path_traversal() -> None:
     ]
     for name in dangerous_names:
         with pytest.raises(ValueError, match="consecutive dots"):
-            _validate_branch_name(name)
+            validate_branch_name(name)
 
 
 def test_validate_branch_name_special_characters() -> None:
@@ -512,17 +512,17 @@ def test_validate_branch_name_special_characters() -> None:
     ]
     for name in git_special_chars:
         with pytest.raises(ValueError, match="invalid git characters"):
-            _validate_branch_name(name)
+            validate_branch_name(name)
 
     # Test spaces (whitespace that's not a control character)
     with pytest.raises(ValueError, match="contains whitespace"):
-        _validate_branch_name("branch with space")
+        validate_branch_name("branch with space")
 
     # Tab and newline are control characters (0x09, 0x0a), so they match control chars first
     with pytest.raises(ValueError, match="control characters"):
-        _validate_branch_name("branch\ttab")
+        validate_branch_name("branch\ttab")
     with pytest.raises(ValueError, match="control characters"):
-        _validate_branch_name("branch\nnewline")
+        validate_branch_name("branch\nnewline")
 
 
 def test_validate_branch_name_reflog_syntax() -> None:
@@ -534,38 +534,38 @@ def test_validate_branch_name_reflog_syntax() -> None:
     ]
     for name in invalid_names:
         with pytest.raises(ValueError, match="reflog syntax"):
-            _validate_branch_name(name)
+            validate_branch_name(name)
 
 
 def test_validate_branch_name_edge_cases() -> None:
     """Test edge cases for branch name validation."""
     # Empty name
     with pytest.raises(ValueError, match="cannot be empty"):
-        _validate_branch_name("")
+        validate_branch_name("")
 
     # Too long
     with pytest.raises(ValueError, match="too long"):
-        _validate_branch_name("a" * 300)
+        validate_branch_name("a" * 300)
 
     # Starts with dot
     with pytest.raises(ValueError, match="starts or ends with dot"):
-        _validate_branch_name(".hidden")
+        validate_branch_name(".hidden")
 
     # Ends with dot
     with pytest.raises(ValueError, match="starts or ends with dot"):
-        _validate_branch_name("branch.")
+        validate_branch_name("branch.")
 
     # Ends with .lock
     with pytest.raises(ValueError, match="ends with .lock"):
-        _validate_branch_name("branch.lock")
+        validate_branch_name("branch.lock")
 
     # Consecutive slashes
     with pytest.raises(ValueError, match="consecutive slashes"):
-        _validate_branch_name("feature//branch")
+        validate_branch_name("feature//branch")
 
     # Trailing slash
     with pytest.raises(ValueError, match="cannot end with slash"):
-        _validate_branch_name("feature/")
+        validate_branch_name("feature/")
 
 
 def test_acquire_topic_lock_timeout(threads_dir: Path) -> None:
@@ -1136,7 +1136,7 @@ def test_parity_error_with_recovery() -> None:
 def test_detect_stash_empty(threads_repo: Path) -> None:
     """Test _detect_stash returns False when no stash."""
     repo = Repo(threads_repo)
-    assert _detect_stash(repo) is False
+    assert detect_stash(repo) is False
 
 
 def test_detect_stash_with_stash(threads_repo: Path) -> None:
@@ -1150,14 +1150,14 @@ def test_detect_stash_with_stash(threads_repo: Path) -> None:
     # Stash the changes
     repo.git.stash("push", "-m", "test stash")
 
-    assert _detect_stash(repo) is True
+    assert detect_stash(repo) is True
 
 
 def test_preserve_stash_clean_tree(threads_repo: Path) -> None:
     """Test _preserve_stash returns None on clean tree."""
     repo = Repo(threads_repo)
 
-    stash_ref = _preserve_stash(repo, "watercooler-test")
+    stash_ref = stash_changes(repo, "watercooler-test")
     assert stash_ref is None
 
 
@@ -1169,7 +1169,7 @@ def test_preserve_stash_dirty_tree(threads_repo: Path) -> None:
     (threads_repo / "dirty.md").write_text("# Dirty\n")
     repo.index.add(["dirty.md"])
 
-    stash_ref = _preserve_stash(repo, "watercooler-test")
+    stash_ref = stash_changes(repo, "watercooler-test")
 
     # Should return a stash message with the prefix and timestamp
     assert stash_ref is not None
@@ -1186,13 +1186,13 @@ def test_restore_stash_success(threads_repo: Path) -> None:
     # Create and stash changes
     (threads_repo / "dirty.md").write_text("# Dirty\n")
     repo.index.add(["dirty.md"])
-    stash_ref = _preserve_stash(repo, "watercooler-test")
+    stash_ref = stash_changes(repo, "watercooler-test")
 
     # Verify tree is clean after stash
     assert not repo.is_dirty(untracked_files=True)
 
     # Restore the stash
-    success = _restore_stash(repo, stash_ref)
+    success = restore_stash(repo, stash_ref)
 
     assert success is True
     # Tree should be dirty again
@@ -1207,14 +1207,14 @@ def test_restore_stash_no_stash_noop(threads_repo: Path) -> None:
     repo = Repo(threads_repo)
 
     # No stash ref provided - should succeed as no-op
-    success = _restore_stash(repo, None)
+    success = restore_stash(repo, None)
     assert success is True
 
 
 def test_has_conflicts_clean(threads_repo: Path) -> None:
     """Test _has_conflicts returns False on clean tree."""
     repo = Repo(threads_repo)
-    assert _has_conflicts(repo) is False
+    assert has_conflicts(repo) is False
 
 
 # =============================================================================
@@ -1423,7 +1423,7 @@ def test_preflight_blocks_on_preexisting_conflict(repos_with_remotes: tuple[Path
         pass
 
     # Verify we have an actual conflict (UU status)
-    if not _has_conflicts(threads):
+    if not has_conflicts(threads):
         # Fallback: abort any partial rebase and try merge
         try:
             threads.git.rebase("--abort")
@@ -1434,7 +1434,7 @@ def test_preflight_blocks_on_preexisting_conflict(repos_with_remotes: tuple[Path
         except GitCommandError:
             pass
 
-    assert _has_conflicts(threads), "Setup failed: should have created a conflict"
+    assert has_conflicts(threads), "Setup failed: should have created a conflict"
 
     # Now run preflight - should detect pre-existing conflict and block
     code = Repo(code_path)
@@ -1497,7 +1497,7 @@ def test_ensure_readable_skips_sync_on_preexisting_conflict(repos_with_remotes: 
     except GitCommandError:
         pass  # Expected conflict
 
-    if not _has_conflicts(threads):
+    if not has_conflicts(threads):
         try:
             threads.git.rebase("--abort")
         except GitCommandError:
@@ -1507,7 +1507,7 @@ def test_ensure_readable_skips_sync_on_preexisting_conflict(repos_with_remotes: 
         except GitCommandError:
             pass
 
-    assert _has_conflicts(threads), "Setup failed: should have created a conflict"
+    assert has_conflicts(threads), "Setup failed: should have created a conflict"
 
     # ensure_readable should not block, but should skip sync
     success, actions = ensure_readable(threads_path, code_path)
@@ -1722,7 +1722,7 @@ def test_pull_ff_only_with_branch_parameter(repo_with_remote: tuple[Path, Path])
     assert tracking is None
 
     # Pull with explicit branch - should succeed
-    result = _pull_ff_only(local, "feature-no-tracking")
+    result = pull_ff_only(local, "feature-no-tracking")
     assert result is True
 
     # Verify we got the commit
@@ -1753,7 +1753,7 @@ def test_checkout_branch_sets_upstream_tracking(repo_with_remote: tuple[Path, Pa
     local.git.fetch("origin")
 
     # Checkout with create=True and set_upstream=True
-    result = _checkout_branch(local, "feature-upstream-test", create=True, set_upstream=True)
+    result = checkout_branch(local, "feature-upstream-test", create=True, set_upstream=True)
     assert result is True
 
     # Verify upstream tracking is set
@@ -1781,7 +1781,7 @@ def test_checkout_branch_existing_branch_sets_upstream(repo_with_remote: tuple[P
     local.git.checkout("main")
 
     # Checkout back to feature-existing with set_upstream=True
-    result = _checkout_branch(local, "feature-existing", create=False, set_upstream=True)
+    result = checkout_branch(local, "feature-existing", create=False, set_upstream=True)
     assert result is True
 
     # Verify upstream tracking is now set
@@ -2430,7 +2430,7 @@ def test_has_thread_conflicts_only_returns_false_for_no_conflicts(
 ) -> None:
     """Test _has_thread_conflicts_only returns False when no conflicts."""
     repo = Repo(threads_repo)
-    assert _has_thread_conflicts_only(repo) is False
+    assert has_thread_conflicts_only(repo) is False
 
 
 def test_has_thread_conflicts_only_returns_false_for_graph_conflicts(
@@ -2448,7 +2448,7 @@ def test_has_thread_conflicts_only_returns_false_for_graph_conflicts(
     repo.index.commit("Add graph files")
 
     # No actual conflicts, so both should be False
-    assert _has_thread_conflicts_only(repo) is False
+    assert has_thread_conflicts_only(repo) is False
 
 
 def test_auto_merge_to_main_success(tmp_path: Path) -> None:

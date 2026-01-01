@@ -25,7 +25,7 @@ from ..helpers import (
     _require_context,
     _format_warnings_for_response,
 )
-from ..branch_parity import get_branch_health
+from ..sync import get_branch_health
 from ..observability import log_debug
 
 
@@ -198,9 +198,6 @@ def _reconcile_parity_impl(
             ParityStatus,
             pull_ff_only,
             pull_rebase,
-        )
-        # Legacy imports (not yet in sync package)
-        from watercooler_mcp.branch_parity import (
             get_branch_health,
             run_preflight,
             push_after_commit,

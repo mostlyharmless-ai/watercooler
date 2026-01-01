@@ -42,7 +42,7 @@ from ..helpers import (
     _load_thread_entries_graph_first,
     _list_threads_graph_first,
 )
-from ..branch_parity import ensure_readable
+from ..sync import ensure_readable
 from ..observability import log_debug, log_error
 from .. import validation  # Import module for runtime access (enables test patching)
 
