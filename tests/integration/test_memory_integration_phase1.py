@@ -92,31 +92,28 @@ class TestMigrationIntegration:
         threads_dir.mkdir()
 
         # Create sample thread with multiple entries
-        (threads_dir / "integration-test.md").write_text("""# Thread: Integration Test
+        (threads_dir / "integration-test.md").write_text("""# integration-test — Thread
+
 Status: OPEN
-Ball: Claude
+Ball: Claude (dev)
 
 ---
 
-## Entry 1
-
-**Agent**: Claude (dev)
-**Role**: implementer
-**Type**: Note
-**Timestamp**: 2025-01-15T10:00:00Z
-**ID**: 01INT001
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: First entry
+<!-- Entry-ID: 01INT001 -->
 
 First integration test entry.
 
 ---
 
-## Entry 2
-
-**Agent**: Human (dev)
-**Role**: reviewer
-**Type**: Note
-**Timestamp**: 2025-01-15T11:00:00Z
-**ID**: 01INT002
+Entry: Human (dev) 2025-01-15T11:00:00Z
+Role: reviewer
+Type: Note
+Title: Second entry
+<!-- Entry-ID: 01INT002 -->
 
 Second integration test entry.
 """)
@@ -247,19 +244,18 @@ class TestEndToEndWorkflow:
         threads_dir.mkdir()
 
         # Create thread
-        (threads_dir / "e2e-test.md").write_text("""# Thread: E2E Test
+        (threads_dir / "e2e-test.md").write_text("""# e2e-test — Thread
+
 Status: OPEN
-Ball: Claude
+Ball: Claude (dev)
 
 ---
 
-## Entry 1
-
-**Agent**: Claude (dev)
-**Role**: implementer
-**Type**: Note
-**Timestamp**: 2025-01-15T10:00:00Z
-**ID**: 01E2E001
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: E2E test entry
+<!-- Entry-ID: 01E2E001 -->
 
 End-to-end test content about authentication implementation.
 """)
