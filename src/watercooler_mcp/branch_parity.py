@@ -2386,17 +2386,73 @@ def get_branch_health(
     code_repo_path: Path,
     threads_repo_path: Path,
 ) -> dict:
-    """Get branch health status for reporting.
+    """Get branch health status with LIVE git checks.
+
+    This function performs live git operations to get current state,
+    rather than relying on potentially stale cached state from
+    branch_parity_state.json.
 
     Returns dict with:
-    - status: Current parity status
-    - code_branch, threads_branch: Branch names
-    - code_ahead/behind, threads_ahead/behind: Commit counts
+    - status: Current parity status (computed LIVE)
+    - code_branch, threads_branch: Branch names (LIVE)
+    - code_ahead/behind, threads_ahead/behind: Commit counts (LIVE)
     - pending_push: Whether threads has unpushed commits
-    - last_check_at: Timestamp of last check
+    - last_check_at: Timestamp of this check (fresh)
     - lock_holder: PID of current lock holder (if any)
     """
+    # Read cached state for metadata only (pending_push, last_error, actions_taken)
     state = read_parity_state(threads_repo_path)
+
+    # Initialize with fallback values from state
+    code_branch = state.code_branch
+    threads_branch = state.threads_branch
+    code_ahead, code_behind = state.code_ahead_origin, state.code_behind_origin
+    threads_ahead, threads_behind = state.threads_ahead_origin, state.threads_behind_origin
+    live_status = state.status
+
+    # Perform LIVE git checks
+    try:
+        code_repo = Repo(code_repo_path, search_parent_directories=True)
+        threads_repo = Repo(threads_repo_path, search_parent_directories=True)
+
+        # Live branch names
+        code_branch = _get_branch_name(code_repo)
+        threads_branch = _get_branch_name(threads_repo)
+
+        # Check for detached HEAD
+        if code_branch is None or threads_branch is None:
+            live_status = ParityStatus.DETACHED_HEAD.value
+        else:
+            # Live ahead/behind counts (fetch first for accuracy)
+            try:
+                code_repo.remotes.origin.fetch(prune=True)
+            except Exception as e:
+                log_debug(f"[PARITY] Fetch failed for code repo (non-fatal): {e}")
+
+            try:
+                threads_repo.remotes.origin.fetch(prune=True)
+            except Exception as e:
+                log_debug(f"[PARITY] Fetch failed for threads repo (non-fatal): {e}")
+
+            code_ahead, code_behind = _get_ahead_behind(code_repo, code_branch)
+            threads_ahead, threads_behind = _get_ahead_behind(threads_repo, threads_branch)
+
+            # Recompute status based on live data
+            if code_behind > 0:
+                live_status = ParityStatus.CODE_BEHIND_ORIGIN.value
+            elif code_branch != threads_branch:
+                live_status = ParityStatus.BRANCH_MISMATCH.value
+            elif threads_ahead > 0:
+                live_status = ParityStatus.PENDING_PUSH.value
+            else:
+                live_status = ParityStatus.CLEAN.value
+
+    except InvalidGitRepositoryError as e:
+        log_debug(f"[PARITY] Invalid git repository in get_branch_health: {e}")
+        # Fall back to cached state
+    except Exception as e:
+        log_debug(f"[PARITY] Error in get_branch_health: {e}")
+        # Fall back to cached state
 
     # Check for active lock
     lock_holder = None
@@ -2412,16 +2468,16 @@ def get_branch_health(
                 pass
 
     return {
-        "status": state.status,
-        "code_branch": state.code_branch,
-        "threads_branch": state.threads_branch,
-        "code_ahead_origin": state.code_ahead_origin,
-        "code_behind_origin": state.code_behind_origin,
-        "threads_ahead_origin": state.threads_ahead_origin,
-        "threads_behind_origin": state.threads_behind_origin,
-        "pending_push": state.pending_push,
-        "last_check_at": state.last_check_at,
-        "last_error": state.last_error,
-        "actions_taken": state.actions_taken,
-        "lock_holder": lock_holder,
+        "status": live_status,  # NOW LIVE
+        "code_branch": code_branch,  # NOW LIVE
+        "threads_branch": threads_branch,  # NOW LIVE
+        "code_ahead_origin": code_ahead,  # NOW LIVE
+        "code_behind_origin": code_behind,  # NOW LIVE
+        "threads_ahead_origin": threads_ahead,  # NOW LIVE
+        "threads_behind_origin": threads_behind,  # NOW LIVE
+        "pending_push": state.pending_push,  # From state (async queue status)
+        "last_check_at": _now_iso(),  # Fresh timestamp
+        "last_error": state.last_error,  # From state (historical)
+        "actions_taken": state.actions_taken,  # From state (historical)
+        "lock_holder": lock_holder,  # Live check
     }
