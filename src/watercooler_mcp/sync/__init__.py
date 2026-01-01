@@ -143,6 +143,9 @@ from .branch_parity import (
     _sanitize_topic_for_filename,
     _lock_dir,
     _topic_lock_path,
+    _detect_behind_main_divergence,
+    _detect_branch_divergence,
+    _rebase_branch_onto,
     # Locking constants
     LOCK_TIMEOUT_SECONDS,
     LOCK_TTL_SECONDS,
@@ -265,6 +268,9 @@ __all__ = [
     "_sanitize_topic_for_filename",
     "_lock_dir",
     "_topic_lock_path",
+    "_detect_behind_main_divergence",
+    "_detect_branch_divergence",
+    "_rebase_branch_onto",
     # Branch Parity - Locking constants
     "LOCK_TIMEOUT_SECONDS",
     "LOCK_TTL_SECONDS",
