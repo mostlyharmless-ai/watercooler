@@ -212,7 +212,12 @@ class TestMemorySyncHookIntegration:
             assert config["backend"] == "leanrag"
 
     def test_sync_hook_non_blocking(self, tmp_path):
-        """Memory sync hook is non-blocking on errors."""
+        """Memory sync hook is non-blocking - uses fire-and-forget pattern.
+
+        With ThreadPoolExecutor, sync_to_memory_backend returns True immediately
+        after submitting work to the executor. Errors are logged asynchronously
+        in the worker thread without affecting the caller.
+        """
         from watercooler.baseline_graph.sync import sync_to_memory_backend
 
         threads_dir = tmp_path / "threads"
@@ -223,7 +228,7 @@ class TestMemorySyncHookIntegration:
             "watercooler.baseline_graph.sync._call_graphiti_add_episode",
             side_effect=RuntimeError("Connection failed"),
         ):
-            # Should not raise - returns False on error
+            # Should not raise - fire-and-forget returns True after submission
             result = sync_to_memory_backend(
                 threads_dir=threads_dir,
                 topic="test-thread",
@@ -231,7 +236,9 @@ class TestMemorySyncHookIntegration:
                 entry_body="Test content",
             )
 
-            assert result is False  # Failed but didn't raise
+            # Returns True because work was submitted to executor (fire-and-forget)
+            # Actual errors are logged asynchronously in worker thread
+            assert result is True
 
 
 class TestEndToEndWorkflow:

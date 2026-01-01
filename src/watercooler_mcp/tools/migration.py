@@ -291,6 +291,7 @@ async def _migrate_to_memory_backend_impl(
     topics: str = "",
     skip_closed: bool = False,
     resume: bool = True,
+    force_new_migration: bool = False,
 ) -> str:
     """Migrate thread entries to memory backend.
 
@@ -302,6 +303,7 @@ async def _migrate_to_memory_backend_impl(
         topics: Comma-separated list of topics to migrate (empty = all)
         skip_closed: Skip closed threads
         resume: Resume from checkpoint if available
+        force_new_migration: If True, ignore checkpoint backend mismatch
 
     Returns:
         JSON with migration results
@@ -341,13 +343,23 @@ async def _migrate_to_memory_backend_impl(
             result["resumed_from_checkpoint"] = True
             result["checkpoint_entries"] = len(migrated_entries)
         elif checkpoint_backend:
-            # Checkpoint exists but for different backend - warn user
-            logger.warning(
-                f"Checkpoint found for backend '{checkpoint_backend}' but targeting '{backend}'. "
-                f"Starting fresh migration. Delete .migration_checkpoint.json to suppress this warning."
-            )
-            result["checkpoint_backend_mismatch"] = True
-            result["checkpoint_backend"] = checkpoint_backend
+            # Checkpoint exists but for different backend
+            if force_new_migration:
+                # User explicitly wants to start fresh
+                logger.info(
+                    f"Ignoring checkpoint for backend '{checkpoint_backend}' - "
+                    f"starting fresh migration to '{backend}' (force_new_migration=True)"
+                )
+                result["checkpoint_ignored"] = True
+                result["checkpoint_backend"] = checkpoint_backend
+            else:
+                # Fail to prevent accidental duplicate migrations
+                result["success"] = False
+                result["error"] = (
+                    f"Checkpoint exists for backend '{checkpoint_backend}' but targeting '{backend}'. "
+                    f"Either delete .migration_checkpoint.json or use force_new_migration=True to override."
+                )
+                return json.dumps(result, indent=2)
 
     # Collect entries to migrate
     would_migrate: List[Dict[str, Any]] = []
@@ -407,11 +419,20 @@ async def _migrate_to_memory_backend_impl(
                 if entry_id in migrated_entries:
                     continue
 
+                # Validate required fields before calling backend
+                body = entry.get("body", "").strip()
+                topic = entry.get("topic", "").strip()
+
+                if not body or not topic:
+                    logger.warning(f"Skipping entry {entry_id}: missing required fields (body or topic)")
+                    result["entries_skipped"] += 1
+                    continue
+
                 try:
                     # Call backend to add episode
                     await migration_backend.add_episode_direct(
-                        content=entry.get("body", ""),
-                        group_id=entry.get("topic", ""),
+                        content=body,
+                        group_id=topic,
                         source_id=entry_id,
                         timestamp=entry.get("timestamp"),
                     )
@@ -496,6 +517,7 @@ def register_migration_tools(mcp):
         topics: str = "",
         skip_closed: bool = False,
         resume: bool = True,
+        force_new_migration: bool = False,
     ) -> str:
         """Migrate thread entries to memory backend.
 
@@ -506,6 +528,7 @@ def register_migration_tools(mcp):
             topics: Comma-separated list of topics to migrate (empty = all)
             skip_closed: Skip closed threads
             resume: Resume from checkpoint if available
+            force_new_migration: If True, ignore checkpoint backend mismatch
 
         Returns:
             JSON with migration results
@@ -527,6 +550,7 @@ def register_migration_tools(mcp):
             topics=topics,
             skip_closed=skip_closed,
             resume=resume,
+            force_new_migration=force_new_migration,
         )
 
     # Register tools

@@ -951,8 +951,13 @@ def test_sync_to_memory_backend_disabled(threads_dir: Path, sample_thread: Path,
 
 
 def test_sync_to_memory_backend_graphiti(threads_dir: Path, sample_thread: Path, monkeypatch):
-    """Test sync_to_memory_backend calls graphiti backend."""
-    from watercooler.baseline_graph.sync import sync_to_memory_backend
+    """Test sync_to_memory_backend calls graphiti backend.
+
+    Uses ThreadPoolExecutor for fire-and-forget, so we need to wait for
+    the background worker to complete before checking assertions.
+    """
+    import time
+    from watercooler.baseline_graph.sync import sync_to_memory_backend, _get_sync_executor
 
     monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
 
@@ -980,13 +985,27 @@ def test_sync_to_memory_backend_graphiti(threads_dir: Path, sample_thread: Path,
     )
 
     assert result is True
+
+    # Wait for background worker to complete
+    executor = _get_sync_executor()
+    executor.shutdown(wait=True)
+
+    # Reset executor for other tests
+    import watercooler.baseline_graph.sync as sync_module
+    sync_module._sync_executor = None
+
     assert len(graphiti_calls) == 1
     assert graphiti_calls[0]["group_id"] == "test-topic"
     assert graphiti_calls[0]["entry_id"] == "01TEST001"
 
 
 def test_sync_to_memory_backend_non_blocking(threads_dir: Path, sample_thread: Path, monkeypatch):
-    """Test sync_to_memory_backend is non-blocking (errors logged, returns False)."""
+    """Test sync_to_memory_backend uses fire-and-forget pattern.
+
+    With ThreadPoolExecutor, sync_to_memory_backend returns True immediately
+    after submitting work to the executor. Errors are logged asynchronously
+    in the worker thread without affecting the caller.
+    """
     from watercooler.baseline_graph.sync import sync_to_memory_backend
 
     monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
@@ -1000,7 +1019,8 @@ def test_sync_to_memory_backend_non_blocking(threads_dir: Path, sample_thread: P
         mock_add_episode_error,
     )
 
-    # Should return False (error) but NOT raise
+    # Fire-and-forget: returns True after successful submission to executor
+    # Actual errors are logged asynchronously in worker thread
     result = sync_to_memory_backend(
         threads_dir=threads_dir,
         topic="test-topic",
@@ -1008,7 +1028,7 @@ def test_sync_to_memory_backend_non_blocking(threads_dir: Path, sample_thread: P
         entry_body="Test content",
     )
 
-    assert result is False  # Error occurred, but no exception raised
+    assert result is True  # Submitted successfully (fire-and-forget)
 
 
 def test_sync_entry_calls_memory_hook_when_enabled(threads_dir: Path, sample_thread: Path, monkeypatch):

@@ -1097,6 +1097,70 @@ async def _call_graphiti_add_episode(
         return {"success": False, "error": str(e)}
 
 
+def _sync_graphiti_blocking(
+    content: str,
+    group_id: str,
+    entry_id: str,
+    timestamp: Optional[str],
+    title: Optional[str],
+) -> None:
+    """Blocking wrapper to sync entry to Graphiti.
+
+    Runs in a thread pool worker. Errors are logged but not raised.
+
+    Args:
+        content: Entry body text
+        group_id: Thread topic identifier
+        entry_id: Entry ID for provenance tracking
+        timestamp: Entry timestamp (ISO 8601)
+        title: Entry title
+    """
+    import asyncio
+
+    try:
+        result = asyncio.run(_call_graphiti_add_episode(
+            content=content,
+            group_id=group_id,
+            entry_id=entry_id,
+            timestamp=timestamp,
+            title=title,
+        ))
+        if not result.get("success", False):
+            logger.warning(
+                f"MEMORY: Graphiti sync failed for {group_id}/{entry_id}: "
+                f"{result.get('error', 'unknown')}"
+            )
+        else:
+            logger.debug(f"MEMORY: Synced {group_id}/{entry_id} to Graphiti")
+    except Exception as e:
+        logger.exception(f"MEMORY: Graphiti sync error for {group_id}/{entry_id}")
+
+
+# Module-level thread pool for fire-and-forget memory sync
+# Lazy initialization to avoid creating threads if memory backend is never used
+_sync_executor = None
+_sync_executor_lock = None
+
+
+def _get_sync_executor():
+    """Get or create the sync executor (lazy initialization)."""
+    global _sync_executor, _sync_executor_lock
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    if _sync_executor_lock is None:
+        _sync_executor_lock = threading.Lock()
+
+    if _sync_executor is None:
+        with _sync_executor_lock:
+            if _sync_executor is None:
+                _sync_executor = ThreadPoolExecutor(
+                    max_workers=2,
+                    thread_name_prefix="memory_sync"
+                )
+    return _sync_executor
+
+
 def sync_to_memory_backend(
     threads_dir: Path,
     topic: str,
@@ -1107,8 +1171,9 @@ def sync_to_memory_backend(
 ) -> bool:
     """Sync an entry to the configured memory backend.
 
-    This function is non-blocking - errors are logged but never raise.
-    The baseline graph sync always succeeds regardless of memory backend status.
+    This function is non-blocking - work is submitted to a thread pool
+    and errors are logged but never raise. The baseline graph sync
+    always succeeds regardless of memory backend status.
 
     Args:
         threads_dir: Threads directory
@@ -1119,7 +1184,7 @@ def sync_to_memory_backend(
         timestamp: Optional entry timestamp
 
     Returns:
-        True if sync succeeded, False if disabled or failed
+        True if sync was submitted, False if disabled or failed to submit
     """
     config = get_memory_backend_config()
     if config is None:
@@ -1128,52 +1193,20 @@ def sync_to_memory_backend(
     backend = config["backend"]
 
     try:
-        import asyncio
-
         if backend == "graphiti":
-            # Determine async context and schedule appropriately
-            try:
-                loop = asyncio.get_running_loop()
-                # Already in async context - schedule as fire-and-forget task
-                task = loop.create_task(_call_graphiti_add_episode(
-                    content=entry_body,
-                    group_id=topic,
-                    entry_id=entry_id,
-                    timestamp=timestamp,
-                    title=entry_title,
-                ))
-                # Add error callback to log failures (non-blocking)
-                def _on_task_done(t: asyncio.Task) -> None:
-                    try:
-                        exc = t.exception()
-                        if exc is not None:
-                            logger.warning(f"MEMORY: Background Graphiti sync failed for {topic}/{entry_id}: {exc}")
-                    except asyncio.CancelledError:
-                        logger.debug(f"MEMORY: Graphiti sync cancelled for {topic}/{entry_id}")
-                task.add_done_callback(_on_task_done)
-                logger.debug(f"MEMORY: Scheduled Graphiti sync for {topic}/{entry_id}")
-                return True
-            except RuntimeError:
-                # No running loop - safe to use asyncio.run() which creates a new loop
-                # This handles the normal sync context case
-                try:
-                    result = asyncio.run(_call_graphiti_add_episode(
-                        content=entry_body,
-                        group_id=topic,
-                        entry_id=entry_id,
-                        timestamp=timestamp,
-                        title=entry_title,
-                    ))
-                    return result.get("success", False)
-                except RuntimeError as loop_error:
-                    # Edge case: thread has an event loop but it's not running
-                    # This can happen in certain embedding contexts (e.g., Jupyter, some frameworks)
-                    # Log and return False rather than crashing
-                    logger.warning(
-                        f"MEMORY: Cannot run Graphiti sync for {topic}/{entry_id} - "
-                        f"event loop conflict: {loop_error}"
-                    )
-                    return False
+            # Submit to thread pool for fire-and-forget execution
+            # This avoids event loop complexity and works in any context
+            executor = _get_sync_executor()
+            executor.submit(
+                _sync_graphiti_blocking,
+                content=entry_body,
+                group_id=topic,
+                entry_id=entry_id,
+                timestamp=timestamp,
+                title=entry_title,
+            )
+            logger.debug(f"MEMORY: Submitted Graphiti sync for {topic}/{entry_id}")
+            return True
 
         elif backend == "leanrag":
             # LeanRAG is a pipeline trigger - it processes batches, not individual entries
