@@ -251,3 +251,6 @@ tests/test_artifacts/
 
 # Pipeline work artifacts (development/testing)
 pipeline_work/
+
+# Migration checkpoint files (runtime state, not version controlled)
+.migration_checkpoint.json

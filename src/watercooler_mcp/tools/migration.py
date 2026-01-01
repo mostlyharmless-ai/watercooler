@@ -183,6 +183,8 @@ def _save_checkpoint(
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
     checkpoint_file.write_text(json.dumps(checkpoint, indent=2))
+    # Set restrictive permissions (owner read/write only)
+    checkpoint_file.chmod(0o600)
 
 
 async def _migration_preflight_impl(

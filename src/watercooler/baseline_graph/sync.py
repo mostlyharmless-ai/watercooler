@@ -1135,14 +1135,19 @@ def sync_to_memory_backend(
             try:
                 loop = asyncio.get_running_loop()
                 # Already in async context - can't use asyncio.run()
-                # Schedule as task and return optimistically
-                loop.create_task(_call_graphiti_add_episode(
+                # Schedule as task and return optimistically (fire-and-forget)
+                task = loop.create_task(_call_graphiti_add_episode(
                     content=entry_body,
                     group_id=topic,
                     entry_id=entry_id,
                     timestamp=timestamp,
                     title=entry_title,
                 ))
+                # Add error callback to log failures (non-blocking)
+                def _on_task_done(t: asyncio.Task) -> None:
+                    if t.exception() is not None:
+                        logger.warning(f"MEMORY: Background Graphiti sync failed for {topic}/{entry_id}: {t.exception()}")
+                task.add_done_callback(_on_task_done)
                 logger.debug(f"MEMORY: Scheduled Graphiti sync for {topic}/{entry_id}")
                 return True
             except RuntimeError:
