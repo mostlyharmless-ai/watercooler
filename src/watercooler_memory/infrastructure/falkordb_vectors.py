@@ -12,6 +12,7 @@ with dimension enforcement to ensure all vectors are 1024-d (BGE-M3).
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -29,6 +30,38 @@ try:
 except ImportError:
     FalkorDB = None  # type: ignore
     FALKORDB_AVAILABLE = False
+
+
+# Cypher identifier validation pattern
+# Valid identifiers: start with letter or underscore, followed by alphanumeric/underscore
+_CYPHER_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_identifier(value: str, name: str) -> str:
+    """Validate that a value is a safe Cypher identifier.
+
+    Prevents Cypher injection by ensuring identifiers match a strict pattern.
+    Valid identifiers start with a letter or underscore and contain only
+    alphanumeric characters and underscores.
+
+    Args:
+        value: The identifier value to validate.
+        name: Human-readable name for error messages (e.g., "node_label").
+
+    Returns:
+        The validated value (unchanged if valid).
+
+    Raises:
+        ValueError: If the value is not a valid Cypher identifier.
+    """
+    if not value:
+        raise ValueError(f"Invalid {name}: empty value. Must be a non-empty identifier.")
+    if not _CYPHER_IDENTIFIER_PATTERN.match(value):
+        raise ValueError(
+            f"Invalid {name}: {value!r}. Must start with letter/underscore "
+            "and contain only alphanumeric characters and underscores."
+        )
+    return value
 
 
 @dataclass
@@ -106,10 +139,20 @@ def build_storage_query(
 
     Returns:
         Cypher query string with $node_id, $embedding, and property parameters.
+
+    Raises:
+        ValueError: If any identifier contains invalid characters (Cypher injection protection).
     """
+    # Validate all identifiers to prevent Cypher injection
+    node_label = _validate_identifier(node_label, "node_label")
+    id_field = _validate_identifier(id_field, "id_field")
+    embedding_field = _validate_identifier(embedding_field, "embedding_field")
+
     props_set = ""
     if additional_props:
-        props_lines = [f"n.{prop} = ${prop}" for prop in additional_props]
+        # Validate each property name
+        validated_props = [_validate_identifier(prop, "property") for prop in additional_props]
+        props_lines = [f"n.{prop} = ${prop}" for prop in validated_props]
         props_set = ", " + ", ".join(props_lines)
 
     return f"""
@@ -134,24 +177,36 @@ def build_search_query(
         embedding_field: Name of the embedding field.
         return_fields: Fields to return (default: node_id, score).
         where_clause: Optional WHERE clause for filtering.
+            WARNING: This is trusted input only - not validated. Callers must
+            ensure it does not contain untrusted user input to prevent Cypher injection.
 
     Returns:
         Cypher query string with $query_vector and $limit parameters.
+
+    Raises:
+        ValueError: If any identifier contains invalid characters (Cypher injection protection).
     """
+    # Validate all identifiers to prevent Cypher injection
+    node_label = _validate_identifier(node_label, "node_label")
+    embedding_field = _validate_identifier(embedding_field, "embedding_field")
+
     if return_fields is None:
         return_fields = ["node_id", "score"]
 
+    # Note: where_clause is trusted input - not validated (see docstring warning)
     where_str = f"WHERE {where_clause}" if where_clause else ""
 
-    # Build return clause
+    # Build return clause with validated field names
     return_parts = []
-    for field in return_fields:
-        if field == "score":
+    for field_name in return_fields:
+        if field_name == "score":
             return_parts.append("score")
-        elif field == "node_id":
+        elif field_name == "node_id":
             return_parts.append("n.uuid AS node_id")
         else:
-            return_parts.append(f"n.{field} AS {field}")
+            # Validate each field name
+            validated = _validate_identifier(field_name, "return_field")
+            return_parts.append(f"n.{validated} AS {validated}")
 
     return_clause = ", ".join(return_parts)
 
@@ -394,7 +449,14 @@ class FalkorDBVectorAdapter:
 
         Returns:
             True if node was deleted, False if not found.
+
+        Raises:
+            ValueError: If node_label or id_field contains invalid characters.
         """
+        # Validate identifiers to prevent Cypher injection
+        node_label = _validate_identifier(node_label, "node_label")
+        id_field = _validate_identifier(id_field, "id_field")
+
         query = f"""
             MATCH (n:{node_label} {{{id_field}: $node_id}})
             DELETE n

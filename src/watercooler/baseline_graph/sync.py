@@ -37,10 +37,13 @@ Feature Configuration:
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1138,18 +1141,30 @@ def _sync_graphiti_blocking(
 
 # Module-level thread pool for fire-and-forget memory sync
 # Lazy initialization to avoid creating threads if memory backend is never used
-_sync_executor = None
-_sync_executor_lock = None
+_sync_executor: Optional[ThreadPoolExecutor] = None
+_sync_executor_lock = threading.Lock()  # Static lock - avoids race condition
+_sync_executor_shutdown_registered = False
 
 
-def _get_sync_executor():
-    """Get or create the sync executor (lazy initialization)."""
-    global _sync_executor, _sync_executor_lock
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
+def _shutdown_sync_executor() -> None:
+    """Gracefully shutdown the sync executor on process exit."""
+    global _sync_executor
+    if _sync_executor is not None:
+        try:
+            _sync_executor.shutdown(wait=True)
+        except Exception:
+            # Ignore errors during shutdown (process is exiting anyway)
+            pass
+        _sync_executor = None
 
-    if _sync_executor_lock is None:
-        _sync_executor_lock = threading.Lock()
+
+def _get_sync_executor() -> ThreadPoolExecutor:
+    """Get or create the sync executor (lazy initialization).
+
+    Uses double-checked locking pattern with a static module-level lock.
+    Registers an atexit handler on first executor creation for graceful shutdown.
+    """
+    global _sync_executor, _sync_executor_shutdown_registered
 
     if _sync_executor is None:
         with _sync_executor_lock:
@@ -1158,6 +1173,10 @@ def _get_sync_executor():
                     max_workers=2,
                     thread_name_prefix="memory_sync"
                 )
+                # Register shutdown handler only once
+                if not _sync_executor_shutdown_registered:
+                    atexit.register(_shutdown_sync_executor)
+                    _sync_executor_shutdown_registered = True
     return _sync_executor
 
 
