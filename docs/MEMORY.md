@@ -39,6 +39,101 @@ manifest = export_to_leanrag(graph, "/path/to/output")
 graph.save("/path/to/graph.json")
 ```
 
+## Required Infrastructure
+
+The memory system uses standardized infrastructure across all tiers (MemoryGraph, Graphiti, LeanRAG). This ensures embedding compatibility and enables cross-tier retrieval.
+
+### Component Matrix
+
+| Component | Standard | Port/Path | Purpose |
+|-----------|----------|-----------|---------|
+| **Embedding Server** | BGE-M3 (1024-d) | `localhost:8080/v1` | OpenAI-compatible embeddings |
+| **Graph Database** | FalkorDB | `localhost:6379` | Graph storage + native vectors |
+| **Summarization** | DeepSeek/Local | `localhost:8000/v1` | Optional LLM summaries |
+
+### Environment Variables
+
+All tiers share these standardized environment variables:
+
+```bash
+# Embedding configuration (required for semantic search)
+EMBEDDING_API_BASE=http://localhost:8080/v1
+EMBEDDING_MODEL=bge-m3
+EMBEDDING_DIM=1024
+
+# Graph database
+FALKORDB_HOST=localhost
+FALKORDB_PORT=6379
+
+# LLM for summaries (optional)
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_API_BASE=https://api.deepseek.com/v1
+```
+
+### Dimension Enforcement
+
+All embedding vectors are validated to be exactly 1024 dimensions:
+
+```python
+from watercooler_memory.infrastructure import (
+    validate_embedding_dimension,
+    enforce_dimension,
+    DimensionMismatchError,
+)
+
+# Validate single embedding
+validate_embedding_dimension(embedding)  # Raises if not 1024-d
+
+# Decorator for embedder functions
+@enforce_dimension
+def my_embedder(text: str) -> list[float]:
+    return model.encode(text)  # Validated on return
+```
+
+This prevents dimension mismatches that would corrupt vector similarity searches.
+
+### Quick Infrastructure Setup
+
+**1. Start FalkorDB (graph + vectors):**
+```bash
+docker run -d -p 6379:6379 falkordb/falkordb:latest
+```
+
+**2. Start embedding server (choose one):**
+```bash
+# Option A: Local server (offline, ~2GB model download)
+python -m watercooler_memory.embedding_server
+
+# Option B: External API (requires internet + API key)
+export EMBEDDING_API_BASE=https://your-embedding-api.com/v1
+export EMBEDDING_API_KEY=sk-...
+```
+
+**3. Verify infrastructure:**
+```bash
+# Check FalkorDB
+redis-cli -p 6379 PING  # Should return PONG
+
+# Check embedding server
+curl http://localhost:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"input": "test", "model": "bge-m3"}'
+```
+
+### Three-Tier Architecture
+
+```
+Tier 1: MemoryGraph (raw chunks with provenance)
+    ↓ feeds into
+Tier 2: Graphiti (entity extraction + temporal tracking)
+    ↓ feeds into
+Tier 3: LeanRAG (hierarchical clustering + semantic aggregation)
+```
+
+All tiers share the same embedding space (BGE-M3, 1024-d) for cross-tier retrieval.
+
+---
+
 ## Backend Adapters
 
 The memory module supports multiple backend implementations through a pluggable adapter architecture. Each backend provides different memory and retrieval capabilities.
