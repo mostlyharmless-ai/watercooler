@@ -433,10 +433,11 @@ class TestBranchParityManagerValidate:
         self, mock_threads_repo, mock_code_repo, mock_is_dirty,
         mock_is_rebase, mock_has_conflicts, mock_get_branch, manager_with_mocks
     ):
-        """Test validate returns BRANCH_MISMATCH for mismatched branches."""
+        """Test validate returns BRANCH_MISMATCH for mismatched feature branches."""
         mock_code_repo.return_value = MagicMock()
         mock_threads_repo.return_value = MagicMock()
-        mock_get_branch.side_effect = ["feature-auth", "main"]
+        # Use two different feature branches (neither is main) for generic mismatch
+        mock_get_branch.side_effect = ["feature-auth", "feature-other"]
         mock_has_conflicts.return_value = False
         mock_is_rebase.return_value = False
         mock_is_dirty.return_value = False
@@ -445,6 +446,33 @@ class TestBranchParityManagerValidate:
         assert result.valid is False
         assert result.state_class == StateClass.BRANCH_MISMATCH
         assert "Branch mismatch" in result.mismatches[0]
+
+    @patch('watercooler_mcp.sync.branch_parity.get_branch_name')
+    @patch('watercooler_mcp.sync.branch_parity.has_conflicts')
+    @patch('watercooler_mcp.sync.branch_parity.is_rebase_in_progress')
+    @patch('watercooler_mcp.sync.branch_parity.is_dirty')
+    @patch('watercooler_mcp.sync.branch_parity._find_main_branch')
+    @patch.object(BranchParityManager, 'code_repo', new_callable=PropertyMock)
+    @patch.object(BranchParityManager, 'threads_repo', new_callable=PropertyMock)
+    def test_validate_main_protection(
+        self, mock_threads_repo, mock_code_repo, mock_find_main,
+        mock_is_dirty, mock_is_rebase, mock_has_conflicts, mock_get_branch,
+        manager_with_mocks
+    ):
+        """Test validate returns MAIN_PROTECTION when threads on main but code on feature."""
+        mock_code_repo.return_value = MagicMock()
+        mock_threads_repo.return_value = MagicMock()
+        # Threads on main, code on feature branch - this is MAIN_PROTECTION case
+        mock_get_branch.side_effect = ["feature-auth", "main"]
+        mock_has_conflicts.return_value = False
+        mock_is_rebase.return_value = False
+        mock_is_dirty.return_value = False
+        mock_find_main.return_value = "main"
+
+        result = manager_with_mocks.validate()
+        assert result.valid is False
+        assert result.state_class == StateClass.MAIN_PROTECTION
+        assert "Threads on 'main' but code on 'feature-auth'" in result.mismatches[0]
 
     @patch('watercooler_mcp.sync.branch_parity.get_branch_name')
     @patch('watercooler_mcp.sync.branch_parity.has_conflicts')

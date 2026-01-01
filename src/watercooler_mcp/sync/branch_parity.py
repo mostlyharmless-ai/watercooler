@@ -421,15 +421,31 @@ class BranchParityManager:
             # Check branch name parity
             if code_branch != threads_branch:
                 threads_is_dirty = is_dirty(self.threads_repo)
-                state_class = (
-                    StateClass.BRANCH_MISMATCH_DIRTY
-                    if threads_is_dirty
-                    else StateClass.BRANCH_MISMATCH
+
+                # Detect MAIN_PROTECTION case: threads on main, code on feature branch
+                main_branch = _find_main_branch(self.threads_repo)
+                is_main_protection = (
+                    main_branch is not None
+                    and threads_branch == main_branch
+                    and code_branch != main_branch
                 )
-                mismatches.append(
-                    f"Branch mismatch: code is on '{code_branch}', "
-                    f"threads is on '{threads_branch}'"
-                )
+
+                if is_main_protection:
+                    state_class = StateClass.MAIN_PROTECTION
+                    mismatches.append(
+                        f"Threads on '{main_branch}' but code on '{code_branch}'. "
+                        f"Threads branch needs to be switched to match code."
+                    )
+                else:
+                    state_class = (
+                        StateClass.BRANCH_MISMATCH_DIRTY
+                        if threads_is_dirty
+                        else StateClass.BRANCH_MISMATCH
+                    )
+                    mismatches.append(
+                        f"Branch mismatch: code is on '{code_branch}', "
+                        f"threads is on '{threads_branch}'"
+                    )
                 return BranchPairingResult(
                     valid=False,
                     code_branch=code_branch,
@@ -735,6 +751,15 @@ class BranchParityManager:
                     blocking_reason=state.last_error,
                 )
 
+            # Detect MAIN_PROTECTION case: threads on main, code on feature branch
+            # This is a special case that needs specific handling
+            main_branch = _find_main_branch(self.threads_repo)
+            is_main_protection = (
+                main_branch is not None
+                and threads_branch == main_branch
+                and code_branch != main_branch
+            )
+
             # Handle branch mismatch
             if code_branch != threads_branch:
                 if auto_fix:
@@ -745,19 +770,81 @@ class BranchParityManager:
                         if stash_ref:
                             actions_taken.append(f"Stashed changes: {stash_ref}")
 
-                    # Checkout to match code branch
-                    # First try without create (if branch exists), then with create
-                    checkout_success = checkout_branch(self.threads_repo, code_branch, create=False)
-                    if not checkout_success:
-                        checkout_success = checkout_branch(self.threads_repo, code_branch, create=True)
+                    checkout_success = False
+
+                    if is_main_protection:
+                        # MAIN_PROTECTION: threads on main, code on feature branch
+                        # Try in order: local branch exists, origin has branch, create new
+                        log_debug(
+                            f"[PARITY] MAIN_PROTECTION: threads on '{main_branch}', "
+                            f"code on '{code_branch}'"
+                        )
+
+                        # 1. Check if branch exists locally
+                        local_branches = [h.name for h in self.threads_repo.heads]
+                        if code_branch in local_branches:
+                            checkout_success = checkout_branch(
+                                self.threads_repo, code_branch, create=False
+                            )
+                            if checkout_success:
+                                actions_taken.append(
+                                    f"MAIN_PROTECTION: Switched to existing local branch {code_branch}"
+                                )
+
+                        # 2. Check if origin has the branch
+                        if not checkout_success:
+                            if branch_exists_on_origin(self.threads_repo, code_branch):
+                                # Fetch and checkout
+                                try:
+                                    fetch_with_timeout(self.threads_repo)
+                                    checkout_success = checkout_branch(
+                                        self.threads_repo, code_branch, create=False
+                                    )
+                                    if checkout_success:
+                                        actions_taken.append(
+                                            f"MAIN_PROTECTION: Fetched and switched to origin/{code_branch}"
+                                        )
+                                except Exception as e:
+                                    log_debug(f"[PARITY] Fetch for MAIN_PROTECTION failed: {e}")
+
+                        # 3. Create new branch from main
+                        if not checkout_success:
+                            checkout_success = checkout_branch(
+                                self.threads_repo, code_branch, create=True
+                            )
+                            if checkout_success:
+                                actions_taken.append(
+                                    f"MAIN_PROTECTION: Created new branch {code_branch} from {main_branch}"
+                                )
+                    else:
+                        # Generic branch mismatch: checkout to match code branch
+                        # First try without create (if branch exists), then with create
+                        checkout_success = checkout_branch(
+                            self.threads_repo, code_branch, create=False
+                        )
+                        if not checkout_success:
+                            checkout_success = checkout_branch(
+                                self.threads_repo, code_branch, create=True
+                            )
+
+                        if checkout_success:
+                            actions_taken.append(f"Checked out threads to {code_branch}")
 
                     if checkout_success:
-                        actions_taken.append(f"Checked out threads to {code_branch}")
                         threads_branch = code_branch
                         state.threads_branch = threads_branch
                     else:
-                        state.status = ParityStatus.BRANCH_MISMATCH.value
-                        state.last_error = f"Failed to checkout threads to {code_branch}"
+                        # Checkout failed - use appropriate status
+                        if is_main_protection:
+                            state.status = ParityStatus.MAIN_PROTECTION.value
+                            state.last_error = (
+                                f"Threads on '{main_branch}' but code on '{code_branch}'. "
+                                f"Failed to switch threads branch. "
+                                f"Use watercooler_sync_branch_state to manually fix."
+                            )
+                        else:
+                            state.status = ParityStatus.BRANCH_MISMATCH.value
+                            state.last_error = f"Failed to checkout threads to {code_branch}"
                         write_parity_state(self.threads_repo_path, state)
                         return PreflightResult(
                             success=False,
@@ -773,10 +860,18 @@ class BranchParityManager:
                         else:
                             actions_taken.append(f"Warning: stash {stash_ref} not restored")
                 else:
-                    state.status = ParityStatus.BRANCH_MISMATCH.value
-                    state.last_error = (
-                        f"Branch mismatch: code={code_branch}, threads={threads_branch}"
-                    )
+                    # Not auto-fix: report appropriate status
+                    if is_main_protection:
+                        state.status = ParityStatus.MAIN_PROTECTION.value
+                        state.last_error = (
+                            f"Threads on '{main_branch}' but code on '{code_branch}'. "
+                            f"Use watercooler_sync_branch_state to fix."
+                        )
+                    else:
+                        state.status = ParityStatus.BRANCH_MISMATCH.value
+                        state.last_error = (
+                            f"Branch mismatch: code={code_branch}, threads={threads_branch}"
+                        )
                     write_parity_state(self.threads_repo_path, state)
                     return PreflightResult(
                         success=False,
@@ -874,6 +969,85 @@ class BranchParityManager:
                         can_proceed=False,
                         blocking_reason=state.last_error,
                     )
+
+                # Check for conflicts after pull (rebase may leave conflicts)
+                # Auto-resolve if only graph files or only thread files are in conflict
+                if has_conflicts(self.threads_repo):
+                    log_debug("[PARITY] Conflicts detected after pull, attempting auto-resolution")
+                    resolver = ConflictResolver(self.threads_repo)
+
+                    if has_graph_conflicts_only(self.threads_repo):
+                        if resolver.resolve_graph_conflicts():
+                            try:
+                                self.threads_repo.git.rebase("--continue")
+                                actions_taken.append("Auto-resolved graph conflicts after pull")
+                            except GitCommandError as e:
+                                log_debug(f"[PARITY] Rebase continue failed: {e}")
+                                state.status = ParityStatus.DIVERGED.value
+                                state.last_error = (
+                                    "Graph conflicts resolved but rebase continue failed. "
+                                    "Manual intervention required."
+                                )
+                                write_parity_state(self.threads_repo_path, state)
+                                return PreflightResult(
+                                    success=False,
+                                    state=state,
+                                    can_proceed=False,
+                                    blocking_reason=state.last_error,
+                                )
+                        else:
+                            state.status = ParityStatus.DIVERGED.value
+                            state.last_error = "Graph conflicts after pull could not be auto-resolved"
+                            write_parity_state(self.threads_repo_path, state)
+                            return PreflightResult(
+                                success=False,
+                                state=state,
+                                can_proceed=False,
+                                blocking_reason=state.last_error,
+                            )
+                    elif has_thread_conflicts_only(self.threads_repo):
+                        if resolver.resolve_thread_conflicts():
+                            try:
+                                self.threads_repo.git.rebase("--continue")
+                                actions_taken.append("Auto-resolved thread conflicts after pull")
+                            except GitCommandError as e:
+                                log_debug(f"[PARITY] Rebase continue failed: {e}")
+                                state.status = ParityStatus.DIVERGED.value
+                                state.last_error = (
+                                    "Thread conflicts resolved but rebase continue failed. "
+                                    "Manual intervention required."
+                                )
+                                write_parity_state(self.threads_repo_path, state)
+                                return PreflightResult(
+                                    success=False,
+                                    state=state,
+                                    can_proceed=False,
+                                    blocking_reason=state.last_error,
+                                )
+                        else:
+                            state.status = ParityStatus.DIVERGED.value
+                            state.last_error = "Thread conflicts after pull could not be auto-resolved"
+                            write_parity_state(self.threads_repo_path, state)
+                            return PreflightResult(
+                                success=False,
+                                state=state,
+                                can_proceed=False,
+                                blocking_reason=state.last_error,
+                            )
+                    else:
+                        # Mixed conflicts (both graph and thread files) - require manual resolution
+                        state.status = ParityStatus.DIVERGED.value
+                        state.last_error = (
+                            "Mixed conflicts after pull (both graph and thread files). "
+                            "Manual resolution required."
+                        )
+                        write_parity_state(self.threads_repo_path, state)
+                        return PreflightResult(
+                            success=False,
+                            state=state,
+                            can_proceed=False,
+                            blocking_reason=state.last_error,
+                        )
 
                 # Restore stash
                 if stash_ref:
