@@ -25,6 +25,7 @@ from . import (
     QueryResult,
     TransientError,
 )
+from ..entry_episode_index import EntryEpisodeIndex, IndexConfig
 
 
 @dataclass
@@ -57,6 +58,24 @@ class GraphitiConfig:
 
     # Test mode: Add pytest__ prefix to database names for isolation
     test_mode: bool = False
+
+    # Entry-Episode Index configuration
+    # Enables bidirectional mapping between watercooler entry IDs and Graphiti episode UUIDs
+    track_entry_episodes: bool = True
+
+    # Path to entry-episode index file
+    # Default: ~/.watercooler/graphiti/entry_episode_index.json
+    entry_episode_index_path: Path | None = None
+
+    # Auto-save index after each mapping update
+    auto_save_index: bool = True
+
+    def __post_init__(self):
+        """Set default index path if not provided."""
+        if self.entry_episode_index_path is None and self.track_entry_episodes:
+            self.entry_episode_index_path = (
+                Path.home() / ".watercooler" / "graphiti" / "entry_episode_index.json"
+            )
 
 
 class GraphitiBackend(MemoryBackend):
@@ -108,6 +127,7 @@ class GraphitiBackend(MemoryBackend):
     def __init__(self, config: GraphitiConfig | None = None) -> None:
         self.config = config or GraphitiConfig()
         self._validate_config()
+        self._init_entry_episode_index()
 
     def _validate_config(self) -> None:
         """Validate configuration and Graphiti availability."""
@@ -135,6 +155,65 @@ class GraphitiBackend(MemoryBackend):
                     "OPENAI_API_KEY is required for Graphiti. "
                     "Set via config or environment variable."
                 )
+
+    def _init_entry_episode_index(self) -> None:
+        """Initialize the entry-episode index if enabled."""
+        if not self.config.track_entry_episodes:
+            self.entry_episode_index = None
+            return
+
+        index_config = IndexConfig(
+            backend="graphiti",
+            index_path=self.config.entry_episode_index_path,
+        )
+        self.entry_episode_index = EntryEpisodeIndex(index_config, auto_load=True)
+
+    def index_entry_as_episode(
+        self,
+        entry_id: str,
+        episode_uuid: str,
+        thread_id: str,
+    ) -> None:
+        """Add an entry-episode mapping to the index.
+
+        Args:
+            entry_id: The watercooler entry ID (ULID format)
+            episode_uuid: The Graphiti episode UUID
+            thread_id: The thread this entry belongs to
+        """
+        if self.entry_episode_index is None:
+            return
+
+        self.entry_episode_index.add(entry_id, episode_uuid, thread_id)
+
+        if self.config.auto_save_index:
+            self.entry_episode_index.save()
+
+    def get_episode_for_entry(self, entry_id: str) -> str | None:
+        """Get the Graphiti episode UUID for a watercooler entry ID.
+
+        Args:
+            entry_id: The watercooler entry ID
+
+        Returns:
+            The episode UUID, or None if not found or index disabled
+        """
+        if self.entry_episode_index is None:
+            return None
+        return self.entry_episode_index.get_episode(entry_id)
+
+    def get_entry_for_episode(self, episode_uuid: str) -> str | None:
+        """Get the watercooler entry ID for a Graphiti episode UUID.
+
+        Args:
+            episode_uuid: The Graphiti episode UUID
+
+        Returns:
+            The entry ID, or None if not found or index disabled
+        """
+        if self.entry_episode_index is None:
+            return None
+        return self.entry_episode_index.get_entry(episode_uuid)
 
     def prepare(self, corpus: CorpusPayload) -> PrepareResult:
         """
@@ -635,6 +714,9 @@ class GraphitiBackend(MemoryBackend):
                 raise TransientError(f"Database connection failed: {e}") from e
 
             # Ingest episodes sequentially (async operation wrapped in sync)
+            # Track entry-episode mappings for cross-tier retrieval
+            indexed_mappings: list[tuple[str, str, str]] = []  # (entry_id, episode_uuid, thread_id)
+
             async def ingest_episodes():
                 from datetime import datetime, timezone
 
@@ -648,13 +730,21 @@ class GraphitiBackend(MemoryBackend):
                         else:
                             ref_time = ref_time_str  # Already a datetime
 
-                        await graphiti.add_episode(
+                        result = await graphiti.add_episode(
                             name=episode["name"],
                             episode_body=episode["episode_body"],
                             source_description=episode["source_description"],
                             reference_time=ref_time,
                             group_id=episode.get("group_id"),  # Per-thread partitioning
                         )
+
+                        # Track entry-episode mapping for cross-tier retrieval
+                        metadata = episode.get("metadata", {})
+                        entry_id = metadata.get("entry_id")
+                        thread_id = metadata.get("thread_id", episode.get("group_id", "unknown"))
+                        if entry_id and result and hasattr(result, "uuid"):
+                            indexed_mappings.append((entry_id, result.uuid, thread_id))
+
                         count += 1
                     except Exception as e:
                         raise BackendError(
@@ -663,6 +753,10 @@ class GraphitiBackend(MemoryBackend):
                 return count
 
             indexed_count = asyncio.run(ingest_episodes())
+
+            # Persist entry-episode mappings to index
+            for entry_id, episode_uuid, thread_id in indexed_mappings:
+                self.index_entry_as_episode(entry_id, episode_uuid, thread_id)
 
             return IndexResult(
                 manifest_version=chunks.manifest_version,
