@@ -87,6 +87,34 @@ from .conflict import (
     has_thread_conflicts_only,
 )
 
+from .local_remote import (
+    # Data classes
+    PullResult,
+    CommitResult,
+    PushResult,
+    SyncResult,
+    SyncStatus,
+    # Classes
+    LocalRemoteSyncManager,
+)
+
+from .async_coordinator import (
+    # Constants
+    QUEUE_FILE_NAME,
+    DEFAULT_BATCH_WINDOW,
+    DEFAULT_MAX_DELAY,
+    DEFAULT_MAX_BATCH_SIZE,
+    DEFAULT_SYNC_INTERVAL,
+    # Data classes
+    PendingCommit,
+    AsyncConfig,
+    AsyncStatus,
+    # Classes
+    AsyncSyncCoordinator,
+    # Convenience functions
+    get_queue_file_path,
+)
+
 __all__ = [
     # Errors
     "SyncError",
@@ -149,4 +177,26 @@ __all__ = [
     # Conflict - Convenience functions
     "has_graph_conflicts_only",
     "has_thread_conflicts_only",
+    # Local-Remote - Data classes
+    "PullResult",
+    "CommitResult",
+    "PushResult",
+    "SyncResult",
+    "SyncStatus",
+    # Local-Remote - Classes
+    "LocalRemoteSyncManager",
+    # Async Coordinator - Constants
+    "QUEUE_FILE_NAME",
+    "DEFAULT_BATCH_WINDOW",
+    "DEFAULT_MAX_DELAY",
+    "DEFAULT_MAX_BATCH_SIZE",
+    "DEFAULT_SYNC_INTERVAL",
+    # Async Coordinator - Data classes
+    "PendingCommit",
+    "AsyncConfig",
+    "AsyncStatus",
+    # Async Coordinator - Classes
+    "AsyncSyncCoordinator",
+    # Async Coordinator - Convenience functions
+    "get_queue_file_path",
 ]
