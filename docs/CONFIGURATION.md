@@ -237,6 +237,62 @@ max_headers = 3              # Max headers to include
 
 See [Baseline Graph Documentation](baseline-graph.md) for full usage guide.
 
+### `[memory]` Section
+
+Settings for memory backend integration (Graphiti and LeanRAG):
+
+```toml
+[memory]
+# Backend selection: "graphiti", "leanrag", or "" (disabled)
+# Can also be set via WATERCOOLER_MEMORY_BACKEND env var
+backend = ""
+
+[memory.graphiti]
+# Enable Graphiti integration
+enabled = false                          # or set WATERCOOLER_GRAPHITI_ENABLED=1
+
+# OpenAI API for entity extraction
+openai_api_key = ""                      # or set OPENAI_API_KEY
+
+# FalkorDB connection
+falkordb_host = "localhost"              # or set FALKORDB_HOST
+falkordb_port = 6379                     # or set FALKORDB_PORT
+
+[memory.embedding]
+# Embedding server configuration (shared by all tiers)
+api_base = "http://localhost:8080/v1"    # or set EMBEDDING_API_BASE
+model = "bge-m3"                         # or set EMBEDDING_MODEL
+dimension = 1024                         # or set EMBEDDING_DIM
+timeout = 30.0                           # or set EMBEDDING_TIMEOUT
+```
+
+#### Memory Backend Environment Variables
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `WATERCOOLER_MEMORY_BACKEND` | Backend: `graphiti`, `leanrag`, or empty | `` (disabled) |
+| `WATERCOOLER_GRAPHITI_ENABLED` | Enable Graphiti: `1` or `true` | `` (disabled) |
+| `OPENAI_API_KEY` | OpenAI API key for entity extraction | `` |
+| `FALKORDB_HOST` | FalkorDB host | `localhost` |
+| `FALKORDB_PORT` | FalkorDB port | `6379` |
+| `EMBEDDING_API_BASE` | Embedding server URL | `http://localhost:8080/v1` |
+| `EMBEDDING_MODEL` | Embedding model name | `bge-m3` |
+| `EMBEDDING_DIM` | Embedding dimension | `1024` |
+
+#### MCP Memory Tools
+
+When memory backend is enabled, the following MCP tools become available:
+
+| Tool | Description |
+|------|-------------|
+| `watercooler_graphiti_add_episode` | Add content directly to Graphiti temporal graph |
+| `watercooler_leanrag_run_pipeline` | Trigger LeanRAG clustering pipeline |
+| `watercooler_query_memory` | Query memory backend for facts/entities |
+| `watercooler_search_nodes` | Search for entity nodes |
+| `watercooler_search_memory_facts` | Search for facts/relationships |
+
+See [Memory Documentation](MEMORY.md) for full usage guide.
+
 ## Migrating from Environment Variables
 
 If you're currently using environment variables, you can migrate to config files:
