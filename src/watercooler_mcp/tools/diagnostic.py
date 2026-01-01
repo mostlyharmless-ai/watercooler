@@ -191,15 +191,19 @@ def _reconcile_parity_impl(
                 text="Error: Unable to resolve code and threads repo paths."
             )])
 
+        # Use new sync package for state management
+        from watercooler_mcp.sync import (
+            read_parity_state,
+            write_parity_state,
+            ParityStatus,
+            pull_ff_only,
+            pull_rebase,
+        )
+        # Legacy imports (not yet in sync package)
         from watercooler_mcp.branch_parity import (
             get_branch_health,
             run_preflight,
             push_after_commit,
-            read_parity_state,
-            write_parity_state,
-            _pull_ff_only,
-            _pull_rebase,
-            ParityStatus,
         )
 
         # First, try to sync threads if behind origin (the reconcile part)
@@ -235,11 +239,11 @@ def _reconcile_parity_impl(
         threads_behind = health_before.get('threads_behind_origin', 0)
         if threads_behind > 0:
             log_debug(f"[RECONCILE] Threads behind origin by {threads_behind} commits, pulling")
-            if _pull_ff_only(threads_repo):
+            if pull_ff_only(threads_repo):
                 actions_taken.append(f"Pulled threads (ff-only, {threads_behind} commits)")
             else:
                 log_debug("[RECONCILE] FF-only pull failed, trying rebase")
-                if _pull_rebase(threads_repo):
+                if pull_rebase(threads_repo):
                     actions_taken.append(f"Pulled threads (rebase, {threads_behind} commits)")
                 else:
                     # Pull failed - let run_preflight handle any conflicts (including graph-only conflicts)

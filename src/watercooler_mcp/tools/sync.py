@@ -10,7 +10,7 @@ from fastmcp import Context
 from watercooler import commands
 
 from ..config import get_agent_name, get_threads_dir, get_git_sync_manager_from_context
-from ..git_sync import GitPushError
+from ..sync import PushError
 from ..observability import log_debug
 from .. import validation  # Import module for runtime access (enables test patching)
 
@@ -99,7 +99,7 @@ def _force_sync_impl(
 
         try:
             sync.flush_async()
-        except GitPushError as exc:
+        except PushError as exc:
             return f"Sync failed: {exc}"
 
         status_after = sync.get_async_status()

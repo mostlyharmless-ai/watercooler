@@ -1,5 +1,19 @@
 """Branch parity state machine with auto-remediation.
 
+.. deprecated:: 0.5.0
+   This module is deprecated and will be removed in a future version.
+   Use the new modular sync package instead:
+
+   - For status enums: ``from watercooler_mcp.sync import ParityStatus, StateClass``
+   - For state: ``from watercooler_mcp.sync import ParityState, StateManager``
+   - For results: ``from watercooler_mcp.sync import PreflightResult, BranchPairingResult``
+   - For manager: ``from watercooler_mcp.sync import BranchParityManager``
+   - For errors: ``from watercooler_mcp.sync import BranchPairingError``
+
+This module is preserved as a facade for backward compatibility.
+New code should import from watercooler_mcp.sync directly.
+
+Legacy documentation:
 This module provides preflight validation and auto-remediation for branch
 parity between code and threads repositories. It enforces:
 

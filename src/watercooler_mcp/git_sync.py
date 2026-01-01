@@ -1,5 +1,19 @@
 """Git-based synchronization for cloud-hosted watercooler MCP servers.
 
+.. deprecated:: 0.5.0
+   This module is deprecated and will be removed in a future version.
+   Use the new modular sync package instead:
+
+   - For errors: ``from watercooler_mcp.sync import SyncError, PushError, PullError``
+   - For primitives: ``from watercooler_mcp.sync import push_with_retry, pull_rebase``
+   - For state: ``from watercooler_mcp.sync import StateManager, ParityState``
+   - For local-remote sync: ``from watercooler_mcp.sync import LocalRemoteSyncManager``
+   - For branch parity: ``from watercooler_mcp.sync import BranchParityManager``
+
+This module is preserved as a facade for backward compatibility.
+New code should import from watercooler_mcp.sync directly.
+
+Legacy documentation:
 This module provides GitSyncManager for syncing .watercooler threads via git,
 enabling multi-user collaboration with automatic conflict resolution.
 
