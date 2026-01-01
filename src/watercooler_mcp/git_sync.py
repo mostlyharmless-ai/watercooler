@@ -77,6 +77,19 @@ except ImportError:  # pragma: no cover - executed when module is loaded stand-a
     else:  # pragma: no cover - defensive guard if spec resolution fails
         raise
 
+# Re-export types from sync/ for backward compatibility
+# New code should import directly from watercooler_mcp.sync
+from .sync import (
+    BranchPairingError,
+    BranchMismatch,
+    BranchSyncResult,
+    BranchDivergenceInfo,
+    BranchPairingResult,
+    validate_branch_pairing,
+    sync_branch_history,
+    _find_main_branch,
+)
+
 T = TypeVar('T')
 
 
@@ -161,30 +174,9 @@ class GitPushError(GitSyncError):
     pass
 
 
-class BranchPairingError(GitSyncError):
-    """Branch pairing validation failed."""
-    pass
-
-
-@dataclass
-class BranchMismatch:
-    """Represents a branch pairing mismatch."""
-    type: str  # "branch_name_mismatch", "code_branch_missing", "threads_branch_missing", etc.
-    code: Optional[str]
-    threads: Optional[str]
-    severity: str  # "error", "warning"
-    recovery: str  # Suggested recovery command or action
-    needs_merge_to_main: bool = False  # True if threads branch should be merged to main
-
-
-@dataclass
-class BranchPairingResult:
-    """Result of branch pairing validation."""
-    valid: bool
-    code_branch: Optional[str]
-    threads_branch: Optional[str]
-    mismatches: List[BranchMismatch]
-    warnings: List[str]
+# Note: BranchPairingError, BranchMismatch, BranchPairingResult are now imported
+# from .sync at the top of this module for backward compatibility.
+# The authoritative definitions live in sync/branch_parity.py and sync/errors.py.
 
 
 class GitSyncManager:

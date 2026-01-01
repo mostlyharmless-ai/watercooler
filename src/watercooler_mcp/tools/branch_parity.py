@@ -15,7 +15,7 @@ from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 from git import Repo, InvalidGitRepositoryError, GitCommandError
 
-from ..git_sync import validate_branch_pairing, sync_branch_history
+from ..sync import validate_branch_pairing, sync_branch_history
 from .. import validation  # Import module for runtime access (enables test patching)
 
 

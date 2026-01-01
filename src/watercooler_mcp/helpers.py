@@ -34,7 +34,7 @@ from .config import (
     get_git_sync_manager_from_context,
     resolve_thread_context,
 )
-from .git_sync import (
+from .sync import (
     BranchPairingError,
     BranchMismatch,
     BranchPairingResult,

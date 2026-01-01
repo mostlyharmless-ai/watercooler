@@ -119,10 +119,18 @@ from .branch_parity import (
     # Enums
     StateClass,
     # Data classes
+    BranchMismatch,
+    BranchSyncResult,
+    BranchDivergenceInfo,
     PreflightResult,
     BranchPairingResult,
     # Classes
     BranchParityManager,
+    # Standalone functions
+    validate_branch_pairing,
+    sync_branch_history,
+    # Helper functions (re-exported for backward compat)
+    _find_main_branch,
 )
 
 __all__ = [
@@ -212,8 +220,16 @@ __all__ = [
     # Branch Parity - Enums
     "StateClass",
     # Branch Parity - Data classes
+    "BranchMismatch",
+    "BranchSyncResult",
+    "BranchDivergenceInfo",
     "PreflightResult",
     "BranchPairingResult",
     # Branch Parity - Classes
     "BranchParityManager",
+    # Branch Parity - Standalone functions
+    "validate_branch_pairing",
+    "sync_branch_history",
+    # Branch Parity - Helper functions
+    "_find_main_branch",
 ]
