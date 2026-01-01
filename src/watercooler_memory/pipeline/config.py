@@ -96,9 +96,9 @@ class PipelineConfig:
     batch_size: int = 10  # Documents per batch for LLM stages
     max_concurrent: int = 4  # Concurrent LLM calls
 
-    # Chunking
-    max_tokens: int = 1024
-    overlap_tokens: int = 128
+    # Chunking (768/64 balances comprehensiveness vs "lost in the middle")
+    max_tokens: int = 768
+    overlap_tokens: int = 64
 
     # Services
     llm: LLMConfig = field(default_factory=LLMConfig)

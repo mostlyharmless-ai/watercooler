@@ -17,6 +17,7 @@ from watercooler_memory import (
     ChunkerConfig,
 )
 from watercooler_memory.leanrag_export import export_to_leanrag, entry_to_leanrag_document
+from watercooler_memory.pipeline.config import PipelineConfig
 
 
 @pytest.fixture
@@ -152,6 +153,23 @@ class TestParser:
 class TestChunker:
     """Test text chunking."""
 
+    def test_chunker_defaults_768_64(self):
+        """Test that chunker defaults to 768 tokens / 64 overlap.
+
+        These defaults balance comprehensiveness vs 'lost in the middle' issues
+        per GraphRAG literature (see MEMORY_INTEGRATION_ROADMAP.md).
+        """
+        from watercooler_memory.chunker import DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP
+
+        # Verify module-level constants
+        assert DEFAULT_MAX_TOKENS == 768, f"Expected DEFAULT_MAX_TOKENS=768, got {DEFAULT_MAX_TOKENS}"
+        assert DEFAULT_OVERLAP == 64, f"Expected DEFAULT_OVERLAP=64, got {DEFAULT_OVERLAP}"
+
+        # Verify ChunkerConfig defaults match
+        config = ChunkerConfig()
+        assert config.max_tokens == 768, f"Expected ChunkerConfig.max_tokens=768, got {config.max_tokens}"
+        assert config.overlap == 64, f"Expected ChunkerConfig.overlap=64, got {config.overlap}"
+
     def test_chunk_short_text(self):
         """Test that short text returns single chunk."""
         text = "This is a short text."
@@ -166,7 +184,7 @@ class TestChunker:
 
     def test_chunk_long_text(self):
         """Test that long text is split into multiple chunks."""
-        # Create text longer than default max_tokens (1024)
+        # Create text longer than default max_tokens (768)
         long_text = "This is a test sentence. " * 500
         config = ChunkerConfig(max_tokens=100)
         chunks = chunk_text(long_text, config)
@@ -303,3 +321,17 @@ class TestLeanRAGExport:
 
         assert manifest["statistics"]["documents"] == 2
         assert manifest["statistics"]["threads"] == 1
+
+
+class TestPipelineConfig:
+    """Test pipeline configuration defaults."""
+
+    def test_pipeline_config_chunking_defaults_768_64(self):
+        """Test that PipelineConfig defaults to 768 tokens / 64 overlap.
+
+        These defaults balance comprehensiveness vs 'lost in the middle' issues
+        per GraphRAG literature (see MEMORY_INTEGRATION_ROADMAP.md).
+        """
+        config = PipelineConfig()
+        assert config.max_tokens == 768, f"Expected PipelineConfig.max_tokens=768, got {config.max_tokens}"
+        assert config.overlap_tokens == 64, f"Expected PipelineConfig.overlap_tokens=64, got {config.overlap_tokens}"
