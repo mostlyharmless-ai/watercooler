@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from watercooler_memory.infrastructure.embedding_validator import EXPECTED_DIM
 from watercooler_memory.infrastructure.falkordb_vectors import (
+    FALKORDB_AVAILABLE,
     FalkorDBVectorAdapter,
     FalkorDBVectorConfig,
     VectorSearchResult,
@@ -275,7 +276,8 @@ class TestAdapterConnection:
         config = FalkorDBVectorConfig(host="localhost", port=6379)
         adapter = FalkorDBVectorAdapter(config)
 
-        with patch("watercooler_memory.infrastructure.falkordb_vectors.FalkorDB") as mock_falkor:
+        with patch("watercooler_memory.infrastructure.falkordb_vectors.FALKORDB_AVAILABLE", True), \
+             patch("watercooler_memory.infrastructure.falkordb_vectors.FalkorDB") as mock_falkor:
             mock_client = Mock()
             mock_falkor.return_value = mock_client
 
