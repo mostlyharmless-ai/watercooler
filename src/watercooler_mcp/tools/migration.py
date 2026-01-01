@@ -419,12 +419,25 @@ async def _migrate_to_memory_backend_impl(
                     migrated_entries.append(entry_id)
                     result["entries_migrated"] += 1
 
-                except Exception as e:
+                except (ConnectionError, TimeoutError) as e:
+                    # Network errors - log and continue
+                    logger.warning(f"Network error migrating entry {entry_id}: {e}")
                     result["entries_failed"] += 1
-                    result["errors"].append(f"Entry {entry_id}: {e}")
+                    result["errors"].append(f"Entry {entry_id}: {type(e).__name__}: {e}")
+                except Exception as e:
+                    # Unexpected error - log with traceback for debugging
+                    logger.exception(f"Failed to migrate entry {entry_id}")
+                    result["entries_failed"] += 1
+                    result["errors"].append(f"Entry {entry_id}: {type(e).__name__}: {e}")
 
+        except (OSError, IOError) as e:
+            # File errors
+            logger.warning(f"File error processing thread {thread_file.name}: {e}")
+            result["errors"].append(f"Thread {thread_file.name}: {type(e).__name__}: {e}")
         except Exception as e:
-            result["errors"].append(f"Thread {thread_file.name}: {e}")
+            # Unexpected error
+            logger.exception(f"Failed to process thread {thread_file.name}")
+            result["errors"].append(f"Thread {thread_file.name}: {type(e).__name__}: {e}")
 
     # Save checkpoint
     _save_checkpoint(threads_dir, migrated_entries, backend)

@@ -340,6 +340,77 @@ Ball: Claude
 Entry content here.
 ```
 
+## Rollback / Undo Migration
+
+Migration is **additive** - it copies entries to the memory backend without modifying the original thread files. Your baseline graph remains intact.
+
+### Rollback Options
+
+#### Option 1: Disable Memory Backend (Recommended)
+
+Simply disable the memory backend to revert to baseline graph search:
+
+```bash
+# Unset environment variable
+unset WATERCOOLER_MEMORY_BACKEND
+
+# Or set to empty
+export WATERCOOLER_MEMORY_BACKEND=""
+```
+
+Or update `~/.watercooler/config.toml`:
+
+```toml
+[memory]
+backend = ""  # Disabled
+```
+
+This immediately reverts search to the baseline graph. The migrated data remains in the memory backend but is not used.
+
+#### Option 2: Clear Memory Backend Data
+
+To completely remove migrated data from Graphiti:
+
+```bash
+# Connect to FalkorDB and clear the graph
+docker exec -it falkordb redis-cli
+> GRAPH.DELETE watercooler
+
+# Or delete specific thread data
+# (Graphiti stores data by group_id = thread topic)
+```
+
+**Warning:** This is destructive and cannot be undone.
+
+#### Option 3: Fresh Migration to Different Backend
+
+If you want to switch from Graphiti to LeanRAG (or vice versa):
+
+1. Delete the checkpoint file:
+   ```bash
+   rm /path/to/threads/.migration_checkpoint.json
+   ```
+
+2. Set the new backend:
+   ```bash
+   export WATERCOOLER_MEMORY_BACKEND=leanrag
+   ```
+
+3. Run migration to the new backend:
+   ```python
+   watercooler_migrate_to_memory_backend(
+       code_path="/path/to/repo",
+       backend="leanrag",
+       dry_run=False
+   )
+   ```
+
+### Data Safety
+
+- **Thread files are never modified** - Original markdown files remain unchanged
+- **Baseline graph is preserved** - You can always revert to baseline search
+- **Migration is idempotent** - Re-running migration on the same entries is safe (deduplicated)
+
 ## Best Practices
 
 1. **Always dry-run first** - Review what will be migrated before executing
