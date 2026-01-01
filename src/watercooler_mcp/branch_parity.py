@@ -2445,13 +2445,15 @@ def get_branch_health(
             live_status = ParityStatus.DETACHED_HEAD.value
         else:
             # Live ahead/behind counts (fetch first for accuracy)
+            # Use timeout to avoid hanging on slow/offline networks
+            fetch_timeout = 10  # seconds
             try:
-                code_repo.remotes.origin.fetch(prune=True)
+                code_repo.remotes.origin.fetch(prune=True, kill_after_timeout=fetch_timeout)
             except Exception as e:
                 log_debug(f"[PARITY] Fetch failed for code repo (non-fatal): {e}")
 
             try:
-                threads_repo.remotes.origin.fetch(prune=True)
+                threads_repo.remotes.origin.fetch(prune=True, kill_after_timeout=fetch_timeout)
             except Exception as e:
                 log_debug(f"[PARITY] Fetch failed for threads repo (non-fatal): {e}")
 
