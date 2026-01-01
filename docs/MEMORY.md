@@ -866,3 +866,74 @@ python /path/to/LeanRAG/build_graph.py ./export
 ```
 
 The chunks contain the required `hash_code` and `text` fields that LeanRAG's pipeline expects.
+
+---
+
+## MCP Tools for Memory Integration
+
+### Phase 1 Tools (Implemented)
+
+The following MCP tools provide memory backend integration:
+
+#### Write Tools
+
+| Tool | Description |
+|------|-------------|
+| `watercooler_graphiti_add_episode` | Add content directly to Graphiti temporal graph |
+| `watercooler_leanrag_run_pipeline` | Trigger LeanRAG clustering pipeline |
+
+#### Search Tools
+
+| Tool | Description |
+|------|-------------|
+| `watercooler_search` | Unified search with tier-aware routing |
+| `watercooler_search_nodes` | Search Graphiti entity nodes |
+| `watercooler_search_memory_facts` | Search Graphiti facts/relationships |
+| `watercooler_query_memory` | Query memory backend for facts/entities |
+| `watercooler_get_episodes` | Search Graphiti episodes |
+
+#### Migration Tools
+
+| Tool | Description |
+|------|-------------|
+| `watercooler_migration_preflight` | Check migration prerequisites |
+| `watercooler_migrate_to_memory_backend` | Migrate entries to Graphiti/LeanRAG |
+
+### Search Routing
+
+The `watercooler_search` tool supports tier-aware routing:
+
+```python
+# Use baseline graph (free tier, always available)
+watercooler_search(query="authentication", backend="baseline")
+
+# Use Graphiti memory backend (requires setup)
+watercooler_search(query="authentication", backend="graphiti")
+
+# Auto-detect based on WATERCOOLER_MEMORY_BACKEND env var
+watercooler_search(query="authentication", backend="auto")
+
+# Search modes
+watercooler_search(query="OAuth2", mode="entries")   # Search entries
+watercooler_search(query="OAuth2", mode="entities")  # Search entity nodes
+watercooler_search(query="OAuth2", mode="episodes")  # Search episodes
+```
+
+### Automatic Sync Hook
+
+When `WATERCOOLER_MEMORY_BACKEND` is set, new entries are automatically synced to the memory backend after baseline graph sync:
+
+```bash
+export WATERCOOLER_MEMORY_BACKEND=graphiti
+```
+
+The sync is non-blocking - errors are logged but never fail the baseline sync.
+
+---
+
+## See Also
+
+- [Configuration Guide](CONFIGURATION.md) - Memory backend configuration
+- [Tier Migration Guide](TIER_MIGRATION.md) - Migrating to memory backends
+- [Graphiti Setup](GRAPHITI_SETUP.md) - Graphiti installation
+- [LeanRAG Setup](LEANRAG_SETUP.md) - LeanRAG installation
