@@ -15,6 +15,7 @@ Merge strategies:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -770,23 +771,47 @@ class ConflictResolver:
             log_debug(f"[CONFLICT] Failed to stage {file_rel}: {e}")
 
     def _complete_merge_or_rebase(self, context: str) -> bool:
-        """Complete the merge or rebase after resolving conflicts."""
+        """Complete the merge or rebase after resolving conflicts.
+
+        Sets up non-interactive environment to prevent git from:
+        - Opening an editor for commit messages
+        - Prompting for user input
+        - Hanging on credential prompts
+        """
         try:
             git_dir = Path(self.repo.git_dir)
             is_rebase = (git_dir / "rebase-merge").exists() or (
                 git_dir / "rebase-apply"
             ).exists()
 
+            # Set up environment for non-interactive operation
+            # Critical for MCP server context where there's no TTY
+            env = os.environ.copy()
+            env["GIT_EDITOR"] = "true"  # No-op editor - prevents editor opening
+            env["GIT_TERMINAL_PROMPT"] = "0"  # Disable terminal prompts
+            env["GCM_INTERACTIVE"] = "never"  # Disable credential manager prompts
+            # Provide fallback identity if not configured (needed for CI/test environments)
+            env.setdefault("GIT_AUTHOR_NAME", "Watercooler Auto-Merge")
+            env.setdefault("GIT_AUTHOR_EMAIL", "noreply@watercooler.local")
+            env.setdefault("GIT_COMMITTER_NAME", "Watercooler Auto-Merge")
+            env.setdefault("GIT_COMMITTER_EMAIL", "noreply@watercooler.local")
+
             if is_rebase:
-                self.repo.git.rebase("--continue")
+                log_debug(f"[CONFLICT] Running rebase --continue for {context}")
+                self.repo.git.rebase("--continue", env=env)
                 log_debug(f"[CONFLICT] Continued rebase after resolving {context}")
             else:
-                self.repo.git.commit("-m", f"Auto-merge {context}")
+                log_debug(f"[CONFLICT] Running commit for {context}")
+                self.repo.git.commit("-m", f"Auto-merge {context}", env=env)
                 log_debug(f"[CONFLICT] Committed merged {context}")
 
             return True
         except GitCommandError as e:
-            log_debug(f"[CONFLICT] Failed to complete merge/rebase: {e}")
+            # Log full error details for debugging
+            log_debug(f"[CONFLICT] Failed to complete merge/rebase for {context}")
+            log_debug(f"[CONFLICT] GitCommandError: {e}")
+            log_debug(f"[CONFLICT] Command: {getattr(e, 'command', 'unknown')}")
+            log_debug(f"[CONFLICT] Stderr: {getattr(e, 'stderr', 'none')}")
             return False
 
 
