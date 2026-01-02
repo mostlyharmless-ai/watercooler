@@ -49,6 +49,7 @@ from .conflict import (
     ConflictResolver,
     has_graph_conflicts_only,
     has_thread_conflicts_only,
+    has_state_conflicts_only,
 )
 from .errors import BranchPairingError
 
@@ -858,7 +859,21 @@ class BranchParityManager:
                         if restore_stash(self.threads_repo, stash_ref):
                             actions_taken.append("Restored stashed changes")
                         else:
-                            actions_taken.append(f"Warning: stash {stash_ref} not restored")
+                            # Stash pop failed - try auto-resolution for state file conflicts
+                            stash_resolved = False
+                            if has_state_conflicts_only(self.threads_repo):
+                                resolver = ConflictResolver(self.threads_repo)
+                                if resolver.resolve_state_conflicts():
+                                    try:
+                                        self.threads_repo.git.stash("drop")
+                                        actions_taken.append(
+                                            "Auto-resolved state file conflict after stash pop"
+                                        )
+                                        stash_resolved = True
+                                    except GitCommandError:
+                                        pass
+                            if not stash_resolved:
+                                actions_taken.append(f"Warning: stash {stash_ref} not restored")
                 else:
                     # Not auto-fix: report appropriate status
                     if is_main_protection:
@@ -1054,15 +1069,32 @@ class BranchParityManager:
                     if restore_stash(self.threads_repo, stash_ref):
                         actions_taken.append("Restored stashed changes")
                     else:
-                        state.status = ParityStatus.DIVERGED.value
-                        state.last_error = f"Stash pop conflict after pull. Stash: {stash_ref}"
-                        write_parity_state(self.threads_repo_path, state)
-                        return PreflightResult(
-                            success=False,
-                            state=state,
-                            can_proceed=False,
-                            blocking_reason=state.last_error,
-                        )
+                        # Stash pop failed - check if we can auto-resolve
+                        stash_resolved = False
+                        if has_state_conflicts_only(self.threads_repo):
+                            # State file conflict - auto-resolve by taking theirs
+                            resolver = ConflictResolver(self.threads_repo)
+                            if resolver.resolve_state_conflicts():
+                                # Drop the stash since we've resolved the conflict
+                                try:
+                                    self.threads_repo.git.stash("drop")
+                                    actions_taken.append(
+                                        "Auto-resolved state file conflict after stash pop"
+                                    )
+                                    stash_resolved = True
+                                except GitCommandError:
+                                    pass  # Stash may already be gone
+
+                        if not stash_resolved:
+                            state.status = ParityStatus.DIVERGED.value
+                            state.last_error = f"Stash pop conflict after pull. Stash: {stash_ref}"
+                            write_parity_state(self.threads_repo_path, state)
+                            return PreflightResult(
+                                success=False,
+                                state=state,
+                                can_proceed=False,
+                                blocking_reason=state.last_error,
+                            )
 
                 # Update ahead/behind
                 threads_ahead, threads_behind = get_ahead_behind(
@@ -1569,7 +1601,14 @@ def _rebase_branch_onto(
                     try:
                         repo.git.stash('pop')
                     except Exception:
-                        pass
+                        # Try auto-resolution for state file conflicts
+                        if has_state_conflicts_only(repo):
+                            resolver = ConflictResolver(repo)
+                            if resolver.resolve_state_conflicts():
+                                try:
+                                    repo.git.stash('drop')
+                                except GitCommandError:
+                                    pass
                 return BranchSyncResult(
                     success=False,
                     action_taken="error",
@@ -1588,7 +1627,19 @@ def _rebase_branch_onto(
                 try:
                     repo.git.stash('pop')
                 except Exception as e:
-                    log_debug(f"Warning: Could not pop stash after rebase: {e}")
+                    # Try auto-resolution for state file conflicts
+                    if has_state_conflicts_only(repo):
+                        resolver = ConflictResolver(repo)
+                        if resolver.resolve_state_conflicts():
+                            try:
+                                repo.git.stash('drop')
+                                log_debug("Auto-resolved state file conflict after stash pop")
+                            except GitCommandError:
+                                pass
+                        else:
+                            log_debug(f"Warning: Could not pop stash after rebase: {e}")
+                    else:
+                        log_debug(f"Warning: Could not pop stash after rebase: {e}")
 
             if force:
                 repo.git.push('origin', branch, '--force-with-lease')
@@ -1617,7 +1668,14 @@ def _rebase_branch_onto(
                 try:
                     repo.git.stash('pop')
                 except Exception:
-                    pass
+                    # Try auto-resolution for state file conflicts
+                    if has_state_conflicts_only(repo):
+                        resolver = ConflictResolver(repo)
+                        if resolver.resolve_state_conflicts():
+                            try:
+                                repo.git.stash('drop')
+                            except GitCommandError:
+                                pass
 
             return BranchSyncResult(
                 success=False,
@@ -2483,7 +2541,19 @@ def auto_merge_to_main(
             if restore_stash(threads_repo, stash_ref):
                 actions.append("Restored stashed changes")
             else:
-                actions.append("Warning: stash restore failed, run 'git stash pop' manually")
+                # Stash pop failed - try auto-resolution for state file conflicts
+                stash_resolved = False
+                if has_state_conflicts_only(threads_repo):
+                    resolver = ConflictResolver(threads_repo)
+                    if resolver.resolve_state_conflicts():
+                        try:
+                            threads_repo.git.stash("drop")
+                            actions.append("Auto-resolved state file conflict after stash pop")
+                            stash_resolved = True
+                        except GitCommandError:
+                            pass
+                if not stash_resolved:
+                    actions.append("Warning: stash restore failed, run 'git stash pop' manually")
 
         message = f"Auto-merged threads branch to main: {'; '.join(actions)}"
         log_debug(f"[PARITY] {message}")
