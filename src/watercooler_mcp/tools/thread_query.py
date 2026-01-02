@@ -441,6 +441,9 @@ def _get_thread_entry_impl(
     selected: ThreadEntry | None = None
 
     if index is not None:
+        # Support Python-style negative indexing: -1 = last, -2 = second-to-last, etc.
+        if index < 0:
+            index = len(entries) + index
         if index < 0 or index >= len(entries):
             return ToolResult(content=[TextContent(type="text", text=f"Error: index {index} out of range (entries={len(entries)}).")])
         selected = entries[index]
