@@ -82,6 +82,7 @@ from .conflict import (
     # Pure merge functions
     merge_manifest_content,
     merge_jsonl_content,
+    merge_sync_state_content,
     merge_thread_content,
     # Convenience functions
     has_graph_conflicts_only,
@@ -217,6 +218,7 @@ __all__ = [
     # Conflict - Pure merge functions
     "merge_manifest_content",
     "merge_jsonl_content",
+    "merge_sync_state_content",
     "merge_thread_content",
     # Conflict - Convenience functions
     "has_graph_conflicts_only",

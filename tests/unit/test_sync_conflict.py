@@ -16,6 +16,7 @@ from watercooler_mcp.sync import (
     # Pure merge functions
     merge_manifest_content,
     merge_jsonl_content,
+    merge_sync_state_content,
     merge_thread_content,
     # Convenience functions
     has_graph_conflicts_only,
@@ -222,6 +223,119 @@ class TestMergeJsonlContent:
         """Merge of empty inputs should return empty."""
         result = merge_jsonl_content("", "")
         assert result == ""
+
+
+class TestMergeSyncStateContent:
+    """Tests for merge_sync_state_content function."""
+
+    def test_merge_takes_higher_entry_count(self):
+        """Topic with higher entries_synced count should win."""
+        ours = json.dumps({
+            "topics": {
+                "topic-a": {"entries_synced": 5, "last_sync_at": "2025-01-01T00:00:00Z"}
+            },
+            "last_updated": "2025-01-01T00:00:00Z"
+        })
+        theirs = json.dumps({
+            "topics": {
+                "topic-a": {"entries_synced": 10, "last_sync_at": "2025-01-02T00:00:00Z"}
+            },
+            "last_updated": "2025-01-02T00:00:00Z"
+        })
+        result = json.loads(merge_sync_state_content(ours, theirs))
+        assert result["topics"]["topic-a"]["entries_synced"] == 10
+
+    def test_merge_equal_counts_uses_timestamp(self):
+        """When entry counts equal, more recent timestamp wins."""
+        ours = json.dumps({
+            "topics": {
+                "topic-a": {"entries_synced": 5, "last_sync_at": "2025-01-03T00:00:00Z"}
+            },
+            "last_updated": "2025-01-03T00:00:00Z"
+        })
+        theirs = json.dumps({
+            "topics": {
+                "topic-a": {"entries_synced": 5, "last_sync_at": "2025-01-01T00:00:00Z"}
+            },
+            "last_updated": "2025-01-01T00:00:00Z"
+        })
+        result = json.loads(merge_sync_state_content(ours, theirs))
+        # Ours has more recent timestamp, should be selected
+        assert result["topics"]["topic-a"]["last_sync_at"] == "2025-01-03T00:00:00Z"
+
+    def test_merge_combines_unique_topics(self):
+        """Topics unique to each side should all appear in result."""
+        ours = json.dumps({
+            "topics": {
+                "topic-ours": {"entries_synced": 3, "last_sync_at": "2025-01-01T00:00:00Z"}
+            },
+            "last_updated": "2025-01-01T00:00:00Z"
+        })
+        theirs = json.dumps({
+            "topics": {
+                "topic-theirs": {"entries_synced": 7, "last_sync_at": "2025-01-02T00:00:00Z"}
+            },
+            "last_updated": "2025-01-02T00:00:00Z"
+        })
+        result = json.loads(merge_sync_state_content(ours, theirs))
+        assert "topic-ours" in result["topics"]
+        assert "topic-theirs" in result["topics"]
+        assert result["topics"]["topic-ours"]["entries_synced"] == 3
+        assert result["topics"]["topic-theirs"]["entries_synced"] == 7
+
+    def test_merge_takes_most_recent_last_updated(self):
+        """Merged result should have the most recent last_updated."""
+        ours = json.dumps({
+            "topics": {},
+            "last_updated": "2025-01-01T00:00:00Z"
+        })
+        theirs = json.dumps({
+            "topics": {},
+            "last_updated": "2025-01-05T00:00:00Z"
+        })
+        result = json.loads(merge_sync_state_content(ours, theirs))
+        assert result["last_updated"] == "2025-01-05T00:00:00Z"
+
+    def test_merge_handles_missing_topics(self):
+        """Merge should handle files with empty or missing topics."""
+        ours = json.dumps({
+            "topics": {},
+            "last_updated": "2025-01-01T00:00:00Z"
+        })
+        theirs = json.dumps({
+            "topics": {
+                "topic-a": {"entries_synced": 5, "last_sync_at": "2025-01-02T00:00:00Z"}
+            },
+            "last_updated": "2025-01-02T00:00:00Z"
+        })
+        result = json.loads(merge_sync_state_content(ours, theirs))
+        assert "topic-a" in result["topics"]
+        assert result["topics"]["topic-a"]["entries_synced"] == 5
+
+    def test_merge_complex_scenario(self):
+        """Test complex merge with overlapping and unique topics."""
+        ours = json.dumps({
+            "topics": {
+                "topic-shared": {"entries_synced": 10, "last_sync_at": "2025-01-01T00:00:00Z"},
+                "topic-ours-only": {"entries_synced": 3, "last_sync_at": "2025-01-01T00:00:00Z"}
+            },
+            "last_updated": "2025-01-01T00:00:00Z"
+        })
+        theirs = json.dumps({
+            "topics": {
+                "topic-shared": {"entries_synced": 8, "last_sync_at": "2025-01-02T00:00:00Z"},
+                "topic-theirs-only": {"entries_synced": 5, "last_sync_at": "2025-01-02T00:00:00Z"}
+            },
+            "last_updated": "2025-01-02T00:00:00Z"
+        })
+        result = json.loads(merge_sync_state_content(ours, theirs))
+        # topic-shared: ours has higher count (10 > 8)
+        assert result["topics"]["topic-shared"]["entries_synced"] == 10
+        # Both unique topics present
+        assert result["topics"]["topic-ours-only"]["entries_synced"] == 3
+        assert result["topics"]["topic-theirs-only"]["entries_synced"] == 5
+        # Most recent last_updated
+        assert result["last_updated"] == "2025-01-02T00:00:00Z"
 
 
 class TestMergeThreadContent:

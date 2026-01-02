@@ -155,6 +155,66 @@ def merge_jsonl_content(ours_content: str, theirs_content: str) -> str:
     return "\n".join(merged_lines) + "\n" if merged_lines else ""
 
 
+def merge_sync_state_content(ours_content: str, theirs_content: str) -> str:
+    """Pure function to merge graph/baseline/sync_state.json content.
+
+    This file tracks sync status per topic. Merge strategy:
+    - For each topic, take the version with higher entries_synced count
+    - If counts equal, take version with more recent last_sync_at timestamp
+    - Merge all unique topics from both sides
+    - Take the most recent last_updated timestamp
+
+    Args:
+        ours_content: JSON string of our version
+        theirs_content: JSON string of their version
+
+    Returns:
+        Merged JSON string with pretty formatting
+
+    Raises:
+        json.JSONDecodeError: If content is not valid JSON
+    """
+    ours_json = json.loads(ours_content)
+    theirs_json = json.loads(theirs_content)
+
+    # Merge topics - prefer higher entry count, then more recent timestamp
+    merged_topics: Dict[str, Any] = {}
+    all_topics = set(ours_json.get("topics", {}).keys()) | set(
+        theirs_json.get("topics", {}).keys()
+    )
+
+    for topic in all_topics:
+        ours_topic = ours_json.get("topics", {}).get(topic, {})
+        theirs_topic = theirs_json.get("topics", {}).get(topic, {})
+
+        ours_count = ours_topic.get("entries_synced", 0) or 0
+        theirs_count = theirs_topic.get("entries_synced", 0) or 0
+
+        if ours_count > theirs_count:
+            merged_topics[topic] = ours_topic
+        elif theirs_count > ours_count:
+            merged_topics[topic] = theirs_topic
+        else:
+            # Equal counts - prefer more recent timestamp
+            ours_time = ours_topic.get("last_sync_at", "")
+            theirs_time = theirs_topic.get("last_sync_at", "")
+            if ours_time >= theirs_time:
+                merged_topics[topic] = ours_topic if ours_topic else theirs_topic
+            else:
+                merged_topics[topic] = theirs_topic if theirs_topic else ours_topic
+
+    # Build merged result
+    merged = {
+        "topics": merged_topics,
+        "last_updated": max(
+            ours_json.get("last_updated", ""),
+            theirs_json.get("last_updated", ""),
+        ),
+    }
+
+    return json.dumps(merged, indent=2) + "\n"
+
+
 def merge_thread_content(ours_content: str, theirs_content: str) -> Tuple[str, bool]:
     """Pure function to merge two thread file versions at entry level.
 
@@ -417,6 +477,7 @@ class ConflictResolver:
 
         Handles:
         - manifest.json: Take newer timestamp, merge topics
+        - sync_state.json: Take version with higher entry count per topic
         - *.jsonl: Deduplicate by UUID
 
         Returns:
@@ -435,6 +496,9 @@ class ConflictResolver:
 
             if file_path.name == "manifest.json":
                 if not self._merge_manifest_file(file_path, file_rel):
+                    return False
+            elif file_path.name == "sync_state.json":
+                if not self._merge_sync_state_file(file_path, file_rel):
                     return False
             elif file_path.suffix == ".jsonl":
                 if not self._merge_jsonl_file(file_path, file_rel):
@@ -642,6 +706,25 @@ class ConflictResolver:
             return False
         except OSError as e:
             log_debug(f"[CONFLICT] IO error in JSONL merge: {e}")
+            return False
+
+    def _merge_sync_state_file(self, file_path: Path, file_rel: str) -> bool:
+        """Merge a graph/baseline/sync_state.json file."""
+        try:
+            ours_content = self.repo.git.show(f":2:{file_rel}")
+            theirs_content = self.repo.git.show(f":3:{file_rel}")
+            merged_content = merge_sync_state_content(ours_content, theirs_content)
+            file_path.write_text(merged_content)
+            log_debug(f"[CONFLICT] Auto-merged sync_state.json: {file_rel}")
+            return True
+        except GitCommandError as e:
+            log_debug(f"[CONFLICT] Git error in sync_state merge: {e}")
+            return False
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            log_debug(f"[CONFLICT] Parse error in sync_state merge: {e}")
+            return False
+        except OSError as e:
+            log_debug(f"[CONFLICT] IO error in sync_state merge: {e}")
             return False
 
     def _merge_thread_file(self, file_path: Path, file_rel: str) -> bool:
