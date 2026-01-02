@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from git import Repo
 from git.exc import InvalidGitRepositoryError, GitCommandError
@@ -52,6 +52,9 @@ from .conflict import (
     has_state_conflicts_only,
 )
 from .errors import BranchPairingError
+
+if TYPE_CHECKING:
+    from watercooler.lock import AdvisoryLock
 
 
 # =============================================================================
@@ -2223,6 +2226,12 @@ def _lock_dir(threads_dir: Path) -> Path:
     return threads_dir / ".watercooler" / "locks"
 
 
+def _parity_lock_path(threads_dir: Path) -> Path:
+    """Get path to repo-pair parity/lifecycle lock."""
+    lock_dir = _lock_dir(threads_dir)
+    return lock_dir / "parity.lock"
+
+
 def _sanitize_topic_for_filename(topic: str) -> str:
     """Sanitize topic name for use as filename.
 
@@ -2307,6 +2316,40 @@ def acquire_topic_lock(
         raise TimeoutError(
             f"Failed to acquire lock for topic '{topic}' within {timeout}s."
         )
+    return lock
+
+
+def acquire_parity_lock(
+    threads_dir: Path, timeout: int = LOCK_TIMEOUT_SECONDS
+) -> "AdvisoryLock":
+    """Acquire repo-pair parity/lifecycle lock. Caller must release."""
+    import time
+    from watercooler.lock import AdvisoryLock
+
+    lock_path = _parity_lock_path(threads_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Quick retries for transient contention
+    for attempt in range(LOCK_QUICK_RETRIES):
+        lock = AdvisoryLock(lock_path, ttl=LOCK_TTL_SECONDS, timeout=0)
+        if lock.acquire():
+            return lock
+        time.sleep(LOCK_QUICK_RETRY_DELAY)
+
+    # Fall back to full timeout
+    lock = AdvisoryLock(lock_path, ttl=LOCK_TTL_SECONDS, timeout=timeout)
+    if not lock.acquire():
+        lock_info = lock.get_lock_info()
+        if lock_info:
+            holder_pid = lock_info.get("pid", "unknown")
+            holder_time = lock_info.get("time", "unknown")
+            holder_user = lock_info.get("user", "unknown")
+            raise TimeoutError(
+                f"Failed to acquire parity lock within {timeout}s. "
+                f"Lock held by: pid={holder_pid}, user={holder_user}, since={holder_time}. "
+                f"If stale, it will auto-expire after TTL ({LOCK_TTL_SECONDS}s)."
+            )
+        raise TimeoutError(f"Failed to acquire parity lock within {timeout}s.")
     return lock
 
 

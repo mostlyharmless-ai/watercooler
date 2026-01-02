@@ -23,6 +23,7 @@ from .sync import (
     write_parity_state,
     run_preflight,
     acquire_topic_lock,
+    acquire_parity_lock,
     _now_iso,
 )
 from .observability import log_debug, log_action, log_warning
@@ -108,13 +109,26 @@ def run_with_sync(
         return operation()
 
     # Per-topic locking to serialize concurrent writes
+    parity_lock = None
     lock = None
     try:
+        # Parity/lifecycle lock serializes branch topology-sensitive actions
+        if context.threads_dir:
+            try:
+                parity_lock = acquire_parity_lock(context.threads_dir, timeout=30)
+                log_debug("[PARITY] Acquired parity lock")
+                log_action("parity.lock.acquire", scope="repo-pair", outcome="ok")
+            except TimeoutError as e:
+                log_action("parity.lock.acquire", scope="repo-pair", outcome="timeout")
+                raise BranchPairingError(f"Failed to acquire parity lock: {e}")
+
         if topic and context.threads_dir:
             try:
                 lock = acquire_topic_lock(context.threads_dir, topic, timeout=30)
                 log_debug(f"[PARITY] Acquired lock for topic '{topic}'")
+                log_action("parity.lock.acquire", scope="topic", topic=topic, outcome="ok")
             except TimeoutError as e:
+                log_action("parity.lock.acquire", scope="topic", topic=topic, outcome="timeout")
                 raise BranchPairingError(f"Failed to acquire lock for topic '{topic}': {e}")
 
         # Run preflight with auto-remediation instead of old validation
@@ -206,6 +220,11 @@ def run_with_sync(
         if lock:
             lock.release()
             log_debug(f"[PARITY] Released lock for topic '{topic}'")
+            log_action("parity.lock.release", scope="topic", topic=topic)
+        if parity_lock:
+            parity_lock.release()
+            log_debug("[PARITY] Released parity lock")
+            log_action("parity.lock.release", scope="repo-pair")
 
 
 def run_with_graph_sync(
@@ -224,26 +243,42 @@ def run_with_graph_sync(
     """
     sync = get_git_sync_manager_from_context(context)
 
-    # 1. Preflight (Factor 1 + Factor 2 pre-check)
-    if context.code_root and context.threads_dir:
-        preflight_result = run_preflight(
-            code_repo_path=context.code_root,
-            threads_repo_path=context.threads_dir,
-            auto_fix=True,
-            fetch_first=True,
-        )
-        if not preflight_result.can_proceed:
-            raise BranchPairingError(
-                preflight_result.blocking_reason or "Branch parity preflight failed"
+    parity_lock = None
+    try:
+        # 1. Preflight (Factor 1 + Factor 2 pre-check) with parity lock
+        if context.threads_dir:
+            try:
+                parity_lock = acquire_parity_lock(context.threads_dir, timeout=30)
+                log_debug("[PARITY] Acquired parity lock")
+                log_action("parity.lock.acquire", scope="repo-pair", outcome="ok")
+            except TimeoutError as e:
+                log_action("parity.lock.acquire", scope="repo-pair", outcome="timeout")
+                raise BranchPairingError(f"Failed to acquire parity lock: {e}")
+
+        if context.code_root and context.threads_dir:
+            preflight_result = run_preflight(
+                code_repo_path=context.code_root,
+                threads_repo_path=context.threads_dir,
+                auto_fix=True,
+                fetch_first=True,
             )
-        if preflight_result.auto_fixed:
-            log_debug(f"[GRAPH-SYNC] Preflight auto-fixed: {preflight_result.state.actions_taken}")
+            if not preflight_result.can_proceed:
+                raise BranchPairingError(
+                    preflight_result.blocking_reason or "Branch parity preflight failed"
+                )
+            if preflight_result.auto_fixed:
+                log_debug(f"[GRAPH-SYNC] Preflight auto-fixed: {preflight_result.state.actions_taken}")
 
-    # 2. Execute operation
-    result = operation()
+        # 2. Execute operation
+        result = operation()
 
-    # 3. Commit and push graph files (blocking)
-    if sync and context.threads_dir:
-        sync.commit_graph_changes_sync(commit_msg)
+        # 3. Commit and push graph files (blocking)
+        if sync and context.threads_dir:
+            sync.commit_graph_changes_sync(commit_msg)
 
-    return result
+        return result
+    finally:
+        if parity_lock:
+            parity_lock.release()
+            log_debug("[PARITY] Released parity lock")
+            log_action("parity.lock.release", scope="repo-pair")

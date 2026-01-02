@@ -37,7 +37,9 @@ from watercooler_mcp.sync import (
     restore_stash,
     has_conflicts,
     has_thread_conflicts_only,
+    has_state_conflicts_only,
     STATE_FILE_NAME,
+    STATE_DIR,
     LOCKS_DIR_NAME,
     LOCK_TIMEOUT_SECONDS,
     LOCK_TTL_SECONDS,
@@ -54,6 +56,7 @@ from watercooler_mcp.sync import (
     pull_rebase,
     checkout_branch,
     auto_merge_to_main,
+    ConflictResolver,
 )
 
 
@@ -262,8 +265,8 @@ def test_write_and_read_parity_state(threads_dir: Path) -> None:
     result = write_parity_state(threads_dir, state)
     assert result is True
 
-    # Verify file exists
-    state_file = threads_dir / STATE_FILE_NAME
+    # Verify file exists (now at preferred location)
+    state_file = threads_dir / STATE_DIR / STATE_FILE_NAME
     assert state_file.exists()
 
     # Read it back
@@ -301,6 +304,38 @@ def test_parity_state_from_dict() -> None:
     assert state.code_branch == "feature-y"
     assert state.threads_branch == "main"
     assert state.last_error == "Cannot write to main"
+
+
+def test_state_file_conflict_auto_resolves_to_theirs(threads_repo: Path) -> None:
+    """State-file-only conflicts should auto-resolve by taking theirs."""
+    repo = Repo(threads_repo)
+    state_path = Path(threads_repo) / STATE_FILE_NAME
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    base = '{"status": "clean", "last_check_at": "t0"}\n'
+    ours = '{"status": "clean", "last_check_at": "t1"}\n'
+    theirs = '{"status": "clean", "last_check_at": "t2"}\n'
+
+    _force_conflict_state(
+        repo,
+        STATE_FILE_NAME,
+        base_content=base,
+        local_content=ours,
+        remote_content=theirs,
+        create_merge_head=True,
+        merge_commit=repo.head.commit.hexsha,
+    )
+
+    # Verify conflict scope is state-only
+    assert has_state_conflicts_only(repo)
+
+    resolver = ConflictResolver(repo)
+    assert resolver.resolve_state_conflicts()
+
+    # After resolution, no conflicts and file matches "theirs"
+    assert not has_conflicts(repo)
+    resolved = state_path.read_text()
+    assert '"last_check_at": "t2"' in resolved
 
 
 # =============================================================================

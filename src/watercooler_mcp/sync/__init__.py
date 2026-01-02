@@ -58,6 +58,7 @@ from .state import (
     # Constants
     STATE_FILE_NAME,
     STATE_FILE_VERSION,
+    STATE_DIR,
     # Enums
     ParityStatus,
     # Data classes
@@ -137,6 +138,7 @@ from .branch_parity import (
     get_branch_health,
     push_after_commit,
     acquire_topic_lock,
+    acquire_parity_lock,
     auto_merge_to_main,
     _detect_squash_merge,
     _now_iso,
@@ -197,6 +199,7 @@ __all__ = [
     # State - Constants
     "STATE_FILE_NAME",
     "STATE_FILE_VERSION",
+    "STATE_DIR",
     # State - Enums
     "ParityStatus",
     # State - Data classes
@@ -264,6 +267,7 @@ __all__ = [
     "get_branch_health",
     "push_after_commit",
     "acquire_topic_lock",
+    "acquire_parity_lock",
     "auto_merge_to_main",
     "_detect_squash_merge",
     "_now_iso",

@@ -443,9 +443,11 @@ def stash_changes(repo: Repo, prefix: str = "watercooler-auto") -> Optional[str]
 
 
 def restore_stash(repo: Repo, stash_ref: Optional[str] = None) -> bool:
-    """Pop the most recent stash.
+    """Restore the most recent stash using apply-first semantics.
 
-    Data-safety invariant: On conflict, stash is preserved (not dropped).
+    Data-safety invariants:
+    - Use `stash apply` (not pop) so conflicts retain the stash.
+    - Drop the stash only after a successful apply.
 
     Args:
         repo: Git repository
@@ -458,10 +460,14 @@ def restore_stash(repo: Repo, stash_ref: Optional[str] = None) -> bool:
         return True  # Nothing to restore
 
     try:
-        repo.git.stash("pop")
+        repo.git.stash("apply")
+        try:
+            repo.git.stash("drop")
+        except GitCommandError as drop_err:
+            log_debug(f"[PRIMITIVES] Stash applied but drop failed (stash may remain): {drop_err}")
         log_debug(f"[PRIMITIVES] Restored stash: {stash_ref}")
         return True
     except GitCommandError as e:
-        # Stash pop failed (likely conflict) - stash is preserved
-        log_debug(f"[PRIMITIVES] Stash pop failed (stash preserved): {e}")
+        # Stash apply failed (likely conflict); stash is preserved for manual handling
+        log_debug(f"[PRIMITIVES] Stash apply failed (stash preserved): {e}")
         return False

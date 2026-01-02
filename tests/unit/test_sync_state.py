@@ -9,6 +9,7 @@ from watercooler_mcp.sync import (
     # Constants
     STATE_FILE_NAME,
     STATE_FILE_VERSION,
+    STATE_DIR,
     # Enums
     ParityStatus,
     # Data classes
@@ -281,7 +282,7 @@ class TestStateManager:
         assert state3.status == "pending_push"
 
     def test_write_creates_file(self, tmp_path):
-        """write() should create state file."""
+        """write() should create state file in preferred location."""
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
@@ -290,7 +291,8 @@ class TestStateManager:
         result = manager.write(state)
 
         assert result is True
-        state_file = threads_dir / STATE_FILE_NAME
+        # State file now lives at .watercooler/state/branch_parity_state.json
+        state_file = threads_dir / STATE_DIR / STATE_FILE_NAME
         assert state_file.exists()
         data = json.loads(state_file.read_text())
         assert data["status"] == "pending_push"
@@ -497,7 +499,7 @@ class TestConvenienceFunctions:
         assert state.status == "pending_push"
 
     def test_write_parity_state(self, tmp_path):
-        """write_parity_state() should write state to file."""
+        """write_parity_state() should write state to preferred location."""
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
@@ -505,14 +507,27 @@ class TestConvenienceFunctions:
         result = write_parity_state(threads_dir, state)
 
         assert result is True
-        state_file = threads_dir / STATE_FILE_NAME
+        # State file now lives at .watercooler/state/branch_parity_state.json
+        state_file = threads_dir / STATE_DIR / STATE_FILE_NAME
         assert state_file.exists()
 
     def test_get_state_file_path(self, tmp_path):
-        """get_state_file_path() should return correct path."""
+        """get_state_file_path() should return preferred path when neither exists."""
         threads_dir = tmp_path / "threads"
         path = get_state_file_path(threads_dir)
-        assert path == threads_dir / STATE_FILE_NAME
+        # When neither file exists, returns preferred location
+        assert path == threads_dir / STATE_DIR / STATE_FILE_NAME
+
+    def test_get_state_file_path_legacy_fallback(self, tmp_path):
+        """get_state_file_path() should return legacy path when only legacy exists."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+        legacy_file = threads_dir / STATE_FILE_NAME
+        legacy_file.write_text('{"status": "clean"}')
+
+        path = get_state_file_path(threads_dir)
+        # When only legacy exists, returns legacy
+        assert path == legacy_file
 
 
 # =============================================================================

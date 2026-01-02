@@ -321,10 +321,14 @@ class TestStashOperations:
         repo.git.stash.assert_not_called()
 
     def test_restore_stash_success(self):
-        """restore_stash pops stash on success."""
+        """restore_stash applies then drops stash on success."""
         repo = MagicMock()
         assert restore_stash(repo, "stash-ref") is True
-        repo.git.stash.assert_called_with("pop")
+        # Stash safety: apply first, then drop (not pop)
+        assert repo.git.stash.call_args_list == [
+            (("apply",), {}),
+            (("drop",), {}),
+        ]
 
 
 # =============================================================================

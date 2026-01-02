@@ -38,6 +38,13 @@ from .primitives import (
 
 STATE_FILE_NAME = "branch_parity_state.json"
 STATE_FILE_VERSION = 1  # For future migrations
+# Prefer storing parity state under .watercooler/state (ignored/local), fallback to legacy root file for compatibility.
+STATE_DIR = ".watercooler/state"
+
+
+def _default_state_path(threads_dir: Path) -> Path:
+    """Preferred location for parity state (ignored/local)."""
+    return Path(threads_dir) / STATE_DIR / STATE_FILE_NAME
 
 
 # =============================================================================
@@ -210,7 +217,9 @@ class StateManager:
         """
         self.threads_dir = Path(threads_dir)
         self.code_repo_path = Path(code_repo_path) if code_repo_path else None
-        self._state_file = self.threads_dir / STATE_FILE_NAME
+        # Prefer the ignored/local path; keep legacy path for backward compatibility reads.
+        self._state_file = _default_state_path(self.threads_dir)
+        self._legacy_state_file = self.threads_dir / STATE_FILE_NAME
         self._cached_state: Optional[ParityState] = None
         self._cache_valid = False
 
@@ -237,29 +246,34 @@ class StateManager:
 
     def _read_from_file(self) -> ParityState:
         """Read state directly from file, bypassing cache."""
-        try:
-            if self._state_file.exists():
-                content = self._state_file.read_text(encoding="utf-8")
-                data = json.loads(content)
+        # Try preferred then legacy path for compatibility; migrate forward on next write.
+        for candidate in (self._state_file, self._legacy_state_file):
+            try:
+                if candidate.exists():
+                    content = candidate.read_text(encoding="utf-8")
+                    data = json.loads(content)
 
-                # Handle version migration if needed
-                file_version = data.get("version", 1)
-                if file_version < STATE_FILE_VERSION:
-                    data = self._migrate_state(data, file_version)
+                    # Handle version migration if needed
+                    file_version = data.get("version", 1)
+                    if file_version < STATE_FILE_VERSION:
+                        data = self._migrate_state(data, file_version)
 
-                return ParityState.from_dict(data)
-        except json.JSONDecodeError as e:
-            log_debug(
-                f"[STATE] WARNING: Corrupted state file at {self._state_file}, "
-                f"resetting to clean state. JSON error: {e}"
-            )
-        except (KeyError, TypeError) as e:
-            log_debug(
-                f"[STATE] WARNING: Invalid state file structure at {self._state_file}, "
-                f"resetting to clean state. Structure error: {e}"
-            )
-        except Exception as e:
-            log_debug(f"[STATE] Failed to read state file: {e}")
+                    # If we read from legacy, keep writing to preferred path going forward.
+                    if candidate != self._state_file:
+                        self._state_file = _default_state_path(self.threads_dir)
+                    return ParityState.from_dict(data)
+            except json.JSONDecodeError as e:
+                log_debug(
+                    f"[STATE] WARNING: Corrupted state file at {candidate}, "
+                    f"resetting to clean state. JSON error: {e}"
+                )
+            except (KeyError, TypeError) as e:
+                log_debug(
+                    f"[STATE] WARNING: Invalid state file structure at {candidate}, "
+                    f"resetting to clean state. Structure error: {e}"
+                )
+            except Exception as e:
+                log_debug(f"[STATE] Failed to read state file {candidate}: {e}")
 
         return ParityState()
 
@@ -485,5 +499,7 @@ def write_parity_state(threads_dir: Path, state: ParityState) -> bool:
 
 
 def get_state_file_path(threads_dir: Path) -> Path:
-    """Get path to parity state file."""
-    return threads_dir / STATE_FILE_NAME
+    """Get path to parity state file (preferred ignored path)."""
+    preferred = _default_state_path(threads_dir)
+    legacy = threads_dir / STATE_FILE_NAME
+    return preferred if preferred.exists() or not legacy.exists() else legacy
