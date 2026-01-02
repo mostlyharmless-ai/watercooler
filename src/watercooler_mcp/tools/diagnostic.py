@@ -211,26 +211,70 @@ def _reconcile_parity_impl(
         # Get current health before reconcile
         health_before = get_branch_health(context.code_root, context.threads_dir)
 
-        # Check if CODE is behind origin - this requires user action, we can't auto-fix
+        # Check if CODE is behind origin - try auto-pull if safe (fast-forward)
         code_behind = health_before.get('code_behind_origin', 0)
         if code_behind > 0:
             code_branch = health_before.get('code_branch', 'unknown')
-            return ToolResult(content=[TextContent(
-                type="text",
-                text=json.dumps({
-                    "status": "code_behind_origin",
-                    "error": f"Code branch '{code_branch}' is {code_behind} commits behind origin. "
-                             f"Please pull the code repo first: git pull",
-                    "code_behind": code_behind,
-                    "code_branch": code_branch,
-                    "code_root": str(context.code_root),
-                    "suggested_commands": [
-                        f"cd {context.code_root}",
-                        "git pull --rebase",
-                    ],
-                    "actions_taken": [],
-                }, indent=2)
-            )])
+            code_ahead = health_before.get('code_ahead_origin', 0)
+
+            # Check if auto-pull is safe:
+            # 1. Working tree must be clean (no uncommitted changes)
+            # 2. Must be fast-forward (no local commits ahead)
+            is_clean = not code_repo.is_dirty(untracked_files=False)
+            is_fast_forward = code_ahead == 0
+
+            if is_clean and is_fast_forward:
+                # Safe to auto-pull
+                try:
+                    log_debug(f"[RECONCILE] Code behind by {code_behind}, attempting auto-pull (ff-only)")
+                    code_repo.git.pull('--ff-only')
+                    actions_taken.append(f"Auto-pulled code repo (fast-forward, {code_behind} commits)")
+                    log_debug("[RECONCILE] Code auto-pull succeeded")
+                    # Refresh health after pull
+                    health_before = get_branch_health(context.code_root, context.threads_dir)
+                except Exception as pull_err:
+                    log_debug(f"[RECONCILE] Code auto-pull failed: {pull_err}")
+                    return ToolResult(content=[TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "status": "code_behind_origin",
+                            "error": f"Auto-pull failed: {pull_err}. Please pull manually.",
+                            "code_behind": code_behind,
+                            "code_branch": code_branch,
+                            "code_root": str(context.code_root),
+                            "suggested_commands": [
+                                f"cd {context.code_root}",
+                                "git pull --rebase",
+                            ],
+                            "actions_taken": actions_taken,
+                        }, indent=2)
+                    )])
+            else:
+                # Not safe to auto-pull
+                reason = []
+                if not is_clean:
+                    reason.append("working tree has uncommitted changes")
+                if not is_fast_forward:
+                    reason.append(f"local has {code_ahead} commits ahead (requires rebase)")
+
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "status": "code_behind_origin",
+                        "error": f"Code branch '{code_branch}' is {code_behind} commits behind origin. "
+                                 f"Cannot auto-pull: {'; '.join(reason)}. Please pull manually.",
+                        "code_behind": code_behind,
+                        "code_ahead": code_ahead,
+                        "code_branch": code_branch,
+                        "code_root": str(context.code_root),
+                        "auto_pull_blocked": reason,
+                        "suggested_commands": [
+                            f"cd {context.code_root}",
+                            "git pull --rebase",
+                        ],
+                        "actions_taken": [],
+                    }, indent=2)
+                )])
 
         # If threads is behind, pull it (this is the "reconcile" operation)
         threads_behind = health_before.get('threads_behind_origin', 0)
