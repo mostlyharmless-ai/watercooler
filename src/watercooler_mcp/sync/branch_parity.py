@@ -687,6 +687,38 @@ class BranchParityManager:
                             can_proceed=False,
                             blocking_reason=state.last_error,
                         )
+                elif auto_fix and has_state_conflicts_only(self.threads_repo):
+                    if resolver.resolve_state_conflicts():
+                        actions_taken.append("Auto-resolved state file conflicts")
+                        # If in rebase, continue it
+                        if is_rebase_in_progress(self.threads_repo):
+                            try:
+                                self.threads_repo.git.rebase("--continue")
+                                actions_taken.append("Completed rebase after state conflict resolution")
+                            except GitCommandError as e:
+                                log_debug(f"[PARITY] Rebase continue failed: {e}")
+                                state.status = ParityStatus.DIVERGED.value
+                                state.last_error = (
+                                    "State conflicts resolved but rebase continue failed. "
+                                    "Manual intervention required."
+                                )
+                                write_parity_state(self.threads_repo_path, state)
+                                return PreflightResult(
+                                    success=False,
+                                    state=state,
+                                    can_proceed=False,
+                                    blocking_reason=state.last_error,
+                                )
+                    else:
+                        state.status = ParityStatus.DIVERGED.value
+                        state.last_error = "State file conflicts could not be auto-resolved"
+                        write_parity_state(self.threads_repo_path, state)
+                        return PreflightResult(
+                            success=False,
+                            state=state,
+                            can_proceed=False,
+                            blocking_reason=state.last_error,
+                        )
                 else:
                     state.status = ParityStatus.DIVERGED.value
                     state.last_error = "Threads repository has unresolved merge conflicts. Resolve manually"
@@ -711,15 +743,63 @@ class BranchParityManager:
                 )
 
             if is_rebase_in_progress(self.threads_repo):
-                state.status = ParityStatus.REBASE_IN_PROGRESS.value
-                state.last_error = "Threads repository has rebase in progress"
-                write_parity_state(self.threads_repo_path, state)
-                return PreflightResult(
-                    success=False,
-                    state=state,
-                    can_proceed=False,
-                    blocking_reason=state.last_error,
-                )
+                # Try to resolve conflicts and continue rebase if possible
+                if auto_fix and has_conflicts(self.threads_repo):
+                    resolver = ConflictResolver(self.threads_repo)
+                    resolved = False
+                    if has_graph_conflicts_only(self.threads_repo):
+                        resolved = resolver.resolve_graph_conflicts()
+                        if resolved:
+                            actions_taken.append("Auto-resolved graph conflicts during rebase")
+                    elif has_thread_conflicts_only(self.threads_repo):
+                        resolved = resolver.resolve_thread_conflicts()
+                        if resolved:
+                            actions_taken.append("Auto-resolved thread conflicts during rebase")
+                    elif has_state_conflicts_only(self.threads_repo):
+                        resolved = resolver.resolve_state_conflicts()
+                        if resolved:
+                            actions_taken.append("Auto-resolved state conflicts during rebase")
+
+                    if resolved:
+                        try:
+                            self.threads_repo.git.rebase("--continue")
+                            actions_taken.append("Completed interrupted rebase")
+                        except GitCommandError as e:
+                            log_debug(f"[PARITY] Rebase continue failed: {e}")
+                            state.status = ParityStatus.REBASE_IN_PROGRESS.value
+                            state.last_error = (
+                                "Conflicts resolved but rebase continue failed. "
+                                "Manual intervention required."
+                            )
+                            write_parity_state(self.threads_repo_path, state)
+                            return PreflightResult(
+                                success=False,
+                                state=state,
+                                can_proceed=False,
+                                blocking_reason=state.last_error,
+                            )
+                    else:
+                        state.status = ParityStatus.REBASE_IN_PROGRESS.value
+                        state.last_error = (
+                            "Threads repository has rebase in progress with unresolvable conflicts"
+                        )
+                        write_parity_state(self.threads_repo_path, state)
+                        return PreflightResult(
+                            success=False,
+                            state=state,
+                            can_proceed=False,
+                            blocking_reason=state.last_error,
+                        )
+                else:
+                    state.status = ParityStatus.REBASE_IN_PROGRESS.value
+                    state.last_error = "Threads repository has rebase in progress"
+                    write_parity_state(self.threads_repo_path, state)
+                    return PreflightResult(
+                        success=False,
+                        state=state,
+                        can_proceed=False,
+                        blocking_reason=state.last_error,
+                    )
 
             # Fetch from origin
             if fetch_first:
@@ -1052,11 +1132,40 @@ class BranchParityManager:
                                 can_proceed=False,
                                 blocking_reason=state.last_error,
                             )
+                    elif has_state_conflicts_only(self.threads_repo):
+                        if resolver.resolve_state_conflicts():
+                            try:
+                                self.threads_repo.git.rebase("--continue")
+                                actions_taken.append("Auto-resolved state conflicts after pull")
+                            except GitCommandError as e:
+                                log_debug(f"[PARITY] Rebase continue failed: {e}")
+                                state.status = ParityStatus.DIVERGED.value
+                                state.last_error = (
+                                    "State conflicts resolved but rebase continue failed. "
+                                    "Manual intervention required."
+                                )
+                                write_parity_state(self.threads_repo_path, state)
+                                return PreflightResult(
+                                    success=False,
+                                    state=state,
+                                    can_proceed=False,
+                                    blocking_reason=state.last_error,
+                                )
+                        else:
+                            state.status = ParityStatus.DIVERGED.value
+                            state.last_error = "State file conflicts after pull could not be auto-resolved"
+                            write_parity_state(self.threads_repo_path, state)
+                            return PreflightResult(
+                                success=False,
+                                state=state,
+                                can_proceed=False,
+                                blocking_reason=state.last_error,
+                            )
                     else:
-                        # Mixed conflicts (both graph and thread files) - require manual resolution
+                        # Mixed conflicts (graph, thread, or state files) - require manual resolution
                         state.status = ParityStatus.DIVERGED.value
                         state.last_error = (
-                            "Mixed conflicts after pull (both graph and thread files). "
+                            "Mixed conflicts after pull. "
                             "Manual resolution required."
                         )
                         write_parity_state(self.threads_repo_path, state)
