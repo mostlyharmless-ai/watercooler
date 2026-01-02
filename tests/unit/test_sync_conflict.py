@@ -20,6 +20,9 @@ from watercooler_mcp.sync import (
     # Convenience functions
     has_graph_conflicts_only,
     has_thread_conflicts_only,
+    has_state_conflicts_only,
+    # Constants
+    STATE_FILE_NAME,
 )
 
 
@@ -524,3 +527,116 @@ class TestConvenienceFunctions:
         repo.git.status.return_value = "UU graph/baseline/nodes.jsonl\n"
 
         assert has_thread_conflicts_only(repo) is False
+
+    def test_has_state_conflicts_only_true(self, tmp_path):
+        """has_state_conflicts_only returns True for state file conflicts."""
+        repo = MagicMock()
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "MERGE_HEAD").touch()
+        repo.git_dir = str(git_dir)
+        repo.git.status.return_value = f"UU {STATE_FILE_NAME}\n"
+
+        assert has_state_conflicts_only(repo) is True
+
+    def test_has_state_conflicts_only_false_for_thread(self, tmp_path):
+        """has_state_conflicts_only returns False for thread conflicts."""
+        repo = MagicMock()
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "MERGE_HEAD").touch()
+        repo.git_dir = str(git_dir)
+        repo.git.status.return_value = "UU topic.md\n"
+
+        assert has_state_conflicts_only(repo) is False
+
+    def test_has_state_conflicts_only_false_for_mixed(self, tmp_path):
+        """has_state_conflicts_only returns False for mixed conflicts."""
+        repo = MagicMock()
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "MERGE_HEAD").touch()
+        repo.git_dir = str(git_dir)
+        repo.git.status.return_value = f"UU {STATE_FILE_NAME}\nUU topic.md\n"
+
+        assert has_state_conflicts_only(repo) is False
+
+
+# =============================================================================
+# State Conflict Resolution Tests
+# =============================================================================
+
+
+class TestStateConflictResolution:
+    """Tests for state file conflict auto-resolution."""
+
+    def test_detect_state_only_scope(self, tmp_path):
+        """detect() identifies state file as STATE_ONLY scope."""
+        repo = MagicMock()
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "MERGE_HEAD").touch()
+        repo.git_dir = str(git_dir)
+        repo.git.status.return_value = f"UU {STATE_FILE_NAME}\n"
+
+        resolver = ConflictResolver(repo)
+        info = resolver.detect()
+
+        assert info.has_conflicts is True
+        assert info.scope == ConflictScope.STATE_ONLY
+        assert info.can_auto_resolve is True
+        assert info.resolution_strategy == "take_theirs"
+
+    def test_state_conflict_can_auto_resolve(self, tmp_path):
+        """State-only conflicts can be auto-resolved."""
+        repo = MagicMock()
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "MERGE_HEAD").touch()
+        repo.git_dir = str(git_dir)
+        repo.git.status.return_value = f"UU {STATE_FILE_NAME}\n"
+
+        resolver = ConflictResolver(repo)
+        assert resolver.can_auto_resolve() is True
+
+    def test_resolve_state_conflicts_takes_theirs(self, tmp_path):
+        """resolve_state_conflicts takes remote version."""
+        repo = MagicMock()
+        repo.working_dir = str(tmp_path)
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "MERGE_HEAD").touch()
+        repo.git_dir = str(git_dir)
+        repo.git.status.return_value = f"UU {STATE_FILE_NAME}\n"
+
+        # Create state file
+        (tmp_path / STATE_FILE_NAME).write_text('{"status": "conflicted"}')
+
+        resolver = ConflictResolver(repo)
+        result = resolver.resolve_state_conflicts()
+
+        # Should call checkout --theirs
+        repo.git.checkout.assert_called_with("--theirs", STATE_FILE_NAME)
+        # Should stage the file
+        repo.index.add.assert_called_with([STATE_FILE_NAME])
+        assert result is True
+
+    def test_auto_resolve_dispatches_to_state_resolver(self, tmp_path):
+        """auto_resolve calls resolve_state_conflicts for STATE_ONLY scope."""
+        repo = MagicMock()
+        repo.working_dir = str(tmp_path)
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "MERGE_HEAD").touch()
+        repo.git_dir = str(git_dir)
+        repo.git.status.return_value = f"UU {STATE_FILE_NAME}\n"
+
+        # Create state file
+        (tmp_path / STATE_FILE_NAME).write_text('{"status": "conflicted"}')
+
+        resolver = ConflictResolver(repo)
+        result = resolver.auto_resolve()
+
+        # Verify state resolution was called
+        repo.git.checkout.assert_called_with("--theirs", STATE_FILE_NAME)
+        assert result is True

@@ -86,6 +86,7 @@ from .conflict import (
     # Convenience functions
     has_graph_conflicts_only,
     has_thread_conflicts_only,
+    has_state_conflicts_only,
 )
 
 from .local_remote import (
@@ -220,6 +221,7 @@ __all__ = [
     # Conflict - Convenience functions
     "has_graph_conflicts_only",
     "has_thread_conflicts_only",
+    "has_state_conflicts_only",
     # Local-Remote - Data classes
     "PullResult",
     "CommitResult",

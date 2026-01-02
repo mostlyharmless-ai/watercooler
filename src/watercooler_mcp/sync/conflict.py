@@ -24,6 +24,7 @@ from git import Repo
 from git.exc import GitCommandError
 
 from ..observability import log_debug
+from .state import STATE_FILE_NAME
 
 
 # =============================================================================
@@ -46,6 +47,7 @@ class ConflictScope(str, Enum):
     NONE = "none"  # No conflicts
     GRAPH_ONLY = "graph_only"  # Only graph/baseline/ files
     THREAD_ONLY = "thread_only"  # Only .md thread files
+    STATE_ONLY = "state_only"  # Only state file (branch_parity_state.json)
     MIXED = "mixed"  # Mix of file types
 
 
@@ -347,7 +349,11 @@ class ConflictResolver:
         scope = self._determine_scope(conflicting_files)
 
         # Determine if auto-resolution is possible
-        can_auto_resolve = scope in (ConflictScope.GRAPH_ONLY, ConflictScope.THREAD_ONLY)
+        can_auto_resolve = scope in (
+            ConflictScope.GRAPH_ONLY,
+            ConflictScope.THREAD_ONLY,
+            ConflictScope.STATE_ONLY,
+        )
 
         # Determine resolution strategy
         strategy = None
@@ -355,6 +361,8 @@ class ConflictResolver:
             strategy = "deduplicate_by_uuid"
         elif scope == ConflictScope.THREAD_ONLY:
             strategy = "merge_by_entry_id"
+        elif scope == ConflictScope.STATE_ONLY:
+            strategy = "take_theirs"
 
         return ConflictInfo(
             conflict_type=conflict_type,
@@ -398,6 +406,8 @@ class ConflictResolver:
             return self.resolve_graph_conflicts()
         elif info.scope == ConflictScope.THREAD_ONLY:
             return self.resolve_thread_conflicts()
+        elif info.scope == ConflictScope.STATE_ONLY:
+            return self.resolve_state_conflicts()
         else:
             log_debug(f"[CONFLICT] Cannot auto-resolve mixed conflicts")
             return False
@@ -468,6 +478,42 @@ class ConflictResolver:
             self._stage_resolved_file(file_rel)
 
         return self._complete_merge_or_rebase("thread conflicts")
+
+    def resolve_state_conflicts(self) -> bool:
+        """Auto-resolve conflicts in state file using take-theirs strategy.
+
+        The branch_parity_state.json file is metadata that tracks sync state.
+        When conflicts occur (typically from concurrent sessions), we always
+        take the remote version (theirs) because:
+        1. It represents the most recent successful sync
+        2. State is regenerated on each operation anyway
+        3. Local state may be stale from an interrupted operation
+
+        Returns:
+            True if state file conflict resolved successfully
+        """
+        conflicting_files = self._get_conflicting_files()
+        if not conflicting_files:
+            return True
+
+        for file_rel in conflicting_files:
+            if file_rel != STATE_FILE_NAME:
+                log_debug(f"[CONFLICT] Non-state file in state conflicts: {file_rel}")
+                return False
+
+            try:
+                # Take the remote version (theirs) - last-write-wins for metadata
+                self.repo.git.checkout("--theirs", file_rel)
+                log_debug(f"[CONFLICT] Resolved state file conflict: {file_rel} (took theirs)")
+
+                # Stage the resolved file
+                self._stage_resolved_file(file_rel)
+
+            except GitCommandError as e:
+                log_debug(f"[CONFLICT] Failed to resolve state file: {e}")
+                return False
+
+        return self._complete_merge_or_rebase("state file conflict")
 
     def abort_resolution(self) -> bool:
         """Abort the current merge or rebase.
@@ -549,8 +595,11 @@ class ConflictResolver:
 
         all_graph = all(f.startswith("graph/baseline/") for f in files)
         all_thread = all(f.endswith(".md") and not f.startswith("graph/") for f in files)
+        all_state = all(f == STATE_FILE_NAME for f in files)
 
-        if all_graph:
+        if all_state:
+            return ConflictScope.STATE_ONLY
+        elif all_graph:
             return ConflictScope.GRAPH_ONLY
         elif all_thread:
             return ConflictScope.THREAD_ONLY
@@ -712,3 +761,20 @@ def has_thread_conflicts_only(repo: Repo) -> bool:
     resolver = ConflictResolver(repo)
     info = resolver.detect()
     return info.has_conflicts and info.scope == ConflictScope.THREAD_ONLY
+
+
+def has_state_conflicts_only(repo: Repo) -> bool:
+    """Check if all conflicts are in the state file only.
+
+    This is useful for detecting conflicts that can be safely auto-resolved
+    by taking the remote version (concurrent session metadata conflicts).
+
+    Args:
+        repo: Git repository
+
+    Returns:
+        True if conflicts exist AND all are in branch_parity_state.json
+    """
+    resolver = ConflictResolver(repo)
+    info = resolver.detect()
+    return info.has_conflicts and info.scope == ConflictScope.STATE_ONLY
