@@ -744,7 +744,20 @@ class BranchParityManager:
 
             if is_rebase_in_progress(self.threads_repo):
                 # Try to resolve conflicts and continue rebase if possible
-                if auto_fix and has_conflicts(self.threads_repo):
+                if not auto_fix:
+                    state.status = ParityStatus.REBASE_IN_PROGRESS.value
+                    state.last_error = "Threads repository has rebase in progress"
+                    write_parity_state(self.threads_repo_path, state)
+                    return PreflightResult(
+                        success=False,
+                        state=state,
+                        can_proceed=False,
+                        blocking_reason=state.last_error,
+                    )
+
+                # auto_fix=True: try to complete the rebase
+                if has_conflicts(self.threads_repo):
+                    # Unresolved conflicts - try to resolve them
                     resolver = ConflictResolver(self.threads_repo)
                     resolved = False
                     if has_graph_conflicts_only(self.threads_repo):
@@ -760,25 +773,7 @@ class BranchParityManager:
                         if resolved:
                             actions_taken.append("Auto-resolved state conflicts during rebase")
 
-                    if resolved:
-                        try:
-                            self.threads_repo.git.rebase("--continue")
-                            actions_taken.append("Completed interrupted rebase")
-                        except GitCommandError as e:
-                            log_debug(f"[PARITY] Rebase continue failed: {e}")
-                            state.status = ParityStatus.REBASE_IN_PROGRESS.value
-                            state.last_error = (
-                                "Conflicts resolved but rebase continue failed. "
-                                "Manual intervention required."
-                            )
-                            write_parity_state(self.threads_repo_path, state)
-                            return PreflightResult(
-                                success=False,
-                                state=state,
-                                can_proceed=False,
-                                blocking_reason=state.last_error,
-                            )
-                    else:
+                    if not resolved:
                         state.status = ParityStatus.REBASE_IN_PROGRESS.value
                         state.last_error = (
                             "Threads repository has rebase in progress with unresolvable conflicts"
@@ -791,8 +786,20 @@ class BranchParityManager:
                             blocking_reason=state.last_error,
                         )
                 else:
+                    # No conflicts - git already auto-merged, just need to continue
+                    actions_taken.append("Git auto-merged rebase conflicts")
+
+                # Continue the rebase (conflicts resolved or git auto-merged)
+                try:
+                    self.threads_repo.git.rebase("--continue")
+                    actions_taken.append("Completed interrupted rebase")
+                except GitCommandError as e:
+                    log_debug(f"[PARITY] Rebase continue failed: {e}")
                     state.status = ParityStatus.REBASE_IN_PROGRESS.value
-                    state.last_error = "Threads repository has rebase in progress"
+                    state.last_error = (
+                        "Rebase continue failed. "
+                        "Manual intervention required."
+                    )
                     write_parity_state(self.threads_repo_path, state)
                     return PreflightResult(
                         success=False,
