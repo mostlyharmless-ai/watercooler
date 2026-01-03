@@ -546,7 +546,7 @@ def check_branches(*, code_root: Path | None = None, include_merged: bool = Fals
 
     try:
         from watercooler_mcp.config import resolve_thread_context
-        from watercooler_mcp.git_sync import validate_branch_pairing
+        from watercooler_mcp.sync import validate_branch_pairing
 
         code_path = code_root or Path.cwd()
         context = resolve_thread_context(code_path)
@@ -645,7 +645,7 @@ def check_branches(*, code_root: Path | None = None, include_merged: bool = Fals
 
         # Add parity health status for current branch
         try:
-            from watercooler_mcp.branch_parity import get_branch_health
+            from watercooler_mcp.sync import get_branch_health
             health = get_branch_health(context.code_root, context.threads_dir)
             lines.append("")
             lines.append("📊 Current Branch Parity Status:")
@@ -688,7 +688,7 @@ def check_branch(branch: str, *, code_root: Path | None = None) -> str:
 
     try:
         from watercooler_mcp.config import resolve_thread_context
-        from watercooler_mcp.git_sync import validate_branch_pairing
+        from watercooler_mcp.sync import validate_branch_pairing
 
         code_path = code_root or Path.cwd()
         context = resolve_thread_context(code_path)
@@ -797,7 +797,7 @@ def merge_branch(branch: str, *, code_root: Path | None = None, force: bool = Fa
         warnings = []
         if context.code_root:
             try:
-                from watercooler_mcp.git_sync import _detect_squash_merge
+                from watercooler_mcp.sync import _detect_squash_merge
                 code_repo_obj = Repo(context.code_root, search_parent_directories=True)
                 is_squash, squash_sha = _detect_squash_merge(code_repo_obj, branch)
                 if is_squash:

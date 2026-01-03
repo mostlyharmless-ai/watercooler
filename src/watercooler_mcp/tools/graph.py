@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 from fastmcp import Context
 
-from ..git_sync import BranchPairingError
+from ..sync import BranchPairingError
 from ..middleware import run_with_graph_sync
 from .. import validation  # Import module for runtime access (enables test patching)
 

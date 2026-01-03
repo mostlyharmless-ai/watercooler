@@ -34,16 +34,14 @@ from .config import (
     get_git_sync_manager_from_context,
     resolve_thread_context,
 )
-from .git_sync import (
+from .sync import (
     BranchPairingError,
     BranchMismatch,
     BranchPairingResult,
     validate_branch_pairing,
     sync_branch_history,
-    _find_main_branch,
-)
-from .branch_parity import (
     auto_merge_to_main,
+    _find_main_branch,
 )
 from .observability import log_debug
 
@@ -166,8 +164,10 @@ def _attempt_auto_fix_divergence(
             break
 
     # Handle merge-to-main case: code branch merged to main, threads should follow
+    # Apply conservative evidence gating: only attempt auto-merge when the validation
+    # result explicitly requests merge-to-main (needs_merge_to_main=True) AND a main
+    # branch exists. Otherwise, surface the mismatch for explicit resolution.
     if merge_to_main_mismatch:
-        log_debug("Ahead-of-main divergence detected, will merge threads to main")
         try:
             threads_repo = Repo(context.threads_dir, search_parent_directories=True)
             main_branch = _find_main_branch(threads_repo)
@@ -177,8 +177,11 @@ def _attempt_auto_fix_divergence(
                 )
 
             feature_branch = validation_result.threads_branch or context.code_branch
+
             success, message = auto_merge_to_main(
-                threads_repo, feature_branch, main_branch
+                threads_repo,
+                feature_branch,
+                main_branch,
             )
 
             if success:
@@ -200,6 +203,7 @@ def _attempt_auto_fix_divergence(
                     )
                     return revalidation
             else:
+                # Surface for explicit resolution
                 raise BranchPairingError(
                     f"Auto-merge to main failed: {message}\n"
                     f"Manual recovery: cd <threads-repo> && git checkout main && "
