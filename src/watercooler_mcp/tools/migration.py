@@ -430,7 +430,8 @@ async def _migrate_to_memory_backend_impl(
 
                 try:
                     # Parse timestamp for reference_time
-                    from datetime import datetime, timezone
+                    # Note: .replace('Z', '+00:00') needed because Python's fromisoformat
+                    # doesn't handle 'Z' suffix until Python 3.11
                     timestamp_str = entry.get("timestamp")
                     if timestamp_str:
                         try:
@@ -441,8 +442,13 @@ async def _migrate_to_memory_backend_impl(
                         ref_time = datetime.now(timezone.utc)
 
                     # Build episode name from title or body snippet
+                    # Strip whitespace and replace newlines to avoid multi-line names
                     title = entry.get("title", "")
-                    episode_name = title if title else body[:50] + ("..." if len(body) > 50 else "")
+                    if title:
+                        episode_name = title.strip()
+                    else:
+                        body_snippet = body[:50].replace('\n', ' ').strip()
+                        episode_name = body_snippet + ("..." if len(body) > 50 else "")
 
                     # Build source description from entry metadata
                     agent = entry.get("agent", "Unknown")
@@ -455,12 +461,21 @@ async def _migrate_to_memory_backend_impl(
                         source_desc += f" - {entry_type}"
 
                     # Call backend to add episode
-                    await migration_backend.add_episode_direct(
+                    ep_result = await migration_backend.add_episode_direct(
                         name=episode_name,
                         episode_body=body,
                         source_description=source_desc,
                         reference_time=ref_time,
                         group_id=topic,
+                    )
+
+                    # Log migration progress at debug level
+                    episode_uuid = ep_result.get("episode_uuid", "unknown")
+                    entities_count = len(ep_result.get("entities_extracted", []))
+                    facts_count = ep_result.get("facts_extracted", 0)
+                    logger.debug(
+                        f"Migrated entry {entry_id} -> episode {episode_uuid}, "
+                        f"extracted {entities_count} entities, {facts_count} facts"
                     )
 
                     migrated_entries.append(entry_id)
