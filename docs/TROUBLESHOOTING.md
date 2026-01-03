@@ -18,6 +18,8 @@ Common issues and solutions for the watercooler MCP server.
   - [Client ID is None](#client-id-is-none)
   - [Tools Not Working](#tools-not-working)
   - [Git Not Found](#git-not-found)
+  - [Git Authentication](#git-authentication)
+  - [SSH Agent Issues (WSL2/Headless)](#ssh-agent-issues-wsl2headless)
   - [Git Sync Issues (Cloud Mode)](#git-sync-issues-cloud-mode)
 - [Branch Parity Errors](#branch-parity-errors)
 - [Thread folder inside code repo](#thread-folder-inside-code-repo)
@@ -345,6 +347,138 @@ Git pushes/pulls fail, or you see `Permission denied (publickey)` / `fatal: Auth
    - The credential helper will still be used for HTTPS operations
 
 See [AUTHENTICATION.md](AUTHENTICATION.md) for complete authentication guide.
+
+---
+
+## SSH Agent Issues (WSL2/Headless)
+
+### Symptom
+Git operations silently fail, hang indefinitely, or timeout in MCP server context, but work fine from interactive terminal.
+
+Common error patterns:
+- Watercooler write operations (`say`, `ack`, `handoff`) hang for 30+ seconds then timeout
+- No visible error message, just silent failure
+- `git push` works in terminal but fails when called by MCP server
+- Graph conflicts appear to "cycle forever" without resolution
+
+### Root Cause
+SSH protocol requires either:
+1. An unlocked SSH key (no passphrase), or
+2. An SSH agent with the key loaded
+
+In headless contexts (MCP servers, background services, cron jobs), there's no TTY for passphrase prompts. Without an SSH agent running, SSH operations fail silently or hang waiting for input that never comes.
+
+### Diagnosis
+
+**Step 1: Check if using SSH protocol**
+```bash
+git remote get-url origin
+# If starts with git@github.com: → you're using SSH
+# If starts with https://github.com → you're using HTTPS (skip to next section)
+```
+
+**Step 2: Check SSH agent status**
+```bash
+# Is SSH agent running?
+echo $SSH_AUTH_SOCK
+# Empty = no agent running
+
+# Are keys loaded?
+ssh-add -l
+# "The agent has no identities" = no keys loaded
+# "Could not open connection" = no agent running
+```
+
+**Step 3: Test SSH authentication**
+```bash
+ssh -T git@github.com
+# If prompts for passphrase → agent not loaded
+# If says "Hi username!" → agent working
+```
+
+### Solution 1: Switch to HTTPS (Recommended)
+
+The most reliable fix for MCP/headless environments:
+
+```bash
+# 1. Configure gh to use HTTPS
+gh config set git_protocol https
+
+# 2. Set up credential helper
+gh auth setup-git
+
+# 3. Verify
+git config --global credential.helper
+# Should show: !/usr/bin/gh auth git-credential
+
+# 4. Optionally convert existing repos to HTTPS
+git remote set-url origin https://github.com/org/repo.git
+git remote set-url origin https://github.com/org/repo-threads.git
+```
+
+### Solution 2: Fix SSH Agent (if SSH required)
+
+**Quick fix (current session):**
+```bash
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_ed25519
+```
+
+**Persistent fix (WSL2/Linux):**
+Add to `~/.bashrc` or `~/.zshrc`:
+```bash
+# Auto-start SSH agent
+if [ -z "$SSH_AUTH_SOCK" ]; then
+    eval "$(ssh-agent -s)" > /dev/null
+    ssh-add ~/.ssh/id_ed25519 2>/dev/null
+fi
+```
+
+**Persistent fix (systemd user service):**
+```bash
+# Create ~/.config/systemd/user/ssh-agent.service
+cat > ~/.config/systemd/user/ssh-agent.service << 'EOF'
+[Unit]
+Description=SSH key agent
+
+[Service]
+Type=simple
+Environment=SSH_AUTH_SOCK=%t/ssh-agent.socket
+ExecStart=/usr/bin/ssh-agent -D -a $SSH_AUTH_SOCK
+ExecStartPost=/usr/bin/ssh-add
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Enable and start
+systemctl --user enable ssh-agent
+systemctl --user start ssh-agent
+
+# Add to shell profile
+echo 'export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/ssh-agent.socket"' >> ~/.bashrc
+```
+
+### Verification
+
+After applying either solution:
+
+```bash
+# Test git authentication
+git ls-remote origin
+
+# Test Watercooler health
+# In MCP client:
+watercooler_health(code_path=".")
+# Should show "Branch Parity: clean" within seconds
+
+# Test a write operation
+watercooler_say(topic="test", title="Test", body="Testing git auth", code_path=".")
+```
+
+### See Also
+
+- [AUTHENTICATION.md](AUTHENTICATION.md#ssh-agent-required-for-ssh-protocol-critical-for-mcpheadless) - Full authentication setup guide
 
 ---
 
