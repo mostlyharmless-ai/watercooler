@@ -24,7 +24,7 @@ from .config import (
     get_git_sync_manager_from_context,
     resolve_thread_context,
 )
-from .git_sync import BranchPairingError
+from .sync import BranchPairingError
 from .observability import log_debug
 
 

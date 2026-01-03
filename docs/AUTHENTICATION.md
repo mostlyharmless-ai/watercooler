@@ -298,6 +298,91 @@ git config --global credential."https://github.com".helper "$(pwd)/scripts/git-c
    - Set up SSH keys in GitHub: https://docs.github.com/en/authentication/connecting-to-github-with-ssh
    - The credential helper won't be used (SSH authentication is separate)
 
+### ⚠️ SSH Agent Required for SSH Protocol (Critical for MCP/Headless)
+
+**Problem:** Git operations silently fail or hang when using SSH protocol without an SSH agent running.
+
+**Why this happens:**
+- SSH authentication requires either an unlocked key or an SSH agent with the key loaded
+- In headless environments (MCP servers, background services, WSL2 without GUI), there's no TTY for password prompts
+- Without an SSH agent, SSH key passphrase prompts fail silently or hang indefinitely
+- This is especially problematic for Watercooler MCP which runs as a background service
+
+**Symptoms:**
+- `watercooler_say` or other write operations hang or timeout
+- Git operations fail with no clear error message
+- `ssh -T git@github.com` prompts for passphrase but MCP context can't respond
+
+**Solution: Use HTTPS with GitHub CLI (Recommended for MCP)**
+
+The most reliable approach for MCP servers and headless environments:
+
+1. **Configure GitHub CLI to use HTTPS:**
+   ```bash
+   # Check current protocol
+   gh config get git_protocol
+
+   # Switch to HTTPS
+   gh config set git_protocol https
+   ```
+
+   Or edit `~/.config/gh/hosts.yml`:
+   ```yaml
+   github.com:
+       git_protocol: https
+       user: your-username
+   ```
+
+2. **Set up the credential helper:**
+   ```bash
+   gh auth setup-git
+   ```
+
+   This configures git to use `gh` as a credential helper, which:
+   - Uses your existing `gh auth login` session
+   - Works in headless environments (no TTY required)
+   - Handles token refresh automatically
+
+3. **Verify the setup:**
+   ```bash
+   git config --global credential.helper
+   # Should show: !/usr/bin/gh auth git-credential
+   ```
+
+**Alternative: SSH with Agent (if you must use SSH)**
+
+If you require SSH protocol:
+
+1. **Start SSH agent:**
+   ```bash
+   eval "$(ssh-agent -s)"
+   ```
+
+2. **Add your key:**
+   ```bash
+   ssh-add ~/.ssh/id_ed25519
+   ```
+
+3. **For persistent agent (WSL2/Linux):**
+   Add to `~/.bashrc` or `~/.zshrc`:
+   ```bash
+   if [ -z "$SSH_AUTH_SOCK" ]; then
+       eval "$(ssh-agent -s)" > /dev/null
+       ssh-add ~/.ssh/id_ed25519 2>/dev/null
+   fi
+   ```
+
+4. **Verify agent is working:**
+   ```bash
+   ssh-add -l
+   # Should list your key fingerprint
+
+   ssh -T git@github.com
+   # Should authenticate without prompting for passphrase
+   ```
+
+**See Also:** [TROUBLESHOOTING.md](TROUBLESHOOTING.md#ssh-agent-issues-wsl2headless) for detailed diagnostics
+
 ## Future Enhancements
 
 ### Dashboard API Integration (Planned)

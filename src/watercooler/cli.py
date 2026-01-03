@@ -276,7 +276,7 @@ def main(argv: list[str] | None = None) -> None:
             resolve_thread_context,
             get_git_sync_manager_from_context,
         )
-        from watercooler_mcp.git_sync import GitPushError
+        from watercooler_mcp.sync import PushError
 
         code_root = Path(args.code_path).resolve() if args.code_path else Path.cwd()
         ctx = resolve_thread_context(code_root)
@@ -336,7 +336,7 @@ def main(argv: list[str] | None = None) -> None:
         try:
             sync.flush_async()
             print("✅ Pending entries synced.")
-        except GitPushError as exc:
+        except PushError as exc:
             print(f"❌ Sync failed: {exc}", file=sys.stderr)
             sys.exit(1)
 

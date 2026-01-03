@@ -469,7 +469,16 @@ python3 -m watercooler_mcp
 - **MCP server**: `src/watercooler_mcp/` - MCP integration
   - `server.py` - FastMCP server implementation
   - `config.py` - MCP-specific configuration
-  - `git_sync.py` - Git synchronization
+  - `sync/` - **Modular git sync package** (preferred for new code):
+    - `primitives.py` - Pure git operations (fetch, pull, push, stash, checkout)
+    - `state.py` - Parity state management with live git checks
+    - `conflict.py` - Conflict detection and resolution (JSONL, markdown)
+    - `local_remote.py` - Single-repo sync operations (L2R)
+    - `branch_parity.py` - Cross-repo coordination (T2C)
+    - `async_coordinator.py` - Background sync with batching
+    - `errors.py` - Rich exception hierarchy
+  - `git_sync.py` - Legacy facade (deprecated, use `sync/` package)
+  - `branch_parity.py` - Legacy facade (deprecated, use `sync/` package)
   - `observability.py` - Logging and monitoring
   - `provisioning.py` - Resource provisioning
 
