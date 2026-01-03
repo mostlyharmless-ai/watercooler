@@ -39,11 +39,9 @@ from watercooler_memory.infrastructure import (
 )
 
 # Check optional tier availability
-try:
-    from watercooler_memory.infrastructure import FalkorDBVectorAdapter, FalkorDBVectorConfig
-    FALKORDB_AVAILABLE = True
-except ImportError:
-    FALKORDB_AVAILABLE = False
+# Note: FalkorDBVectorAdapter was removed in Phase 2 consolidation.
+# FalkorDB vectors are now handled by LeanRAG (external/LeanRAG).
+FALKORDB_AVAILABLE = False
 
 try:
     from watercooler_memory.embeddings import embed_texts, EmbeddingConfig, is_httpx_available
@@ -149,74 +147,9 @@ class TestCrossTierEmbeddingCompatibility:
         assert DEFAULT_DIM == 1024
 
 
-@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
-class TestTier2FalkorDBVectors:
-    """Test Tier 2: FalkorDB vector storage (used by Graphiti)."""
-
-    @pytest.fixture
-    def falkordb_adapter(self):
-        """Create FalkorDB adapter for testing."""
-        config = FalkorDBVectorConfig.from_env()
-        adapter = FalkorDBVectorAdapter(config)
-        try:
-            adapter.connect()
-            if not adapter.healthcheck():
-                pytest.skip("FalkorDB not responding")
-        except Exception as e:
-            pytest.skip(f"Could not connect to FalkorDB: {e}")
-
-        # Use test-specific database
-        adapter._graph = adapter._client.select_graph("pytest__cross_tier")
-
-        yield adapter
-
-        # Cleanup
-        try:
-            adapter._graph.query("MATCH (n:CrossTierTest) DELETE n")
-        except Exception:
-            pass
-        adapter.disconnect()
-
-    def test_store_and_search_chunks(self, memory_graph: MemoryGraph, falkordb_adapter):
-        """Test storing and searching MemoryGraph chunks in FalkorDB."""
-        adapter = falkordb_adapter
-
-        # Create mock embeddings (1024-d) for chunks
-        chunks = list(memory_graph.chunks.values())[:5]  # First 5 chunks
-
-        for i, chunk in enumerate(chunks):
-            # Generate deterministic mock embedding
-            embedding = [float(i) / 1024.0 + j / 10240.0 for j in range(1024)]
-
-            adapter.store_vector(
-                node_label="CrossTierTest",
-                node_id=chunk.chunk_id,
-                embedding=embedding,
-                properties={"text": chunk.text[:100], "entry_id": chunk.entry_id},
-            )
-
-        # Search with first chunk's embedding
-        query_embedding = [0.0 / 1024.0 + j / 10240.0 for j in range(1024)]
-        results = adapter.search_vectors(
-            node_label="CrossTierTest",
-            query_vector=query_embedding,
-            limit=3,
-        )
-
-        assert len(results) > 0
-        # First result should be most similar to query (chunk 0)
-        assert results[0].score > 0.9
-
-    def test_dimension_enforcement_in_storage(self, falkordb_adapter):
-        """Verify FalkorDB adapter enforces 1024-d dimension."""
-        wrong_dim = [0.1] * 512
-
-        with pytest.raises(DimensionMismatchError):
-            falkordb_adapter.store_vector(
-                node_label="CrossTierTest",
-                node_id="test-wrong-dim",
-                embedding=wrong_dim,
-            )
+# Note: TestTier2FalkorDBVectors was removed in Phase 2 consolidation.
+# FalkorDB vector storage is now tested via LeanRAG integration tests
+# (external/LeanRAG/tests/integration/test_falkordb_vector.py)
 
 
 class TestGoldenPathEndToEnd:
@@ -258,10 +191,8 @@ class TestGoldenPathEndToEnd:
         from watercooler_memory.infrastructure import EXPECTED_DIM
         assert EXPECTED_DIM == 1024
 
-        # Tier 2 (FalkorDB): Dimension enforced in adapter
-        if FALKORDB_AVAILABLE:
-            config = FalkorDBVectorConfig()
-            assert config.embedding_dim == EXPECTED_DIM
+        # Tier 2 (FalkorDB/Graphiti): Dimension enforced via LeanRAG's HNSW index
+        # Index creation uses EMBEDDING_DIM (1024) - see external/graphiti
 
         # Tier 3 (LeanRAG): Uses same embedding infrastructure
         from watercooler_memory.pipeline.config import EmbeddingConfig as PipelineEmbeddingConfig
