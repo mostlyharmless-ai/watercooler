@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime
 from typing import Any, Sequence
 
 from . import (
@@ -214,6 +215,82 @@ class GraphitiBackend(MemoryBackend):
         if self.entry_episode_index is None:
             return None
         return self.entry_episode_index.get_entry(episode_uuid)
+
+    async def add_episode_direct(
+        self,
+        name: str,
+        episode_body: str,
+        source_description: str,
+        reference_time: datetime,
+        group_id: str,
+    ) -> dict[str, Any]:
+        """Add an episode directly to Graphiti without the prepare/index workflow.
+
+        This method provides direct access to Graphiti's add_episode API for use cases
+        like migration tools and real-time sync where the full prepare/index pipeline
+        is not appropriate.
+
+        Args:
+            name: Episode title/name
+            episode_body: The episode content
+            source_description: Description of the source
+            reference_time: Timestamp for the episode (datetime object)
+            group_id: Group/thread identifier for partitioning
+
+        Returns:
+            Dict with episode_uuid, entities_extracted, and facts_extracted
+
+        Raises:
+            BackendError: If Graphiti client creation or episode addition fails
+            TransientError: If database connection fails
+        """
+        try:
+            graphiti = self._create_graphiti_client()
+        except (ConnectionError, TimeoutError, OSError) as e:
+            raise TransientError(f"Database connection failed: {e}") from e
+        except ConfigError:
+            raise  # Re-raise config errors as-is
+        except Exception as e:
+            # Unexpected error during client creation
+            raise BackendError(f"Failed to create Graphiti client: {e}") from e
+
+        try:
+            result = await graphiti.add_episode(
+                name=name,
+                episode_body=episode_body,
+                source_description=source_description,
+                reference_time=reference_time,
+                group_id=group_id,
+            )
+
+            # Extract episode UUID from result - fail if missing
+            episode_uuid = getattr(result, "uuid", None)
+            if not episode_uuid:
+                raise BackendError(
+                    "Graphiti returned success but no episode UUID - "
+                    "episode may not have been created properly"
+                )
+
+            # Count extracted entities and facts if available
+            entities = []
+            facts_count = 0
+            if hasattr(result, "nodes"):
+                entities = [getattr(n, "name", str(n)) for n in result.nodes]
+            if hasattr(result, "edges"):
+                facts_count = len(result.edges)
+
+            return {
+                "episode_uuid": episode_uuid,
+                "entities_extracted": entities,
+                "facts_extracted": facts_count,
+            }
+
+        except (ConnectionError, TimeoutError, OSError) as e:
+            raise TransientError(f"Database operation failed: {e}") from e
+        except BackendError:
+            raise  # Re-raise our own errors as-is
+        except Exception as e:
+            raise BackendError(f"Failed to add episode: {e}") from e
 
     def prepare(self, corpus: CorpusPayload) -> PrepareResult:
         """
