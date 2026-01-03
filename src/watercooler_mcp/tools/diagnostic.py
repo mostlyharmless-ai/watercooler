@@ -82,14 +82,27 @@ def _check_git_auth_health(threads_dir: Path) -> dict:
     try:
         # Try multiple methods to find credential helper
         helper = None
+        github_helper = None
 
-        # Method 1: Check repo-local config
+        # Method 1: Check GitHub-specific credential helper (takes precedence)
+        try:
+            result_cmd = subprocess.run(
+                ["git", "config", "--global", "--get", "credential.https://github.com.helper"],
+                capture_output=True, text=True, timeout=5,
+                cwd=str(threads_dir)
+            )
+            if result_cmd.returncode == 0:
+                github_helper = result_cmd.stdout.strip() or None
+        except Exception:
+            pass
+
+        # Method 2: Check repo-local config
         try:
             helper = repo.config_reader().get_value("credential", "helper", fallback=None)
         except Exception:
             pass
 
-        # Method 2: Check global config via git command (most reliable)
+        # Method 3: Check global config via git command (most reliable)
         if not helper:
             try:
                 result_cmd = subprocess.run(
@@ -102,7 +115,7 @@ def _check_git_auth_health(threads_dir: Path) -> dict:
             except Exception:
                 pass
 
-        # Method 3: Check system config
+        # Method 4: Check system config
         if not helper:
             try:
                 result_cmd = subprocess.run(
@@ -115,7 +128,9 @@ def _check_git_auth_health(threads_dir: Path) -> dict:
             except Exception:
                 pass
 
-        result["credential_helper"] = helper
+        # Use GitHub-specific helper if available (for GitHub repos)
+        result["credential_helper"] = github_helper or helper
+        result["github_credential_helper"] = github_helper
     except Exception:
         pass
 
@@ -154,6 +169,35 @@ def _check_git_auth_health(threads_dir: Path) -> dict:
     if result["protocol"] == "https" and not result["credential_helper"]:
         result["warnings"].append("HTTPS protocol but no credential helper configured")
         result["recommendations"].append("Set up credential helper: gh auth setup-git")
+
+    # Check GitHub CLI auth status if using gh as credential helper
+    result["gh_auth_status"] = None
+    if result["credential_helper"] and "gh" in result["credential_helper"]:
+        try:
+            gh_status = subprocess.run(
+                ["gh", "auth", "status"],
+                capture_output=True, text=True, timeout=5
+            )
+            if gh_status.returncode == 0:
+                result["gh_auth_status"] = "valid"
+            else:
+                stderr = gh_status.stderr.strip()
+                if "authentication failed" in stderr.lower() or "no longer valid" in stderr.lower():
+                    result["gh_auth_status"] = "expired"
+                    result["warnings"].append("GitHub CLI token has expired")
+                    result["recommendations"].append("Re-authenticate: gh auth login -h github.com --web")
+                elif "not logged" in stderr.lower():
+                    result["gh_auth_status"] = "not authenticated"
+                    result["warnings"].append("GitHub CLI not authenticated")
+                    result["recommendations"].append("Authenticate: gh auth login -h github.com --web")
+                else:
+                    result["gh_auth_status"] = f"error: {stderr[:50]}"
+        except FileNotFoundError:
+            result["gh_auth_status"] = "gh not installed"
+        except subprocess.TimeoutExpired:
+            result["gh_auth_status"] = "timeout"
+        except Exception as e:
+            result["gh_auth_status"] = f"error: {str(e)[:30]}"
 
     # Quick connectivity test (non-blocking, with short timeout)
     try:
@@ -306,6 +350,8 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
                 if git_health['protocol'] == 'https':
                     helper = git_health['credential_helper'] or 'none'
                     status_lines.append(f"  Credential Helper: {helper}")
+                    if git_health.get('gh_auth_status'):
+                        status_lines.append(f"  GitHub CLI Auth: {git_health['gh_auth_status']}")
                 elif git_health['protocol'] == 'ssh':
                     agent_status = "running" if git_health['ssh_agent_running'] else "not running"
                     keys_status = "loaded" if git_health['ssh_keys_loaded'] else "not loaded"

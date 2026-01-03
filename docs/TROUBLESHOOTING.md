@@ -19,6 +19,7 @@ Common issues and solutions for the watercooler MCP server.
   - [Tools Not Working](#tools-not-working)
   - [Git Not Found](#git-not-found)
   - [Git Authentication](#git-authentication)
+  - [GitHub CLI Token Expiration](#github-cli-token-expiration)
   - [SSH Agent Issues (WSL2/Headless)](#ssh-agent-issues-wsl2headless)
   - [Git Sync Issues (Cloud Mode)](#git-sync-issues-cloud-mode)
 - [Branch Parity Errors](#branch-parity-errors)
@@ -50,6 +51,7 @@ graph TD
     Q3 -->|"permission denied"| PermError[<b>Permission Errors</b><br/>Jump to section below]
     Q3 -->|"git command not found"| GitNotFound[<b>Git Not Found</b><br/>Jump to section below]
     Q3 -->|Git sync errors| GitSync[<b>Git Sync Issues</b><br/>Jump to section below]
+    Q3 -->|"authentication failed"| GHAuth[<b>GitHub CLI Token Expiration</b><br/>Jump to section below]
     Q3 -->|"branch parity" or "preflight"| ParityError[<b>Branch Parity Errors</b><br/>Jump to section below]
     Q3 -->|Other errors| ToolError[<b>Tools Not Working</b><br/>Jump to section below]
 
@@ -65,6 +67,7 @@ graph TD
     style PermError fill:#ffcccc
     style GitNotFound fill:#ffcccc
     style GitSync fill:#ffcccc
+    style GHAuth fill:#ffcccc
     style ParityError fill:#ffcccc
     style ToolError fill:#ffcccc
     style WrongAgent fill:#ffffcc
@@ -347,6 +350,59 @@ Git pushes/pulls fail, or you see `Permission denied (publickey)` / `fatal: Auth
    - The credential helper will still be used for HTTPS operations
 
 See [AUTHENTICATION.md](AUTHENTICATION.md) for complete authentication guide.
+
+---
+
+## GitHub CLI Token Expiration
+
+### Symptom
+- Git operations fail silently or with authentication errors
+- Dashboard fails to update or show current data
+- API rate limits show unauthenticated (60 req/hr instead of 5,000)
+- Running `gh auth status` shows:
+  ```
+  github.com
+    X github.com: authentication failed
+    - The github.com token in /home/user/.config/gh/hosts.yml is no longer valid.
+  ```
+
+### Cause
+GitHub CLI (`gh`) tokens can expire or become invalidated. This affects:
+- Git push/pull operations (if using `gh` as credential helper)
+- GitHub API calls (dashboard updates, repo queries)
+- Watercooler MCP git sync operations
+
+### Diagnosis
+```bash
+gh auth status
+```
+
+If you see "authentication failed" or "token is no longer valid", re-authentication is needed.
+
+### Solution
+**Re-authenticate with GitHub CLI:**
+```bash
+# Interactive (opens browser)
+gh auth login -h github.com --web
+
+# Or fully interactive in terminal
+gh auth login -h github.com
+```
+
+**Verify the fix:**
+```bash
+# Check auth status
+gh auth status
+
+# Verify rate limits (should show 5000, not 60)
+gh api rate_limit --jq '.resources.core | "Core API: \(.limit) limit, \(.remaining) remaining"'
+```
+
+### Prevention
+There's no way to prevent token expiration entirely, but you can:
+- Use a personal access token with longer expiry (GitHub Settings → Developer settings → Personal access tokens)
+- Set a calendar reminder to re-authenticate periodically
+- Monitor for the "authentication failed" error in MCP server logs
 
 ---
 
