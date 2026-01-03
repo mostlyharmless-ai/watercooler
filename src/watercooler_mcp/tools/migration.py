@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from fastmcp import Context
 
 from watercooler.thread_entries import parse_thread_entries, ThreadEntry
+from watercooler_memory.backends import TransientError, BackendError
 
 logger = logging.getLogger(__name__)
 
@@ -444,11 +445,14 @@ async def _migrate_to_memory_backend_impl(
                     # Build episode name from title or body snippet
                     # Strip whitespace and replace newlines to avoid multi-line names
                     title = entry.get("title", "")
-                    if title:
+                    if title and title.strip():
                         episode_name = title.strip()
-                    else:
+                    elif body:
                         body_snippet = body[:50].replace('\n', ' ').strip()
                         episode_name = body_snippet + ("..." if len(body) > 50 else "")
+                    else:
+                        # Fallback to entry ID if both title and body are empty
+                        episode_name = f"Entry {entry_id}" if entry_id else "Untitled Entry"
 
                     # Build source description from entry metadata
                     agent = entry.get("agent", "Unknown")
@@ -481,8 +485,18 @@ async def _migrate_to_memory_backend_impl(
                     migrated_entries.append(entry_id)
                     result["entries_migrated"] += 1
 
-                except (ConnectionError, TimeoutError) as e:
-                    # Network errors - log and continue
+                except TransientError as e:
+                    # Transient errors (network, connection) - log and continue
+                    logger.warning(f"Transient error migrating entry {entry_id}: {e}")
+                    result["entries_failed"] += 1
+                    result["errors"].append(f"Entry {entry_id}: TransientError: {e}")
+                except BackendError as e:
+                    # Backend operation errors - log and continue
+                    logger.warning(f"Backend error migrating entry {entry_id}: {e}")
+                    result["entries_failed"] += 1
+                    result["errors"].append(f"Entry {entry_id}: BackendError: {e}")
+                except (ConnectionError, TimeoutError, OSError) as e:
+                    # Low-level network errors not wrapped by backend
                     logger.warning(f"Network error migrating entry {entry_id}: {e}")
                     result["entries_failed"] += 1
                     result["errors"].append(f"Entry {entry_id}: {type(e).__name__}: {e}")

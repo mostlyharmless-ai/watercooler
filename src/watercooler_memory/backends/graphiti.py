@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime
 from typing import Any, Sequence
 
 from . import (
@@ -220,7 +221,7 @@ class GraphitiBackend(MemoryBackend):
         name: str,
         episode_body: str,
         source_description: str,
-        reference_time: Any,
+        reference_time: datetime,
         group_id: str,
     ) -> dict[str, Any]:
         """Add an episode directly to Graphiti without the prepare/index workflow.
@@ -245,8 +246,13 @@ class GraphitiBackend(MemoryBackend):
         """
         try:
             graphiti = self._create_graphiti_client()
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError) as e:
             raise TransientError(f"Database connection failed: {e}") from e
+        except ConfigError:
+            raise  # Re-raise config errors as-is
+        except Exception as e:
+            # Unexpected error during client creation
+            raise BackendError(f"Failed to create Graphiti client: {e}") from e
 
         try:
             result = await graphiti.add_episode(
@@ -257,8 +263,13 @@ class GraphitiBackend(MemoryBackend):
                 group_id=group_id,
             )
 
-            # Extract episode UUID from result
-            episode_uuid = getattr(result, "uuid", None) or "unknown"
+            # Extract episode UUID from result - fail if missing
+            episode_uuid = getattr(result, "uuid", None)
+            if not episode_uuid:
+                raise BackendError(
+                    "Graphiti returned success but no episode UUID - "
+                    "episode may not have been created properly"
+                )
 
             # Count extracted entities and facts if available
             entities = []
@@ -274,6 +285,10 @@ class GraphitiBackend(MemoryBackend):
                 "facts_extracted": facts_count,
             }
 
+        except (ConnectionError, TimeoutError, OSError) as e:
+            raise TransientError(f"Database operation failed: {e}") from e
+        except BackendError:
+            raise  # Re-raise our own errors as-is
         except Exception as e:
             raise BackendError(f"Failed to add episode: {e}") from e
 

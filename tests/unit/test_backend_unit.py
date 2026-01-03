@@ -1,9 +1,11 @@
 """Unit tests for memory backend internal logic."""
 
 import pytest
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+from watercooler_memory.backends import BackendError, TransientError
 from watercooler_memory.backends.graphiti import GraphitiBackend, GraphitiConfig
 from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
 
@@ -142,3 +144,107 @@ class TestLeanRAGTestMode:
         assert result == original
         assert result.name == "pytest__leanrag-work"
         assert result.name.count("pytest__") == 1
+
+
+class TestGraphitiAddEpisodeDirect:
+    """Unit tests for GraphitiBackend.add_episode_direct method."""
+
+    @pytest.fixture
+    def backend(self) -> GraphitiBackend:
+        """Create Graphiti backend for testing."""
+        config = GraphitiConfig(
+            work_dir=Path("/tmp/test"),
+            openai_api_key="test-key",
+            test_mode=True,
+        )
+        with patch.object(GraphitiBackend, '_validate_config'):
+            return GraphitiBackend(config)
+
+    @pytest.mark.anyio
+    async def test_add_episode_direct_success(self, backend: GraphitiBackend):
+        """Test successful episode addition returns expected result."""
+        # Create mock result with expected attributes
+        mock_result = Mock()
+        mock_result.uuid = "ep-uuid-123"
+        mock_result.nodes = [Mock(name="Entity1"), Mock(name="Entity2")]
+        mock_result.edges = [Mock(), Mock(), Mock()]
+
+        mock_graphiti = AsyncMock()
+        mock_graphiti.add_episode = AsyncMock(return_value=mock_result)
+
+        with patch.object(backend, '_create_graphiti_client', return_value=mock_graphiti):
+            result = await backend.add_episode_direct(
+                name="Test Episode",
+                episode_body="Test content",
+                source_description="Test source",
+                reference_time=datetime.now(timezone.utc),
+                group_id="test-thread",
+            )
+
+        assert result["episode_uuid"] == "ep-uuid-123"
+        assert len(result["entities_extracted"]) == 2
+        assert result["facts_extracted"] == 3
+
+    @pytest.mark.anyio
+    async def test_add_episode_direct_missing_uuid_raises_error(self, backend: GraphitiBackend):
+        """Test that missing UUID in result raises BackendError."""
+        mock_result = Mock()
+        mock_result.uuid = None  # Missing UUID
+        mock_result.nodes = []
+        mock_result.edges = []
+
+        mock_graphiti = AsyncMock()
+        mock_graphiti.add_episode = AsyncMock(return_value=mock_result)
+
+        with patch.object(backend, '_create_graphiti_client', return_value=mock_graphiti):
+            with pytest.raises(BackendError) as exc_info:
+                await backend.add_episode_direct(
+                    name="Test Episode",
+                    episode_body="Test content",
+                    source_description="Test source",
+                    reference_time=datetime.now(timezone.utc),
+                    group_id="test-thread",
+                )
+
+        assert "no episode UUID" in str(exc_info.value)
+
+    @pytest.mark.anyio
+    async def test_add_episode_direct_connection_error_raises_transient(
+        self, backend: GraphitiBackend
+    ):
+        """Test that connection errors raise TransientError."""
+        with patch.object(
+            backend,
+            '_create_graphiti_client',
+            side_effect=ConnectionError("Connection refused"),
+        ):
+            with pytest.raises(TransientError) as exc_info:
+                await backend.add_episode_direct(
+                    name="Test Episode",
+                    episode_body="Test content",
+                    source_description="Test source",
+                    reference_time=datetime.now(timezone.utc),
+                    group_id="test-thread",
+                )
+
+        assert "connection failed" in str(exc_info.value).lower()
+
+    @pytest.mark.anyio
+    async def test_add_episode_direct_operation_error_raises_backend_error(
+        self, backend: GraphitiBackend
+    ):
+        """Test that operation errors raise BackendError."""
+        mock_graphiti = AsyncMock()
+        mock_graphiti.add_episode = AsyncMock(side_effect=RuntimeError("Graph operation failed"))
+
+        with patch.object(backend, '_create_graphiti_client', return_value=mock_graphiti):
+            with pytest.raises(BackendError) as exc_info:
+                await backend.add_episode_direct(
+                    name="Test Episode",
+                    episode_body="Test content",
+                    source_description="Test source",
+                    reference_time=datetime.now(timezone.utc),
+                    group_id="test-thread",
+                )
+
+        assert "Failed to add episode" in str(exc_info.value)
