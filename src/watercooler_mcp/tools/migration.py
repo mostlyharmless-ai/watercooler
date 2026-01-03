@@ -429,12 +429,38 @@ async def _migrate_to_memory_backend_impl(
                     continue
 
                 try:
+                    # Parse timestamp for reference_time
+                    from datetime import datetime, timezone
+                    timestamp_str = entry.get("timestamp")
+                    if timestamp_str:
+                        try:
+                            ref_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                        except ValueError:
+                            ref_time = datetime.now(timezone.utc)
+                    else:
+                        ref_time = datetime.now(timezone.utc)
+
+                    # Build episode name from title or body snippet
+                    title = entry.get("title", "")
+                    episode_name = title if title else body[:50] + ("..." if len(body) > 50 else "")
+
+                    # Build source description from entry metadata
+                    agent = entry.get("agent", "Unknown")
+                    role = entry.get("role", "")
+                    entry_type = entry.get("entry_type", "Note")
+                    source_desc = f"Migration from thread {topic}: {agent}"
+                    if role:
+                        source_desc += f" ({role})"
+                    if entry_type:
+                        source_desc += f" - {entry_type}"
+
                     # Call backend to add episode
                     await migration_backend.add_episode_direct(
-                        content=body,
+                        name=episode_name,
+                        episode_body=body,
+                        source_description=source_desc,
+                        reference_time=ref_time,
                         group_id=topic,
-                        source_id=entry_id,
-                        timestamp=entry.get("timestamp"),
                     )
 
                     migrated_entries.append(entry_id)
