@@ -28,10 +28,15 @@ except ImportError:
     HTTPX_AVAILABLE = False
 
 
-# Default configuration
+# Default configuration (per docs/watercooler-planning/MEMORY_INTEGRATION_ROADMAP.md)
+# Standard env vars:
+#   EMBEDDING_API_BASE=http://localhost:8080/v1
+#   EMBEDDING_MODEL=bge-m3
+#   EMBEDDING_DIM=1024
 # Embedding server runs on port 8080 (separate from summarization on 8000)
 DEFAULT_API_BASE = "http://localhost:8080/v1"
 DEFAULT_MODEL = "bge-m3"
+DEFAULT_DIM = 1024  # BGE-M3 produces 1024-dimensional embeddings
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 3

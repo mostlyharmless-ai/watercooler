@@ -898,3 +898,177 @@ def test_sync_skips_embedding_when_unavailable(threads_dir: Path, sample_thread:
 
     assert success
     assert len(embed_called) == 0  # Embedding was NOT called
+
+
+# ============================================================================
+# Memory Backend Sync Hook Tests (Milestone 5.3)
+# ============================================================================
+
+
+def test_get_memory_backend_config_disabled_by_default(monkeypatch):
+    """Test memory backend is disabled by default."""
+    from watercooler.baseline_graph.sync import get_memory_backend_config
+
+    monkeypatch.delenv("WATERCOOLER_MEMORY_BACKEND", raising=False)
+    config = get_memory_backend_config()
+    assert config is None
+
+
+def test_get_memory_backend_config_graphiti(monkeypatch):
+    """Test memory backend config for graphiti."""
+    from watercooler.baseline_graph.sync import get_memory_backend_config
+
+    monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
+    config = get_memory_backend_config()
+    assert config is not None
+    assert config["backend"] == "graphiti"
+
+
+def test_get_memory_backend_config_leanrag(monkeypatch):
+    """Test memory backend config for leanrag."""
+    from watercooler.baseline_graph.sync import get_memory_backend_config
+
+    monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "leanrag")
+    config = get_memory_backend_config()
+    assert config is not None
+    assert config["backend"] == "leanrag"
+
+
+def test_sync_to_memory_backend_disabled(threads_dir: Path, sample_thread: Path, monkeypatch):
+    """Test sync_to_memory_backend does nothing when disabled."""
+    from watercooler.baseline_graph.sync import sync_to_memory_backend
+
+    monkeypatch.delenv("WATERCOOLER_MEMORY_BACKEND", raising=False)
+
+    # Should return False (no backend configured) without errors
+    result = sync_to_memory_backend(
+        threads_dir=threads_dir,
+        topic="test-topic",
+        entry_id="01TEST001",
+        entry_body="Test content",
+    )
+    assert result is False
+
+
+def test_sync_to_memory_backend_graphiti(threads_dir: Path, sample_thread: Path, monkeypatch):
+    """Test sync_to_memory_backend calls graphiti backend.
+
+    Uses ThreadPoolExecutor for fire-and-forget, so we need to wait for
+    the background worker to complete before checking assertions.
+    """
+    import time
+    from watercooler.baseline_graph.sync import sync_to_memory_backend, _get_sync_executor
+
+    monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
+
+    # Mock the graphiti add function
+    graphiti_calls = []
+
+    async def mock_add_episode(content, group_id, entry_id=None, **kwargs):
+        graphiti_calls.append({
+            "content": content,
+            "group_id": group_id,
+            "entry_id": entry_id,
+        })
+        return {"success": True, "episode_uuid": "mock-uuid"}
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync._call_graphiti_add_episode",
+        mock_add_episode,
+    )
+
+    result = sync_to_memory_backend(
+        threads_dir=threads_dir,
+        topic="test-topic",
+        entry_id="01TEST001",
+        entry_body="Test content",
+    )
+
+    assert result is True
+
+    # Wait for background worker to complete
+    executor = _get_sync_executor()
+    executor.shutdown(wait=True)
+
+    # Reset executor for other tests
+    import watercooler.baseline_graph.sync as sync_module
+    sync_module._sync_executor = None
+
+    assert len(graphiti_calls) == 1
+    assert graphiti_calls[0]["group_id"] == "test-topic"
+    assert graphiti_calls[0]["entry_id"] == "01TEST001"
+
+
+def test_sync_to_memory_backend_non_blocking(threads_dir: Path, sample_thread: Path, monkeypatch):
+    """Test sync_to_memory_backend uses fire-and-forget pattern.
+
+    With ThreadPoolExecutor, sync_to_memory_backend returns True immediately
+    after submitting work to the executor. Errors are logged asynchronously
+    in the worker thread without affecting the caller.
+    """
+    from watercooler.baseline_graph.sync import sync_to_memory_backend
+
+    monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
+
+    # Mock graphiti to raise an error
+    async def mock_add_episode_error(*args, **kwargs):
+        raise Exception("Graphiti backend error")
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync._call_graphiti_add_episode",
+        mock_add_episode_error,
+    )
+
+    # Fire-and-forget: returns True after successful submission to executor
+    # Actual errors are logged asynchronously in worker thread
+    result = sync_to_memory_backend(
+        threads_dir=threads_dir,
+        topic="test-topic",
+        entry_id="01TEST001",
+        entry_body="Test content",
+    )
+
+    assert result is True  # Submitted successfully (fire-and-forget)
+
+
+def test_sync_entry_calls_memory_hook_when_enabled(threads_dir: Path, sample_thread: Path, monkeypatch):
+    """Test sync_entry_to_graph calls memory backend hook when enabled."""
+    from watercooler.baseline_graph.sync import sync_entry_to_graph
+
+    monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
+
+    memory_calls = []
+
+    def mock_sync_to_memory(*args, **kwargs):
+        memory_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.sync_to_memory_backend",
+        mock_sync_to_memory,
+    )
+
+    success = sync_entry_to_graph(threads_dir, "test-topic")
+
+    assert success
+    assert len(memory_calls) == 1
+    assert memory_calls[0]["topic"] == "test-topic"
+
+
+def test_sync_entry_succeeds_when_memory_hook_fails(threads_dir: Path, sample_thread: Path, monkeypatch):
+    """Test sync_entry_to_graph succeeds even if memory hook fails."""
+    from watercooler.baseline_graph.sync import sync_entry_to_graph
+
+    monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
+
+    def mock_sync_to_memory_fails(*args, **kwargs):
+        return False  # Memory sync failed
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.sync_to_memory_backend",
+        mock_sync_to_memory_fails,
+    )
+
+    # Baseline sync should still succeed
+    success = sync_entry_to_graph(threads_dir, "test-topic")
+    assert success  # Baseline sync succeeded despite memory hook failure

@@ -29,6 +29,10 @@ search_memory_facts = None
 get_episodes = None
 diagnose_memory = None
 
+# Write tools (Milestone 5.1, 5.2)
+graphiti_add_episode = None
+leanrag_run_pipeline = None
+
 
 async def _query_memory_impl(
     query: str,
@@ -920,6 +924,294 @@ def _diagnose_memory_impl(ctx: Context) -> ToolResult:
         )])
 
 
+async def _graphiti_add_episode_impl(
+    content: str,
+    group_id: str,
+    ctx: Context,
+    entry_id: str = "",
+    timestamp: str = "",
+    title: str = "",
+    source_description: str = "",
+) -> ToolResult:
+    """Add an episode directly to Graphiti temporal graph.
+
+    This tool allows direct ingestion of content as a Graphiti episode,
+    bypassing the normal thread-based workflow. Useful for:
+    - Importing external knowledge
+    - Adding custom context to the graph
+    - Testing and development
+
+    Args:
+        content: The episode content/body text (required)
+        group_id: Thread/topic identifier for partitioning (required)
+        entry_id: Optional watercooler entry ID for provenance tracking
+        timestamp: Optional ISO 8601 timestamp (defaults to now)
+        title: Optional episode title (defaults to first 50 chars of content)
+        source_description: Optional source metadata
+
+    Returns:
+        JSON with episode_uuid, entities_extracted, and success status
+
+    Example:
+        graphiti_add_episode(
+            content="We decided to use JWT tokens with RS256 signing",
+            group_id="auth-feature",
+            entry_id="01ABC123",
+            timestamp="2025-01-15T10:00:00Z"
+        )
+    """
+    try:
+        # Validate required fields
+        if not content or not content.strip():
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": "Content is required and cannot be empty",
+                    "episode_uuid": None,
+                }, indent=2)
+            )])
+
+        if not group_id or not group_id.strip():
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": "group_id is required and cannot be empty",
+                    "episode_uuid": None,
+                }, indent=2)
+            )])
+
+        # Import memory module (lazy-load)
+        try:
+            from .. import memory as mem
+        except ImportError as e:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": f"Memory module unavailable: {e}",
+                    "episode_uuid": None,
+                }, indent=2)
+            )])
+
+        # Load configuration
+        config = mem.load_graphiti_config()
+        if config is None:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": "Graphiti not enabled. Set WATERCOOLER_GRAPHITI_ENABLED=1",
+                    "episode_uuid": None,
+                }, indent=2)
+            )])
+
+        # Get backend instance
+        backend = mem.get_graphiti_backend(config)
+        if backend is None or isinstance(backend, dict):
+            error_msg = "Graphiti backend unavailable"
+            if isinstance(backend, dict):
+                error_msg = backend.get("message", error_msg)
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": error_msg,
+                    "episode_uuid": None,
+                }, indent=2)
+            )])
+
+        # Prepare episode data
+        from datetime import datetime, timezone
+
+        if timestamp:
+            try:
+                ref_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            except ValueError:
+                ref_time = datetime.now(timezone.utc)
+        else:
+            ref_time = datetime.now(timezone.utc)
+
+        episode_title = title if title else content[:50] + ("..." if len(content) > 50 else "")
+        source_desc = source_description if source_description else "Direct episode via MCP tool"
+
+        # Add episode via backend
+        try:
+            result = await backend.add_episode_direct(
+                name=episode_title,
+                episode_body=content,
+                source_description=source_desc,
+                reference_time=ref_time,
+                group_id=group_id,
+            )
+
+            episode_uuid = result.get("episode_uuid", "unknown")
+            entities = result.get("entities_extracted", [])
+            facts_count = result.get("facts_extracted", 0)
+
+            # Track entry-episode mapping if entry_id provided
+            if entry_id and episode_uuid != "unknown":
+                backend.index_entry_as_episode(entry_id, episode_uuid, group_id)
+
+            log_action(f"MEMORY: Added episode {episode_uuid} to group {group_id}")
+
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "episode_uuid": episode_uuid,
+                    "group_id": group_id,
+                    "entities_extracted": entities,
+                    "facts_extracted": facts_count,
+                    "entry_id": entry_id if entry_id else None,
+                    "message": f"Episode added to {group_id}",
+                }, indent=2)
+            )])
+
+        except Exception as e:
+            log_error(f"MEMORY: Failed to add episode: {e}")
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": f"Failed to add episode: {e}",
+                    "episode_uuid": None,
+                }, indent=2)
+            )])
+
+    except Exception as e:
+        log_error(f"MEMORY: Unexpected error in graphiti_add_episode: {e}")
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps({
+                "success": False,
+                "error": f"Unexpected error: {e}",
+                "episode_uuid": None,
+            }, indent=2)
+        )])
+
+
+def _get_leanrag_pipeline(config=None):
+    """Get LeanRAG pipeline instance if available.
+
+    Returns:
+        Pipeline instance or None if unavailable
+    """
+    try:
+        from watercooler_memory.pipeline import LeanRAGPipeline
+        return LeanRAGPipeline(config)
+    except ImportError:
+        return None
+
+
+async def _leanrag_run_pipeline_impl(
+    group_id: str,
+    ctx: Context,
+    start_date: str = "",
+    end_date: str = "",
+    dry_run: bool = False,
+) -> ToolResult:
+    """Run LeanRAG clustering pipeline on Graphiti episodes.
+
+    Processes episodes from a thread group through the LeanRAG pipeline:
+    1. Extract chunks from Graphiti episodes
+    2. Generate embeddings (BGE-M3, 1024-d)
+    3. Cluster semantically similar content
+    4. Store cluster summaries back to graph
+
+    Args:
+        group_id: Thread/topic identifier to process (required)
+        start_date: Optional start date filter (ISO 8601)
+        end_date: Optional end date filter (ISO 8601)
+        dry_run: If True, only report what would be done
+
+    Returns:
+        JSON with clusters_created, chunks_processed, and execution stats
+
+    Example:
+        leanrag_run_pipeline(
+            group_id="auth-feature",
+            start_date="2025-01-01",
+            dry_run=True
+        )
+    """
+    try:
+        # Validate required fields
+        if not group_id or not group_id.strip():
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": "group_id is required",
+                    "clusters_created": 0,
+                }, indent=2)
+            )])
+
+        # Get pipeline instance
+        pipeline = _get_leanrag_pipeline()
+        if pipeline is None:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": "LeanRAG pipeline unavailable. Install with: pip install watercooler-cloud[memory]",
+                    "clusters_created": 0,
+                }, indent=2)
+            )])
+
+        # Build filter options
+        filters = {"group_id": group_id}
+        if start_date:
+            filters["start_date"] = start_date
+        if end_date:
+            filters["end_date"] = end_date
+
+        # Run pipeline
+        try:
+            result = await pipeline.run(
+                filters=filters,
+                dry_run=dry_run,
+            )
+
+            log_action(f"MEMORY: LeanRAG pipeline completed for {group_id}")
+
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "group_id": group_id,
+                    "dry_run": dry_run,
+                    "clusters_created": result.get("clusters_created", 0),
+                    "chunks_processed": result.get("chunks_processed", 0),
+                    "execution_time_ms": result.get("execution_time_ms", 0),
+                    "message": f"Pipeline {'simulated' if dry_run else 'completed'} for {group_id}",
+                }, indent=2)
+            )])
+
+        except Exception as e:
+            log_error(f"MEMORY: LeanRAG pipeline failed: {e}")
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": f"Pipeline failed: {e}",
+                    "clusters_created": 0,
+                }, indent=2)
+            )])
+
+    except Exception as e:
+        log_error(f"MEMORY: Unexpected error in leanrag_run_pipeline: {e}")
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps({
+                "success": False,
+                "error": f"Unexpected error: {e}",
+                "clusters_created": 0,
+            }, indent=2)
+        )])
+
+
 def register_memory_tools(mcp):
     """Register memory tools with the MCP server.
 
@@ -928,6 +1220,7 @@ def register_memory_tools(mcp):
     """
     global query_memory, search_nodes, get_entity_edge
     global search_memory_facts, get_episodes, diagnose_memory
+    global graphiti_add_episode, leanrag_run_pipeline
 
     # Register tools and store references for testing
     query_memory = mcp.tool(name="watercooler_query_memory")(_query_memory_impl)
@@ -936,3 +1229,7 @@ def register_memory_tools(mcp):
     search_memory_facts = mcp.tool(name="watercooler_search_memory_facts")(_search_memory_facts_impl)
     get_episodes = mcp.tool(name="watercooler_get_episodes")(_get_episodes_impl)
     diagnose_memory = mcp.tool(name="watercooler_diagnose_memory")(_diagnose_memory_impl)
+
+    # Write tools (Milestone 5.1, 5.2)
+    graphiti_add_episode = mcp.tool(name="watercooler_graphiti_add_episode")(_graphiti_add_episode_impl)
+    leanrag_run_pipeline = mcp.tool(name="watercooler_leanrag_run_pipeline")(_leanrag_run_pipeline_impl)

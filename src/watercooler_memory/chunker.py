@@ -4,8 +4,8 @@ Splits entry bodies into chunks suitable for embedding. Uses tiktoken
 for token counting when available, falls back to word-based estimation.
 
 Chunking strategy:
-- Max tokens: 1024 (configurable)
-- Overlap: 128 tokens (configurable)
+- Max tokens: 768 (configurable) - balances comprehensiveness vs "lost in the middle"
+- Overlap: 64 tokens (configurable)
 - Preserves semantic boundaries where possible (paragraphs, sentences)
 """
 
@@ -26,9 +26,11 @@ except ImportError:
     tiktoken = None  # type: ignore
     TIKTOKEN_AVAILABLE = False
 
-# Default chunking parameters (matching LeanRAG)
-DEFAULT_MAX_TOKENS = 1024
-DEFAULT_OVERLAP = 128
+# Default chunking parameters (watercooler preset)
+# 768/64 balances comprehensiveness vs "lost in the middle" issues
+# per GraphRAG literature (see docs/watercooler-planning/MEMORY_INTEGRATION_ROADMAP.md)
+DEFAULT_MAX_TOKENS = 768
+DEFAULT_OVERLAP = 64
 DEFAULT_ENCODING = "cl100k_base"
 
 

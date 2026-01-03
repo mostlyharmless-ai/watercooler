@@ -84,6 +84,7 @@ from .tools.sync import register_sync_tools
 from .tools.graph import register_graph_tools
 from .tools.branch_parity import register_branch_parity_tools
 from .tools.memory import register_memory_tools
+from .tools.migration import register_migration_tools
 # Re-export tools for test compatibility
 from .tools import diagnostic as _diagnostic_tools
 from .tools import thread_query as _thread_query_tools
@@ -135,6 +136,7 @@ register_sync_tools(mcp)
 register_graph_tools(mcp)
 register_branch_parity_tools(mcp)
 register_memory_tools(mcp)
+register_migration_tools(mcp)
 
 # Re-export registered tools for test compatibility (must be after registration)
 health = _diagnostic_tools.health

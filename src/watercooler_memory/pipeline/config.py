@@ -66,11 +66,17 @@ class LLMConfig:
 
 @dataclass
 class EmbeddingConfig:
-    """Embedding service configuration."""
+    """Embedding service configuration.
 
-    model: str = field(default_factory=lambda: os.environ.get("GLM_MODEL", "bge_m3"))
+    Standard env vars (per MEMORY_INTEGRATION_ROADMAP.md):
+    - EMBEDDING_API_BASE=http://localhost:8080/v1
+    - EMBEDDING_MODEL=bge-m3
+    - EMBEDDING_DIM=1024
+    """
+
+    model: str = field(default_factory=lambda: os.environ.get("EMBEDDING_MODEL", "bge-m3"))
     base_url: str = field(default_factory=get_embedding_api_base)
-    embedding_dim: int = 1024  # BGE-M3 dimension
+    embedding_dim: int = field(default_factory=lambda: int(os.environ.get("EMBEDDING_DIM", "1024")))
     batch_size: int = field(default_factory=lambda: max(1, int(os.environ.get("EMBEDDING_BATCH_SIZE", "8"))))
 
     def validate(self) -> list[str]:
@@ -96,9 +102,9 @@ class PipelineConfig:
     batch_size: int = 10  # Documents per batch for LLM stages
     max_concurrent: int = 4  # Concurrent LLM calls
 
-    # Chunking
-    max_tokens: int = 1024
-    overlap_tokens: int = 128
+    # Chunking (768/64 balances comprehensiveness vs "lost in the middle")
+    max_tokens: int = 768
+    overlap_tokens: int = 64
 
     # Services
     llm: LLMConfig = field(default_factory=LLMConfig)

@@ -3,7 +3,7 @@
 Tools:
 - watercooler_baseline_graph_stats: Graph statistics
 - watercooler_baseline_graph_build: Build baseline graph
-- watercooler_search: Search threads and entries
+- watercooler_search: Search threads and entries (tier-aware routing)
 - watercooler_find_similar: Find similar entries
 - watercooler_graph_health: Graph sync health
 - watercooler_reconcile_graph: Reconcile graph with markdown
@@ -11,14 +11,430 @@ Tools:
 """
 
 import json
+import logging
+import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastmcp import Context
 
 from ..sync import BranchPairingError
 from ..middleware import run_with_graph_sync
 from .. import validation  # Import module for runtime access (enables test patching)
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Search Routing Helpers (Milestone 6: Tier-Aware Search Routing)
+# =============================================================================
+
+
+def get_search_backend(backend: str) -> str:
+    """Determine which search backend to use.
+
+    Args:
+        backend: Requested backend - "auto", "baseline", "graphiti", or "leanrag"
+
+    Returns:
+        Resolved backend name: "baseline", "graphiti", or "leanrag"
+    """
+    # Explicit backends are respected (except unknown ones)
+    if backend in ("baseline", "graphiti", "leanrag"):
+        return backend
+
+    # Auto mode: check WATERCOOLER_MEMORY_BACKEND env var
+    if backend == "auto":
+        memory_backend = os.environ.get("WATERCOOLER_MEMORY_BACKEND", "").lower().strip()
+        if memory_backend in ("graphiti", "leanrag"):
+            return memory_backend
+        return "baseline"
+
+    # Unknown backend falls back to baseline
+    logger.warning(f"Unknown search backend: {backend}, falling back to baseline")
+    return "baseline"
+
+
+def infer_search_mode(mode: str, query: str, semantic: bool) -> str:
+    """Infer the search mode based on the query and parameters.
+
+    Args:
+        mode: Requested mode - "auto", "entries", "entities", or "episodes"
+        query: The search query
+        semantic: Whether semantic search is enabled
+
+    Returns:
+        Resolved mode: "entries", "entities", or "episodes"
+    """
+    # Explicit modes are respected
+    if mode in ("entries", "entities", "episodes"):
+        return mode
+
+    # Auto mode: infer from query characteristics
+    # For now, default to entries mode (most common use case)
+    # Future: could detect entity-like queries (proper nouns, names)
+    return "entries"
+
+
+def route_search(
+    ctx: Context,
+    threads_dir: Path,
+    query: str,
+    backend: str,
+    mode: str,
+    **kwargs: Any,
+) -> str:
+    """Route search to the appropriate backend based on tier and mode.
+
+    Args:
+        ctx: MCP context
+        threads_dir: Path to threads directory
+        query: Search query
+        backend: Resolved backend ("baseline", "graphiti", "leanrag")
+        mode: Resolved mode ("entries", "entities", "episodes")
+        **kwargs: Additional search parameters
+
+    Returns:
+        JSON string with search results
+    """
+    fallback_used = False
+    fallback_reason = None
+
+    # Entities/episodes modes require Graphiti
+    if mode in ("entities", "episodes"):
+        if backend == "baseline":
+            # Can't do entities/episodes on baseline - fall back to entries
+            logger.info(f"Mode {mode} requires Graphiti, but backend is baseline. Falling back to entries mode.")
+            mode = "entries"
+            fallback_used = True
+            fallback_reason = f"{mode} requires memory backend"
+        else:
+            # Route to Graphiti entity/episode search
+            try:
+                if mode == "entities":
+                    return _search_graphiti_nodes_impl(
+                        ctx=ctx,
+                        threads_dir=threads_dir,
+                        query=query,
+                        **kwargs,
+                    )
+                else:  # episodes
+                    return _search_graphiti_episodes_impl(
+                        ctx=ctx,
+                        threads_dir=threads_dir,
+                        query=query,
+                        **kwargs,
+                    )
+            except Exception as e:
+                logger.warning(f"Graphiti {mode} search failed: {e}. Falling back to baseline.")
+                fallback_used = True
+                fallback_reason = str(e)
+                backend = "baseline"
+                mode = "entries"
+
+    # Entries mode - route based on backend
+    if backend == "graphiti":
+        try:
+            return _search_graphiti_impl(
+                ctx=ctx,
+                threads_dir=threads_dir,
+                query=query,
+                **kwargs,
+            )
+        except Exception as e:
+            logger.warning(f"Graphiti search failed: {e}. Falling back to baseline.")
+            fallback_used = True
+            fallback_reason = str(e)
+            backend = "baseline"
+
+    if backend == "leanrag":
+        try:
+            return _search_leanrag_impl(
+                ctx=ctx,
+                threads_dir=threads_dir,
+                query=query,
+                **kwargs,
+            )
+        except Exception as e:
+            logger.warning(f"LeanRAG search failed: {e}. Falling back to baseline.")
+            fallback_used = True
+            fallback_reason = str(e)
+            backend = "baseline"
+
+    # Baseline search (default fallback)
+    result = _search_baseline_impl(
+        ctx=ctx,
+        threads_dir=threads_dir,
+        query=query,
+        **kwargs,
+    )
+
+    # Add fallback info if we had to fall back
+    if fallback_used:
+        try:
+            result_data = json.loads(result)
+            result_data["fallback_used"] = True
+            result_data["fallback_reason"] = fallback_reason
+            result = json.dumps(result_data, indent=2)
+        except (json.JSONDecodeError, TypeError):
+            pass  # If result isn't JSON, just return as-is
+
+    return result
+
+
+def _search_baseline_impl(
+    ctx: Context,
+    threads_dir: Path,
+    query: str,
+    semantic: bool = False,
+    semantic_threshold: float = 0.5,
+    start_time: str = "",
+    end_time: str = "",
+    thread_status: str = "",
+    thread_topic: str = "",
+    role: str = "",
+    entry_type: str = "",
+    agent: str = "",
+    limit: int = 10,
+    combine: str = "AND",
+    include_threads: bool = True,
+    include_entries: bool = True,
+    **kwargs: Any,
+) -> str:
+    """Search the baseline graph (free tier).
+
+    This is the core search implementation for baseline graph.
+    """
+    from watercooler.baseline_graph.search import SearchQuery, search_graph
+    from watercooler.baseline_graph.reader import is_graph_available
+
+    if not is_graph_available(threads_dir):
+        return json.dumps({
+            "error": "Graph not available",
+            "message": "No baseline graph found. Run watercooler_baseline_graph_build first.",
+            "results": [],
+            "count": 0,
+        })
+
+    # Validate and constrain limit
+    limit = max(1, min(limit, 100))
+
+    # Build search query
+    search_query = SearchQuery(
+        query=query if query else None,
+        semantic=semantic,
+        semantic_threshold=max(0.0, min(1.0, semantic_threshold)),
+        start_time=start_time if start_time else None,
+        end_time=end_time if end_time else None,
+        thread_status=thread_status if thread_status else None,
+        thread_topic=thread_topic if thread_topic else None,
+        role=role if role else None,
+        entry_type=entry_type if entry_type else None,
+        agent=agent if agent else None,
+        limit=limit,
+        combine=combine.upper() if combine.upper() in ("AND", "OR") else "AND",
+        include_threads=include_threads,
+        include_entries=include_entries,
+    )
+
+    # Execute search
+    results = search_graph(threads_dir, search_query)
+
+    # Format results for JSON output
+    output: Dict[str, Any] = {
+        "count": results.count,
+        "total_scanned": results.total_scanned,
+        "backend": "baseline",
+        "results": [],
+    }
+
+    for result in results.results:
+        item: Dict[str, Any] = {
+            "type": result.node_type,
+            "id": result.node_id,
+            "score": result.score,
+            "matched_fields": result.matched_fields,
+        }
+
+        if result.thread:
+            item["thread"] = {
+                "topic": result.thread.topic,
+                "title": result.thread.title,
+                "status": result.thread.status,
+                "ball": result.thread.ball,
+                "last_updated": result.thread.last_updated,
+                "entry_count": result.thread.entry_count,
+                "summary": result.thread.summary,
+            }
+
+        if result.entry:
+            item["entry"] = {
+                "entry_id": result.entry.entry_id,
+                "thread_topic": result.entry.thread_topic,
+                "index": result.entry.index,
+                "agent": result.entry.agent,
+                "role": result.entry.role,
+                "entry_type": result.entry.entry_type,
+                "title": result.entry.title,
+                "timestamp": result.entry.timestamp,
+                "summary": result.entry.summary,
+            }
+
+        output["results"].append(item)
+
+    return json.dumps(output, indent=2)
+
+
+def _search_graphiti_impl(
+    ctx: Context,
+    threads_dir: Path,
+    query: str,
+    limit: int = 10,
+    **kwargs: Any,
+) -> str:
+    """Search Graphiti memory backend for facts/episodes.
+
+    Routes to watercooler_search_memory_facts for entries search in Graphiti.
+    """
+    from .. import memory as mem
+
+    config = mem.load_graphiti_config()
+    if not config:
+        raise RuntimeError("Graphiti backend not enabled")
+
+    backend = mem.get_graphiti_backend()
+    if not backend:
+        raise RuntimeError("Graphiti backend unavailable")
+
+    # Use Graphiti's search_memory_facts for entry-level search
+    import asyncio
+
+    async def do_search():
+        return await backend.search_facts(query=query, max_facts=limit)
+
+    results = asyncio.get_event_loop().run_until_complete(do_search())
+
+    output: Dict[str, Any] = {
+        "count": len(results),
+        "backend": "graphiti",
+        "results": [
+            {
+                "type": "fact",
+                "id": r.get("uuid", ""),
+                "score": r.get("score", 0.0),
+                "fact": r.get("fact", ""),
+                "source_node": r.get("source_node_uuid", ""),
+                "target_node": r.get("target_node_uuid", ""),
+            }
+            for r in results
+        ],
+    }
+
+    return json.dumps(output, indent=2)
+
+
+def _search_graphiti_nodes_impl(
+    ctx: Context,
+    threads_dir: Path,
+    query: str,
+    limit: int = 10,
+    **kwargs: Any,
+) -> str:
+    """Search Graphiti for entity nodes."""
+    from .. import memory as mem
+
+    config = mem.load_graphiti_config()
+    if not config:
+        raise RuntimeError("Graphiti backend not enabled")
+
+    backend = mem.get_graphiti_backend()
+    if not backend:
+        raise RuntimeError("Graphiti backend unavailable")
+
+    import asyncio
+
+    async def do_search():
+        return await backend.search_nodes(query=query, max_nodes=limit)
+
+    results = asyncio.get_event_loop().run_until_complete(do_search())
+
+    output: Dict[str, Any] = {
+        "count": len(results),
+        "backend": "graphiti",
+        "mode": "entities",
+        "results": [
+            {
+                "type": "entity",
+                "id": r.get("uuid", ""),
+                "name": r.get("name", ""),
+                "labels": r.get("labels", []),
+                "summary": r.get("summary", ""),
+            }
+            for r in results
+        ],
+    }
+
+    return json.dumps(output, indent=2)
+
+
+def _search_graphiti_episodes_impl(
+    ctx: Context,
+    threads_dir: Path,
+    query: str,
+    limit: int = 10,
+    **kwargs: Any,
+) -> str:
+    """Search Graphiti for episodes."""
+    from .. import memory as mem
+
+    config = mem.load_graphiti_config()
+    if not config:
+        raise RuntimeError("Graphiti backend not enabled")
+
+    backend = mem.get_graphiti_backend()
+    if not backend:
+        raise RuntimeError("Graphiti backend unavailable")
+
+    import asyncio
+
+    async def do_search():
+        return await backend.get_episodes(query=query, max_episodes=limit)
+
+    results = asyncio.get_event_loop().run_until_complete(do_search())
+
+    output: Dict[str, Any] = {
+        "count": len(results),
+        "backend": "graphiti",
+        "mode": "episodes",
+        "results": [
+            {
+                "type": "episode",
+                "id": r.get("uuid", ""),
+                "name": r.get("name", ""),
+                "content": r.get("content", ""),
+                "created_at": r.get("created_at", ""),
+            }
+            for r in results
+        ],
+    }
+
+    return json.dumps(output, indent=2)
+
+
+def _search_leanrag_impl(
+    ctx: Context,
+    threads_dir: Path,
+    query: str,
+    limit: int = 10,
+    **kwargs: Any,
+) -> str:
+    """Search LeanRAG hierarchical clusters.
+
+    LeanRAG search is not yet implemented - raises error to trigger fallback.
+    """
+    # LeanRAG search implementation would go here
+    # For now, raise to trigger fallback to baseline
+    raise RuntimeError("LeanRAG search not yet implemented")
 
 
 # Module-level references to registered tools (populated by register_graph_tools)
@@ -166,11 +582,14 @@ def _search_graph_impl(
     combine: str = "AND",
     include_threads: bool = True,
     include_entries: bool = True,
+    mode: str = "auto",
+    backend: str = "auto",
 ) -> str:
-    """Unified search across threads and entries in the baseline graph.
+    """Unified search across threads and entries with tier-aware routing.
 
     Supports keyword search, semantic search with embeddings, time-based
-    filtering, and metadata filters. All filters can be combined with AND or OR logic.
+    filtering, and metadata filters. Routes to appropriate backend based on
+    tier (free/paid) and mode (entries/entities/episodes).
 
     Args:
         code_path: Path to code repository (for resolving threads dir).
@@ -190,14 +609,21 @@ def _search_graph_impl(
         combine: How to combine filters - "AND" or "OR" (default: AND).
         include_threads: Include thread nodes in results (default: True).
         include_entries: Include entry nodes in results (default: True).
+        mode: Search mode - "auto", "entries", "entities", or "episodes".
+            - auto: Infer from query (default is entries)
+            - entries: Search thread entries (baseline graph or Graphiti facts)
+            - entities: Search entity nodes (requires Graphiti)
+            - episodes: Search episodes (requires Graphiti)
+        backend: Search backend - "auto", "baseline", "graphiti", or "leanrag".
+            - auto: Use WATERCOOLER_MEMORY_BACKEND env var, fallback to baseline
+            - baseline: Free tier - baseline graph only
+            - graphiti: Paid tier - Graphiti memory backend
+            - leanrag: Paid tier - LeanRAG hierarchical clusters
 
     Returns:
         JSON with search results including matched nodes and metadata.
     """
     try:
-        from watercooler.baseline_graph.search import SearchQuery, search_graph
-        from watercooler.baseline_graph.reader import is_graph_available
-
         error, context = validation._require_context(code_path)
         if error:
             return error
@@ -208,81 +634,31 @@ def _search_graph_impl(
         if not threads_dir.exists():
             return f"Threads directory not found: {threads_dir}"
 
-        # Check if graph is available
-        if not is_graph_available(threads_dir):
-            return json.dumps({
-                "error": "Graph not available",
-                "message": "No baseline graph found. Run watercooler_baseline_graph_build first.",
-                "results": [],
-                "count": 0,
-            })
+        # Resolve backend and mode
+        resolved_backend = get_search_backend(backend)
+        resolved_mode = infer_search_mode(mode, query, semantic)
 
-        # Validate and constrain limit
-        limit = max(1, min(limit, 100))
-
-        # Build search query
-        search_query = SearchQuery(
-            query=query if query else None,
+        # Route to appropriate search implementation
+        return route_search(
+            ctx=ctx,
+            threads_dir=threads_dir,
+            query=query,
+            backend=resolved_backend,
+            mode=resolved_mode,
             semantic=semantic,
-            semantic_threshold=max(0.0, min(1.0, semantic_threshold)),
-            start_time=start_time if start_time else None,
-            end_time=end_time if end_time else None,
-            thread_status=thread_status if thread_status else None,
-            thread_topic=thread_topic if thread_topic else None,
-            role=role if role else None,
-            entry_type=entry_type if entry_type else None,
-            agent=agent if agent else None,
+            semantic_threshold=semantic_threshold,
+            start_time=start_time,
+            end_time=end_time,
+            thread_status=thread_status,
+            thread_topic=thread_topic,
+            role=role,
+            entry_type=entry_type,
+            agent=agent,
             limit=limit,
-            combine=combine.upper() if combine.upper() in ("AND", "OR") else "AND",
+            combine=combine,
             include_threads=include_threads,
             include_entries=include_entries,
         )
-
-        # Execute search
-        results = search_graph(threads_dir, search_query)
-
-        # Format results for JSON output
-        output = {
-            "count": results.count,
-            "total_scanned": results.total_scanned,
-            "results": [],
-        }
-
-        for result in results.results:
-            item = {
-                "type": result.node_type,
-                "id": result.node_id,
-                "score": result.score,
-                "matched_fields": result.matched_fields,
-            }
-
-            if result.thread:
-                item["thread"] = {
-                    "topic": result.thread.topic,
-                    "title": result.thread.title,
-                    "status": result.thread.status,
-                    "ball": result.thread.ball,
-                    "last_updated": result.thread.last_updated,
-                    "entry_count": result.thread.entry_count,
-                    "summary": result.thread.summary,
-                }
-
-            if result.entry:
-                item["entry"] = {
-                    "entry_id": result.entry.entry_id,
-                    "thread_topic": result.entry.thread_topic,
-                    "index": result.entry.index,
-                    "agent": result.entry.agent,
-                    "role": result.entry.role,
-                    "entry_type": result.entry.entry_type,
-                    "title": result.entry.title,
-                    "timestamp": result.entry.timestamp,
-                    "summary": result.entry.summary,
-                }
-
-            output["results"].append(item)
-
-        return json.dumps(output, indent=2)
 
     except Exception as e:
         return f"Error searching graph: {str(e)}"

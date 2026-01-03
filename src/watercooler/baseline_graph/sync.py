@@ -37,10 +37,13 @@ Feature Configuration:
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -712,6 +715,17 @@ def sync_entry_to_graph(
         _update_graph_sync_state(threads_dir, topic, state)
 
         logger.debug(f"Graph sync complete for {topic}/{entry.entry_id}")
+
+        # Call memory backend hook (non-blocking - errors logged, never raise)
+        sync_to_memory_backend(
+            threads_dir=threads_dir,
+            topic=topic,
+            entry_id=entry.entry_id,
+            entry_body=entry.body,
+            entry_title=entry.title,
+            timestamp=entry.timestamp,
+        )
+
         return True
 
     except Exception as e:
@@ -979,3 +993,250 @@ def reconcile_graph(
         results[topic] = success
 
     return results
+
+
+# ============================================================================
+# Memory Backend Sync Hook (Milestone 5.3)
+# ============================================================================
+
+
+def get_memory_backend_config() -> Optional[Dict[str, Any]]:
+    """Get memory backend configuration from environment.
+
+    Configuration via WATERCOOLER_MEMORY_BACKEND env var:
+    - "graphiti": Sync to Graphiti temporal graph
+    - "leanrag": Trigger LeanRAG clustering pipeline
+
+    Returns:
+        Config dict with backend name, or None if disabled
+    """
+    backend = os.environ.get("WATERCOOLER_MEMORY_BACKEND", "").lower().strip()
+
+    if not backend:
+        return None
+
+    if backend not in ("graphiti", "leanrag"):
+        logger.warning(f"Unknown memory backend: {backend}. Supported: graphiti, leanrag")
+        return None
+
+    return {"backend": backend}
+
+
+async def _call_graphiti_add_episode(
+    content: str,
+    group_id: str,
+    entry_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    title: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Call graphiti_add_episode to sync entry to Graphiti.
+
+    This is the internal async implementation that interfaces with
+    the watercooler_mcp graphiti_add_episode tool.
+
+    Args:
+        content: Entry body text
+        group_id: Thread topic identifier
+        entry_id: Entry ID for provenance tracking
+        timestamp: Entry timestamp (ISO 8601)
+        title: Entry title
+
+    Returns:
+        Result dict with success status and episode_uuid
+    """
+    try:
+        from watercooler_mcp import memory as mem
+
+        config = mem.load_graphiti_config()
+        if config is None:
+            return {"success": False, "error": "Graphiti not enabled"}
+
+        backend = mem.get_graphiti_backend(config)
+        if backend is None or isinstance(backend, dict):
+            error_msg = "Graphiti backend unavailable"
+            if isinstance(backend, dict):
+                error_msg = backend.get("message", error_msg)
+            return {"success": False, "error": error_msg}
+
+        # Parse timestamp
+        from datetime import datetime, timezone as tz
+        if timestamp:
+            try:
+                ref_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            except ValueError:
+                ref_time = datetime.now(tz.utc)
+        else:
+            ref_time = datetime.now(tz.utc)
+
+        # Create episode title
+        episode_title = title if title else content[:50] + ("..." if len(content) > 50 else "")
+
+        # Add episode directly to Graphiti
+        result = await backend.add_episode_direct(
+            name=episode_title,
+            episode_body=content,
+            source_description="Sync from baseline graph",
+            reference_time=ref_time,
+            group_id=group_id,
+        )
+
+        episode_uuid = result.get("episode_uuid", "unknown")
+
+        # Track entry-episode mapping if entry_id provided
+        if entry_id and episode_uuid != "unknown":
+            backend.index_entry_as_episode(entry_id, episode_uuid, group_id)
+
+        logger.debug(f"MEMORY: Synced entry {entry_id} as episode {episode_uuid}")
+
+        return {
+            "success": True,
+            "episode_uuid": episode_uuid,
+            "entities_extracted": result.get("entities_extracted", []),
+        }
+
+    except ImportError as e:
+        return {"success": False, "error": f"Memory module unavailable: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _sync_graphiti_blocking(
+    content: str,
+    group_id: str,
+    entry_id: str,
+    timestamp: Optional[str],
+    title: Optional[str],
+) -> None:
+    """Blocking wrapper to sync entry to Graphiti.
+
+    Runs in a thread pool worker. Errors are logged but not raised.
+
+    Args:
+        content: Entry body text
+        group_id: Thread topic identifier
+        entry_id: Entry ID for provenance tracking
+        timestamp: Entry timestamp (ISO 8601)
+        title: Entry title
+    """
+    import asyncio
+
+    try:
+        result = asyncio.run(_call_graphiti_add_episode(
+            content=content,
+            group_id=group_id,
+            entry_id=entry_id,
+            timestamp=timestamp,
+            title=title,
+        ))
+        if not result.get("success", False):
+            logger.warning(
+                f"MEMORY: Graphiti sync failed for {group_id}/{entry_id}: "
+                f"{result.get('error', 'unknown')}"
+            )
+        else:
+            logger.debug(f"MEMORY: Synced {group_id}/{entry_id} to Graphiti")
+    except Exception as e:
+        logger.exception(f"MEMORY: Graphiti sync error for {group_id}/{entry_id}")
+
+
+# Module-level thread pool for fire-and-forget memory sync
+# Lazy initialization to avoid creating threads if memory backend is never used
+_sync_executor: Optional[ThreadPoolExecutor] = None
+_sync_executor_lock = threading.Lock()  # Static lock - avoids race condition
+_sync_executor_shutdown_registered = False
+
+
+def _shutdown_sync_executor() -> None:
+    """Gracefully shutdown the sync executor on process exit."""
+    global _sync_executor
+    if _sync_executor is not None:
+        try:
+            _sync_executor.shutdown(wait=True)
+        except Exception:
+            # Ignore errors during shutdown (process is exiting anyway)
+            pass
+        _sync_executor = None
+
+
+def _get_sync_executor() -> ThreadPoolExecutor:
+    """Get or create the sync executor (lazy initialization).
+
+    Uses double-checked locking pattern with a static module-level lock.
+    Registers an atexit handler on first executor creation for graceful shutdown.
+    """
+    global _sync_executor, _sync_executor_shutdown_registered
+
+    if _sync_executor is None:
+        with _sync_executor_lock:
+            if _sync_executor is None:
+                _sync_executor = ThreadPoolExecutor(
+                    max_workers=2,
+                    thread_name_prefix="memory_sync"
+                )
+                # Register shutdown handler only once
+                if not _sync_executor_shutdown_registered:
+                    atexit.register(_shutdown_sync_executor)
+                    _sync_executor_shutdown_registered = True
+    return _sync_executor
+
+
+def sync_to_memory_backend(
+    threads_dir: Path,
+    topic: str,
+    entry_id: str,
+    entry_body: str,
+    entry_title: Optional[str] = None,
+    timestamp: Optional[str] = None,
+) -> bool:
+    """Sync an entry to the configured memory backend.
+
+    This function is non-blocking - work is submitted to a thread pool
+    and errors are logged but never raise. The baseline graph sync
+    always succeeds regardless of memory backend status.
+
+    Args:
+        threads_dir: Threads directory
+        topic: Thread topic (used as group_id)
+        entry_id: Entry ID for provenance tracking
+        entry_body: Entry content to sync
+        entry_title: Optional entry title
+        timestamp: Optional entry timestamp
+
+    Returns:
+        True if sync was submitted, False if disabled or failed to submit
+    """
+    config = get_memory_backend_config()
+    if config is None:
+        return False
+
+    backend = config["backend"]
+
+    try:
+        if backend == "graphiti":
+            # Submit to thread pool for fire-and-forget execution
+            # This avoids event loop complexity and works in any context
+            executor = _get_sync_executor()
+            executor.submit(
+                _sync_graphiti_blocking,
+                content=entry_body,
+                group_id=topic,
+                entry_id=entry_id,
+                timestamp=timestamp,
+                title=entry_title,
+            )
+            logger.debug(f"MEMORY: Submitted Graphiti sync for {topic}/{entry_id}")
+            return True
+
+        elif backend == "leanrag":
+            # LeanRAG is a pipeline trigger - it processes batches, not individual entries
+            # Log for now, actual implementation would trigger pipeline on-demand
+            logger.debug(f"MEMORY: LeanRAG backend - entry {entry_id} queued for pipeline")
+            return True
+
+        else:
+            logger.warning(f"MEMORY: Unknown backend {backend}")
+            return False
+
+    except Exception as e:
+        logger.warning(f"MEMORY: Sync failed for {topic}/{entry_id}: {e}")
+        return False

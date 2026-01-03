@@ -17,6 +17,7 @@ from watercooler_memory import (
     ChunkerConfig,
 )
 from watercooler_memory.leanrag_export import export_to_leanrag, entry_to_leanrag_document
+from watercooler_memory.pipeline.config import PipelineConfig
 
 
 @pytest.fixture
@@ -152,6 +153,23 @@ class TestParser:
 class TestChunker:
     """Test text chunking."""
 
+    def test_chunker_defaults_768_64(self):
+        """Test that chunker defaults to 768 tokens / 64 overlap.
+
+        These defaults balance comprehensiveness vs 'lost in the middle' issues
+        per GraphRAG literature (see MEMORY_INTEGRATION_ROADMAP.md).
+        """
+        from watercooler_memory.chunker import DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP
+
+        # Verify module-level constants
+        assert DEFAULT_MAX_TOKENS == 768, f"Expected DEFAULT_MAX_TOKENS=768, got {DEFAULT_MAX_TOKENS}"
+        assert DEFAULT_OVERLAP == 64, f"Expected DEFAULT_OVERLAP=64, got {DEFAULT_OVERLAP}"
+
+        # Verify ChunkerConfig defaults match
+        config = ChunkerConfig()
+        assert config.max_tokens == 768, f"Expected ChunkerConfig.max_tokens=768, got {config.max_tokens}"
+        assert config.overlap == 64, f"Expected ChunkerConfig.overlap=64, got {config.overlap}"
+
     def test_chunk_short_text(self):
         """Test that short text returns single chunk."""
         text = "This is a short text."
@@ -166,7 +184,7 @@ class TestChunker:
 
     def test_chunk_long_text(self):
         """Test that long text is split into multiple chunks."""
-        # Create text longer than default max_tokens (1024)
+        # Create text longer than default max_tokens (768)
         long_text = "This is a test sentence. " * 500
         config = ChunkerConfig(max_tokens=100)
         chunks = chunk_text(long_text, config)
@@ -303,3 +321,54 @@ class TestLeanRAGExport:
 
         assert manifest["statistics"]["documents"] == 2
         assert manifest["statistics"]["threads"] == 1
+
+
+class TestPipelineConfig:
+    """Test pipeline configuration defaults."""
+
+    def test_pipeline_config_chunking_defaults_768_64(self):
+        """Test that PipelineConfig defaults to 768 tokens / 64 overlap.
+
+        These defaults balance comprehensiveness vs 'lost in the middle' issues
+        per GraphRAG literature (see MEMORY_INTEGRATION_ROADMAP.md).
+        """
+        config = PipelineConfig()
+        assert config.max_tokens == 768, f"Expected PipelineConfig.max_tokens=768, got {config.max_tokens}"
+        assert config.overlap_tokens == 64, f"Expected PipelineConfig.overlap_tokens=64, got {config.overlap_tokens}"
+
+
+class TestEmbeddingConfig:
+    """Test embedding configuration defaults and standardization."""
+
+    def test_embedding_defaults_standardized(self):
+        """Test that embedding defaults match the standardized configuration.
+
+        Standard env vars (per MEMORY_INTEGRATION_ROADMAP.md):
+        - EMBEDDING_API_BASE=http://localhost:8080/v1
+        - EMBEDDING_MODEL=bge-m3
+        - EMBEDDING_DIM=1024
+        """
+        from watercooler_memory.embeddings import (
+            DEFAULT_API_BASE,
+            DEFAULT_MODEL,
+            EmbeddingConfig,
+        )
+
+        # Check module-level defaults
+        assert DEFAULT_API_BASE == "http://localhost:8080/v1", f"Expected DEFAULT_API_BASE='http://localhost:8080/v1', got '{DEFAULT_API_BASE}'"
+        assert DEFAULT_MODEL == "bge-m3", f"Expected DEFAULT_MODEL='bge-m3', got '{DEFAULT_MODEL}'"
+
+        # Check EmbeddingConfig defaults
+        config = EmbeddingConfig()
+        assert config.api_base == "http://localhost:8080/v1"
+        assert config.model == "bge-m3"
+
+    def test_pipeline_embedding_config_defaults(self):
+        """Test that pipeline EmbeddingConfig defaults are standardized."""
+        from watercooler_memory.pipeline.config import EmbeddingConfig as PipelineEmbeddingConfig
+
+        config = PipelineEmbeddingConfig()
+        # Note: base_url comes from get_embedding_api_base() which defaults to localhost:8080/v1
+        assert config.embedding_dim == 1024, f"Expected embedding_dim=1024, got {config.embedding_dim}"
+        # Model name should use EMBEDDING_MODEL env var, defaulting to bge-m3
+        assert config.model == "bge-m3", f"Expected model='bge-m3', got '{config.model}'"
