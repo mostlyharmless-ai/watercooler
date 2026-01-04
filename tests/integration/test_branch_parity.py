@@ -2939,13 +2939,15 @@ def test_sync_branch_state_adopt_with_open_threads(
     assert (threads_path / "open-thread.md").exists()
 
 
-def test_async_sync_skips_orphan_branch(
+def test_async_sync_allows_non_diverged_branch(
     threads_repo_with_remote: tuple[Path, Path],
 ) -> None:
-    """Test AsyncSyncCoordinator skips push for orphan branches.
+    """Test AsyncSyncCoordinator allows push for non-diverged branches.
 
-    Orphan branches (threads exists but code was deleted) should not be
-    pushed by the async sync - this prevents interfering with manual recovery.
+    Non-diverged branches (only ahead of origin, not behind) should push
+    successfully. The async coordinator only blocks when the branch is
+    both ahead AND behind (diverged state), which is tested separately
+    in test_async_sync_skips_diverged_branch.
     """
     from watercooler_mcp.sync.async_coordinator import AsyncSyncCoordinator, AsyncConfig
 
@@ -2976,12 +2978,11 @@ def test_async_sync_skips_orphan_branch(
     # Queue a commit
     coordinator.enqueue_commit(commit_message="Async commit", topic="test-topic")
 
-    # Push should succeed because this isn't actually an orphan (no diverge)
-    # The orphan check in async_coordinator only checks for diverged state
-    # (which we tested in test_async_sync_skips_diverged_branch)
+    # Push should succeed because we're only ahead of origin (not diverged)
+    # The async coordinator only blocks when ahead AND behind (diverged state)
     coordinator._do_push()
 
-    # Since we're not diverged, the push should succeed
+    # Non-diverged push should succeed
     status = coordinator.status()
     assert status.queue_depth == 0  # Queue was cleared by successful push
 

@@ -448,11 +448,12 @@ class AsyncSyncCoordinator:
                     # Expected: GitCommandError for missing upstream, ValueError for parse issues
                     log_debug(f"[ASYNC] Could not check ahead/behind (non-fatal): {e}")
                 except Exception as e:
-                    # Unexpected exception - log and record error, but continue
-                    # (could indicate git corruption or filesystem issues)
+                    # Unexpected exception - could indicate git corruption or filesystem issues.
+                    # Return early to avoid compounding potential problems with a push.
                     log_debug(f"[ASYNC] WARNING: Unexpected error checking ahead/behind: {type(e).__name__}: {e}")
                     with self._lock:
                         self._last_error = f"Unexpected error checking branch state: {type(e).__name__}: {e}"
+                    return
 
                 # Re-check diverged state immediately before push to minimize TOCTOU window
                 # (another process could have pushed between initial check and now)
