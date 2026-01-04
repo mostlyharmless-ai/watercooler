@@ -1571,6 +1571,10 @@ def code_repo_with_remote(tmp_path: Path) -> tuple[Path, Path]:
     code_path = tmp_path / "code-repo"
     code = Repo.clone_from(str(code_bare), str(code_path))
 
+    # Configure git user for merge commits (required for --no-ff)
+    code.config_writer().set_value("user", "name", "Test").release()
+    code.config_writer().set_value("user", "email", "test@example.com").release()
+
     # Create initial commit and push
     author = Actor("Test", "test@example.com")
     (code_path / "README.md").write_text("# Code Repo\n")
