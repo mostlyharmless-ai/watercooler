@@ -11,6 +11,7 @@ This is Layer 5 in the sync architecture, building on primitives, state, and con
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -2949,7 +2950,9 @@ def _detect_squash_merge_from_main(
             branch_lower = deleted_branch_name.lower()
 
             # Check for PR merge patterns (GitHub format)
-            if branch_lower in msg_lower:
+            # Use word boundary matching to avoid false positives
+            # (e.g., branch "fix" should not match "fix typo" commits)
+            if re.search(rf'\b{re.escape(branch_lower)}\b', msg_lower):
                 # Common merge commit patterns:
                 # "Merge pull request #123 from org/branch-name"
                 # "branch-name (#123)"

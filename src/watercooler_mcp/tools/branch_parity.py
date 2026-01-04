@@ -16,6 +16,8 @@ from mcp.types import TextContent
 from git import Repo, InvalidGitRepositoryError, GitCommandError
 
 from ..sync import validate_branch_pairing, sync_branch_history
+from ..sync.primitives import is_dirty
+from ..observability import log_debug
 from .. import validation  # Import module for runtime access (enables test patching)
 
 
@@ -431,6 +433,16 @@ def _sync_branch_state_impl(
                     )
                 )])
 
+            # Check for dirty state before checkout
+            if is_dirty(threads_repo):
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=(
+                        f"Error: Threads repo has uncommitted changes.\n"
+                        f"Commit or stash changes before adopting orphan branch."
+                    )
+                )])
+
             # Check for OPEN threads before adopting
             threads_repo.git.checkout(target_branch)
             open_threads = []
@@ -442,7 +454,8 @@ def _sync_branch_state_impl(
                     thread_topics.append(thread_file.stem)
                     if not is_closed(status):
                         open_threads.append(thread_file.stem)
-                except Exception:
+                except Exception as e:
+                    log_debug(f"[ADOPT] Failed to parse thread metadata for {thread_file.name}: {e}")
                     thread_topics.append(thread_file.stem)
 
             if open_threads and not force:
