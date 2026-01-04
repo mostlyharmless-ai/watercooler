@@ -387,7 +387,25 @@ class AsyncSyncCoordinator:
             return False
 
     def _do_push(self) -> None:
-        """Execute the push operation."""
+        """Execute the push operation.
+
+        Includes safety guards for orphaned and diverged branches:
+        - Diverged: branch is both ahead AND behind origin (skip push, risk of data loss)
+        - These guards prevent the async sync from interfering with manual recovery
+
+        TOCTOU Race Window:
+            There is an inherent race between checking diverged state and pushing.
+            We mitigate this by:
+            1. Initial check before any push attempt
+            2. Re-check immediately before push to minimize the window
+            3. Relying on push_with_retry to fail safely if state changed
+
+            A stronger guarantee would require --force-with-lease, but that adds
+            complexity and would reject pushes when remote has new commits from
+            other collaborators (which is often intentional). The current approach
+            is a reasonable tradeoff: we detect most divergence, and the few
+            cases that slip through fail safely on push rather than corrupting data.
+        """
         with self._lock:
             if not self._queue:
                 return
@@ -396,13 +414,64 @@ class AsyncSyncCoordinator:
             log_debug(f"[ASYNC] Pushing batch of {len(batch)} commits")
 
         try:
-            # Import Repo here to avoid circular imports
+            # Import git classes here to avoid circular imports
             from git import Repo
+            from git.exc import GitCommandError
+            from .primitives import get_ahead_behind
 
             repo = Repo(self.repo_path, search_parent_directories=True)
             branch = repo.active_branch.name if not repo.head.is_detached else None
 
             if branch:
+                # Safety check: detect diverged state (ahead AND behind)
+                # This prevents async sync from interfering with manual recovery
+                #
+                # Note: This check runs outside the queue lock because:
+                # 1. Git state is external - locking our queue doesn't protect git
+                # 2. If divergence occurs after our check, push_with_retry will fail safely
+                # 3. Holding lock during git operations would block enqueue for too long
+                try:
+                    ahead, behind = get_ahead_behind(repo, branch)
+                    if ahead > 0 and behind > 0:
+                        log_debug(
+                            f"[ASYNC] SKIPPING push - branch '{branch}' is diverged: "
+                            f"{ahead} ahead, {behind} behind. Risk of data loss. "
+                            f"Use 'recover' operation to fix."
+                        )
+                        with self._lock:
+                            self._last_error = (
+                                f"Push skipped: branch diverged ({ahead} ahead, {behind} behind). "
+                                f"Run sync_branch_state with operation='recover'."
+                            )
+                        return
+                except (GitCommandError, ValueError) as e:
+                    # Expected: GitCommandError for missing upstream, ValueError for parse issues
+                    log_debug(f"[ASYNC] Could not check ahead/behind (non-fatal): {e}")
+                except Exception as e:
+                    # Unexpected exception - could indicate git corruption or filesystem issues.
+                    # Return early to avoid compounding potential problems with a push.
+                    log_debug(f"[ASYNC] WARNING: Unexpected error checking ahead/behind: {type(e).__name__}: {e}")
+                    with self._lock:
+                        self._last_error = f"Unexpected error checking branch state: {type(e).__name__}: {e}"
+                    return
+
+                # Re-check diverged state immediately before push to minimize TOCTOU window
+                # (another process could have pushed between initial check and now)
+                try:
+                    ahead, behind = get_ahead_behind(repo, branch)
+                    if ahead > 0 and behind > 0:
+                        log_debug(
+                            f"[ASYNC] SKIPPING push (re-check) - branch '{branch}' diverged"
+                        )
+                        with self._lock:
+                            self._last_error = (
+                                f"Push skipped: branch diverged on re-check. "
+                                f"Run sync_branch_state with operation='recover'."
+                            )
+                        return
+                except Exception:
+                    pass  # Best-effort re-check, proceed with push
+
                 success = push_with_retry(repo, branch)
                 if success:
                     with self._lock:

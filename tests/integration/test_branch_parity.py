@@ -1571,6 +1571,10 @@ def code_repo_with_remote(tmp_path: Path) -> tuple[Path, Path]:
     code_path = tmp_path / "code-repo"
     code = Repo.clone_from(str(code_bare), str(code_path))
 
+    # Configure git user for merge commits (required for --no-ff)
+    code.config_writer().set_value("user", "name", "Test").release()
+    code.config_writer().set_value("user", "email", "test@example.com").release()
+
     # Create initial commit and push
     author = Actor("Test", "test@example.com")
     (code_path / "README.md").write_text("# Code Repo\n")
@@ -2594,3 +2598,464 @@ def test_auto_merge_to_main_with_dirty_tree(tmp_path: Path) -> None:
     # Verify the uncommitted file still exists (restored from stash)
     assert dirty_file.exists()
     assert dirty_file.read_text() == "This is uncommitted content\n"
+
+
+# =============================================================================
+# Orphan Branch Auto-Fix Tests (Bug: bug-branch-parity-orphan-threads-branch)
+# =============================================================================
+
+
+def test_preflight_orphan_branch_auto_fixes_when_merged(
+    code_repo_with_remote: tuple[Path, Path],
+    threads_repo_with_remote: tuple[Path, Path],
+) -> None:
+    """Test preflight auto-fixes orphan when code branch was merged to main.
+
+    Scenario: Code branch was merged to main and deleted. Threads branch
+    still exists on origin. Preflight should auto-merge threads to main
+    and delete the orphan branch.
+    """
+    from watercooler_mcp.sync.branch_parity import _detect_squash_merge_from_main
+
+    code_path, code_bare = code_repo_with_remote
+    threads_path, threads_bare = threads_repo_with_remote
+    code = Repo(code_path)
+    threads = Repo(threads_path)
+    author = Actor("Test", "test@example.com")
+
+    # Create feature branch in both repos
+    code.git.checkout("-b", "feature-to-merge")
+    (code_path / "feature.txt").write_text("Feature code\n")
+    code.index.add(["feature.txt"])
+    code.index.commit("Add feature", author=author)
+    code.git.push("-u", "origin", "feature-to-merge")
+
+    threads.git.checkout("-b", "feature-to-merge")
+    (threads_path / "feature-thread.md").write_text("# Feature Thread\nStatus: CLOSED\n")
+    threads.index.add(["feature-thread.md"])
+    threads.index.commit("Add feature thread", author=author)
+    threads.git.push("-u", "origin", "feature-to-merge")
+
+    # Simulate code branch merged to main (use --no-ff to create merge commit like GitHub PRs)
+    code.git.checkout("main")
+    code.git.merge("--no-ff", "-m", "Merge feature-to-merge into main", "feature-to-merge")
+    code.git.push("origin", "main")
+
+    # Delete code branch (both local and remote) - simulating PR merge
+    code.git.branch("-d", "feature-to-merge")
+    code.git.push("origin", "--delete", "feature-to-merge")
+
+    # Threads still on feature branch
+    threads.git.checkout("feature-to-merge")
+
+    # Fetch to update local refs
+    code.git.fetch("origin", "--prune")
+    threads.git.fetch("origin")
+
+    # Verify orphan state exists
+    is_merged, sha = _detect_squash_merge_from_main(code, "feature-to-merge")
+    assert is_merged is True
+
+    # Run preflight with auto_fix - should auto-fix the orphan
+    result = run_preflight(
+        code_repo_path=code_path,
+        threads_repo_path=threads_path,
+        auto_fix=True,
+        fetch_first=True,
+    )
+
+    # Should succeed (orphan auto-fixed)
+    assert result.success is True
+    assert result.can_proceed is True
+
+    # Threads should now be on main (after orphan cleanup)
+    assert threads.active_branch.name == "main"
+
+    # Verify the actions include orphan handling
+    assert any("orphan" in action.lower() for action in result.state.actions_taken)
+
+
+def test_delete_orphan_branch_local_and_remote(
+    threads_repo_with_remote: tuple[Path, Path],
+) -> None:
+    """Test _delete_orphan_branch deletes both local and remote branch."""
+    from watercooler_mcp.sync.branch_parity import _delete_orphan_branch
+
+    threads_path, threads_bare = threads_repo_with_remote
+    threads = Repo(threads_path)
+    author = Actor("Test", "test@example.com")
+
+    # Create and push a branch
+    threads.git.checkout("-b", "orphan-to-delete")
+    (threads_path / "orphan.md").write_text("# Orphan\n")
+    threads.index.add(["orphan.md"])
+    threads.index.commit("Add orphan", author=author)
+    threads.git.push("-u", "origin", "orphan-to-delete")
+
+    # Switch back to main before deleting
+    threads.git.checkout("main")
+
+    # Delete the orphan
+    success, message = _delete_orphan_branch(threads, "orphan-to-delete", delete_remote=True)
+
+    assert success is True
+    assert "Deleted local branch" in message
+    assert "Deleted remote branch" in message
+
+    # Verify branch is gone locally
+    assert "orphan-to-delete" not in [b.name for b in threads.heads]
+
+    # Verify branch is gone from remote
+    threads.git.fetch("origin", "--prune")
+    remote_refs = [ref.name for ref in threads.remote().refs]
+    assert "origin/orphan-to-delete" not in remote_refs
+
+
+def test_async_sync_skips_diverged_branch(tmp_path: Path) -> None:
+    """Test AsyncSyncCoordinator skips push when branch is diverged.
+
+    This prevents the async sync from interfering with manual recovery.
+    """
+    from watercooler_mcp.sync.async_coordinator import AsyncSyncCoordinator, AsyncConfig
+
+    # Create bare origin with initial content
+    origin_path = tmp_path / "threads-origin"
+    origin_path.mkdir()
+    origin_bare = Repo.init(origin_path, bare=True)
+
+    # Create a source repo with initial commit, then push to origin
+    source_path = tmp_path / "threads-source"
+    source_repo = Repo.init(source_path)
+    author = Actor("Test", "test@example.com")
+    (source_path / "README.md").write_text("# Threads\n")
+    source_repo.index.add(["README.md"])
+    source_repo.index.commit("Initial commit", author=author)
+    source_repo.git.branch("-M", "main")
+    source_repo.create_remote("origin", str(origin_path))
+    source_repo.git.push("-u", "origin", "main")
+
+    # Now clone from origin to get our working repo
+    threads_path = tmp_path / "threads"
+    threads_repo = Repo.clone_from(str(origin_path), str(threads_path))
+    threads_repo.git.checkout("main")
+
+    # Create local commit (ahead)
+    (threads_path / "local.md").write_text("# Local\n")
+    threads_repo.index.add(["local.md"])
+    threads_repo.index.commit("Local commit", author=author)
+
+    # Create a commit on origin to make us behind (diverged state)
+    # We do this by pushing from the source repo
+    (source_path / "remote.md").write_text("# Remote\n")
+    source_repo.index.add(["remote.md"])
+    source_repo.index.commit("Remote commit", author=author)
+    source_repo.git.push("origin", "main")
+
+    # Fetch to see the remote commit (now we're diverged: ahead AND behind)
+    threads_repo.git.fetch("origin")
+
+    # Create coordinator
+    config = AsyncConfig(batch_window=0, max_delay=0)
+    coordinator = AsyncSyncCoordinator(
+        repo_path=threads_path,
+        queue_dir=threads_path / ".sync",
+        config=config,
+    )
+
+    # Queue a commit (we're testing _do_push behavior, not enqueue)
+    coordinator.enqueue_commit(commit_message="Test commit", topic="test-topic")
+
+    # Try to push - should skip due to diverged state
+    coordinator._do_push()
+
+    # The last_error should indicate we skipped due to diverge
+    assert coordinator._last_error is not None
+    assert "diverged" in coordinator._last_error.lower()
+
+
+def test_detect_squash_merge_from_main_finds_merged_branch(
+    code_repo_with_remote: tuple[Path, Path],
+) -> None:
+    """Test _detect_squash_merge_from_main detects squash-merged branches."""
+    from watercooler_mcp.sync.branch_parity import _detect_squash_merge_from_main
+
+    code_path, code_bare = code_repo_with_remote
+    code = Repo(code_path)
+    author = Actor("Test", "test@example.com")
+
+    # Create feature branch
+    code.git.checkout("-b", "feature-squash-test")
+    (code_path / "feature1.txt").write_text("Feature 1\n")
+    code.index.add(["feature1.txt"])
+    code.index.commit("Feature commit 1", author=author)
+    (code_path / "feature2.txt").write_text("Feature 2\n")
+    code.index.add(["feature2.txt"])
+    code.index.commit("Feature commit 2", author=author)
+
+    # Squash merge to main (simulating GitHub PR squash merge)
+    code.git.checkout("main")
+    code.git.merge("feature-squash-test", "--squash")
+    code.index.commit("Merge feature-squash-test (#123)", author=author)
+
+    # Delete the feature branch
+    code.git.branch("-D", "feature-squash-test")
+
+    # Detection should find the merge
+    was_merged, sha = _detect_squash_merge_from_main(code, "feature-squash-test")
+
+    assert was_merged is True
+    # sha might be None or a short hash depending on commit message match
+
+
+def test_sync_branch_state_adopt_operation(
+    code_repo_with_remote: tuple[Path, Path],
+    threads_repo_with_remote: tuple[Path, Path],
+) -> None:
+    """Test adopt operation merges orphan to main and deletes the branch.
+
+    Scenario: Code branch was merged to main and deleted. Threads branch
+    still exists. The adopt operation should merge threads to main and
+    delete the orphaned threads branch.
+    """
+    from watercooler_mcp.tools.branch_parity import _sync_branch_state_impl
+    from unittest.mock import MagicMock
+
+    code_path, code_bare = code_repo_with_remote
+    threads_path, threads_bare = threads_repo_with_remote
+    code = Repo(code_path)
+    threads = Repo(threads_path)
+    author = Actor("Test", "test@example.com")
+
+    # Create orphan scenario: threads branch exists but code branch was deleted
+    threads.git.checkout("-b", "orphan-branch")
+    thread_file = threads_path / "orphan-thread.md"
+    thread_file.write_text("# orphan-thread — Thread\nStatus: CLOSED\nBall: Agent\n\n---\n")
+
+    # Also make the README.md a proper closed thread to avoid it being treated as OPEN
+    readme = threads_path / "README.md"
+    readme.write_text("# README — Thread\nStatus: CLOSED\nBall: Agent\n\n---\n")
+
+    threads.index.add(["orphan-thread.md", "README.md"])
+    threads.index.commit("Add orphan thread", author=author)
+    threads.git.push("-u", "origin", "orphan-branch")
+
+    # Verify code doesn't have this branch
+    assert "orphan-branch" not in [b.name for b in code.heads]
+
+    # Create mock context
+    ctx = MagicMock()
+
+    # Run adopt operation (no OPEN threads so force=False should work)
+    result = _sync_branch_state_impl(
+        ctx,
+        code_path=str(code_path),
+        branch="orphan-branch",
+        operation="adopt",
+        force=False,
+    )
+
+    # Parse result
+    result_text = result.content[0].text
+    output = json.loads(result_text)
+
+    assert output["success"] is True
+    assert output["operation"] == "adopt"
+    assert "Adopted orphan branch" in output["message"]
+    assert "Merged to main" in output["message"]
+
+    # Verify threads is on main now
+    assert threads.active_branch.name == "main"
+
+    # Verify orphan branch was deleted
+    threads.git.fetch("origin", "--prune")
+    assert "orphan-branch" not in [b.name for b in threads.heads]
+    remote_refs = [ref.name for ref in threads.remote().refs]
+    assert "origin/orphan-branch" not in remote_refs
+
+    # Verify thread file exists on main
+    assert (threads_path / "orphan-thread.md").exists()
+
+
+def test_sync_branch_state_adopt_with_open_threads(
+    code_repo_with_remote: tuple[Path, Path],
+    threads_repo_with_remote: tuple[Path, Path],
+) -> None:
+    """Test adopt operation warns about OPEN threads without force.
+
+    When an orphan branch has OPEN threads, the adopt operation should
+    fail with a warning unless force=True.
+    """
+    from watercooler_mcp.tools.branch_parity import _sync_branch_state_impl
+    from unittest.mock import MagicMock
+
+    code_path, code_bare = code_repo_with_remote
+    threads_path, threads_bare = threads_repo_with_remote
+    code = Repo(code_path)
+    threads = Repo(threads_path)
+    author = Actor("Test", "test@example.com")
+
+    # Create orphan branch with OPEN threads
+    threads.git.checkout("-b", "orphan-with-open")
+    thread_file = threads_path / "open-thread.md"
+    thread_file.write_text("# open-thread — Thread\nStatus: OPEN\nBall: Claude\n\n---\n")
+    threads.index.add(["open-thread.md"])
+    threads.index.commit("Add open thread", author=author)
+    threads.git.push("-u", "origin", "orphan-with-open")
+
+    # Create mock context
+    ctx = MagicMock()
+
+    # Run adopt without force - should fail
+    result = _sync_branch_state_impl(
+        ctx,
+        code_path=str(code_path),
+        branch="orphan-with-open",
+        operation="adopt",
+        force=False,
+    )
+
+    result_text = result.content[0].text
+    assert "Error" in result_text or "OPEN thread" in result_text
+    assert "open-thread" in result_text
+    assert "force=True" in result_text
+
+    # Run adopt with force - should succeed
+    result = _sync_branch_state_impl(
+        ctx,
+        code_path=str(code_path),
+        branch="orphan-with-open",
+        operation="adopt",
+        force=True,
+    )
+
+    result_text = result.content[0].text
+    output = json.loads(result_text)
+
+    assert output["success"] is True
+    assert "Adopted orphan branch" in output["message"]
+
+    # Verify the OPEN thread was preserved on main
+    assert threads.active_branch.name == "main"
+    assert (threads_path / "open-thread.md").exists()
+
+
+def test_async_sync_allows_non_diverged_branch(
+    threads_repo_with_remote: tuple[Path, Path],
+) -> None:
+    """Test AsyncSyncCoordinator allows push for non-diverged branches.
+
+    Non-diverged branches (only ahead of origin, not behind) should push
+    successfully. The async coordinator only blocks when the branch is
+    both ahead AND behind (diverged state), which is tested separately
+    in test_async_sync_skips_diverged_branch.
+    """
+    from watercooler_mcp.sync.async_coordinator import AsyncSyncCoordinator, AsyncConfig
+
+    threads_path, threads_bare = threads_repo_with_remote
+    threads = Repo(threads_path)
+    author = Actor("Test", "test@example.com")
+
+    # Create a branch and push
+    threads.git.checkout("-b", "orphan-async-test")
+    (threads_path / "async-test.md").write_text("# Test\n")
+    threads.index.add(["async-test.md"])
+    threads.index.commit("Add test", author=author)
+    threads.git.push("-u", "origin", "orphan-async-test")
+
+    # Create local commit (ahead of origin)
+    (threads_path / "local-change.md").write_text("# Local\n")
+    threads.index.add(["local-change.md"])
+    threads.index.commit("Local change", author=author)
+
+    # Create coordinator
+    config = AsyncConfig(batch_window=0, max_delay=0)
+    coordinator = AsyncSyncCoordinator(
+        repo_path=threads_path,
+        queue_dir=threads_path / ".sync",
+        config=config,
+    )
+
+    # Queue a commit
+    coordinator.enqueue_commit(commit_message="Async commit", topic="test-topic")
+
+    # Push should succeed because we're only ahead of origin (not diverged)
+    # The async coordinator only blocks when ahead AND behind (diverged state)
+    coordinator._do_push()
+
+    # Non-diverged push should succeed
+    status = coordinator.status()
+    assert status.queue_depth == 0  # Queue was cleared by successful push
+
+
+def test_audit_detects_orphaned_branches(
+    code_repo_with_remote: tuple[Path, Path],
+    threads_repo_with_remote: tuple[Path, Path],
+) -> None:
+    """Test audit reports orphaned branches with thread counts.
+
+    The audit should identify threads-only branches that are orphaned
+    (threads on origin but no matching code branch) and report the
+    number of open/stranded threads.
+    """
+    from watercooler_mcp.tools.branch_parity import _audit_branch_pairing_impl
+    from unittest.mock import MagicMock
+
+    code_path, code_bare = code_repo_with_remote
+    threads_path, threads_bare = threads_repo_with_remote
+    code = Repo(code_path)
+    threads = Repo(threads_path)
+    author = Actor("Test", "test@example.com")
+
+    # Create orphan scenario: threads branch exists on origin, code branch doesn't
+    threads.git.checkout("-b", "audit-orphan")
+
+    # Make README.md a proper closed thread to have predictable counts
+    readme = threads_path / "README.md"
+    readme.write_text("# README — Thread\nStatus: CLOSED\nBall: Agent\n\n---\n")
+
+    # Add multiple threads (mix of OPEN and CLOSED)
+    open_thread = threads_path / "open-thread.md"
+    open_thread.write_text("# open-thread — Thread\nStatus: OPEN\nBall: Claude\n\n---\n")
+
+    closed_thread = threads_path / "closed-thread.md"
+    closed_thread.write_text("# closed-thread — Thread\nStatus: CLOSED\nBall: Agent\n\n---\n")
+
+    threads.index.add(["README.md", "open-thread.md", "closed-thread.md"])
+    threads.index.commit("Add threads", author=author)
+    threads.git.push("-u", "origin", "audit-orphan")
+
+    # Switch back to main
+    threads.git.checkout("main")
+
+    # Create mock context
+    ctx = MagicMock()
+
+    # Run audit
+    result = _audit_branch_pairing_impl(
+        ctx,
+        code_path=str(code_path),
+        include_merged=True,
+    )
+
+    result_text = result.content[0].text
+    output = json.loads(result_text)
+
+    # Find the orphan in threads_only_branches
+    threads_only = output.get("threads_only_branches", [])
+    orphan_entry = None
+    for branch in threads_only:
+        if branch["name"] == "audit-orphan":
+            orphan_entry = branch
+            break
+
+    assert orphan_entry is not None, f"audit-orphan not found in {threads_only}"
+    assert orphan_entry["is_orphan"] is True
+    assert orphan_entry["open_threads"] == 1  # 1 OPEN thread (open-thread.md)
+    assert "open-thread" in orphan_entry["stranded_threads"]
+    assert "closed-thread" in orphan_entry["stranded_threads"]
+    assert orphan_entry["action"] == "adopt"
+
+    # Check recommendations include adopt command
+    recommendations = output.get("recommendations", [])
+    adopt_rec = [r for r in recommendations if "audit-orphan" in r and "adopt" in r]
+    assert len(adopt_rec) > 0, f"No adopt recommendation found in {recommendations}"

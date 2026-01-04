@@ -64,7 +64,6 @@ class TestParityStatus:
             ParityStatus.REBASE_IN_PROGRESS,
             ParityStatus.DIVERGED,
             ParityStatus.NEEDS_MANUAL_RECOVER,
-            ParityStatus.ORPHAN_BRANCH,
             ParityStatus.ERROR,
         ]
         for status in blocking_states:
@@ -78,6 +77,7 @@ class TestParityStatus:
             ParityStatus.BRANCH_MISMATCH,
             ParityStatus.MAIN_PROTECTION,
             ParityStatus.REMOTE_UNREACHABLE,
+            ParityStatus.ORPHAN_BRANCH,
         ]
         for status in non_blocking_states:
             assert ParityStatus.is_blocking(status) is False
@@ -88,6 +88,7 @@ class TestParityStatus:
             ParityStatus.BRANCH_MISMATCH,
             ParityStatus.PENDING_PUSH,
             ParityStatus.REMOTE_UNREACHABLE,
+            ParityStatus.ORPHAN_BRANCH,
         ]
         for status in auto_fixable_states:
             assert ParityStatus.is_auto_fixable(status) is True
@@ -101,7 +102,6 @@ class TestParityStatus:
             ParityStatus.REBASE_IN_PROGRESS,
             ParityStatus.DIVERGED,
             ParityStatus.NEEDS_MANUAL_RECOVER,
-            ParityStatus.ORPHAN_BRANCH,
             ParityStatus.ERROR,
         ]
         for status in non_auto_fixable_states:

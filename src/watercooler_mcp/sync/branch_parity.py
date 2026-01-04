@@ -11,6 +11,8 @@ This is Layer 5 in the sync architecture, building on primitives, state, and con
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -851,7 +853,111 @@ class BranchParityManager:
                 and code_branch != main_branch
             )
 
-            # Handle branch mismatch
+            # Check for orphan branch BEFORE branch mismatch handling
+            # Orphan = threads branch exists on origin but code repo doesn't have this branch
+            # This happens when code branch was merged/deleted but threads branch remains
+            if (
+                code_branch != threads_branch
+                and threads_branch not in ("main", "master")
+            ):
+                # Check if threads_branch was deleted from code's origin
+                code_has_threads_branch = branch_exists_on_origin(
+                    self.code_repo, threads_branch
+                )
+                threads_on_origin = branch_exists_on_origin(
+                    self.threads_repo, threads_branch
+                )
+                if threads_on_origin and not code_has_threads_branch:
+                    # Orphan detected - threads branch exists but code branch was deleted
+                    if auto_fix:
+                        log_debug(
+                            f"[PARITY] Orphan detected: threads on '{threads_branch}' "
+                            f"but code branch was deleted from origin. Attempting auto-fix..."
+                        )
+
+                        # Step 1: Verify the code branch was likely merged (not just abandoned)
+                        was_merged, merge_sha = _detect_squash_merge_from_main(
+                            self.code_repo, threads_branch
+                        )
+                        if not was_merged:
+                            log_debug(
+                                f"[PARITY] Cannot confirm {threads_branch} was merged to main. "
+                                "Blocking for safety."
+                            )
+                            state.status = ParityStatus.ORPHAN_BRANCH.value
+                            state.last_error = (
+                                f"Orphan threads branch: '{threads_branch}' exists on origin "
+                                f"but code branch not found on origin and cannot confirm it was merged. "
+                                f"Use 'adopt' operation to manually adopt this orphan."
+                            )
+                            write_parity_state(self.threads_repo_path, state)
+                            return PreflightResult(
+                                success=False,
+                                state=state,
+                                can_proceed=False,
+                                blocking_reason=state.last_error,
+                            )
+
+                        actions_taken.append(
+                            f"Detected orphan: {threads_branch} (code merged as {merge_sha or 'squash'})"
+                        )
+
+                        # Step 2: Merge orphaned threads branch to main
+                        target_main = main_branch or "main"
+                        merge_ok, merge_msg = auto_merge_to_main(
+                            self.threads_repo, threads_branch, target_main
+                        )
+                        if not merge_ok:
+                            log_debug(f"[PARITY] Auto-merge of orphan failed: {merge_msg}")
+                            state.status = ParityStatus.ORPHAN_BRANCH.value
+                            state.last_error = (
+                                f"Orphan auto-fix failed during merge: {merge_msg}. "
+                                f"Use 'adopt' operation with force=True for manual resolution."
+                            )
+                            write_parity_state(self.threads_repo_path, state)
+                            return PreflightResult(
+                                success=False,
+                                state=state,
+                                can_proceed=False,
+                                blocking_reason=state.last_error,
+                            )
+                        actions_taken.append(f"Merged orphan to {target_main}: {merge_msg}")
+
+                        # Step 3: Delete the orphaned branch
+                        delete_ok, delete_msg = _delete_orphan_branch(
+                            self.threads_repo, threads_branch, delete_remote=True
+                        )
+                        if delete_ok:
+                            actions_taken.append(f"Deleted orphan: {delete_msg}")
+                        else:
+                            # Non-fatal - merge succeeded, branch just wasn't cleaned up
+                            log_debug(f"[PARITY] Orphan delete failed (non-fatal): {delete_msg}")
+                            actions_taken.append(f"Warning: orphan cleanup incomplete: {delete_msg}")
+
+                        # Step 4: Update state - now on main
+                        threads_branch = get_branch_name(self.threads_repo)
+                        state.threads_branch = threads_branch
+                        log_debug(
+                            f"[PARITY] Orphan auto-fixed. Now on code={code_branch}, threads={threads_branch}"
+                        )
+                        # Continue with updated branches (likely code=main, threads=main now)
+                    else:
+                        # Can't auto-fix (disabled)
+                        state.status = ParityStatus.ORPHAN_BRANCH.value
+                        state.last_error = (
+                            f"Orphan threads branch: '{threads_branch}' exists on origin "
+                            f"but code branch was deleted. "
+                            f"Run preflight with auto_fix=True or use 'adopt' operation."
+                        )
+                        write_parity_state(self.threads_repo_path, state)
+                        return PreflightResult(
+                            success=False,
+                            state=state,
+                            can_proceed=False,
+                            blocking_reason=state.last_error,
+                        )
+
+            # Handle branch mismatch (after orphan check)
             if code_branch != threads_branch:
                 if auto_fix:
                     # Stash if dirty
@@ -985,22 +1091,31 @@ class BranchParityManager:
                         blocking_reason=state.last_error,
                     )
 
-            # Check for orphan branch: threads on origin but code not on origin
-            code_on_origin = branch_exists_on_origin(self.code_repo, code_branch)
-            threads_on_origin = branch_exists_on_origin(self.threads_repo, threads_branch)
-            if threads_on_origin and not code_on_origin:
-                state.status = ParityStatus.ORPHAN_BRANCH.value
-                state.last_error = (
-                    f"Orphan threads branch: '{threads_branch}' exists on origin "
-                    f"but code branch was deleted or never pushed"
+            # Check for orphan state when branches match:
+            # threads branch is on origin but code branch is not
+            # (e.g., code was deleted from origin, or never pushed)
+            if code_branch == threads_branch and threads_branch not in ("main", "master"):
+                code_branch_on_origin = branch_exists_on_origin(
+                    self.code_repo, code_branch
                 )
-                write_parity_state(self.threads_repo_path, state)
-                return PreflightResult(
-                    success=False,
-                    state=state,
-                    can_proceed=False,
-                    blocking_reason=state.last_error,
+                threads_branch_on_origin = branch_exists_on_origin(
+                    self.threads_repo, threads_branch
                 )
+                if threads_branch_on_origin and not code_branch_on_origin:
+                    # Threads is on origin but code isn't - this is an orphan-like state
+                    state.status = ParityStatus.ORPHAN_BRANCH.value
+                    state.last_error = (
+                        f"Orphan state: threads branch '{threads_branch}' exists on origin "
+                        f"but code branch is not on origin. Either push the code branch "
+                        f"or delete the threads branch from origin."
+                    )
+                    write_parity_state(self.threads_repo_path, state)
+                    return PreflightResult(
+                        success=False,
+                        state=state,
+                        can_proceed=False,
+                        blocking_reason=state.last_error,
+                    )
 
             # Check and set upstream tracking for threads branch if missing
             if auto_fix:
@@ -2779,3 +2894,191 @@ def _detect_squash_merge(code_repo_obj: Repo, branch: str) -> Tuple[bool, Option
         return (False, None)
     except Exception:
         return (False, None)
+
+
+# Maximum commits to scan when looking for merge evidence.
+# Tradeoff: Higher values catch older merges but slow down detection.
+# 100 covers ~2-3 weeks of typical repo activity. Configurable via env var
+# for high-velocity repos that may need more history.
+# Bounds: 1-1000 (clamped to prevent DoS via extremely large values or negatives)
+_raw_max_commits = os.environ.get("WATERCOOLER_MERGE_DETECTION_MAX_COMMITS", "100")
+try:
+    MERGE_DETECTION_MAX_COMMITS = max(1, min(1000, int(_raw_max_commits)))
+except ValueError:
+    MERGE_DETECTION_MAX_COMMITS = 100  # Default on parse failure
+
+
+def _detect_squash_merge_from_main(
+    code_repo: Repo,
+    deleted_branch_name: str,
+    main_branch: str = "main",
+) -> Tuple[bool, Optional[str]]:
+    """Detect if a deleted branch was squash-merged to main.
+
+    This is used for orphan branch detection when the code branch
+    has been deleted (after PR merge) but the threads branch still exists.
+
+    Supported merge message formats (GitHub-centric):
+    - "Merge pull request #123 from org/branch-name" (GitHub PR merge)
+    - "branch-name (#123)" (GitHub squash merge default)
+    - Any commit message containing the branch name
+
+    Note: This detection is best-effort and may not work for:
+    - GitLab/Bitbucket/Gitea with different merge formats
+    - Manual merges without branch name in message
+    - Branches deleted without being merged (returns False correctly)
+
+    Args:
+        code_repo: GitPython Repo object for code repository
+        deleted_branch_name: Name of the branch that was deleted
+        main_branch: Name of the main branch to check
+
+    Returns:
+        Tuple of (was_merged, merge_commit_sha)
+        Returns (True, sha) if evidence of merge found in commit messages
+        Returns (False, None) if no evidence of merge or branch still exists
+    """
+    try:
+        # Validate branch name before using in regex to prevent injection
+        try:
+            validate_branch_name(deleted_branch_name)
+        except ValueError:
+            return (False, None)  # Invalid branch name can't have been merged
+
+        if main_branch not in [b.name for b in code_repo.heads]:
+            return (False, None)
+
+        # Check remote tracking branch
+        try:
+            remote_refs = [ref.name for ref in code_repo.remote().refs]
+            if f"origin/{deleted_branch_name}" in remote_refs:
+                # Branch still exists on remote - not truly deleted/merged
+                return (False, None)
+        except Exception:
+            pass
+
+        # Look for merge evidence in recent main commits
+        main_commits = list(code_repo.iter_commits(main_branch, max_count=MERGE_DETECTION_MAX_COMMITS))
+
+        for commit in main_commits:
+            msg_lower = commit.message.lower()
+            branch_lower = deleted_branch_name.lower()
+
+            # Check for branch name with word boundaries
+            branch_pattern = rf'\b{re.escape(branch_lower)}\b'
+            has_branch_name = re.search(branch_pattern, msg_lower) is not None
+
+            if has_branch_name:
+                # Require additional context to avoid false positives
+                has_pr_number = re.search(r'#\d+', commit.message) is not None
+                has_merge_keyword = any(kw in msg_lower for kw in (
+                    "merge", "squash", "merged", "merging"
+                ))
+
+                # For short/generic branch names (<=6 chars), require BOTH
+                # branch name AND (PR# OR merge keyword) to reduce false positives
+                # e.g., branch "fix" matching "Fix typo (#123)" unrelated commit
+                is_short_name = len(deleted_branch_name) <= 6
+
+                if is_short_name:
+                    # Strict: require branch appears in merge context
+                    # Pattern: "from org/branch" or "branch (#123)" or "Merge branch"
+                    has_merge_context = (
+                        f"from {branch_lower}" in msg_lower or
+                        f"/{branch_lower}" in msg_lower or
+                        re.search(rf'{re.escape(branch_lower)}\s*\(#\d+\)', msg_lower) is not None or
+                        f"merge {branch_lower}" in msg_lower or
+                        f"merge branch {branch_lower}" in msg_lower
+                    )
+                    if has_merge_context:
+                        return (True, commit.hexsha[:7])
+                else:
+                    # Normal names: require PR# OR merge keyword
+                    # Common patterns:
+                    # "Merge pull request #123 from org/branch-name"
+                    # "branch-name (#123)"
+                    # "Squash merge of branch-name"
+                    if has_pr_number or has_merge_keyword:
+                        return (True, commit.hexsha[:7])
+
+            # Check for PR number references with branch name (handles dashes as spaces)
+            if "merge pull request" in msg_lower and branch_lower.replace("-", " ") in msg_lower:
+                return (True, commit.hexsha[:7])
+
+        # No evidence of merge found - do NOT assume it was merged
+        # Branches may be deleted without merging (abandoned work, cancelled PRs, etc.)
+        return (False, None)
+
+    except Exception as e:
+        log_debug(f"[PARITY] _detect_squash_merge_from_main failed: {e}")
+        return (False, None)
+
+
+def _delete_orphan_branch(
+    repo: Repo,
+    branch_name: str,
+    delete_remote: bool = True,
+) -> Tuple[bool, str]:
+    """Delete an orphaned branch (local and optionally remote).
+
+    This is used after merging an orphaned threads branch to main.
+    It cleans up the orphan branch to prevent future confusion.
+
+    Args:
+        repo: GitPython Repo object
+        branch_name: Name of the branch to delete
+        delete_remote: Whether to also delete from origin (default: True)
+
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    actions: List[str] = []
+
+    try:
+        validate_branch_name(branch_name)
+    except ValueError as e:
+        return (False, f"Invalid branch name: {e}")
+
+    # Don't delete main/master
+    if branch_name in ("main", "master"):
+        return (False, "Cannot delete main/master branch")
+
+    current_branch = get_branch_name(repo)
+    if current_branch == branch_name:
+        return (False, f"Cannot delete current branch '{branch_name}'. Switch branches first.")
+
+    # Delete local branch
+    try:
+        if branch_name in [b.name for b in repo.heads]:
+            repo.delete_head(branch_name, force=True)
+            actions.append(f"Deleted local branch '{branch_name}'")
+    except GitCommandError as e:
+        # GitCommandError: branch may not exist locally (common in some workflows)
+        # or git is in a weird state. Log and continue to try remote deletion,
+        # since remote cleanup is often the primary goal for orphan handling.
+        log_debug(f"[PARITY] Failed to delete local branch {branch_name}: {e}")
+    except (PermissionError, OSError) as e:
+        # PermissionError/OSError: filesystem-level issues indicate a real problem
+        # that won't be fixed by continuing. Surface these immediately so the user
+        # can investigate (disk full, permissions, filesystem corruption, etc.)
+        return (False, f"Failed to delete local branch: {e}")
+
+    # Delete remote branch
+    if delete_remote:
+        try:
+            repo.git.push("origin", "--delete", branch_name)
+            actions.append(f"Deleted remote branch 'origin/{branch_name}'")
+        except GitCommandError as e:
+            if "remote ref does not exist" in str(e).lower():
+                actions.append(f"Remote branch 'origin/{branch_name}' already deleted")
+            else:
+                log_debug(f"[PARITY] Failed to delete remote branch {branch_name}: {e}")
+                if not actions:
+                    return (False, f"Failed to delete branch: {e}")
+
+    if actions:
+        message = "; ".join(actions)
+        log_debug(f"[PARITY] _delete_orphan_branch: {message}")
+        return (True, message)
+    else:
+        return (False, f"Branch '{branch_name}' not found locally or remotely")
