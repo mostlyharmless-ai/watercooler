@@ -11,8 +11,9 @@ import sys
 import json
 import subprocess
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastmcp import Context
 from fastmcp.tools.tool import ToolResult
@@ -38,8 +39,11 @@ health = None
 whoami = None
 reconcile_parity = None
 
+# Rate limit warning threshold (10% remaining triggers warning)
+RATE_LIMIT_WARNING_THRESHOLD = 0.1
 
-def _check_git_auth_health(threads_dir: Path) -> dict:
+
+def _check_git_auth_health(threads_dir: Path) -> dict[str, Any]:
     """Check git authentication configuration and connectivity.
 
     Returns a dict with:
@@ -233,7 +237,7 @@ def _check_git_auth_health(threads_dir: Path) -> dict:
     return result
 
 
-def _check_github_rate_limit() -> dict:
+def _check_github_rate_limit() -> dict[str, Any]:
     """Check GitHub API rate limit status.
 
     Returns a dict with:
@@ -272,13 +276,14 @@ def _check_github_rate_limit() -> dict:
             result["limit"] = limit
             result["percent"] = round((remaining / limit) * 100) if limit > 0 else 0
 
-            # Calculate minutes until reset
+            # Calculate minutes until reset (GitHub returns UTC timestamps)
             if reset_ts > 0:
-                reset_time = datetime.fromtimestamp(reset_ts)
-                now = datetime.now()
+                reset_time = datetime.fromtimestamp(reset_ts, tz=timezone.utc)
+                now = datetime.now(tz=timezone.utc)
                 if reset_time > now:
                     delta = reset_time - now
-                    result["reset_minutes"] = max(0, delta.seconds // 60)
+                    # Use total_seconds() to handle deltas > 24 hours correctly
+                    result["reset_minutes"] = max(0, int(delta.total_seconds()) // 60)
                 else:
                     result["reset_minutes"] = 0
 
@@ -289,7 +294,7 @@ def _check_github_rate_limit() -> dict:
                 result["recommendations"].append(
                     f"Wait {result['reset_minutes']} minutes for reset, or reduce API calls"
                 )
-            elif remaining < (limit * 0.1):  # Less than 10%
+            elif remaining < (limit * RATE_LIMIT_WARNING_THRESHOLD):
                 result["status"] = "warning"
                 result["warnings"].append(
                     f"Approaching rate limit: {remaining}/{limit} ({result['percent']}%) remaining"
@@ -324,7 +329,7 @@ def _check_github_rate_limit() -> dict:
     return result
 
 
-def _check_gh_version() -> dict:
+def _check_gh_version() -> dict[str, Any]:
     """Check gh CLI version.
 
     Returns a dict with:
