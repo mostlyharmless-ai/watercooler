@@ -2632,9 +2632,9 @@ def test_preflight_orphan_branch_auto_fixes_when_merged(
     threads.index.commit("Add feature thread", author=author)
     threads.git.push("-u", "origin", "feature-to-merge")
 
-    # Simulate code branch merged to main
+    # Simulate code branch merged to main (use --no-ff to create merge commit like GitHub PRs)
     code.git.checkout("main")
-    code.git.merge("feature-to-merge", "--no-edit", "-m", "Merge feature-to-merge into main")
+    code.git.merge("feature-to-merge", "--no-ff", "-m", "Merge feature-to-merge into main")
     code.git.push("origin", "main")
 
     # Delete code branch (both local and remote) - simulating PR merge

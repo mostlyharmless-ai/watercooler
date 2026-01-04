@@ -401,8 +401,9 @@ class AsyncSyncCoordinator:
             log_debug(f"[ASYNC] Pushing batch of {len(batch)} commits")
 
         try:
-            # Import Repo here to avoid circular imports
+            # Import git classes here to avoid circular imports
             from git import Repo
+            from git.exc import GitCommandError
             from .primitives import get_ahead_behind
 
             repo = Repo(self.repo_path, search_parent_directories=True)
@@ -425,8 +426,12 @@ class AsyncSyncCoordinator:
                                 f"Run sync_branch_state with operation='recover'."
                             )
                         return
-                except Exception as e:
+                except (GitCommandError, ValueError) as e:
+                    # Expected: GitCommandError for missing upstream, ValueError for parse issues
                     log_debug(f"[ASYNC] Could not check ahead/behind (non-fatal): {e}")
+                except Exception as e:
+                    # Unexpected exception - log at higher visibility but continue
+                    log_debug(f"[ASYNC] WARNING: Unexpected error checking ahead/behind: {type(e).__name__}: {e}")
 
                 success = push_with_retry(repo, branch)
                 if success:

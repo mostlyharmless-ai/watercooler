@@ -2894,6 +2894,10 @@ def _detect_squash_merge(code_repo_obj: Repo, branch: str) -> Tuple[bool, Option
         return (False, None)
 
 
+# Maximum commits to scan when looking for merge evidence
+MERGE_DETECTION_MAX_COMMITS = 100
+
+
 def _detect_squash_merge_from_main(
     code_repo: Repo,
     deleted_branch_name: str,
@@ -2904,6 +2908,16 @@ def _detect_squash_merge_from_main(
     This is used for orphan branch detection when the code branch
     has been deleted (after PR merge) but the threads branch still exists.
 
+    Supported merge message formats (GitHub-centric):
+    - "Merge pull request #123 from org/branch-name" (GitHub PR merge)
+    - "branch-name (#123)" (GitHub squash merge default)
+    - Any commit message containing the branch name
+
+    Note: This detection is best-effort and may not work for:
+    - GitLab/Bitbucket/Gitea with different merge formats
+    - Manual merges without branch name in message
+    - Branches deleted without being merged (returns False correctly)
+
     Args:
         code_repo: GitPython Repo object for code repository
         deleted_branch_name: Name of the branch that was deleted
@@ -2911,9 +2925,8 @@ def _detect_squash_merge_from_main(
 
     Returns:
         Tuple of (was_merged, merge_commit_sha)
-        Returns (True, sha) if evidence of merge found
-        Returns (True, None) if likely merged but can't find exact commit
-        Returns (False, None) if no evidence of merge
+        Returns (True, sha) if evidence of merge found in commit messages
+        Returns (False, None) if no evidence of merge or branch still exists
     """
     try:
         if main_branch not in [b.name for b in code_repo.heads]:
@@ -2929,13 +2942,13 @@ def _detect_squash_merge_from_main(
             pass
 
         # Look for merge evidence in recent main commits
-        main_commits = list(code_repo.iter_commits(main_branch, max_count=100))
+        main_commits = list(code_repo.iter_commits(main_branch, max_count=MERGE_DETECTION_MAX_COMMITS))
 
         for commit in main_commits:
             msg_lower = commit.message.lower()
             branch_lower = deleted_branch_name.lower()
 
-            # Check for PR merge patterns
+            # Check for PR merge patterns (GitHub format)
             if branch_lower in msg_lower:
                 # Common merge commit patterns:
                 # "Merge pull request #123 from org/branch-name"
@@ -2943,13 +2956,13 @@ def _detect_squash_merge_from_main(
                 # "Squash merge of branch-name"
                 return (True, commit.hexsha[:7])
 
-            # Check for PR number references with branch name
+            # Check for PR number references with branch name (handles dashes as spaces)
             if "merge pull request" in msg_lower and branch_lower.replace("-", " ") in msg_lower:
                 return (True, commit.hexsha[:7])
 
-        # If branch doesn't exist locally or remotely, assume it was merged
-        # (conservative: prefer to allow orphan cleanup)
-        return (True, None)
+        # No evidence of merge found - do NOT assume it was merged
+        # Branches may be deleted without merging (abandoned work, cancelled PRs, etc.)
+        return (False, None)
 
     except Exception as e:
         log_debug(f"[PARITY] _detect_squash_merge_from_main failed: {e}")
