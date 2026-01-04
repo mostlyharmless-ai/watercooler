@@ -406,6 +406,103 @@ There's no way to prevent token expiration entirely, but you can:
 
 ---
 
+## Outdated GitHub CLI Version
+
+### Symptom
+- `watercooler_health` shows "gh Version: X.X.X ⚠️ outdated"
+- Various authentication or API errors
+- SSL/TLS errors that may actually be rate limiting issues
+- Features not working as expected
+
+### Diagnosis
+Check your gh version:
+```bash
+gh --version
+```
+
+Watercooler requires gh version 2.20 or newer. Older versions may have bugs or missing features that cause unexpected behavior.
+
+### Solution (Ubuntu/Debian)
+The `gh` package in older Ubuntu/Debian repos can be significantly outdated. To get the latest version:
+
+```bash
+# Download and install the GitHub CLI GPG key
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
+  sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+
+# Fix permissions
+sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+
+# Add the official GitHub CLI repository
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
+  sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+
+# Update and upgrade
+sudo apt update
+sudo apt upgrade gh
+
+# Verify
+gh --version
+```
+
+### Solution (macOS)
+```bash
+brew upgrade gh
+```
+
+### Solution (Windows)
+```powershell
+winget upgrade --id GitHub.cli
+```
+
+### After Upgrading
+Re-authenticate after upgrading:
+```bash
+gh auth login -h github.com --web
+gh auth status
+```
+
+---
+
+## GitHub API Rate Limiting
+
+### Symptom
+- Operations fail with SSL-like errors or cryptic messages
+- `watercooler_health` shows "Rate Limit: 0/5000 (0%) ⚠️ RATE LIMITED"
+- Errors mentioning "rate limit exceeded"
+- Operations work initially but fail after running for a while
+
+### Understanding Rate Limits
+GitHub API limits:
+- **Authenticated**: 5,000 requests/hour (using `gh auth`)
+- **Unauthenticated**: 60 requests/hour
+
+Each operation that touches GitHub (push, pull, API calls) counts against this limit.
+
+### Diagnosis
+```bash
+# Quick check via watercooler
+watercooler_health(code_path=".")
+
+# Detailed breakdown
+gh api rate_limit --jq '.resources | to_entries[] | "\(.key): \(.value.remaining)/\(.value.limit)"'
+```
+
+### Solution
+1. **Wait for reset**: The health check shows reset time (usually ~1 hour max)
+2. **Reduce API usage**:
+   - Increase dashboard poll intervals
+   - Batch operations instead of frequent small updates
+   - Pause automated tools temporarily
+3. **Check for runaway processes**: Multiple agents or polling loops can burn through limits quickly
+
+### Prevention
+- Monitor rate limit before starting intensive operations
+- Use `WATERCOOLER_SYNC_MODE=sync` sparingly (each sync = API calls)
+- Configure dashboard to use longer poll intervals when not actively monitoring
+
+---
+
 ## SSH Agent Issues (WSL2/Headless)
 
 ### Symptom
@@ -602,8 +699,17 @@ If you enabled cloud sync via `WATERCOOLER_GIT_REPO`, here are common problems a
   - If using Cloudflare Worker + R2, ensure cache keys include a version/commit SHA and are invalidated/rotated on write
 
 - Rate limits / GitHub API
-  - Apply exponential backoff and consider short batching windows
-   - All other functionality works normally
+  - GitHub API has a 5,000 requests/hour limit for authenticated users (60/hour unauthenticated)
+  - Check current status: `watercooler_health(code_path=".")` shows rate limit in GitHub section
+  - When rate limited (0 remaining), wait for the reset timer shown in health output
+  - Common causes of high API usage:
+    - Dashboard polling (each connected repo = 1+ API calls per poll)
+    - Frequent git operations (push/pull trigger API calls)
+    - Multiple agents working simultaneously
+  - Solutions:
+    - Increase dashboard poll interval when not actively monitoring
+    - Batch operations rather than frequent small updates
+    - Use `gh api rate_limit` to check detailed breakdown by resource type
 
 - Async push failures not visible
   - By default, writes commit locally and push asynchronously in the background

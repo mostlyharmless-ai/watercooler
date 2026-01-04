@@ -170,9 +170,18 @@ All tools are namespaced as `watercooler_*`:
 ### Diagnostic Tools
 
 #### `watercooler_health`
-Check server health and configuration.
+Check server health and configuration including branch parity, git authentication, and GitHub API status.
 
-**Returns:** Server version, agent identity, threads directory status
+**Parameters:**
+- `code_path` (str): Path to code repository for parity checks (optional)
+
+**Returns:** Comprehensive health status including:
+- Server version and agent identity
+- Threads directory configuration
+- Graph services status (LLM, embeddings)
+- Branch parity health
+- Git authentication status
+- GitHub CLI version and API rate limits
 
 **Example output:**
 ```
@@ -181,7 +190,45 @@ Status: Healthy
 Agent: Codex
 Threads Dir: /workspace/watercooler-cloud-threads
 Threads Dir Exists: True
-Resolution Source: pattern
+Threads Repo URL: https://github.com/org/repo-threads.git
+Code Branch: feature/auth
+Auto-Branch: enabled
+Python: /usr/bin/python3
+fastmcp: 2.14.0
+
+Graph Services:
+  Summaries Enabled: True
+  LLM Service: available (http://localhost:11434/v1)
+  Embeddings Enabled: True
+  Embedding Service: available (http://localhost:11434/v1)
+
+Branch Parity:
+  Status: clean
+  Code Branch: feature/auth
+  Threads Branch: feature/auth
+  Code Ahead/Behind: 0/0
+  Threads Ahead/Behind: 0/0
+  Pending Push: False
+
+Git Authentication:
+  Protocol: https
+  Connectivity: ok
+  Credential Helper: !/usr/bin/gh auth git-credential
+  GitHub CLI Auth: valid
+
+GitHub:
+  gh Version: 2.83.2 ✓
+  Rate Limit: 4500/5000 (90%) - resets in 45min
+```
+
+**Rate Limit Warnings:**
+When rate limit is low (<10%) or exhausted:
+```
+GitHub:
+  gh Version: 2.83.2 ✓
+  Rate Limit: 0/5000 (0%) ⚠️ RATE LIMITED
+    → Resets in 23 minutes
+    → Wait for reset or reduce API calls
 ```
 
 #### `watercooler_whoami`

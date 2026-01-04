@@ -10,7 +10,10 @@ import os
 import sys
 import json
 import subprocess
+import re
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastmcp import Context
 from fastmcp.tools.tool import ToolResult
@@ -36,8 +39,11 @@ health = None
 whoami = None
 reconcile_parity = None
 
+# Rate limit warning threshold (10% remaining triggers warning)
+RATE_LIMIT_WARNING_THRESHOLD = 0.1
 
-def _check_git_auth_health(threads_dir: Path) -> dict:
+
+def _check_git_auth_health(threads_dir: Path) -> dict[str, Any]:
     """Check git authentication configuration and connectivity.
 
     Returns a dict with:
@@ -231,6 +237,177 @@ def _check_git_auth_health(threads_dir: Path) -> dict:
     return result
 
 
+def _check_github_rate_limit() -> dict[str, Any]:
+    """Check GitHub API rate limit status.
+
+    Returns a dict with:
+        remaining: calls remaining in current window
+        limit: total calls allowed per hour
+        percent: percentage remaining (0-100)
+        reset_minutes: minutes until rate limit resets
+        status: 'ok', 'warning' (<10%), 'limited' (0 remaining), or 'error'
+        warnings: list of warning messages
+        recommendations: list of recommended actions
+    """
+    result = {
+        "remaining": None,
+        "limit": None,
+        "percent": None,
+        "reset_minutes": None,
+        "status": "unknown",
+        "warnings": [],
+        "recommendations": [],
+    }
+
+    try:
+        api_result = subprocess.run(
+            ["gh", "api", "rate_limit"],
+            capture_output=True, text=True, timeout=10
+        )
+        if api_result.returncode == 0:
+            data = json.loads(api_result.stdout)
+            core = data.get("resources", {}).get("core", {})
+
+            remaining = core.get("remaining", 0)
+            limit = core.get("limit", 5000)
+            reset_ts = core.get("reset", 0)
+
+            result["remaining"] = remaining
+            result["limit"] = limit
+            result["percent"] = round((remaining / limit) * 100) if limit > 0 else 0
+
+            # Calculate minutes until reset (GitHub returns UTC timestamps)
+            if reset_ts > 0:
+                reset_time = datetime.fromtimestamp(reset_ts, tz=timezone.utc)
+                now = datetime.now(tz=timezone.utc)
+                if reset_time > now:
+                    delta = reset_time - now
+                    # Use total_seconds() to handle deltas > 24 hours correctly
+                    result["reset_minutes"] = max(0, int(delta.total_seconds()) // 60)
+                else:
+                    result["reset_minutes"] = 0
+
+            # Determine status and warnings
+            if remaining == 0:
+                result["status"] = "limited"
+                result["warnings"].append(f"RATE LIMITED - 0/{limit} calls remaining")
+                result["recommendations"].append(
+                    f"Wait {result['reset_minutes']} minutes for reset, or reduce API calls"
+                )
+            elif remaining < (limit * RATE_LIMIT_WARNING_THRESHOLD):
+                result["status"] = "warning"
+                result["warnings"].append(
+                    f"Approaching rate limit: {remaining}/{limit} ({result['percent']}%) remaining"
+                )
+                result["recommendations"].append("Consider pausing automated operations")
+            else:
+                result["status"] = "ok"
+        else:
+            # gh api call failed - might be auth issue
+            stderr = api_result.stderr.strip()
+            if "rate limit" in stderr.lower():
+                result["status"] = "limited"
+                result["warnings"].append("Rate limit exceeded (from error response)")
+            else:
+                result["status"] = "error"
+                result["warnings"].append(f"Could not check rate limit: {stderr[:80]}")
+
+    except FileNotFoundError:
+        result["status"] = "gh_not_installed"
+        result["warnings"].append("gh CLI not installed")
+        result["recommendations"].append("Install: https://cli.github.com/")
+    except subprocess.TimeoutExpired:
+        result["status"] = "timeout"
+        result["warnings"].append("Rate limit check timed out")
+    except json.JSONDecodeError as e:
+        result["status"] = "error"
+        result["warnings"].append(f"Invalid JSON from gh api: {e}")
+    except Exception as e:
+        result["status"] = "error"
+        result["warnings"].append(f"Rate limit check failed: {str(e)[:50]}")
+
+    return result
+
+
+def _check_gh_version() -> dict[str, Any]:
+    """Check gh CLI version.
+
+    Returns a dict with:
+        version: version string (e.g., "2.83.2")
+        major: major version number
+        minor: minor version number
+        is_outdated: True if version < 2.20
+        status: 'ok', 'outdated', 'not_installed', or 'error'
+        warnings: list of warning messages
+        recommendations: list of recommended actions
+    """
+    result = {
+        "version": None,
+        "major": None,
+        "minor": None,
+        "is_outdated": False,
+        "status": "unknown",
+        "warnings": [],
+        "recommendations": [],
+    }
+
+    # Minimum recommended version (2.20 has important fixes)
+    MIN_MAJOR = 2
+    MIN_MINOR = 20
+
+    try:
+        version_result = subprocess.run(
+            ["gh", "--version"],
+            capture_output=True, text=True, timeout=5
+        )
+        if version_result.returncode == 0:
+            # Parse version from output like "gh version 2.83.2 (2025-12-10)"
+            output = version_result.stdout.strip()
+            match = re.search(r"gh version (\d+)\.(\d+)\.(\d+)", output)
+            if match:
+                major = int(match.group(1))
+                minor = int(match.group(2))
+                patch = int(match.group(3))
+                result["version"] = f"{major}.{minor}.{patch}"
+                result["major"] = major
+                result["minor"] = minor
+
+                # Check if outdated
+                if major < MIN_MAJOR or (major == MIN_MAJOR and minor < MIN_MINOR):
+                    result["is_outdated"] = True
+                    result["status"] = "outdated"
+                    result["warnings"].append(
+                        f"gh version {result['version']} is outdated (< {MIN_MAJOR}.{MIN_MINOR})"
+                    )
+                    result["recommendations"].append(
+                        "Update gh: sudo apt update && sudo apt install gh"
+                    )
+                    result["recommendations"].append(
+                        "Or see: https://github.com/cli/cli/blob/trunk/docs/install_linux.md"
+                    )
+                else:
+                    result["status"] = "ok"
+            else:
+                result["status"] = "error"
+                result["warnings"].append(f"Could not parse gh version from: {output[:50]}")
+        else:
+            result["status"] = "error"
+            result["warnings"].append(f"gh --version failed: {version_result.stderr[:50]}")
+
+    except FileNotFoundError:
+        result["status"] = "not_installed"
+        result["warnings"].append("gh CLI not installed")
+        result["recommendations"].append("Install: https://cli.github.com/")
+    except subprocess.TimeoutExpired:
+        result["status"] = "timeout"
+        result["warnings"].append("gh version check timed out")
+    except Exception as e:
+        result["status"] = "error"
+        result["warnings"].append(f"gh version check failed: {str(e)[:50]}")
+
+    return result
+
+
 def _health_impl(ctx: Context, code_path: str = "") -> str:
     """Check server health and configuration including branch parity status.
 
@@ -373,6 +550,65 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
                         status_lines.append(f"    → {rec}")
             except Exception as e:
                 status_lines.append(f"\nGit Authentication: Error - {e}")
+
+        # Add GitHub rate limit and version check
+        try:
+            gh_version = _check_gh_version()
+            rate_limit = _check_github_rate_limit()
+
+            status_lines.extend([
+                "",
+                "GitHub:",
+            ])
+
+            # gh version
+            if gh_version["version"]:
+                version_status = "✓" if gh_version["status"] == "ok" else "⚠️"
+                status_lines.append(f"  gh Version: {gh_version['version']} {version_status}")
+            elif gh_version["status"] == "not_installed":
+                status_lines.append("  gh Version: not installed ⚠️")
+            else:
+                status_lines.append(f"  gh Version: {gh_version['status']}")
+
+            # Rate limit
+            if rate_limit["remaining"] is not None:
+                percent = rate_limit["percent"]
+                remaining = rate_limit["remaining"]
+                limit = rate_limit["limit"]
+                reset_min = rate_limit["reset_minutes"]
+
+                if rate_limit["status"] == "limited":
+                    status_lines.append(f"  Rate Limit: {remaining}/{limit} (0%) ⚠️ RATE LIMITED")
+                    status_lines.append(f"    → Resets in {reset_min} minutes")
+                elif rate_limit["status"] == "warning":
+                    status_lines.append(f"  Rate Limit: {remaining}/{limit} ({percent}%) ⚠️")
+                    status_lines.append(f"    → Resets in {reset_min} minutes")
+                else:
+                    reset_str = f" - resets in {reset_min}min" if reset_min else ""
+                    status_lines.append(f"  Rate Limit: {remaining}/{limit} ({percent}%){reset_str}")
+            elif rate_limit["status"] == "gh_not_installed":
+                status_lines.append("  Rate Limit: n/a (gh not installed)")
+            else:
+                status_lines.append(f"  Rate Limit: {rate_limit['status']}")
+
+            # Collect all warnings and recommendations
+            all_warnings = gh_version["warnings"] + rate_limit["warnings"]
+            all_recs = gh_version["recommendations"] + rate_limit["recommendations"]
+
+            if all_warnings:
+                status_lines.append("")
+                status_lines.append("  ⚠️  GitHub WARNINGS:")
+                for warn in all_warnings:
+                    status_lines.append(f"    - {warn}")
+
+            if all_recs:
+                status_lines.append("")
+                status_lines.append("  Recommendations:")
+                for rec in all_recs:
+                    status_lines.append(f"    → {rec}")
+
+        except Exception as e:
+            status_lines.append(f"\nGitHub: Error - {e}")
 
         return _format_warnings_for_response("\n".join(status_lines))
     except Exception as e:
