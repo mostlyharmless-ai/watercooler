@@ -387,7 +387,12 @@ class AsyncSyncCoordinator:
             return False
 
     def _do_push(self) -> None:
-        """Execute the push operation."""
+        """Execute the push operation.
+
+        Includes safety guards for orphaned and diverged branches:
+        - Diverged: branch is both ahead AND behind origin (skip push, risk of data loss)
+        - These guards prevent the async sync from interfering with manual recovery
+        """
         with self._lock:
             if not self._queue:
                 return
@@ -398,11 +403,31 @@ class AsyncSyncCoordinator:
         try:
             # Import Repo here to avoid circular imports
             from git import Repo
+            from .primitives import get_ahead_behind
 
             repo = Repo(self.repo_path, search_parent_directories=True)
             branch = repo.active_branch.name if not repo.head.is_detached else None
 
             if branch:
+                # Safety check: detect diverged state (ahead AND behind)
+                # This prevents async sync from interfering with manual recovery
+                try:
+                    ahead, behind = get_ahead_behind(repo, branch)
+                    if ahead > 0 and behind > 0:
+                        log_debug(
+                            f"[ASYNC] SKIPPING push - branch '{branch}' is diverged: "
+                            f"{ahead} ahead, {behind} behind. Risk of data loss. "
+                            f"Use 'recover' operation to fix."
+                        )
+                        with self._lock:
+                            self._last_error = (
+                                f"Push skipped: branch diverged ({ahead} ahead, {behind} behind). "
+                                f"Run sync_branch_state with operation='recover'."
+                            )
+                        return
+                except Exception as e:
+                    log_debug(f"[ASYNC] Could not check ahead/behind (non-fatal): {e}")
+
                 success = push_with_retry(repo, branch)
                 if success:
                     with self._lock:

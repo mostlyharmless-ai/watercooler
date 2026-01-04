@@ -63,7 +63,6 @@ class ParityStatus(str, Enum):
     - REBASE_IN_PROGRESS: Complete or abort rebase/merge
     - DIVERGED: Manual merge/rebase needed
     - NEEDS_MANUAL_RECOVER: Force-push detected, history corrupted
-    - ORPHAN_BRANCH: Threads branch exists but code branch was deleted
     - ERROR: Unexpected error during check
 
     Auto-fixable states:
@@ -71,6 +70,8 @@ class ParityStatus(str, Enum):
     - PENDING_PUSH: Auto-push on next write
     - MAIN_PROTECTION: Block write, suggest feature branch
     - REMOTE_UNREACHABLE: Retry with backoff
+    - ORPHAN_BRANCH: Threads branch exists but code branch was deleted
+                     (auto-merge to main and delete orphan)
 
     Clean state:
     - CLEAN: Ready for operations
@@ -98,7 +99,6 @@ class ParityStatus(str, Enum):
             cls.REBASE_IN_PROGRESS,
             cls.DIVERGED,
             cls.NEEDS_MANUAL_RECOVER,
-            cls.ORPHAN_BRANCH,
             cls.ERROR,
         }
         return status in blocking
@@ -110,6 +110,7 @@ class ParityStatus(str, Enum):
             cls.BRANCH_MISMATCH,
             cls.PENDING_PUSH,
             cls.REMOTE_UNREACHABLE,
+            cls.ORPHAN_BRANCH,
         }
         return status in auto_fixable
 

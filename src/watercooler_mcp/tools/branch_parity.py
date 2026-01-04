@@ -106,6 +106,8 @@ def _sync_branch_state_impl(
     - merge: Merge threads branch to main if code branch merged
     - checkout: Ensure both repos on same branch
     - recover: Recover from branch history divergence (e.g., after rebase/force-push)
+    - adopt: Adopt an orphaned threads branch (code branch was merged/deleted).
+             Merges orphan to main, deletes orphan branch, preserves all threads.
 
     Note:
         This operational tool does **not** require ``agent_func`` or other
@@ -117,9 +119,11 @@ def _sync_branch_state_impl(
     Args:
         code_path: Path to code repository directory (default: current directory)
         branch: Specific branch to sync (default: current branch)
-        operation: One of "create", "delete", "merge", "checkout", "recover" (default: "checkout")
+        operation: One of "create", "delete", "merge", "checkout", "recover", "adopt"
+                   (default: "checkout")
         force: Skip safety checks (use with caution, default: False). For "recover",
-               this controls whether to force-push after rebasing.
+               this controls whether to force-push after rebasing. For "adopt",
+               allows adopting branches with OPEN threads.
 
     Returns:
         Operation result with success/failure and any warnings.
@@ -127,6 +131,7 @@ def _sync_branch_state_impl(
     Example:
         >>> sync_branch_state(ctx, code_path=".", branch="feature-auth", operation="checkout")
         >>> sync_branch_state(ctx, code_path=".", branch="staging", operation="recover", force=True)
+        >>> sync_branch_state(ctx, code_path=".", branch="old-feature", operation="adopt")
     """
     try:
         error, context = validation._require_context(code_path)
@@ -385,10 +390,112 @@ def _sync_branch_state_impl(
                     text=result_msg
                 )])
 
+        elif operation == "adopt":
+            # Adopt an orphaned threads branch: merge to main and delete
+            # This is for when a code branch was merged/deleted but threads branch remains
+
+            if target_branch not in [b.name for b in threads_repo.heads]:
+                # Check if it exists on remote
+                try:
+                    threads_repo.remote().fetch(prune=True)
+                    remote_refs = [ref.name for ref in threads_repo.remote().refs]
+                    if f"origin/{target_branch}" in remote_refs:
+                        # Checkout from remote
+                        threads_repo.git.checkout('-b', target_branch, f'origin/{target_branch}')
+                    else:
+                        return ToolResult(content=[TextContent(
+                            type="text",
+                            text=f"Error: Branch '{target_branch}' does not exist locally or on remote."
+                        )])
+                except Exception as e:
+                    return ToolResult(content=[TextContent(
+                        type="text",
+                        text=f"Error fetching remote branches: {e}"
+                    )])
+
+            # Check if this is actually an orphan (code branch doesn't exist)
+            code_branch_exists = target_branch in [b.name for b in code_repo.heads]
+            try:
+                remote_refs = [ref.name for ref in code_repo.remote().refs]
+                code_on_origin = f"origin/{target_branch}" in remote_refs
+            except Exception:
+                code_on_origin = False
+
+            if code_branch_exists or code_on_origin:
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=(
+                        f"Error: Branch '{target_branch}' is not orphaned.\n"
+                        f"Code branch exists locally: {code_branch_exists}, on origin: {code_on_origin}\n"
+                        f"Use 'merge' operation for normal branch merging."
+                    )
+                )])
+
+            # Check for OPEN threads before adopting
+            threads_repo.git.checkout(target_branch)
+            open_threads = []
+            thread_topics = []
+            for thread_file in context.threads_dir.glob("*.md"):
+                try:
+                    from watercooler.metadata import thread_meta, is_closed
+                    title, status, ball, updated = thread_meta(thread_file)
+                    thread_topics.append(thread_file.stem)
+                    if not is_closed(status):
+                        open_threads.append(thread_file.stem)
+                except Exception:
+                    thread_topics.append(thread_file.stem)
+
+            if open_threads and not force:
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=(
+                        f"Error: Cannot adopt branch '{target_branch}' with {len(open_threads)} OPEN thread(s):\n"
+                        f"  {', '.join(open_threads)}\n\n"
+                        f"Options:\n"
+                        f"  1. Close threads before adopting\n"
+                        f"  2. Use force=True to adopt anyway (threads will be preserved on main)\n"
+                    )
+                )])
+
+            # Merge orphan to main
+            main_branch = "main" if "main" in [b.name for b in threads_repo.heads] else "master"
+            from watercooler_mcp.sync.branch_parity import auto_merge_to_main, _delete_orphan_branch
+
+            merge_ok, merge_msg = auto_merge_to_main(
+                threads_repo, target_branch, main_branch
+            )
+            if not merge_ok:
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=f"Error: Failed to merge orphan branch: {merge_msg}"
+                )])
+
+            # Delete the orphan branch
+            delete_ok, delete_msg = _delete_orphan_branch(
+                threads_repo, target_branch, delete_remote=True
+            )
+
+            # Build result message
+            result_msg = f"✅ Adopted orphan branch '{target_branch}':\n"
+            result_msg += f"  - Merged to {main_branch}: {merge_msg}\n"
+            if delete_ok:
+                result_msg += f"  - Deleted orphan: {delete_msg}\n"
+            else:
+                warnings.append(f"Warning: Could not delete orphan branch: {delete_msg}")
+
+            result_msg += f"\n  Threads preserved: {len(thread_topics)}"
+            if thread_topics:
+                result_msg += f"\n    {', '.join(thread_topics[:5])}"
+                if len(thread_topics) > 5:
+                    result_msg += f" (+{len(thread_topics) - 5} more)"
+
+            if open_threads:
+                warnings.append(f"Note: {len(open_threads)} OPEN threads were adopted (still open on main)")
+
         else:
             return ToolResult(content=[TextContent(
                 type="text",
-                text=f"Error: Unknown operation '{operation}'. Must be one of: create, delete, merge, checkout, recover"
+                text=f"Error: Unknown operation '{operation}'. Must be one of: create, delete, merge, checkout, recover, adopt"
             )])
 
         output = {
@@ -489,22 +596,75 @@ def _audit_branch_pairing_impl(
             except Exception:
                 code_only.append({"name": branch, "commits_ahead": 0, "action": "unknown"})
 
-        # Find threads-only branches
+        # Find threads-only branches (potential orphans)
         for branch in threads_branches - code_branches:
             try:
                 branch_obj = threads_repo.heads[branch]
                 commits_ahead = len(list(threads_repo.iter_commits(f"main..{branch}"))) if "main" in threads_branches else 0
-                threads_only.append({
+
+                # Check if this is truly orphaned (exists on threads origin, not on code origin)
+                is_orphan = False
+                try:
+                    threads_repo.remote().fetch(prune=True)
+                    code_repo.remote().fetch(prune=True)
+                    threads_remote_refs = [ref.name for ref in threads_repo.remote().refs]
+                    code_remote_refs = [ref.name for ref in code_repo.remote().refs]
+                    threads_on_origin = f"origin/{branch}" in threads_remote_refs
+                    code_on_origin = f"origin/{branch}" in code_remote_refs
+                    is_orphan = threads_on_origin and not code_on_origin
+                except Exception:
+                    pass
+
+                # Count open threads and get stranded thread topics
+                open_threads_count = 0
+                stranded_threads = []
+                original_branch = threads_repo.active_branch.name
+                try:
+                    threads_repo.git.checkout(branch)
+                    for thread_file in context.threads_dir.glob("*.md"):
+                        try:
+                            from watercooler.metadata import thread_meta, is_closed
+                            title, status, ball, updated = thread_meta(thread_file)
+                            stranded_threads.append(thread_file.stem)
+                            if not is_closed(status):
+                                open_threads_count += 1
+                        except Exception:
+                            stranded_threads.append(thread_file.stem)
+                    threads_repo.git.checkout(original_branch)
+                except Exception:
+                    try:
+                        threads_repo.git.checkout(original_branch)
+                    except Exception:
+                        pass
+
+                branch_info = {
                     "name": branch,
                     "commits_ahead": commits_ahead,
-                    "action": "delete_or_merge" if commits_ahead == 0 or include_merged else "create_code_branch",
-                })
-                if commits_ahead == 0:
+                    "is_orphan": is_orphan,
+                    "open_threads": open_threads_count,
+                    "stranded_threads": stranded_threads,
+                    "action": "adopt" if is_orphan else ("delete_or_merge" if commits_ahead == 0 else "create_code_branch"),
+                }
+                threads_only.append(branch_info)
+
+                # Enhanced recommendations
+                if is_orphan:
+                    if open_threads_count > 0:
+                        recommendations.append(
+                            f"⚠️ ORPHAN: '{branch}' has {open_threads_count} OPEN threads. "
+                            f"Run: sync_branch_state(branch='{branch}', operation='adopt', force=True)"
+                        )
+                    else:
+                        recommendations.append(
+                            f"ORPHAN: '{branch}' can be adopted. "
+                            f"Run: sync_branch_state(branch='{branch}', operation='adopt')"
+                        )
+                elif commits_ahead == 0:
                     recommendations.append(f"Threads branch '{branch}' is fully merged - safe to delete")
                 else:
                     recommendations.append(f"Code branch '{branch}' was deleted - merge or delete threads branch")
             except Exception:
-                threads_only.append({"name": branch, "commits_ahead": 0, "action": "unknown"})
+                threads_only.append({"name": branch, "commits_ahead": 0, "is_orphan": False, "open_threads": 0, "stranded_threads": [], "action": "unknown"})
 
         output = {
             "synced_branches": synced,
