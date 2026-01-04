@@ -441,6 +441,23 @@ class AsyncSyncCoordinator:
                     with self._lock:
                         self._last_error = f"Unexpected error checking branch state: {type(e).__name__}: {e}"
 
+                # Re-check diverged state immediately before push to minimize TOCTOU window
+                # (another process could have pushed between initial check and now)
+                try:
+                    ahead, behind = get_ahead_behind(repo, branch)
+                    if ahead > 0 and behind > 0:
+                        log_debug(
+                            f"[ASYNC] SKIPPING push (re-check) - branch '{branch}' diverged"
+                        )
+                        with self._lock:
+                            self._last_error = (
+                                f"Push skipped: branch diverged on re-check. "
+                                f"Run sync_branch_state with operation='recover'."
+                            )
+                        return
+                except Exception:
+                    pass  # Best-effort re-check, proceed with push
+
                 success = push_with_retry(repo, branch)
                 if success:
                     with self._lock:

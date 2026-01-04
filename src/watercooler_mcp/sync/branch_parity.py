@@ -2896,7 +2896,10 @@ def _detect_squash_merge(code_repo_obj: Repo, branch: str) -> Tuple[bool, Option
         return (False, None)
 
 
-# Maximum commits to scan when looking for merge evidence
+# Maximum commits to scan when looking for merge evidence.
+# Tradeoff: Higher values catch older merges but slow down detection.
+# 100 covers ~2-3 weeks of typical repo activity. Configurable via env var
+# for high-velocity repos that may need more history.
 MERGE_DETECTION_MAX_COMMITS = int(
     os.environ.get("WATERCOOLER_MERGE_DETECTION_MAX_COMMITS", "100")
 )
@@ -2964,18 +2967,36 @@ def _detect_squash_merge_from_main(
 
             if has_branch_name:
                 # Require additional context to avoid false positives
-                # (e.g., branch "fix" matching random "fix typo" commits)
                 has_pr_number = re.search(r'#\d+', commit.message) is not None
                 has_merge_keyword = any(kw in msg_lower for kw in (
                     "merge", "squash", "merged", "merging"
                 ))
 
-                # Common merge commit patterns:
-                # "Merge pull request #123 from org/branch-name"
-                # "branch-name (#123)"
-                # "Squash merge of branch-name"
-                if has_pr_number or has_merge_keyword:
-                    return (True, commit.hexsha[:7])
+                # For short/generic branch names (<=6 chars), require BOTH
+                # branch name AND (PR# OR merge keyword) to reduce false positives
+                # e.g., branch "fix" matching "Fix typo (#123)" unrelated commit
+                is_short_name = len(deleted_branch_name) <= 6
+
+                if is_short_name:
+                    # Strict: require branch appears in merge context
+                    # Pattern: "from org/branch" or "branch (#123)" or "Merge branch"
+                    has_merge_context = (
+                        f"from {branch_lower}" in msg_lower or
+                        f"/{branch_lower}" in msg_lower or
+                        re.search(rf'{re.escape(branch_lower)}\s*\(#\d+\)', msg_lower) is not None or
+                        f"merge {branch_lower}" in msg_lower or
+                        f"merge branch {branch_lower}" in msg_lower
+                    )
+                    if has_merge_context:
+                        return (True, commit.hexsha[:7])
+                else:
+                    # Normal names: require PR# OR merge keyword
+                    # Common patterns:
+                    # "Merge pull request #123 from org/branch-name"
+                    # "branch-name (#123)"
+                    # "Squash merge of branch-name"
+                    if has_pr_number or has_merge_keyword:
+                        return (True, commit.hexsha[:7])
 
             # Check for PR number references with branch name (handles dashes as spaces)
             if "merge pull request" in msg_lower and branch_lower.replace("-", " ") in msg_lower:

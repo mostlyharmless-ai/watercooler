@@ -648,34 +648,43 @@ def _audit_branch_pairing_impl(
                 code_on_origin = f"origin/{branch}" in code_remote_refs
                 is_orphan = threads_on_origin and not code_on_origin
 
+                # Skip entire branch processing if repo is dirty (can't safely checkout)
+                if is_dirty(threads_repo):
+                    log_debug(f"[AUDIT] Skipping '{branch}' processing: repo is dirty")
+                    threads_only.append({
+                        "name": branch,
+                        "commits_ahead": commits_ahead,
+                        "is_orphan": is_orphan,
+                        "open_threads": -1,  # -1 indicates unknown due to dirty state
+                        "stranded_threads": [],
+                        "action": "unknown_dirty",
+                        "warning": "Could not scan threads - repo has uncommitted changes",
+                    })
+                    continue
+
                 # Count open threads and get stranded thread topics
                 open_threads_count = 0
                 stranded_threads = []
                 original_branch = threads_repo.active_branch.name
-                threads_dirty = is_dirty(threads_repo)
 
-                if threads_dirty:
-                    # Can't safely checkout with uncommitted changes
-                    log_debug(f"[AUDIT] Skipping thread scan for '{branch}': repo is dirty")
-                else:
+                try:
+                    threads_repo.git.checkout(branch)
+                    for thread_file in context.threads_dir.glob("*.md"):
+                        try:
+                            from watercooler.metadata import thread_meta, is_closed
+                            title, status, ball, updated = thread_meta(thread_file)
+                            stranded_threads.append(thread_file.stem)
+                            if not is_closed(status):
+                                open_threads_count += 1
+                        except Exception as e:
+                            log_debug(f"[AUDIT] Failed to parse thread {thread_file.name}: {e}")
+                            stranded_threads.append(thread_file.stem)
+                    threads_repo.git.checkout(original_branch)
+                except Exception:
                     try:
-                        threads_repo.git.checkout(branch)
-                        for thread_file in context.threads_dir.glob("*.md"):
-                            try:
-                                from watercooler.metadata import thread_meta, is_closed
-                                title, status, ball, updated = thread_meta(thread_file)
-                                stranded_threads.append(thread_file.stem)
-                                if not is_closed(status):
-                                    open_threads_count += 1
-                            except Exception as e:
-                                log_debug(f"[AUDIT] Failed to parse thread {thread_file.name}: {e}")
-                                stranded_threads.append(thread_file.stem)
                         threads_repo.git.checkout(original_branch)
                     except Exception:
-                        try:
-                            threads_repo.git.checkout(original_branch)
-                        except Exception:
-                            pass
+                        pass
 
                 branch_info = {
                     "name": branch,
