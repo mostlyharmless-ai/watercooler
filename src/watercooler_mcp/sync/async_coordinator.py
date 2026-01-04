@@ -392,6 +392,19 @@ class AsyncSyncCoordinator:
         Includes safety guards for orphaned and diverged branches:
         - Diverged: branch is both ahead AND behind origin (skip push, risk of data loss)
         - These guards prevent the async sync from interfering with manual recovery
+
+        TOCTOU Race Window:
+            There is an inherent race between checking diverged state and pushing.
+            We mitigate this by:
+            1. Initial check before any push attempt
+            2. Re-check immediately before push to minimize the window
+            3. Relying on push_with_retry to fail safely if state changed
+
+            A stronger guarantee would require --force-with-lease, but that adds
+            complexity and would reject pushes when remote has new commits from
+            other collaborators (which is often intentional). The current approach
+            is a reasonable tradeoff: we detect most divergence, and the few
+            cases that slip through fail safely on push rather than corrupting data.
         """
         with self._lock:
             if not self._queue:

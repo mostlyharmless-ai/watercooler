@@ -2900,9 +2900,12 @@ def _detect_squash_merge(code_repo_obj: Repo, branch: str) -> Tuple[bool, Option
 # Tradeoff: Higher values catch older merges but slow down detection.
 # 100 covers ~2-3 weeks of typical repo activity. Configurable via env var
 # for high-velocity repos that may need more history.
-MERGE_DETECTION_MAX_COMMITS = int(
-    os.environ.get("WATERCOOLER_MERGE_DETECTION_MAX_COMMITS", "100")
-)
+# Bounds: 1-1000 (clamped to prevent DoS via extremely large values or negatives)
+_raw_max_commits = os.environ.get("WATERCOOLER_MERGE_DETECTION_MAX_COMMITS", "100")
+try:
+    MERGE_DETECTION_MAX_COMMITS = max(1, min(1000, int(_raw_max_commits)))
+except ValueError:
+    MERGE_DETECTION_MAX_COMMITS = 100  # Default on parse failure
 
 
 def _detect_squash_merge_from_main(
@@ -3050,10 +3053,14 @@ def _delete_orphan_branch(
             repo.delete_head(branch_name, force=True)
             actions.append(f"Deleted local branch '{branch_name}'")
     except GitCommandError as e:
+        # GitCommandError: branch may not exist locally (common in some workflows)
+        # or git is in a weird state. Log and continue to try remote deletion,
+        # since remote cleanup is often the primary goal for orphan handling.
         log_debug(f"[PARITY] Failed to delete local branch {branch_name}: {e}")
-        # Continue to try remote deletion
     except (PermissionError, OSError) as e:
-        # Surface filesystem errors - don't silently ignore
+        # PermissionError/OSError: filesystem-level issues indicate a real problem
+        # that won't be fixed by continuing. Surface these immediately so the user
+        # can investigate (disk full, permissions, filesystem corruption, etc.)
         return (False, f"Failed to delete local branch: {e}")
 
     # Delete remote branch
