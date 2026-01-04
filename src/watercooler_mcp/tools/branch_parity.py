@@ -16,7 +16,7 @@ from mcp.types import TextContent
 from git import Repo, InvalidGitRepositoryError, GitCommandError
 
 from ..sync import validate_branch_pairing, sync_branch_history
-from ..sync.primitives import is_dirty
+from ..sync.primitives import is_dirty, get_branch_name
 from ..observability import log_debug
 from .. import validation  # Import module for runtime access (enables test patching)
 
@@ -457,6 +457,8 @@ def _sync_branch_state_impl(
                 )])
 
             # Check for OPEN threads before adopting
+            # Save original branch so we can restore on error
+            original_branch = get_branch_name(threads_repo)
             threads_repo.git.checkout(target_branch)
             open_threads = []
             thread_topics = []
@@ -472,6 +474,12 @@ def _sync_branch_state_impl(
                     thread_topics.append(thread_file.stem)
 
             if open_threads and not force:
+                # Restore original branch before returning error
+                if original_branch:
+                    try:
+                        threads_repo.git.checkout(original_branch)
+                    except Exception as e:
+                        log_debug(f"[ADOPT] Failed to restore original branch: {e}")
                 return ToolResult(content=[TextContent(
                     type="text",
                     text=(
