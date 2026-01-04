@@ -11,6 +11,7 @@ This is Layer 5 in the sync architecture, building on primitives, state, and con
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -2896,7 +2897,9 @@ def _detect_squash_merge(code_repo_obj: Repo, branch: str) -> Tuple[bool, Option
 
 
 # Maximum commits to scan when looking for merge evidence
-MERGE_DETECTION_MAX_COMMITS = 100
+MERGE_DETECTION_MAX_COMMITS = int(
+    os.environ.get("WATERCOOLER_MERGE_DETECTION_MAX_COMMITS", "100")
+)
 
 
 def _detect_squash_merge_from_main(
@@ -2930,6 +2933,12 @@ def _detect_squash_merge_from_main(
         Returns (False, None) if no evidence of merge or branch still exists
     """
     try:
+        # Validate branch name before using in regex to prevent injection
+        try:
+            validate_branch_name(deleted_branch_name)
+        except ValueError:
+            return (False, None)  # Invalid branch name can't have been merged
+
         if main_branch not in [b.name for b in code_repo.heads]:
             return (False, None)
 
@@ -2949,15 +2958,24 @@ def _detect_squash_merge_from_main(
             msg_lower = commit.message.lower()
             branch_lower = deleted_branch_name.lower()
 
-            # Check for PR merge patterns (GitHub format)
-            # Use word boundary matching to avoid false positives
-            # (e.g., branch "fix" should not match "fix typo" commits)
-            if re.search(rf'\b{re.escape(branch_lower)}\b', msg_lower):
+            # Check for branch name with word boundaries
+            branch_pattern = rf'\b{re.escape(branch_lower)}\b'
+            has_branch_name = re.search(branch_pattern, msg_lower) is not None
+
+            if has_branch_name:
+                # Require additional context to avoid false positives
+                # (e.g., branch "fix" matching random "fix typo" commits)
+                has_pr_number = re.search(r'#\d+', commit.message) is not None
+                has_merge_keyword = any(kw in msg_lower for kw in (
+                    "merge", "squash", "merged", "merging"
+                ))
+
                 # Common merge commit patterns:
                 # "Merge pull request #123 from org/branch-name"
                 # "branch-name (#123)"
                 # "Squash merge of branch-name"
-                return (True, commit.hexsha[:7])
+                if has_pr_number or has_merge_keyword:
+                    return (True, commit.hexsha[:7])
 
             # Check for PR number references with branch name (handles dashes as spaces)
             if "merge pull request" in msg_lower and branch_lower.replace("-", " ") in msg_lower:
@@ -3010,9 +3028,12 @@ def _delete_orphan_branch(
         if branch_name in [b.name for b in repo.heads]:
             repo.delete_head(branch_name, force=True)
             actions.append(f"Deleted local branch '{branch_name}'")
-    except Exception as e:
+    except GitCommandError as e:
         log_debug(f"[PARITY] Failed to delete local branch {branch_name}: {e}")
         # Continue to try remote deletion
+    except (PermissionError, OSError) as e:
+        # Surface filesystem errors - don't silently ignore
+        return (False, f"Failed to delete local branch: {e}")
 
     # Delete remote branch
     if delete_remote:

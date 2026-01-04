@@ -412,6 +412,11 @@ class AsyncSyncCoordinator:
             if branch:
                 # Safety check: detect diverged state (ahead AND behind)
                 # This prevents async sync from interfering with manual recovery
+                #
+                # Note: This check runs outside the queue lock because:
+                # 1. Git state is external - locking our queue doesn't protect git
+                # 2. If divergence occurs after our check, push_with_retry will fail safely
+                # 3. Holding lock during git operations would block enqueue for too long
                 try:
                     ahead, behind = get_ahead_behind(repo, branch)
                     if ahead > 0 and behind > 0:
@@ -430,8 +435,11 @@ class AsyncSyncCoordinator:
                     # Expected: GitCommandError for missing upstream, ValueError for parse issues
                     log_debug(f"[ASYNC] Could not check ahead/behind (non-fatal): {e}")
                 except Exception as e:
-                    # Unexpected exception - log at higher visibility but continue
+                    # Unexpected exception - log and record error, but continue
+                    # (could indicate git corruption or filesystem issues)
                     log_debug(f"[ASYNC] WARNING: Unexpected error checking ahead/behind: {type(e).__name__}: {e}")
+                    with self._lock:
+                        self._last_error = f"Unexpected error checking branch state: {type(e).__name__}: {e}"
 
                 success = push_with_retry(repo, branch)
                 if success:

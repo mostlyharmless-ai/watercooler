@@ -396,6 +396,19 @@ def _sync_branch_state_impl(
             # Adopt an orphaned threads branch: merge to main and delete
             # This is for when a code branch was merged/deleted but threads branch remains
 
+            # Validate: can't adopt main/master or detached HEAD
+            if target_branch in ("main", "master"):
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text="Error: Cannot adopt 'main' or 'master' branch."
+                )])
+
+            if threads_repo.head.is_detached:
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text="Error: Threads repo is in detached HEAD state. Checkout a branch first."
+                )])
+
             if target_branch not in [b.name for b in threads_repo.heads]:
                 # Check if it exists on remote
                 try:
@@ -569,6 +582,20 @@ def _audit_branch_pairing_impl(
         code_repo = Repo(context.code_root, search_parent_directories=True)
         threads_repo = Repo(context.threads_dir, search_parent_directories=True)
 
+        # Fetch remotes once upfront (more efficient than fetching per-branch)
+        threads_remote_refs: List[str] = []
+        code_remote_refs: List[str] = []
+        try:
+            threads_repo.remote().fetch(prune=True)
+            threads_remote_refs = [ref.name for ref in threads_repo.remote().refs]
+        except Exception as e:
+            log_debug(f"[AUDIT] Failed to fetch threads remote: {e}")
+        try:
+            code_repo.remote().fetch(prune=True)
+            code_remote_refs = [ref.name for ref in code_repo.remote().refs]
+        except Exception as e:
+            log_debug(f"[AUDIT] Failed to fetch code remote: {e}")
+
         # Get all branches
         code_branches = {b.name for b in code_repo.heads}
         threads_branches = {b.name for b in threads_repo.heads}
@@ -616,39 +643,39 @@ def _audit_branch_pairing_impl(
                 commits_ahead = len(list(threads_repo.iter_commits(f"main..{branch}"))) if "main" in threads_branches else 0
 
                 # Check if this is truly orphaned (exists on threads origin, not on code origin)
-                is_orphan = False
-                try:
-                    threads_repo.remote().fetch(prune=True)
-                    code_repo.remote().fetch(prune=True)
-                    threads_remote_refs = [ref.name for ref in threads_repo.remote().refs]
-                    code_remote_refs = [ref.name for ref in code_repo.remote().refs]
-                    threads_on_origin = f"origin/{branch}" in threads_remote_refs
-                    code_on_origin = f"origin/{branch}" in code_remote_refs
-                    is_orphan = threads_on_origin and not code_on_origin
-                except Exception:
-                    pass
+                # Uses pre-fetched remote refs from above
+                threads_on_origin = f"origin/{branch}" in threads_remote_refs
+                code_on_origin = f"origin/{branch}" in code_remote_refs
+                is_orphan = threads_on_origin and not code_on_origin
 
                 # Count open threads and get stranded thread topics
                 open_threads_count = 0
                 stranded_threads = []
                 original_branch = threads_repo.active_branch.name
-                try:
-                    threads_repo.git.checkout(branch)
-                    for thread_file in context.threads_dir.glob("*.md"):
-                        try:
-                            from watercooler.metadata import thread_meta, is_closed
-                            title, status, ball, updated = thread_meta(thread_file)
-                            stranded_threads.append(thread_file.stem)
-                            if not is_closed(status):
-                                open_threads_count += 1
-                        except Exception:
-                            stranded_threads.append(thread_file.stem)
-                    threads_repo.git.checkout(original_branch)
-                except Exception:
+                threads_dirty = is_dirty(threads_repo)
+
+                if threads_dirty:
+                    # Can't safely checkout with uncommitted changes
+                    log_debug(f"[AUDIT] Skipping thread scan for '{branch}': repo is dirty")
+                else:
                     try:
+                        threads_repo.git.checkout(branch)
+                        for thread_file in context.threads_dir.glob("*.md"):
+                            try:
+                                from watercooler.metadata import thread_meta, is_closed
+                                title, status, ball, updated = thread_meta(thread_file)
+                                stranded_threads.append(thread_file.stem)
+                                if not is_closed(status):
+                                    open_threads_count += 1
+                            except Exception as e:
+                                log_debug(f"[AUDIT] Failed to parse thread {thread_file.name}: {e}")
+                                stranded_threads.append(thread_file.stem)
                         threads_repo.git.checkout(original_branch)
                     except Exception:
-                        pass
+                        try:
+                            threads_repo.git.checkout(original_branch)
+                        except Exception:
+                            pass
 
                 branch_info = {
                     "name": branch,
