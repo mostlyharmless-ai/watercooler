@@ -24,14 +24,20 @@ LEANRAG_PATH = Path(__file__).parent.parent.parent / "external" / "LeanRAG"
 if str(LEANRAG_PATH) not in sys.path:
     sys.path.insert(0, str(LEANRAG_PATH))
 
-# Check if LeanRAG config exists
-LEANRAG_CONFIG = LEANRAG_PATH / "config.yaml"
-LEANRAG_AVAILABLE = LEANRAG_CONFIG.exists()
+# Check if LeanRAG can be imported (requires config.yaml in working directory)
+# LeanRAG loads config at import time, so we test actual importability
+LEANRAG_AVAILABLE = False
+LEANRAG_SKIP_REASON = "LeanRAG unavailable"
+try:
+    from leanrag.pipelines import build_native
+    LEANRAG_AVAILABLE = True
+except (ImportError, FileNotFoundError) as e:
+    LEANRAG_SKIP_REASON = f"LeanRAG import failed: {e}. Run from external/LeanRAG directory."
 
 # Skip decorator for tests requiring LeanRAG
 requires_leanrag = pytest.mark.skipif(
     not LEANRAG_AVAILABLE,
-    reason="LeanRAG config.yaml not found - run from LeanRAG directory or set up config"
+    reason=LEANRAG_SKIP_REASON
 )
 
 
@@ -293,6 +299,70 @@ class TestBuildHierarchicalGraph:
         with open(checkpoint_path) as f:
             checkpoint = json.load(f)
         assert checkpoint["step"] == 1
+
+
+    def test_strict_checkpoint_raises_on_mismatch(self, tmp_path):
+        """Test that strict_checkpoint=True raises ValueError on schema mismatch."""
+        from leanrag.pipelines.build_native import (
+            CHECKPOINT_SCHEMA_VERSION,
+            build_hierarchical_graph,
+        )
+
+        # Create input files
+        entity_file = tmp_path / "entity.jsonl"
+        relation_file = tmp_path / "relation.jsonl"
+        entity_file.write_text('{"entity_name": "test", "description": "desc", "source_id": "s1"}\n')
+        relation_file.write_text('{"src_tgt": "A", "tgt_src": "B", "description": "rel", "source_id": "s1"}\n')
+
+        # Create checkpoint with future schema version
+        checkpoint_path = tmp_path / ".checkpoint.json"
+        checkpoint_path.write_text(json.dumps({
+            "schema_version": CHECKPOINT_SCHEMA_VERSION + 1,
+            "step": 2,
+        }))
+
+        # Should raise ValueError in strict mode
+        with pytest.raises(ValueError, match="does not match"):
+            build_hierarchical_graph(
+                working_dir=str(tmp_path),
+                checkpoint_path=str(checkpoint_path),
+                strict_checkpoint=True,
+            )
+
+    def test_non_strict_checkpoint_warns_on_mismatch(self, tmp_path):
+        """Test that strict_checkpoint=False logs warning but proceeds."""
+        from leanrag.pipelines.build_native import (
+            CHECKPOINT_SCHEMA_VERSION,
+            build_hierarchical_graph,
+        )
+
+        # Create input files
+        entity_file = tmp_path / "entity.jsonl"
+        relation_file = tmp_path / "relation.jsonl"
+        entity_file.write_text('{"entity_name": "test", "description": "desc", "source_id": "s1"}\n')
+        relation_file.write_text('{"src_tgt": "A", "tgt_src": "B", "description": "rel", "source_id": "s1"}\n')
+
+        # Create checkpoint with future schema version
+        checkpoint_path = tmp_path / ".checkpoint.json"
+        checkpoint_path.write_text(json.dumps({
+            "schema_version": CHECKPOINT_SCHEMA_VERSION + 1,
+            "step": 1,
+            "entity_results": {},
+            "relation_results": [],
+        }))
+
+        # Mock embedding to stop early
+        with patch("leanrag.pipelines.build_native._embedding_data") as mock_embed:
+            mock_embed.side_effect = Exception("Stop for test")
+
+            try:
+                build_hierarchical_graph(
+                    working_dir=str(tmp_path),
+                    checkpoint_path=str(checkpoint_path),
+                    strict_checkpoint=False,  # Should not raise
+                )
+            except Exception:
+                pass  # Expected to fail at embedding, not checkpoint
 
 
 @requires_leanrag

@@ -15,12 +15,17 @@ Issue #83: This module extracts Graphiti-specific code from baseline_graph/sync.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import threading
 from datetime import datetime, timezone as tz
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+# Lock for thread-safe queue file writes
+_queue_lock = threading.Lock()
 
 
 # ============================================================================
@@ -146,15 +151,25 @@ def _graphiti_sync_callback(
         return True
 
     try:
-        result = asyncio.run(
-            _call_graphiti_add_episode(
-                content=entry_body,
-                group_id=topic,
-                entry_id=entry_id,
-                timestamp=timestamp,
-                title=entry_title,
-            )
+        coro = _call_graphiti_add_episode(
+            content=entry_body,
+            group_id=topic,
+            entry_id=entry_id,
+            timestamp=timestamp,
+            title=entry_title,
         )
+
+        # Handle both sync and async contexts safely
+        # If called from an existing event loop, use run_coroutine_threadsafe
+        # Otherwise, use asyncio.run()
+        try:
+            loop = asyncio.get_running_loop()
+            # We're in an async context - schedule on the loop from this thread
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            result = future.result(timeout=30)  # 30 second timeout
+        except RuntimeError:
+            # No running loop - safe to use asyncio.run()
+            result = asyncio.run(coro)
 
         if not result.get("success", False):
             log.warning(
@@ -196,6 +211,10 @@ def _leanrag_sync_callback(
     entries for later batch processing. The actual clustering happens via
     explicit pipeline runs (watercooler_leanrag_run_pipeline MCP tool).
 
+    Entries are appended to a queue file (.leanrag_queue.jsonl) in the
+    threads directory. Pipeline runs can check this file to know if there's
+    fresh work to process.
+
     Args:
         threads_dir: Threads directory
         topic: Thread topic (used as group_id)
@@ -211,20 +230,98 @@ def _leanrag_sync_callback(
         dry_run: If True, simulate without actual sync
 
     Returns:
-        True (always succeeds - entries are queued, not immediately processed)
+        True on success, False on failure
     """
     if dry_run:
         log.debug(f"MEMORY: [DRY RUN] Would queue {topic}/{entry_id} for LeanRAG pipeline")
         return True
 
-    # LeanRAG processes batches, not individual entries
-    # Log the entry for future pipeline processing
-    log.debug(f"MEMORY: Entry {topic}/{entry_id} queued for LeanRAG pipeline")
+    try:
+        # Build queue entry with all metadata
+        queue_entry = {
+            "entry_id": entry_id,
+            "topic": topic,
+            "timestamp": timestamp or datetime.now(tz.utc).isoformat(),
+            "queued_at": datetime.now(tz.utc).isoformat(),
+            "entry_title": entry_title,
+            "entry_body": entry_body,
+            "agent": agent,
+            "role": role,
+            "entry_type": entry_type,
+        }
 
-    # Future enhancement: Append to a queue file or database that the pipeline reads
-    # For now, this is a no-op placeholder since LeanRAG is triggered on-demand
+        # Append to queue file (thread-safe)
+        queue_file = Path(threads_dir) / ".leanrag_queue.jsonl"
+        with _queue_lock:
+            with open(queue_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(queue_entry) + "\n")
 
-    return True
+        log.debug(f"MEMORY: Entry {topic}/{entry_id} queued for LeanRAG pipeline")
+        return True
+
+    except Exception as e:
+        log.exception(f"MEMORY: Failed to queue {topic}/{entry_id} for LeanRAG: {e}")
+        return False
+
+
+def get_leanrag_queue_path(threads_dir: Path) -> Path:
+    """Get the path to the LeanRAG queue file.
+
+    Args:
+        threads_dir: Threads directory
+
+    Returns:
+        Path to .leanrag_queue.jsonl
+    """
+    return Path(threads_dir) / ".leanrag_queue.jsonl"
+
+
+def read_leanrag_queue(threads_dir: Path) -> list[Dict[str, Any]]:
+    """Read all entries from the LeanRAG queue.
+
+    Args:
+        threads_dir: Threads directory
+
+    Returns:
+        List of queued entry dicts
+    """
+    queue_file = get_leanrag_queue_path(threads_dir)
+    if not queue_file.exists():
+        return []
+
+    entries = []
+    with open(queue_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.warning(f"MEMORY: Skipping malformed queue entry: {line[:50]}...")
+    return entries
+
+
+def clear_leanrag_queue(threads_dir: Path) -> int:
+    """Clear the LeanRAG queue after processing.
+
+    Args:
+        threads_dir: Threads directory
+
+    Returns:
+        Number of entries cleared
+    """
+    queue_file = get_leanrag_queue_path(threads_dir)
+    if not queue_file.exists():
+        return 0
+
+    # Count entries before clearing
+    count = len(read_leanrag_queue(threads_dir))
+
+    with _queue_lock:
+        queue_file.unlink()
+
+    logger.debug(f"MEMORY: Cleared {count} entries from LeanRAG queue")
+    return count
 
 
 # ============================================================================

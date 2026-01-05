@@ -321,3 +321,122 @@ class TestCallGraphitiAddEpisode:
         result = asyncio.run(run_test())
         assert result["success"] is False
         assert "error" in result
+
+
+class TestLeanRAGQueue:
+    """Tests for LeanRAG queue functionality."""
+
+    def test_queue_entry_written(self, tmp_path):
+        """Test that LeanRAG callback writes to queue file."""
+        from watercooler_mcp.memory_sync import (
+            _leanrag_sync_callback,
+            get_leanrag_queue_path,
+            read_leanrag_queue,
+        )
+
+        log = MagicMock()
+
+        result = _leanrag_sync_callback(
+            threads_dir=tmp_path,
+            topic="test-topic",
+            entry_id="entry-123",
+            entry_body="Test body content",
+            entry_title="Test Title",
+            timestamp="2025-01-05T12:00:00Z",
+            agent="claude",
+            role="implementer",
+            entry_type="Note",
+            backend_config={"backend": "leanrag"},
+            log=log,
+            dry_run=False,
+        )
+
+        assert result is True
+
+        # Verify queue file exists
+        queue_path = get_leanrag_queue_path(tmp_path)
+        assert queue_path.exists()
+
+        # Verify entry content
+        entries = read_leanrag_queue(tmp_path)
+        assert len(entries) == 1
+        assert entries[0]["entry_id"] == "entry-123"
+        assert entries[0]["topic"] == "test-topic"
+        assert entries[0]["entry_body"] == "Test body content"
+        assert entries[0]["agent"] == "claude"
+
+    def test_queue_multiple_entries(self, tmp_path):
+        """Test that multiple entries are appended to queue."""
+        from watercooler_mcp.memory_sync import (
+            _leanrag_sync_callback,
+            read_leanrag_queue,
+        )
+
+        log = MagicMock()
+
+        # Add multiple entries
+        for i in range(3):
+            _leanrag_sync_callback(
+                threads_dir=tmp_path,
+                topic=f"topic-{i}",
+                entry_id=f"entry-{i}",
+                entry_body=f"Body {i}",
+                entry_title=None,
+                timestamp=None,
+                agent=None,
+                role=None,
+                entry_type=None,
+                backend_config={"backend": "leanrag"},
+                log=log,
+                dry_run=False,
+            )
+
+        entries = read_leanrag_queue(tmp_path)
+        assert len(entries) == 3
+        assert entries[0]["entry_id"] == "entry-0"
+        assert entries[2]["entry_id"] == "entry-2"
+
+    def test_clear_queue(self, tmp_path):
+        """Test clearing the queue."""
+        from watercooler_mcp.memory_sync import (
+            _leanrag_sync_callback,
+            clear_leanrag_queue,
+            get_leanrag_queue_path,
+            read_leanrag_queue,
+        )
+
+        log = MagicMock()
+
+        # Add entries
+        for i in range(2):
+            _leanrag_sync_callback(
+                threads_dir=tmp_path,
+                topic="test",
+                entry_id=f"e{i}",
+                entry_body="body",
+                entry_title=None,
+                timestamp=None,
+                agent=None,
+                role=None,
+                entry_type=None,
+                backend_config={},
+                log=log,
+                dry_run=False,
+            )
+
+        assert len(read_leanrag_queue(tmp_path)) == 2
+
+        # Clear queue
+        cleared = clear_leanrag_queue(tmp_path)
+        assert cleared == 2
+
+        # Verify cleared
+        assert not get_leanrag_queue_path(tmp_path).exists()
+        assert len(read_leanrag_queue(tmp_path)) == 0
+
+    def test_read_empty_queue(self, tmp_path):
+        """Test reading non-existent queue returns empty list."""
+        from watercooler_mcp.memory_sync import read_leanrag_queue
+
+        entries = read_leanrag_queue(tmp_path)
+        assert entries == []
