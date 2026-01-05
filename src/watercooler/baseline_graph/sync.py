@@ -47,7 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from watercooler.baseline_graph.export import (
     entry_to_node,
@@ -1001,14 +1001,60 @@ def reconcile_graph(
 # Memory Backend Callback Registry
 # ============================================================================
 
+
+class MemorySyncCallback(Protocol):
+    """Protocol defining the memory sync callback signature.
+
+    Callbacks are invoked by sync_to_memory_backend when an entry needs to be
+    synced to a memory backend. This Protocol provides explicit type checking
+    for callback implementations.
+    """
+
+    def __call__(
+        self,
+        threads_dir: Path,
+        topic: str,
+        entry_id: str,
+        entry_body: str,
+        entry_title: Optional[str],
+        timestamp: Optional[str],
+        agent: Optional[str],
+        role: Optional[str],
+        entry_type: Optional[str],
+        backend_config: Dict[str, Any],
+        log: logging.Logger,
+        dry_run: bool = False,
+    ) -> bool:
+        """Sync an entry to a memory backend.
+
+        Args:
+            threads_dir: Threads directory
+            topic: Thread topic (used as group_id)
+            entry_id: Entry ID for provenance tracking
+            entry_body: Entry content to sync
+            entry_title: Optional entry title
+            timestamp: Entry timestamp (ISO 8601)
+            agent: Agent name
+            role: Agent role
+            entry_type: Entry type
+            backend_config: Backend configuration dict
+            log: Logger instance
+            dry_run: If True, simulate without actual sync
+
+        Returns:
+            True on success, False on failure
+        """
+        ...
+
+
 # Registry for memory backend sync callbacks
 # Callbacks are registered by backend implementations (e.g., in watercooler_mcp.memory_sync)
-_memory_sync_callbacks: Dict[str, Callable[..., bool]] = {}
+_memory_sync_callbacks: Dict[str, MemorySyncCallback] = {}
 
 
 def register_memory_sync_callback(
     backend_name: str,
-    callback: Callable[..., bool],
+    callback: MemorySyncCallback,
 ) -> None:
     """Register a sync callback for a memory backend.
 
@@ -1018,9 +1064,7 @@ def register_memory_sync_callback(
 
     Args:
         backend_name: Backend identifier (e.g., "graphiti", "leanrag")
-        callback: Function with signature:
-            (threads_dir, topic, entry_id, entry_body, entry_title, timestamp,
-             agent, role, entry_type, backend_config, logger, dry_run) -> bool
+        callback: Function implementing MemorySyncCallback protocol
 
     Example:
         def my_graphiti_sync(threads_dir, topic, entry_id, entry_body, ...):

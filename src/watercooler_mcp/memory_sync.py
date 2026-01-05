@@ -151,25 +151,17 @@ def _graphiti_sync_callback(
         return True
 
     try:
-        coro = _call_graphiti_add_episode(
-            content=entry_body,
-            group_id=topic,
-            entry_id=entry_id,
-            timestamp=timestamp,
-            title=entry_title,
+        # Callbacks run in ThreadPoolExecutor workers which have no event loop,
+        # so asyncio.run() is always safe here.
+        result = asyncio.run(
+            _call_graphiti_add_episode(
+                content=entry_body,
+                group_id=topic,
+                entry_id=entry_id,
+                timestamp=timestamp,
+                title=entry_title,
+            )
         )
-
-        # Handle both sync and async contexts safely
-        # If called from an existing event loop, use run_coroutine_threadsafe
-        # Otherwise, use asyncio.run()
-        try:
-            loop = asyncio.get_running_loop()
-            # We're in an async context - schedule on the loop from this thread
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-            result = future.result(timeout=30)  # 30 second timeout
-        except RuntimeError:
-            # No running loop - safe to use asyncio.run()
-            result = asyncio.run(coro)
 
         if not result.get("success", False):
             log.warning(
@@ -304,6 +296,9 @@ def read_leanrag_queue(threads_dir: Path) -> list[Dict[str, Any]]:
 def clear_leanrag_queue(threads_dir: Path) -> int:
     """Clear the LeanRAG queue after processing.
 
+    Atomically reads and clears the queue while holding the lock to prevent
+    race conditions with concurrent writers.
+
     Args:
         threads_dir: Threads directory
 
@@ -311,14 +306,26 @@ def clear_leanrag_queue(threads_dir: Path) -> int:
         Number of entries cleared
     """
     queue_file = get_leanrag_queue_path(threads_dir)
-    if not queue_file.exists():
-        return 0
-
-    # Count entries before clearing
-    count = len(read_leanrag_queue(threads_dir))
 
     with _queue_lock:
-        queue_file.unlink()
+        if not queue_file.exists():
+            return 0
+
+        # Count entries while holding lock
+        count = 0
+        try:
+            with open(queue_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        count += 1
+        except (OSError, IOError):
+            return 0
+
+        # Delete while still holding lock
+        try:
+            queue_file.unlink()
+        except FileNotFoundError:
+            return 0
 
     logger.debug(f"MEMORY: Cleared {count} entries from LeanRAG queue")
     return count
