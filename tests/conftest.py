@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Generator
 
 import pytest
 
@@ -24,4 +25,96 @@ def anyio_backend():
     which is incompatible with trio.
     """
     return "asyncio"
+
+
+# ============================================================================
+# Memory Backend Test Fixtures
+# ============================================================================
+
+
+@pytest.fixture
+def disable_memory_backends(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Disable all memory backends for tests that don't need them.
+
+    Usage:
+        def test_something(disable_memory_backends):
+            # Memory backends are disabled, no server connections attempted
+            ...
+    """
+    monkeypatch.setenv("WATERCOOLER_MEMORY_DISABLED", "1")
+    yield
+
+
+@pytest.fixture
+def stub_memory_api_keys(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Set stub API keys for memory backends.
+
+    These stubs allow tests to pass validation without making real API calls.
+    Use with mocked backends to prevent outbound connections.
+
+    Usage:
+        def test_memory_config(stub_memory_api_keys):
+            # API key validation passes with stub values
+            ...
+    """
+    # Graphiti backend keys
+    monkeypatch.setenv("LLM_API_KEY", "stub-llm-key-for-testing")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "stub-embedding-key-for-testing")
+    monkeypatch.setenv("OPENAI_API_KEY", "stub-openai-key-for-testing")
+
+    # LeanRAG backend keys
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "stub-deepseek-key-for-testing")
+
+    yield
+
+
+@pytest.fixture
+def stub_local_memory_servers(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Configure memory backends to use local server endpoints with stub keys.
+
+    Sets up the environment as if local LLM and embedding servers are running.
+    Does NOT actually start servers - use with mocked HTTP calls.
+
+    Usage:
+        def test_with_local_servers(stub_local_memory_servers):
+            # Environment configured for local servers
+            ...
+    """
+    # Local embedding server (port 8080)
+    monkeypatch.setenv("EMBEDDING_API_BASE", "http://localhost:8080/v1")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "not-needed-for-local")
+    monkeypatch.setenv("EMBEDDING_MODEL", "bge-m3")
+
+    # Local LLM server (port 8000)
+    monkeypatch.setenv("LLM_API_BASE", "http://localhost:8000/v1")
+    monkeypatch.setenv("LLM_API_KEY", "not-needed-for-local")
+    monkeypatch.setenv("LLM_MODEL", "local")
+
+    # LeanRAG aliases (same servers)
+    monkeypatch.setenv("GLM_BASE_URL", "http://localhost:8080/v1")
+    monkeypatch.setenv("GLM_MODEL", "bge-m3")
+    monkeypatch.setenv("GLM_EMBEDDING_MODEL", "bge-m3")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "not-needed-for-local")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "local")
+
+    yield
+
+
+@pytest.fixture
+def memory_test_env(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_memory_api_keys: None,
+) -> Generator[None, None, None]:
+    """Complete memory test environment with Graphiti enabled.
+
+    Combines stub keys with Graphiti enabled. Use with mocked backends.
+
+    Usage:
+        def test_graphiti_feature(memory_test_env):
+            # Graphiti enabled with stub keys
+            ...
+    """
+    monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
+    yield
 

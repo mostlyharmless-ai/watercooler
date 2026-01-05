@@ -1102,6 +1102,21 @@ def get_registered_backends() -> list[str]:
 # ============================================================================
 
 
+def is_memory_disabled() -> bool:
+    """Check if memory backends are disabled.
+
+    When WATERCOOLER_MEMORY_DISABLED=1 is set, all memory backend functionality
+    is bypassed. This is useful for:
+    - Non-memory workflows that don't need graph backends
+    - CI environments where memory servers aren't available
+    - Quick local testing without server dependencies
+
+    Returns:
+        True if memory is disabled, False otherwise
+    """
+    return os.environ.get("WATERCOOLER_MEMORY_DISABLED", "").lower() in ("1", "true", "yes")
+
+
 def get_memory_backend_config() -> Optional[Dict[str, Any]]:
     """Get memory backend configuration from environment.
 
@@ -1112,6 +1127,11 @@ def get_memory_backend_config() -> Optional[Dict[str, Any]]:
     Returns:
         Config dict with backend name, or None if disabled
     """
+    # Check master disable switch first
+    if is_memory_disabled():
+        logger.debug("MEMORY: Disabled (WATERCOOLER_MEMORY_DISABLED=1)")
+        return None
+
     backend = os.environ.get("WATERCOOLER_MEMORY_BACKEND", "").lower().strip()
 
     if not backend:

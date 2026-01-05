@@ -27,6 +27,8 @@
 | [`BASELINE_GRAPH_MODEL`](#baseline_graph_model) | No | `llama3.2:3b` | Baseline Graph | LLM model name |
 | [`BASELINE_GRAPH_EXTRACTIVE_ONLY`](#baseline_graph_extractive_only) | No | `false` | Baseline Graph | Force extractive mode |
 | [`WATERCOOLER_GRAPHITI_ENABLED`](#watercooler_graphiti_enabled) | No | `"0"` | MCP Memory | Enable Graphiti memory queries |
+| [`WATERCOOLER_MEMORY_DISABLED`](#watercooler_memory_disabled) | No | Not set | All Memory | Disable all memory backends |
+| [`WATERCOOLER_MEMORY_BACKEND`](#watercooler_memory_backend) | No | Not set | Memory Sync | Select memory backend (graphiti/leanrag) |
 
 ---
 
@@ -836,6 +838,201 @@ export OPENAI_API_KEY="sk-..."
 - See [GRAPHITI_SETUP.md](./GRAPHITI_SETUP.md) for complete setup guide
 - See [MEMORY.md](./MEMORY.md) for memory backend overview
 - See [mcp-server.md](./mcp-server.md#watercooler_query_memory) for tool reference
+
+---
+
+## Memory Backend Configuration
+
+Variables for configuring LLM and embedding servers across memory backends (Graphiti, LeanRAG, MemoryGraph). Each backend has its own configuration, but all can share the same underlying servers.
+
+### WATERCOOLER_MEMORY_DISABLED
+
+**Purpose:** Master switch to disable all memory backend functionality.
+
+**Required:** No
+
+**Default:** Not set (memory enabled)
+
+**Format:** Boolean string (`"1"`, `"true"`, `"yes"` to disable)
+
+**Used by:** All memory backends
+
+**Details:**
+
+When set, completely bypasses all memory backend functionality. Useful for:
+- Non-memory workflows that don't need graph backends
+- CI environments where memory servers aren't available
+- Quick local testing without server dependencies
+
+**Configuration examples:**
+
+**Shell:**
+```bash
+export WATERCOOLER_MEMORY_DISABLED="1"
+```
+
+**MCP config:**
+```json
+{
+  "mcpServers": {
+    "watercooler-cloud": {
+      "env": {
+        "WATERCOOLER_MEMORY_DISABLED": "1"
+      }
+    }
+  }
+}
+```
+
+---
+
+### WATERCOOLER_MEMORY_BACKEND
+
+**Purpose:** Select which memory backend to use for sync operations.
+
+**Required:** No
+
+**Default:** Not set (sync disabled)
+
+**Format:** String (`"graphiti"` or `"leanrag"`)
+
+**Used by:** Memory sync hook
+
+**Details:**
+
+Configures which memory backend receives entry syncs after writes. Options:
+- `"graphiti"` - Sync to Graphiti temporal graph (real-time)
+- `"leanrag"` - Queue for LeanRAG clustering pipeline (batch)
+
+**Configuration examples:**
+
+**Shell:**
+```bash
+export WATERCOOLER_MEMORY_BACKEND="graphiti"
+```
+
+---
+
+### Graphiti Backend Variables
+
+Variables used by the Graphiti memory backend.
+
+| Variable | Required | Default | Purpose |
+|----------|----------|---------|---------|
+| `WATERCOOLER_GRAPHITI_ENABLED` | No | `"0"` | Enable Graphiti memory queries |
+| `LLM_API_BASE` | No | OpenAI | LLM server endpoint |
+| `LLM_API_KEY` | Yes* | - | LLM API key |
+| `LLM_MODEL` | No | `gpt-4o-mini` | LLM model name |
+| `EMBEDDING_API_BASE` | No | OpenAI | Embedding server endpoint |
+| `EMBEDDING_API_KEY` | Yes* | - | Embedding API key |
+| `EMBEDDING_MODEL` | No | `text-embedding-3-small` | Embedding model name |
+| `WATERCOOLER_GRAPHITI_RERANKER` | No | `rrf` | Reranker algorithm |
+
+*Required when Graphiti is enabled. For local servers, use `"not-needed-for-local"`.
+
+**Local server example:**
+```bash
+# Local embedding server (port 8080)
+EMBEDDING_API_BASE=http://localhost:8080/v1
+EMBEDDING_API_KEY=not-needed-for-local
+EMBEDDING_MODEL=bge-m3
+
+# Local LLM server (port 8000)
+LLM_API_BASE=http://localhost:8000/v1
+LLM_API_KEY=not-needed-for-local
+LLM_MODEL=local
+```
+
+---
+
+### LeanRAG Backend Variables
+
+Variables used by the LeanRAG memory backend (loaded from `external/LeanRAG/config.yaml`).
+
+| Variable | Required | Default | Purpose |
+|----------|----------|---------|---------|
+| `GLM_BASE_URL` | No | - | Embedding server endpoint |
+| `GLM_MODEL` | No | - | Embedding model name |
+| `GLM_EMBEDDING_MODEL` | No | - | Embedding model (alternative) |
+| `DEEPSEEK_BASE_URL` | No | - | LLM server endpoint |
+| `DEEPSEEK_API_KEY` | No | - | LLM API key |
+| `DEEPSEEK_MODEL` | No | - | LLM model name |
+
+**Local server example (matching Graphiti):**
+```bash
+# LeanRAG embedding config (same server as Graphiti)
+GLM_BASE_URL=http://localhost:8080/v1
+GLM_MODEL=bge-m3
+GLM_EMBEDDING_MODEL=bge-m3
+
+# LeanRAG LLM config (same server as Graphiti)
+DEEPSEEK_BASE_URL=http://localhost:8000/v1
+DEEPSEEK_API_KEY=not-needed-for-local
+DEEPSEEK_MODEL=local
+```
+
+---
+
+### FalkorDB Variables
+
+Variables for the FalkorDB graph database (used by Graphiti and LeanRAG).
+
+| Variable | Required | Default | Purpose |
+|----------|----------|---------|---------|
+| `FALKORDB_HOST` | No | `localhost` | FalkorDB host |
+| `FALKORDB_PORT` | No | `6379` | FalkorDB port |
+| `FALKORDB_PASSWORD` | No | - | FalkorDB password |
+
+**Start FalkorDB:**
+```bash
+docker run -d -p 6379:6379 falkordb/falkordb:latest
+```
+
+---
+
+### Validating Memory Configuration
+
+Use the validation script to check all backends are configured consistently:
+
+```bash
+# Basic check (warn-only)
+python scripts/check-memory-config.py
+
+# Strict mode (exit non-zero on issues)
+python scripts/check-memory-config.py --strict
+
+# Skip health checks (for offline/CI)
+python scripts/check-memory-config.py --skip-health-check
+
+# Generate .env template
+python scripts/check-memory-config.py --generate-env
+```
+
+**Example output:**
+```
+Memory Backend Configuration Check
+===================================
+
+Embedding Server
+================
+  ✓ http://localhost:8080/v1: healthy (bge-m3)
+
+  Backend Configuration:
+    Graphiti (EMBEDDING_API_BASE): http://localhost:8080/v1
+    LeanRAG (GLM_BASE_URL):        http://localhost:8080/v1
+
+LLM Server
+==========
+  ✓ http://localhost:8000/v1: healthy (local)
+
+FalkorDB
+========
+  ✓ localhost:6379: connected
+
+Summary
+=======
+All backends configured consistently ✓
+```
 
 ---
 

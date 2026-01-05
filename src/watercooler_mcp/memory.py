@@ -36,6 +36,7 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
     Logs warnings for configuration issues.
 
     Environment Variables:
+        WATERCOOLER_MEMORY_DISABLED: "1" to disable all memory backends
         WATERCOOLER_GRAPHITI_ENABLED: "1" to enable (default: "0")
         OPENAI_API_KEY: OpenAI API key (required if enabled)
         WATERCOOLER_GRAPHITI_RERANKER: Reranker algorithm (default: "rrf")
@@ -49,7 +50,12 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
         >>> if config:
         ...     backend = get_graphiti_backend(config)
     """
-    # Check master switch (default: disabled)
+    # Check global memory disable switch first
+    if os.getenv("WATERCOOLER_MEMORY_DISABLED", "").lower() in ("1", "true", "yes"):
+        log_debug("MEMORY: All memory backends disabled (WATERCOOLER_MEMORY_DISABLED=1)")
+        return None
+
+    # Check Graphiti-specific switch (default: disabled)
     enabled = os.getenv("WATERCOOLER_GRAPHITI_ENABLED", "0") == "1"
     if not enabled:
         log_debug("MEMORY: Graphiti disabled (WATERCOOLER_GRAPHITI_ENABLED != '1')")
