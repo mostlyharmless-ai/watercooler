@@ -138,6 +138,10 @@ register_branch_parity_tools(mcp)
 register_memory_tools(mcp)
 register_migration_tools(mcp)
 
+# Initialize memory sync callbacks (Issue #83 - callback registry pattern)
+from .memory_sync import init_memory_sync_callbacks
+init_memory_sync_callbacks()
+
 # Re-export registered tools for test compatibility (must be after registration)
 health = _diagnostic_tools.health
 list_threads = _thread_query_tools.list_threads

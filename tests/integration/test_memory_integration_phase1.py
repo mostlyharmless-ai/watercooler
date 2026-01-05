@@ -218,27 +218,39 @@ class TestMemorySyncHookIntegration:
         after submitting work to the executor. Errors are logged asynchronously
         in the worker thread without affecting the caller.
         """
-        from watercooler.baseline_graph.sync import sync_to_memory_backend
+        from watercooler.baseline_graph.sync import (
+            register_memory_sync_callback,
+            sync_to_memory_backend,
+            unregister_memory_sync_callback,
+        )
 
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
-        # Mock the graphiti call to raise an error
-        with patch.dict(os.environ, {"WATERCOOLER_MEMORY_BACKEND": "graphiti"}), patch(
-            "watercooler.baseline_graph.sync._call_graphiti_add_episode",
-            side_effect=RuntimeError("Connection failed"),
-        ):
-            # Should not raise - fire-and-forget returns True after submission
-            result = sync_to_memory_backend(
-                threads_dir=threads_dir,
-                topic="test-thread",
-                entry_id="01TEST123",
-                entry_body="Test content",
-            )
+        # Register a mock callback that raises an error
+        def error_callback(*args, **kwargs):
+            raise RuntimeError("Connection failed")
 
-            # Returns True because work was submitted to executor (fire-and-forget)
-            # Actual errors are logged asynchronously in worker thread
-            assert result is True
+        # Register test callback (will override default if exists)
+        register_memory_sync_callback("graphiti", error_callback)
+
+        try:
+            with patch.dict(os.environ, {"WATERCOOLER_MEMORY_BACKEND": "graphiti"}):
+                # Should not raise - fire-and-forget returns True after submission
+                result = sync_to_memory_backend(
+                    threads_dir=threads_dir,
+                    topic="test-thread",
+                    entry_id="01TEST123",
+                    entry_body="Test content",
+                )
+
+                # Returns True because work was submitted to executor (fire-and-forget)
+                # Actual errors are logged asynchronously in worker thread
+                assert result is True
+        finally:
+            # Restore the original callback
+            from watercooler_mcp.memory_sync import _graphiti_sync_callback
+            register_memory_sync_callback("graphiti", _graphiti_sync_callback)
 
 
 class TestEndToEndWorkflow:
