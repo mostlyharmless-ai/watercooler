@@ -951,52 +951,60 @@ def test_sync_to_memory_backend_disabled(threads_dir: Path, sample_thread: Path,
 
 
 def test_sync_to_memory_backend_graphiti(threads_dir: Path, sample_thread: Path, monkeypatch):
-    """Test sync_to_memory_backend calls graphiti backend.
+    """Test sync_to_memory_backend calls registered graphiti callback.
 
     Uses ThreadPoolExecutor for fire-and-forget, so we need to wait for
     the background worker to complete before checking assertions.
     """
     import time
-    from watercooler.baseline_graph.sync import sync_to_memory_backend, _get_sync_executor
+    from watercooler.baseline_graph.sync import (
+        sync_to_memory_backend,
+        _get_sync_executor,
+        register_memory_sync_callback,
+        unregister_memory_sync_callback,
+    )
 
     monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
 
-    # Mock the graphiti add function
+    # Register a test callback that captures calls
     graphiti_calls = []
 
-    async def mock_add_episode(content, group_id, entry_id=None, **kwargs):
+    def mock_graphiti_callback(threads_dir, topic, entry_id, entry_body, *args, **kwargs):
         graphiti_calls.append({
-            "content": content,
-            "group_id": group_id,
+            "topic": topic,
             "entry_id": entry_id,
+            "entry_body": entry_body,
         })
-        return {"success": True, "episode_uuid": "mock-uuid"}
+        return True
 
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync._call_graphiti_add_episode",
-        mock_add_episode,
-    )
+    # Override the graphiti callback
+    register_memory_sync_callback("graphiti", mock_graphiti_callback)
 
-    result = sync_to_memory_backend(
-        threads_dir=threads_dir,
-        topic="test-topic",
-        entry_id="01TEST001",
-        entry_body="Test content",
-    )
+    try:
+        result = sync_to_memory_backend(
+            threads_dir=threads_dir,
+            topic="test-topic",
+            entry_id="01TEST001",
+            entry_body="Test content",
+        )
 
-    assert result is True
+        assert result is True
 
-    # Wait for background worker to complete
-    executor = _get_sync_executor()
-    executor.shutdown(wait=True)
+        # Wait for background worker to complete
+        executor = _get_sync_executor()
+        executor.shutdown(wait=True)
 
-    # Reset executor for other tests
-    import watercooler.baseline_graph.sync as sync_module
-    sync_module._sync_executor = None
+        # Reset executor for other tests
+        import watercooler.baseline_graph.sync as sync_module
+        sync_module._sync_executor = None
 
-    assert len(graphiti_calls) == 1
-    assert graphiti_calls[0]["group_id"] == "test-topic"
-    assert graphiti_calls[0]["entry_id"] == "01TEST001"
+        assert len(graphiti_calls) == 1
+        assert graphiti_calls[0]["topic"] == "test-topic"
+        assert graphiti_calls[0]["entry_id"] == "01TEST001"
+    finally:
+        # Restore original callback
+        from watercooler_mcp.memory_sync import _graphiti_sync_callback
+        register_memory_sync_callback("graphiti", _graphiti_sync_callback)
 
 
 def test_sync_to_memory_backend_non_blocking(threads_dir: Path, sample_thread: Path, monkeypatch):
@@ -1006,29 +1014,34 @@ def test_sync_to_memory_backend_non_blocking(threads_dir: Path, sample_thread: P
     after submitting work to the executor. Errors are logged asynchronously
     in the worker thread without affecting the caller.
     """
-    from watercooler.baseline_graph.sync import sync_to_memory_backend
+    from watercooler.baseline_graph.sync import (
+        sync_to_memory_backend,
+        register_memory_sync_callback,
+    )
 
     monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
 
-    # Mock graphiti to raise an error
-    async def mock_add_episode_error(*args, **kwargs):
+    # Register a callback that raises an error
+    def mock_error_callback(*args, **kwargs):
         raise Exception("Graphiti backend error")
 
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync._call_graphiti_add_episode",
-        mock_add_episode_error,
-    )
+    register_memory_sync_callback("graphiti", mock_error_callback)
 
-    # Fire-and-forget: returns True after successful submission to executor
-    # Actual errors are logged asynchronously in worker thread
-    result = sync_to_memory_backend(
-        threads_dir=threads_dir,
-        topic="test-topic",
-        entry_id="01TEST001",
-        entry_body="Test content",
-    )
+    try:
+        # Fire-and-forget: returns True after successful submission to executor
+        # Actual errors are logged asynchronously in worker thread
+        result = sync_to_memory_backend(
+            threads_dir=threads_dir,
+            topic="test-topic",
+            entry_id="01TEST001",
+            entry_body="Test content",
+        )
 
-    assert result is True  # Submitted successfully (fire-and-forget)
+        assert result is True  # Submitted successfully (fire-and-forget)
+    finally:
+        # Restore original callback
+        from watercooler_mcp.memory_sync import _graphiti_sync_callback
+        register_memory_sync_callback("graphiti", _graphiti_sync_callback)
 
 
 def test_sync_entry_calls_memory_hook_when_enabled(threads_dir: Path, sample_thread: Path, monkeypatch):

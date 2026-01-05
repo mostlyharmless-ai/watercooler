@@ -1092,16 +1092,30 @@ async def _graphiti_add_episode_impl(
         )])
 
 
-def _get_leanrag_pipeline(config=None):
-    """Get LeanRAG pipeline instance if available.
+def _get_leanrag_backend(config=None):
+    """Get LeanRAG backend instance if available.
 
     Returns:
-        Pipeline instance or None if unavailable
+        LeanRAGBackend instance or None if unavailable
     """
     try:
-        from watercooler_memory.pipeline import LeanRAGPipeline
-        return LeanRAGPipeline(config)
-    except ImportError:
+        from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
+        from pathlib import Path
+
+        # Use provided config or defaults
+        if config is None:
+            config = LeanRAGConfig(
+                leanrag_path=Path("external/LeanRAG"),
+            )
+        elif isinstance(config, dict):
+            config = LeanRAGConfig(**config)
+
+        return LeanRAGBackend(config)
+    except ImportError as e:
+        log_error(f"MEMORY: LeanRAG backend import failed: {e}")
+        return None
+    except Exception as e:
+        log_error(f"MEMORY: LeanRAG backend init failed: {e}")
         return None
 
 
@@ -1136,6 +1150,11 @@ async def _leanrag_run_pipeline_impl(
             dry_run=True
         )
     """
+    import asyncio
+    import time
+
+    start_time = time.time()
+
     try:
         # Validate required fields
         if not group_id or not group_id.strip():
@@ -1148,44 +1167,115 @@ async def _leanrag_run_pipeline_impl(
                 }, indent=2)
             )])
 
-        # Get pipeline instance
-        pipeline = _get_leanrag_pipeline()
-        if pipeline is None:
+        # Get backend instance
+        backend = _get_leanrag_backend()
+        if backend is None:
             return ToolResult(content=[TextContent(
                 type="text",
                 text=json.dumps({
                     "success": False,
-                    "error": "LeanRAG pipeline unavailable. Install with: pip install watercooler-cloud[memory]",
+                    "error": "LeanRAG backend unavailable. Install with: pip install watercooler-cloud[memory]",
                     "clusters_created": 0,
                 }, indent=2)
             )])
 
-        # Build filter options
-        filters = {"group_id": group_id}
-        if start_date:
-            filters["start_date"] = start_date
-        if end_date:
-            filters["end_date"] = end_date
+        # For dry_run, just report what would be done
+        if dry_run:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "group_id": group_id,
+                    "dry_run": True,
+                    "clusters_created": 0,
+                    "chunks_processed": 0,
+                    "execution_time_ms": int((time.time() - start_time) * 1000),
+                    "message": f"Dry run: Would process episodes from group '{group_id}'",
+                }, indent=2)
+            )])
 
-        # Run pipeline
+        # Fetch episodes from Graphiti for this group
         try:
-            result = await pipeline.run(
-                filters=filters,
-                dry_run=dry_run,
-            )
+            from watercooler_memory.backends.graphiti import GraphitiBackend
 
-            log_action(f"MEMORY: LeanRAG pipeline completed for {group_id}")
+            graphiti = GraphitiBackend()
+            episodes_result = await graphiti.get_episodes(
+                group_ids=[group_id],
+                limit=1000,  # Reasonable limit
+            )
+            episodes = episodes_result.get("episodes", [])
+        except ImportError:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": "Graphiti backend required to fetch episodes. Enable Graphiti first.",
+                    "clusters_created": 0,
+                }, indent=2)
+            )])
+        except Exception as e:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": f"Failed to fetch episodes from Graphiti: {e}",
+                    "clusters_created": 0,
+                }, indent=2)
+            )])
+
+        if not episodes:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "group_id": group_id,
+                    "dry_run": False,
+                    "clusters_created": 0,
+                    "chunks_processed": 0,
+                    "execution_time_ms": int((time.time() - start_time) * 1000),
+                    "message": f"No episodes found for group '{group_id}'",
+                }, indent=2)
+            )])
+
+        # Convert episodes to ChunkPayload format
+        from watercooler_memory.backends import ChunkPayload
+        import hashlib
+
+        chunks = []
+        for ep in episodes:
+            content = ep.get("content", "")
+            chunk_id = ep.get("uuid") or hashlib.md5(content.encode()).hexdigest()
+            chunks.append({
+                "id": chunk_id,
+                "text": content,
+                "metadata": {
+                    "group_id": group_id,
+                    "source": "graphiti_episode",
+                },
+            })
+
+        chunk_payload = ChunkPayload(
+            manifest_version="1.0",
+            chunks=chunks,
+        )
+
+        # Run LeanRAG index via thread (ADR 0001 Sync Facade pattern)
+        try:
+            result = await asyncio.to_thread(backend.index, chunk_payload)
+
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            log_action(f"MEMORY: LeanRAG pipeline completed for {group_id}: {len(chunks)} chunks")
 
             return ToolResult(content=[TextContent(
                 type="text",
                 text=json.dumps({
                     "success": True,
                     "group_id": group_id,
-                    "dry_run": dry_run,
-                    "clusters_created": result.get("clusters_created", 0),
-                    "chunks_processed": result.get("chunks_processed", 0),
-                    "execution_time_ms": result.get("execution_time_ms", 0),
-                    "message": f"Pipeline {'simulated' if dry_run else 'completed'} for {group_id}",
+                    "dry_run": False,
+                    "clusters_created": result.indexed_count,
+                    "chunks_processed": len(chunks),
+                    "execution_time_ms": execution_time_ms,
+                    "message": result.message,
                 }, indent=2)
             )])
 

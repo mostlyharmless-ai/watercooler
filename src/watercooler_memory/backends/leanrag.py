@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
+# subprocess removed - now using native build_hierarchical_graph()
 import sys
 import tempfile
 import threading
@@ -70,7 +70,7 @@ class LeanRAGBackend(MemoryBackend):
     - Multi-layer knowledge graph construction
     - Reduced redundancy (~46% vs flat baselines)
 
-    This adapter wraps LeanRAG subprocess calls and maps to/from canonical payloads.
+    This adapter uses native LeanRAG Python APIs and maps to/from canonical payloads.
 
     Performance Considerations:
     - Current implementation creates new FalkorDB connections per request
@@ -295,8 +295,12 @@ class LeanRAGBackend(MemoryBackend):
 
         Executes LeanRAG pipeline:
         1. triple_extraction (bypasses LeanRAG chunking)
-        2. build.py to construct hierarchical graph
+        2. build_hierarchical_graph() to construct hierarchical graph (native)
         """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         work_dir = self.config.work_dir or Path(tempfile.mkdtemp(prefix="leanrag-index-"))
 
         # Convert to absolute path so it works when we change directories
@@ -336,55 +340,53 @@ class LeanRAGBackend(MemoryBackend):
                 finally:
                     os.chdir(original_cwd)
 
-            build_cmd = [
-                sys.executable,
-                "leanrag/pipelines/build.py",
-                "--path",
-                str(work_dir),
-                "--num",
-                "2",
-            ]
+            # Native graph building (replaces subprocess call to build.py)
+            logger.info(f"Running LeanRAG graph building (native) at {work_dir}")
 
-            env = os.environ.copy()
-            env["PYTHONPATH"] = str(leanrag_abspath) + os.pathsep + env.get("PYTHONPATH", "")
+            # Import inside lock context to ensure sys.path is set
+            with _chdir_lock:
+                if str(leanrag_abspath) not in sys.path:
+                    sys.path.insert(0, str(leanrag_abspath))
 
-            print(f"Running LeanRAG graph building: {' '.join(build_cmd)}")
-            
-            build_result = subprocess.run(
-                build_cmd,
-                check=True,
-                # Don't capture output - let it stream to console so user can see progress
-                timeout=1800,  # 30 minutes for build.py (community summaries via LLM)
-                cwd=str(self.config.leanrag_path),
-                env=env,
+                original_cwd = os.getcwd()
+                try:
+                    os.chdir(str(self.config.leanrag_path))
+
+                    from leanrag.pipelines.build_native import build_hierarchical_graph
+
+                    build_result = build_hierarchical_graph(
+                        working_dir=str(work_dir),
+                        max_workers=8,  # Default parallelism
+                        fresh_start=False,  # Allow checkpoint resume
+                    )
+                finally:
+                    os.chdir(original_cwd)
+
+            if build_result.errors:
+                logger.warning(f"Graph building completed with errors: {build_result.errors}")
+
+            logger.info(
+                f"Graph building complete: {build_result.entries_processed} entities, "
+                f"{build_result.clusters_created} clusters, "
+                f"{build_result.duration_seconds:.1f}s"
             )
-            
-            print(f"Graph building complete")
 
             return IndexResult(
                 manifest_version=chunks.manifest_version,
                 indexed_count=len(chunks.chunks),
-                message=f"Indexed {len(chunks.chunks)} chunks via LeanRAG at {work_dir}",
+                message=(
+                    f"Indexed {len(chunks.chunks)} chunks via LeanRAG at {work_dir}. "
+                    f"Built {build_result.clusters_created} clusters in {build_result.duration_seconds:.1f}s"
+                ),
             )
-        except subprocess.TimeoutExpired as exc:
-            stderr_tail = exc.stderr[-500:] if exc.stderr else ""
-            raise TransientError(
-                f"LeanRAG pipeline timed out after {exc.timeout}s. "
-                f"Command: {' '.join(exc.cmd)}. "
-                f"Stderr: {stderr_tail}"
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            stderr_tail = exc.stderr[-500:] if exc.stderr else ""
-            raise BackendError(
-                f"LeanRAG pipeline failed with exit code {exc.returncode}. "
-                f"Command: {' '.join(exc.cmd)}. "
-                f"Stderr: {stderr_tail}"
-            ) from exc
         except FileNotFoundError as exc:
             raise ConfigError(
                 f"Required LeanRAG files not found: {exc}. "
                 "Ensure LeanRAG submodule is initialized and prepared has been run."
             ) from exc
+        except ValueError as exc:
+            # Checkpoint corruption or other value errors from build_native
+            raise BackendError(f"LeanRAG build error: {exc}") from exc
         except Exception as exc:
             raise BackendError(f"Unexpected error during index: {exc}") from exc
 

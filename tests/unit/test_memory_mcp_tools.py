@@ -180,33 +180,40 @@ class TestLeanRAGRunPipelineTool:
     """Tests for watercooler_leanrag_run_pipeline tool."""
 
     @pytest.fixture
-    def mock_leanrag_pipeline(self):
-        """Create mock LeanRAG pipeline."""
-        mock_result = {
-            "clusters_created": 5,
-            "chunks_processed": 50,
-            "execution_time_ms": 1200,
-        }
+    def mock_leanrag_backend(self):
+        """Create mock LeanRAG backend."""
+        # Mock result from backend.index()
+        mock_index_result = MagicMock()
+        mock_index_result.indexed_count = 5
+        mock_index_result.message = "Indexed 5 chunks"
 
-        async def mock_run(*args, **kwargs):
-            return mock_result
-
-        mock_pipeline = MagicMock()
-        mock_pipeline.run = AsyncMock(side_effect=mock_run)
-        return mock_pipeline
+        mock_backend = MagicMock()
+        mock_backend.index = MagicMock(return_value=mock_index_result)
+        return mock_backend
 
     @pytest.fixture
     def mock_context(self):
         """Create mock MCP context."""
         return MagicMock()
 
-    async def test_run_pipeline_success(self, mock_leanrag_pipeline, mock_context):
+    async def test_run_pipeline_success(self, mock_leanrag_backend, mock_context):
         """Test successful pipeline execution."""
         from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
 
+        # Mock Graphiti backend to return episodes
+        mock_graphiti = MagicMock()
+
+        async def mock_get_episodes(*args, **kwargs):
+            return {"episodes": [{"uuid": "ep1", "content": "Test content"}]}
+
+        mock_graphiti.get_episodes = AsyncMock(side_effect=mock_get_episodes)
+
         with patch(
-            "watercooler_mcp.tools.memory._get_leanrag_pipeline",
-            return_value=mock_leanrag_pipeline,
+            "watercooler_mcp.tools.memory._get_leanrag_backend",
+            return_value=mock_leanrag_backend,
+        ), patch(
+            "watercooler_memory.backends.graphiti.GraphitiBackend",
+            return_value=mock_graphiti,
         ):
             result = await _leanrag_run_pipeline_impl(
                 group_id="auth-feature",
@@ -217,13 +224,24 @@ class TestLeanRAGRunPipelineTool:
             assert result_data["success"] is True
             assert "clusters_created" in result_data
 
-    async def test_run_pipeline_with_filters(self, mock_leanrag_pipeline, mock_context):
+    async def test_run_pipeline_with_filters(self, mock_leanrag_backend, mock_context):
         """Test pipeline with filter options."""
         from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
 
+        # Mock Graphiti backend to return episodes
+        mock_graphiti = MagicMock()
+
+        async def mock_get_episodes(*args, **kwargs):
+            return {"episodes": [{"uuid": "ep1", "content": "Test content"}]}
+
+        mock_graphiti.get_episodes = AsyncMock(side_effect=mock_get_episodes)
+
         with patch(
-            "watercooler_mcp.tools.memory._get_leanrag_pipeline",
-            return_value=mock_leanrag_pipeline,
+            "watercooler_mcp.tools.memory._get_leanrag_backend",
+            return_value=mock_leanrag_backend,
+        ), patch(
+            "watercooler_memory.backends.graphiti.GraphitiBackend",
+            return_value=mock_graphiti,
         ):
             result = await _leanrag_run_pipeline_impl(
                 group_id="auth-feature",
@@ -240,7 +258,7 @@ class TestLeanRAGRunPipelineTool:
         from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
 
         with patch(
-            "watercooler_mcp.tools.memory._get_leanrag_pipeline",
+            "watercooler_mcp.tools.memory._get_leanrag_backend",
             return_value=None,
         ):
             result = await _leanrag_run_pipeline_impl(
@@ -253,13 +271,13 @@ class TestLeanRAGRunPipelineTool:
             assert "error" in result_data
             assert "unavailable" in result_data["error"].lower()
 
-    async def test_run_pipeline_dry_run(self, mock_leanrag_pipeline, mock_context):
+    async def test_run_pipeline_dry_run(self, mock_leanrag_backend, mock_context):
         """Test dry-run mode."""
         from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
 
         with patch(
-            "watercooler_mcp.tools.memory._get_leanrag_pipeline",
-            return_value=mock_leanrag_pipeline,
+            "watercooler_mcp.tools.memory._get_leanrag_backend",
+            return_value=mock_leanrag_backend,
         ):
             result = await _leanrag_run_pipeline_impl(
                 group_id="auth-feature",

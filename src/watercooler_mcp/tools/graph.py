@@ -430,11 +430,64 @@ def _search_leanrag_impl(
 ) -> str:
     """Search LeanRAG hierarchical clusters.
 
-    LeanRAG search is not yet implemented - raises error to trigger fallback.
+    Uses the LeanRAG backend to search the hierarchical knowledge graph.
+    Falls back to baseline if LeanRAG is not available or not indexed.
+
+    Args:
+        ctx: MCP context
+        threads_dir: Path to threads directory
+        query: Search query string
+        limit: Maximum number of results
+        **kwargs: Additional search parameters
+
+    Returns:
+        JSON string with search results
     """
-    # LeanRAG search implementation would go here
-    # For now, raise to trigger fallback to baseline
-    raise RuntimeError("LeanRAG search not yet implemented")
+    try:
+        from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
+        from watercooler_memory.backends import QueryPayload
+
+        # Configure backend with threads_dir as work_dir
+        config = LeanRAGConfig(
+            work_dir=threads_dir / "graph" / "leanrag",
+            leanrag_path=Path("external/LeanRAG"),
+        )
+
+        backend = LeanRAGBackend(config)
+
+        # Build query payload
+        query_payload = QueryPayload(
+            manifest_version="1.0",
+            queries=[{"query": query, "limit": limit}],
+        )
+
+        # Execute query
+        result = backend.query(query_payload)
+
+        # Format results
+        output = {
+            "backend": "leanrag",
+            "query": query,
+            "result_count": len(result.results),
+            "results": [],
+        }
+
+        for r in result.results:
+            output["results"].append({
+                "query": r.get("query", query),
+                "answer": r.get("answer", ""),
+                "context": r.get("context", ""),
+                "topk": r.get("topk", limit),
+            })
+
+        return json.dumps(output, indent=2)
+
+    except ImportError as e:
+        # LeanRAG not available
+        raise RuntimeError(f"LeanRAG backend not available: {e}")
+    except Exception as e:
+        # Any error triggers fallback to baseline
+        raise RuntimeError(f"LeanRAG search failed: {e}")
 
 
 # Module-level references to registered tools (populated by register_graph_tools)
