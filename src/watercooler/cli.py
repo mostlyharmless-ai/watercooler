@@ -135,6 +135,19 @@ def main(argv: list[str] | None = None) -> None:
     p_config_validate.add_argument("--project-path", help="Project directory for config discovery")
     p_config_validate.add_argument("--strict", action="store_true", help="Treat warnings as errors")
 
+    # Slack commands
+    p_slack = sub.add_parser("slack", help="Slack integration")
+    slack_sub = p_slack.add_subparsers(dest="slack_cmd")
+
+    p_slack_setup = slack_sub.add_parser("setup", help="Interactive webhook setup")
+    p_slack_setup.add_argument("--webhook-url", help="Webhook URL (skips interactive prompt)")
+
+    p_slack_test = slack_sub.add_parser("test", help="Send a test notification")
+
+    p_slack_status = slack_sub.add_parser("status", help="Show current Slack configuration")
+
+    p_slack_disable = slack_sub.add_parser("disable", help="Disable Slack notifications")
+
     p_append = sub.add_parser("append-entry", help="Append a structured entry")
     p_append.add_argument("topic")
     p_append.add_argument("--threads-dir")
@@ -688,6 +701,29 @@ def main(argv: list[str] | None = None) -> None:
                 sys.exit(1)
 
             sys.exit(0)
+
+    if args.cmd == "slack":
+        from .slack_cli import slack_setup, slack_test, slack_status, slack_disable
+
+        if not args.slack_cmd:
+            print("Usage: watercooler slack {setup|test|status|disable}")
+            sys.exit(0)
+
+        if args.slack_cmd == "setup":
+            code = slack_setup(webhook_url=args.webhook_url if hasattr(args, 'webhook_url') else None)
+            sys.exit(code)
+
+        if args.slack_cmd == "test":
+            code = slack_test()
+            sys.exit(code)
+
+        if args.slack_cmd == "status":
+            code = slack_status()
+            sys.exit(code)
+
+        if args.slack_cmd == "disable":
+            code = slack_disable()
+            sys.exit(code)
 
     if args.cmd == "memory":
         from pathlib import Path
