@@ -13,10 +13,11 @@ from ulid import ULID
 from watercooler import commands, fs
 from watercooler.metadata import thread_meta
 
-from ..config import get_agent_name
+from ..config import get_agent_name, is_slack_enabled
 from ..helpers import _format_warnings_for_response
 from ..middleware import run_with_sync
 from .. import validation  # Import module for runtime access (enables test patching)
+from ..slack import notify_new_entry, notify_ball_flip, notify_handoff, notify_status_change
 
 
 # Module-level references to registered tools (populated by register_thread_write_tools)
@@ -120,6 +121,18 @@ def _say_impl(
         # Get updated thread meta to show new ball owner
         thread_path = fs.thread_path(topic, threads_dir)
         _, status, ball, _ = thread_meta(thread_path)
+
+        # Send Slack notification (fire-and-forget, non-blocking)
+        if is_slack_enabled():
+            notify_new_entry(
+                topic=topic,
+                agent=agent,
+                title=title,
+                role=role,
+                entry_type=entry_type,
+                code_repo=context.code_repo,
+                ball=ball,
+            )
 
         return _format_warnings_for_response(
             f"✅ Entry added to '{topic}'\n"
@@ -298,6 +311,16 @@ def _handoff_impl(
                 priority_flush=True,
             )
 
+            # Send Slack notification (fire-and-forget, non-blocking)
+            if is_slack_enabled():
+                notify_handoff(
+                    topic=topic,
+                    from_agent=agent,
+                    to_agent=target_agent,
+                    note=note or None,
+                    code_repo=context.code_repo,
+                )
+
             return (
                 f"✅ Ball handed off to: {target_agent}\n"
                 f"Thread: {topic}\n"
@@ -324,6 +347,16 @@ def _handoff_impl(
             # Get updated thread meta
             thread_path = fs.thread_path(topic, threads_dir)
             _, status, ball, _ = thread_meta(thread_path)
+
+            # Send Slack notification (fire-and-forget, non-blocking)
+            if is_slack_enabled():
+                notify_handoff(
+                    topic=topic,
+                    from_agent=agent,
+                    to_agent=ball or "unknown",
+                    note=note or None,
+                    code_repo=context.code_repo,
+                )
 
             return (
                 f"✅ Ball handed off to: {ball}\n"
@@ -385,6 +418,14 @@ def _set_status_impl(
             return "identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')"
         threads_dir = context.threads_dir
 
+        # Get old status before change (for notification)
+        thread_path = fs.thread_path(topic, threads_dir)
+        old_status = None
+        try:
+            _, old_status, _, _ = thread_meta(thread_path)
+        except Exception:
+            pass  # Thread may not exist yet
+
         def op():
             commands.set_status(topic, threads_dir=threads_dir, status=status)
 
@@ -398,6 +439,16 @@ def _set_status_impl(
             agent_spec=agent_spec,
             priority_flush=priority_flush,
         )
+
+        # Send Slack notification (fire-and-forget, non-blocking)
+        if is_slack_enabled():
+            notify_status_change(
+                topic=topic,
+                old_status=old_status,
+                new_status=status,
+                agent=agent_base,
+                code_repo=context.code_repo,
+            )
 
         return (
             f"✅ Status updated for '{topic}'\n"

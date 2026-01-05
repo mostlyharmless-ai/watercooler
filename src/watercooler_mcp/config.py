@@ -43,6 +43,8 @@ __all__ = [
     "get_code_context",
     "get_agent_name",
     "get_version",
+    "get_slack_config",
+    "is_slack_enabled",
 ]
 
 
@@ -610,6 +612,49 @@ def get_agent_for_platform(platform_slug: Optional[str] = None) -> Dict[str, str
         "name": config.mcp.default_agent,
         "default_spec": "general-purpose",
     }
+
+
+def get_slack_config() -> Dict[str, Any]:
+    """Get Slack integration configuration.
+
+    Returns dict with Slack settings.
+    Environment variables override config file values.
+    """
+    config = get_watercooler_config()
+    slack = config.mcp.slack
+
+    def _get_bool(env_key: str, default: bool) -> bool:
+        val = os.getenv(env_key)
+        if val:
+            return val.lower() in ("1", "true", "yes", "on")
+        return default
+
+    def _get_float(env_key: str, default: float) -> float:
+        val = os.getenv(env_key)
+        if val:
+            try:
+                return float(val)
+            except ValueError:
+                pass
+        return default
+
+    return {
+        "webhook_url": os.getenv("WATERCOOLER_SLACK_WEBHOOK", slack.webhook_url),
+        "bot_token": os.getenv("WATERCOOLER_SLACK_BOT_TOKEN", slack.bot_token),
+        "app_token": os.getenv("WATERCOOLER_SLACK_APP_TOKEN", slack.app_token),
+        "default_channel": os.getenv("WATERCOOLER_SLACK_CHANNEL", slack.default_channel),
+        "notify_on_say": _get_bool("WATERCOOLER_SLACK_NOTIFY_SAY", slack.notify_on_say),
+        "notify_on_ball_flip": _get_bool("WATERCOOLER_SLACK_NOTIFY_BALL_FLIP", slack.notify_on_ball_flip),
+        "notify_on_status_change": _get_bool("WATERCOOLER_SLACK_NOTIFY_STATUS", slack.notify_on_status_change),
+        "notify_on_handoff": _get_bool("WATERCOOLER_SLACK_NOTIFY_HANDOFF", slack.notify_on_handoff),
+        "min_notification_interval": _get_float("WATERCOOLER_SLACK_MIN_INTERVAL", slack.min_notification_interval),
+    }
+
+
+def is_slack_enabled() -> bool:
+    """Check if Slack notifications are enabled."""
+    slack_config = get_slack_config()
+    return bool(slack_config.get("webhook_url"))
 
 
 # Type hint import (deferred to avoid circular imports)

@@ -184,6 +184,64 @@ class LoggingConfig(BaseModel):
         return v
 
 
+class SlackConfig(BaseModel):
+    """Slack integration configuration for notifications."""
+
+    # Webhook for simple notifications (no token required)
+    webhook_url: str = Field(
+        default="",
+        description="Slack Incoming Webhook URL for notifications",
+    )
+
+    # Bot token for full API access (optional, for future phases)
+    bot_token: str = Field(
+        default="",
+        description="Slack Bot Token (xoxb-...) for full API access",
+    )
+
+    # App token for Socket Mode (optional, for future phases)
+    app_token: str = Field(
+        default="",
+        description="Slack App Token (xapp-...) for Socket Mode",
+    )
+
+    # Default channel for activity feed
+    default_channel: str = Field(
+        default="",
+        description="Default Slack channel for activity notifications (e.g., #watercooler-activity)",
+    )
+
+    # Notification toggles
+    notify_on_say: bool = Field(
+        default=True,
+        description="Send notification when new entry is added",
+    )
+    notify_on_ball_flip: bool = Field(
+        default=True,
+        description="Send notification when ball is passed to another agent",
+    )
+    notify_on_status_change: bool = Field(
+        default=True,
+        description="Send notification when thread status changes",
+    )
+    notify_on_handoff: bool = Field(
+        default=True,
+        description="Send notification on explicit handoff",
+    )
+
+    # Rate limiting
+    min_notification_interval: float = Field(
+        default=1.0,
+        ge=0,
+        description="Minimum seconds between notifications (rate limit)",
+    )
+
+    @property
+    def is_enabled(self) -> bool:
+        """Check if Slack notifications are enabled (webhook configured)."""
+        return bool(self.webhook_url)
+
+
 class GraphConfig(BaseModel):
     """Baseline graph configuration for summaries and embeddings."""
 
@@ -284,6 +342,7 @@ class McpConfig(BaseModel):
     sync: SyncConfig = Field(default_factory=SyncConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     graph: GraphConfig = Field(default_factory=GraphConfig)
+    slack: SlackConfig = Field(default_factory=SlackConfig)
 
     # Agent-specific overrides (keyed by platform slug)
     agents: Dict[str, AgentConfig] = Field(
