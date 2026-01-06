@@ -87,7 +87,14 @@ def check_server_health(url: str, timeout: float = 5.0) -> Tuple[bool, str]:
             return True, "healthy (no models listed)"
 
     except urllib.error.URLError as e:
-        return False, f"unreachable: {e.reason}"
+        # e.reason can be a string or another exception (e.g., socket.gaierror)
+        reason = getattr(e, 'reason', None)
+        if reason is None:
+            return False, f"unreachable: {e}"
+        elif hasattr(reason, 'strerror'):
+            return False, f"unreachable: {reason.strerror}"
+        else:
+            return False, f"unreachable: {reason}"
     except json.JSONDecodeError:
         return False, "error: invalid JSON response"
     except Exception as e:
