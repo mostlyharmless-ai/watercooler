@@ -420,6 +420,28 @@ class SlackClient:
             or user_id
         )
 
+    # Auth operations
+
+    def auth_test(self) -> Dict[str, Any]:
+        """Test authentication and get workspace info.
+
+        Returns:
+            Auth info including team_id, team name, bot_id, user_id
+        """
+        return self._request("POST", "auth.test", {})
+
+    def get_team_id(self) -> str:
+        """Get the Slack workspace (team) ID.
+
+        Returns:
+            Team ID (e.g., "T07ABC123")
+
+        Raises:
+            SlackAPIError: If auth.test fails
+        """
+        result = self.auth_test()
+        return result.get("team_id", "")
+
 
 # Convenience function for one-off operations
 _client: Optional[SlackClient] = None

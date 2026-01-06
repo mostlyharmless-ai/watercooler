@@ -5,12 +5,19 @@ Handles bidirectional sync between Watercooler threads and Slack:
 - Inbound: Slack reply → Entry (via Events API, handled by watercooler-site)
 
 This module provides the outbound sync logic, called after thread writes.
+
+Git-Native Mapping:
+When a new Slack thread is created, the mapping is stored in:
+  .watercooler/slack-mappings/{topic}.json
+This allows watercooler-site to read mappings directly from GitHub.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, Dict, Any
 
 from ..config import get_slack_config, is_slack_bot_enabled
@@ -40,6 +47,75 @@ def is_sync_enabled() -> bool:
     return is_slack_bot_enabled()
 
 
+def write_git_native_mapping(
+    threads_dir: Path,
+    topic: str,
+    slack_team_id: str,
+    slack_channel_id: str,
+    slack_channel_name: str,
+    slack_thread_ts: str,
+) -> Path:
+    """Write Slack thread mapping to the repo for git-native sync.
+
+    Creates .watercooler/slack-mappings/{topic}.json with the mapping data.
+    This file is committed to the threads repo so watercooler-site can
+    read it via GitHub API.
+
+    Args:
+        threads_dir: Path to threads directory
+        topic: Thread topic (used as filename)
+        slack_team_id: Slack workspace ID
+        slack_channel_id: Slack channel ID
+        slack_channel_name: Slack channel name (for reference)
+        slack_thread_ts: Slack thread timestamp (parent message ts)
+
+    Returns:
+        Path to the created mapping file
+    """
+    mappings_dir = threads_dir / ".watercooler" / "slack-mappings"
+    mappings_dir.mkdir(parents=True, exist_ok=True)
+
+    mapping_file = mappings_dir / f"{topic}.json"
+    mapping_data = {
+        "slackTeamId": slack_team_id,
+        "slackChannelId": slack_channel_id,
+        "slackChannelName": slack_channel_name,
+        "slackThreadTs": slack_thread_ts,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+    with open(mapping_file, "w") as f:
+        json.dump(mapping_data, f, indent=2)
+
+    logger.info(f"Wrote git-native Slack mapping to {mapping_file}")
+    return mapping_file
+
+
+def read_git_native_mapping(
+    threads_dir: Path,
+    topic: str,
+) -> Optional[Dict[str, str]]:
+    """Read Slack thread mapping from the repo.
+
+    Args:
+        threads_dir: Path to threads directory
+        topic: Thread topic
+
+    Returns:
+        Mapping dict or None if not found
+    """
+    mapping_file = threads_dir / ".watercooler" / "slack-mappings" / f"{topic}.json"
+    if not mapping_file.exists():
+        return None
+
+    try:
+        with open(mapping_file, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to read git-native mapping for {topic}: {e}")
+        return None
+
+
 def sync_entry_to_slack(
     repo: str,
     topic: str,
@@ -54,11 +130,13 @@ def sync_entry_to_slack(
     ball_owner: str = "",
     entry_count: int = 0,
     spec: Optional[str] = None,
+    threads_dir: Optional[Path] = None,
 ) -> Optional[str]:
     """Sync a watercooler entry to Slack as a threaded reply.
 
-    If this is the first entry for the thread, creates the parent message first.
-    
+    If this is the first entry for the thread, creates the parent message first
+    and writes a git-native mapping to .watercooler/slack-mappings/{topic}.json.
+
     Args:
         repo: Repository name (e.g., "watercooler-cloud")
         topic: Thread topic (e.g., "slack-integration")
@@ -73,6 +151,7 @@ def sync_entry_to_slack(
         ball_owner: Current ball owner (for parent message)
         entry_count: Total entries in thread (for parent message)
         spec: Agent specialization
+        threads_dir: Path to threads directory (for git-native mapping)
 
     Returns:
         Slack message ts if successful, None if sync not enabled or failed
@@ -103,7 +182,10 @@ def sync_entry_to_slack(
         if mapping is None:
             # First sync for this thread - create parent message
             logger.info(f"Creating Slack thread for {repo}/{topic}")
-            
+
+            # Get team_id for git-native mapping
+            team_id = client.get_team_id()
+
             blocks = thread_parent_blocks(
                 topic=topic,
                 status=status,
@@ -120,7 +202,19 @@ def sync_entry_to_slack(
             if not thread_ts:
                 raise SlackSyncError("Failed to get thread_ts from parent message")
 
-            # Store the mapping
+            # Write git-native mapping for watercooler-site discovery
+            if threads_dir:
+                write_git_native_mapping(
+                    threads_dir=threads_dir,
+                    topic=topic,
+                    slack_team_id=team_id,
+                    slack_channel_id=channel_id,
+                    slack_channel_name=channel_name.lstrip("#"),
+                    slack_thread_ts=thread_ts,
+                )
+                logger.info(f"Wrote git-native Slack mapping for {topic}")
+
+            # Store the local mapping
             mapping = SlackThreadMapping(
                 topic=topic,
                 repo=repo,

@@ -71,9 +71,42 @@ The Slack integration uses a **Git-Native** architecture where watercooler-site 
 **How It Works:**
 1. watercooler-site authenticates users via GitHub OAuth
 2. Users connect their threads repositories
-3. Slack events arrive at watercooler-site endpoints
-4. watercooler-site writes entries directly via GitHub Contents API
-5. MCP servers see changes on next `git pull`
+3. MCP posts entries to Slack and writes mappings to `.watercooler/slack-mappings/`
+4. Slack events arrive at watercooler-site endpoints
+5. watercooler-site looks up mappings (from GitHub or auto-discovers from bot messages)
+6. watercooler-site writes entries directly via GitHub Contents API
+7. MCP servers see changes on next `git pull`
+
+### Git-Native Thread Mappings
+
+When the MCP server creates a new Slack thread, it writes a mapping file to:
+
+```
+.watercooler/slack-mappings/{topic}.json
+```
+
+Example content:
+```json
+{
+  "slackTeamId": "T07ABC123",
+  "slackChannelId": "C07DEF456",
+  "slackChannelName": "wc-watercooler-cloud",
+  "slackThreadTs": "1704123456.000001",
+  "createdAt": "2025-01-05T12:00:00.000Z"
+}
+```
+
+This file is committed to the threads repo, allowing watercooler-site to look up mappings by reading from GitHub. No separate database sync is required.
+
+### Auto-Discovery from Bot Messages
+
+watercooler-site can also auto-discover mappings by subscribing to the `message.channels` event. When the MCP bot posts a thread parent message, it includes parseable metadata:
+
+```
+`wc:repo-name/topic-slug`
+```
+
+watercooler-site parses this to create/update its mapping in Prisma, enabling reverse lookups from Slack thread_ts to repo/topic
 
 ## Prerequisites
 
@@ -275,6 +308,25 @@ In Slack:
 
 ## Configuration Reference
 
+### MCP Server Configuration (config.toml)
+
+Add to `~/.watercooler/config.toml`:
+
+```toml
+[mcp.slack]
+# Bot token for full API access (Phase 2+)
+bot_token = "xoxb-your-bot-token"
+
+# Channel configuration
+channel_prefix = "wc-"           # Prefix for auto-created channels
+auto_create_channels = true      # Auto-create channels for repos
+
+# Notification toggles
+notify_on_say = true             # Notify on new entries
+notify_on_ball_flip = true       # Notify on ball handoffs
+notify_on_status_change = true   # Notify on status changes
+```
+
 ### watercooler-site Environment Variables
 
 | Variable | Required | Description |
@@ -284,7 +336,20 @@ In Slack:
 
 ### Thread Mapping Storage
 
-Thread mappings are stored in the `SlackThreadMapping` Prisma model:
+Thread mappings exist in three locations (tiered for different use cases):
+
+#### 1. Local Cache (MCP Server)
+Path: `~/.watercooler/slack_mappings.json`
+
+Used by the MCP server for fast lookups. Not shared across machines.
+
+#### 2. Git-Native (Threads Repo)
+Path: `.watercooler/slack-mappings/{topic}.json`
+
+Committed to the threads repo. Allows watercooler-site to look up mappings via GitHub API. Travels with the git repo.
+
+#### 3. Prisma Database (watercooler-site)
+Table: `SlackThreadMapping`
 
 ```prisma
 model SlackThreadMapping {
@@ -301,6 +366,10 @@ model SlackThreadMapping {
   updatedAt      DateTime @updatedAt
 }
 ```
+
+Used for reverse lookups (Slack thread_ts → repo/topic) when handling Slack events. Auto-populated by:
+- Parsing bot messages via Events API
+- Reading git-native mappings on first access
 
 ---
 

@@ -113,6 +113,11 @@ def thread_parent_blocks(
 
     blocks.append(_context(status_parts))
 
+    # Parseable metadata for watercooler-site auto-discovery
+    # Format: wc:repo/topic - enables reverse lookup from Slack events
+    if repo:
+        blocks.append(_context([f"`wc:{repo}/{topic}`"]))
+
     # Action buttons (for interactive messages)
     if include_buttons:
         # Value encodes topic for action handlers
