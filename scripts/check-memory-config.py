@@ -88,8 +88,11 @@ def check_server_health(url: str, timeout: float = 5.0) -> Tuple[bool, str]:
 
     except urllib.error.URLError as e:
         return False, f"unreachable: {e.reason}"
+    except json.JSONDecodeError:
+        return False, "error: invalid JSON response"
     except Exception as e:
-        return False, f"error: {e}"
+        # Avoid exposing sensitive info in error messages
+        return False, f"error: {type(e).__name__}"
 
 
 def check_falkordb_health(host: str, port: int, timeout: float = 5.0) -> Tuple[bool, str]:
@@ -117,8 +120,11 @@ def check_falkordb_health(host: str, port: int, timeout: float = 5.0) -> Tuple[b
 
     except socket.timeout:
         return False, "connection timeout"
+    except socket.gaierror as e:
+        return False, f"DNS resolution failed: {e.strerror}"
     except Exception as e:
-        return False, f"error: {e}"
+        # Avoid exposing sensitive info in error messages
+        return False, f"error: {type(e).__name__}"
 
 
 def load_backend_configs() -> Dict[str, BackendConfig]:
@@ -383,15 +389,21 @@ def main() -> int:
 
     falkordb_host = get_env("FALKORDB_HOST") or "localhost"
     port_str = get_env("FALKORDB_PORT") or "6379"
-    falkordb_port = int(port_str)
+    try:
+        falkordb_port = int(port_str)
+    except ValueError:
+        errors.append(f"FALKORDB_PORT must be a number, got: '{port_str}'")
+        print_status("FALKORDB_PORT", False, f"invalid port: '{port_str}'")
+        falkordb_port = None
 
-    if not args.skip_health_check:
-        healthy, message = check_falkordb_health(falkordb_host, falkordb_port)
-        print_status(f"{falkordb_host}:{falkordb_port}", healthy, message)
-        if not healthy:
-            warnings.append(f"FalkorDB not reachable at {falkordb_host}:{falkordb_port}")
-    else:
-        print(f"  {falkordb_host}:{falkordb_port} (health check skipped)")
+    if falkordb_port is not None:
+        if not args.skip_health_check:
+            healthy, message = check_falkordb_health(falkordb_host, falkordb_port)
+            print_status(f"{falkordb_host}:{falkordb_port}", healthy, message)
+            if not healthy:
+                warnings.append(f"FalkorDB not reachable at {falkordb_host}:{falkordb_port}")
+        else:
+            print(f"  {falkordb_host}:{falkordb_port} (health check skipped)")
 
     # === Consistency Check ===
     consistency_warnings, consistency_errors = check_consistency(backends)
