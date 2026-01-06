@@ -48,7 +48,6 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
             EMBEDDING_API_KEY: Embedding API key (required)
             EMBEDDING_API_BASE: Embedding server endpoint (optional, defaults to OpenAI)
             EMBEDDING_MODEL: Embedding model name (optional, default: "text-embedding-3-small")
-            EMBEDDING_DIM: Embedding dimension (optional, default: 1536)
 
         Search Configuration:
             WATERCOOLER_GRAPHITI_RERANKER: Reranker algorithm (default: "rrf")
@@ -123,7 +122,6 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
 
     embedding_api_base = os.getenv("EMBEDDING_API_BASE") or None  # None = OpenAI default
     embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-    embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
 
     # Get reranker algorithm (default: rrf for speed)
     reranker = os.getenv("WATERCOOLER_GRAPHITI_RERANKER", "rrf").lower()
@@ -136,7 +134,6 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
         embedding_api_key=embedding_api_key,
         embedding_api_base=embedding_api_base,
         embedding_model=embedding_model,
-        embedding_dim=embedding_dim,
         reranker=reranker,
     )
 

@@ -51,7 +51,6 @@ class GraphitiConfig:
     embedding_api_base: str | None = None  # e.g., "http://localhost:8080/v1" for local
     embedding_api_key: str | None = None   # Required for all providers
     embedding_model: str = "text-embedding-3-small"
-    embedding_dim: int = 1536              # 1536 for OpenAI, 1024 for bge-m3
 
     # Legacy fields (deprecated, use llm_* and embedding_* instead)
     openai_api_key: str | None = None      # DEPRECATED: use llm_api_key

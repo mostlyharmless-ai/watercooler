@@ -265,7 +265,6 @@ class TestGraphitiConfigValidation:
             embedding_api_key="test-embed-key",
             embedding_api_base="http://localhost:8080/v1",
             embedding_model="bge-m3",
-            embedding_dim=1024,
         )
 
         assert config.llm_api_key == "test-llm-key"
@@ -274,7 +273,6 @@ class TestGraphitiConfigValidation:
         assert config.embedding_api_key == "test-embed-key"
         assert config.embedding_api_base == "http://localhost:8080/v1"
         assert config.embedding_model == "bge-m3"
-        assert config.embedding_dim == 1024
 
     def test_config_defaults(self):
         """Test that default values are set correctly."""
@@ -287,7 +285,6 @@ class TestGraphitiConfigValidation:
         assert config.llm_model == "gpt-4o-mini"
         assert config.embedding_api_base is None  # OpenAI default
         assert config.embedding_model == "text-embedding-3-small"
-        assert config.embedding_dim == 1536
 
     def test_legacy_openai_fields_still_exist(self):
         """Test that legacy openai_api_key fields still exist for backwards compat."""

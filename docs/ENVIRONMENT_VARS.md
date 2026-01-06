@@ -926,12 +926,11 @@ Variables used by the Graphiti memory backend.
 | `EMBEDDING_API_BASE` | No | OpenAI | Embedding server endpoint |
 | `EMBEDDING_API_KEY` | Yes* | - | Embedding API key (required, no fallback) |
 | `EMBEDDING_MODEL` | No | `text-embedding-3-small` | Embedding model name |
-| `EMBEDDING_DIM` | No | `1536` | Embedding vector dimension |
 | `WATERCOOLER_GRAPHITI_RERANKER` | No | `rrf` | Reranker algorithm |
 
 *Required when Graphiti is enabled. For local servers, use a dummy value like `"not-needed-for-local"`.
 
-**Note:** There is no fallback to `OPENAI_API_KEY`. You must explicitly set `LLM_API_KEY` and `EMBEDDING_API_KEY`.
+**Note:** If `LLM_API_KEY` or `EMBEDDING_API_KEY` is not set, there is a temporary fallback to `OPENAI_API_KEY` with a deprecation warning. This fallback will be removed in a future release - please set `LLM_API_KEY` and `EMBEDDING_API_KEY` explicitly.
 
 **Local server example:**
 ```bash

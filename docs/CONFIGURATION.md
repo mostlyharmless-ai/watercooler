@@ -254,14 +254,13 @@ This is intentional - each backend has its own config system, and env vars provi
 | `LLM_API_KEY` | **Yes**¹ | Error | LLM authentication (no fallback) |
 | `LLM_API_BASE` | No | OpenAI | LLM endpoint URL |
 | `LLM_MODEL` | No | `gpt-4o-mini` | LLM model name |
-| `EMBEDDING_API_KEY` | **Yes**¹ | Error | Embedding authentication (no fallback) |
+| `EMBEDDING_API_KEY` | **Yes**¹ | Error | Embedding authentication |
 | `EMBEDDING_API_BASE` | No | OpenAI | Embedding endpoint URL |
 | `EMBEDDING_MODEL` | No | `text-embedding-3-small` | Embedding model name |
-| `EMBEDDING_DIM` | No | `1536` | Embedding vector dimension |
 | `FALKORDB_HOST` | No | `localhost` | FalkorDB host (Graphiti) |
 | `FALKORDB_PORT` | No | `6379` | FalkorDB port (Graphiti) |
 
-¹ Required when `WATERCOOLER_GRAPHITI_ENABLED=1`. There is **no fallback** to `OPENAI_API_KEY`.
+¹ Required when `WATERCOOLER_GRAPHITI_ENABLED=1`. Falls back to `OPENAI_API_KEY` with deprecation warning if not set (fallback will be removed in a future release).
 
 #### Example: Local LLM/Embedding Setup
 
@@ -278,7 +277,6 @@ export LLM_MODEL="llama3.2:3b"
 export EMBEDDING_API_KEY="local"  # Local server doesn't require a real key
 export EMBEDDING_API_BASE="http://localhost:8080/v1"
 export EMBEDDING_MODEL="bge-m3"
-export EMBEDDING_DIM=1024
 ```
 
 #### Example: OpenAI Setup
