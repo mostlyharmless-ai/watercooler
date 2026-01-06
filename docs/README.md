@@ -59,7 +59,7 @@ File-based collaboration protocol for agentic coding projects with CLI tools and
 - Handoff workflows (dev→reviewer, human→agent)
 
 **❌ Not ideal for:**
-- Real-time chat (use Slack/Discord)
+- Real-time chat (but can [sync with Slack](SLACK_INTEGRATION.md) for hybrid workflows)
 - Large group discussions (>5 participants)
 - Ad-hoc brainstorming without structure
 
@@ -83,6 +83,12 @@ File-based collaboration protocol for agentic coding projects with CLI tools and
 - [Enable cloud sync](.mothballed/docs/CLOUD_SYNC_STRATEGY.md) - Git-based team mode (Phase 2A)
 - [Configure git merge strategy](../.github/WATERCOOLER_SETUP.md) - Required setup
 - [Async collaboration use case](archive/USE_CASES.md#async-team-collaboration) - Cross-timezone example
+
+### Slack Integration
+- [Slack Integration Guide](SLACK_INTEGRATION.md) - Bidirectional sync with Slack
+- Set up channels per repository (`#wc-<repo-name>`)
+- Entries sync as threaded replies
+- Reply in Slack to create watercooler entries
 
 ### Customization
 - [Customize templates](archive/TEMPLATES.md) - Thread and entry formatting
@@ -122,6 +128,9 @@ File-based collaboration protocol for agentic coding projects with CLI tools and
 - **[Structured Entries](STRUCTURED_ENTRIES.md)** - Entry format, 6 roles, 5 types
 - **[Agent Registry](archive/AGENT_REGISTRY.md)** - Agent configuration and counterparts
 - **[Templates](archive/TEMPLATES.md)** - Template syntax and customization
+
+### Integrations
+- **[Slack Integration](SLACK_INTEGRATION.md)** - Bidirectional sync with Slack channels and threads
 
 ### Advanced Topics
 - **[Cloud Sync Strategy](.mothballed/docs/CLOUD_SYNC_STRATEGY.md)** - Git-based cloud sync (Phase 2A)

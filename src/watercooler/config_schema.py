@@ -185,7 +185,7 @@ class LoggingConfig(BaseModel):
 
 
 class SlackConfig(BaseModel):
-    """Slack integration configuration for notifications."""
+    """Slack integration configuration for notifications and bidirectional sync."""
 
     # Webhook for simple notifications (no token required)
     webhook_url: str = Field(
@@ -193,16 +193,26 @@ class SlackConfig(BaseModel):
         description="Slack Incoming Webhook URL for notifications",
     )
 
-    # Bot token for full API access (optional, for future phases)
+    # Bot token for full API access (Phase 2+)
     bot_token: str = Field(
         default="",
         description="Slack Bot Token (xoxb-...) for full API access",
     )
 
-    # App token for Socket Mode (optional, for future phases)
+    # App token for Socket Mode (dev only)
     app_token: str = Field(
         default="",
         description="Slack App Token (xapp-...) for Socket Mode",
+    )
+
+    # Channel configuration (Phase 2+)
+    channel_prefix: str = Field(
+        default="wc-",
+        description="Prefix for auto-created channels (e.g., 'wc-' -> #wc-watercooler-cloud)",
+    )
+    auto_create_channels: bool = Field(
+        default=True,
+        description="Auto-create Slack channels for repos on first sync",
     )
 
     # Default channel for activity feed
@@ -238,8 +248,18 @@ class SlackConfig(BaseModel):
 
     @property
     def is_enabled(self) -> bool:
-        """Check if Slack notifications are enabled (webhook configured)."""
-        return bool(self.webhook_url)
+        """Check if Slack is enabled (webhook or bot token configured)."""
+        return bool(self.webhook_url) or bool(self.bot_token)
+
+    @property
+    def is_webhook_only(self) -> bool:
+        """Check if using webhook-only mode (Phase 1)."""
+        return bool(self.webhook_url) and not bool(self.bot_token)
+
+    @property
+    def is_bot_enabled(self) -> bool:
+        """Check if bot API mode is enabled (Phase 2+)."""
+        return bool(self.bot_token)
 
 
 class GraphConfig(BaseModel):

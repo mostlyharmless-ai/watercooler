@@ -7,17 +7,28 @@ Tools:
 - watercooler_set_status: Update thread status
 """
 
+import logging
+from datetime import datetime, timezone
+
 from fastmcp import Context
 from ulid import ULID
 
 from watercooler import commands, fs
 from watercooler.metadata import thread_meta
 
-from ..config import get_agent_name, is_slack_enabled
+from ..config import get_agent_name, is_slack_enabled, is_slack_bot_enabled
 from ..helpers import _format_warnings_for_response
 from ..middleware import run_with_sync
 from .. import validation  # Import module for runtime access (enables test patching)
+# Phase 1: Webhook notifications
 from ..slack import notify_new_entry, notify_ball_flip, notify_handoff, notify_status_change
+# Phase 2: Bidirectional sync
+from ..slack import (
+    sync_entry_to_slack,
+    sync_status_change as slack_sync_status_change,
+    sync_handoff as slack_sync_handoff,
+    update_thread_parent,
+)
 
 
 # Module-level references to registered tools (populated by register_thread_write_tools)
@@ -133,6 +144,31 @@ def _say_impl(
                 code_repo=context.code_repo,
                 ball=ball,
             )
+
+        # Phase 2: Sync entry to Slack channel/thread (if bot enabled)
+        if is_slack_bot_enabled():
+            try:
+                # Extract repo name from code_repo (e.g., "org/repo" -> "repo")
+                repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
+                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+                sync_entry_to_slack(
+                    repo=repo_name,
+                    topic=topic,
+                    entry_id=entry_id,
+                    agent=agent,
+                    role=role,
+                    entry_type=entry_type,
+                    title=title,
+                    body=body,
+                    timestamp=timestamp,
+                    status=status,
+                    ball_owner=ball,
+                    spec=agent_spec,
+                )
+            except Exception as e:
+                # Log but don't fail the operation - Slack sync is best-effort
+                logging.getLogger(__name__).warning(f"Slack sync failed for {topic}: {e}")
 
         return _format_warnings_for_response(
             f"✅ Entry added to '{topic}'\n"
@@ -321,6 +357,20 @@ def _handoff_impl(
                     code_repo=context.code_repo,
                 )
 
+            # Phase 2: Sync handoff to Slack thread (if bot enabled)
+            if is_slack_bot_enabled():
+                try:
+                    repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
+                    slack_sync_handoff(
+                        repo=repo_name,
+                        topic=topic,
+                        from_agent=agent,
+                        to_agent=target_agent,
+                        note=note or None,
+                    )
+                except Exception as e:
+                    logging.getLogger(__name__).warning(f"Slack handoff sync failed for {topic}: {e}")
+
             return (
                 f"✅ Ball handed off to: {target_agent}\n"
                 f"Thread: {topic}\n"
@@ -357,6 +407,20 @@ def _handoff_impl(
                     note=note or None,
                     code_repo=context.code_repo,
                 )
+
+            # Phase 2: Sync handoff to Slack thread (if bot enabled)
+            if is_slack_bot_enabled():
+                try:
+                    repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
+                    slack_sync_handoff(
+                        repo=repo_name,
+                        topic=topic,
+                        from_agent=agent,
+                        to_agent=ball or "unknown",
+                        note=note or None,
+                    )
+                except Exception as e:
+                    logging.getLogger(__name__).warning(f"Slack handoff sync failed for {topic}: {e}")
 
             return (
                 f"✅ Ball handed off to: {ball}\n"
@@ -449,6 +513,30 @@ def _set_status_impl(
                 agent=agent_base,
                 code_repo=context.code_repo,
             )
+
+        # Phase 2: Sync status change to Slack thread (if bot enabled)
+        if is_slack_bot_enabled():
+            try:
+                repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
+                slack_sync_status_change(
+                    repo=repo_name,
+                    topic=topic,
+                    old_status=old_status or "UNKNOWN",
+                    new_status=status,
+                    changed_by=agent_base,
+                )
+                # Also update thread parent message with new status
+                thread_path = fs.thread_path(topic, threads_dir)
+                _, _, ball, _ = thread_meta(thread_path)
+                update_thread_parent(
+                    repo=repo_name,
+                    topic=topic,
+                    status=status,
+                    ball_owner=ball or "",
+                    entry_count=0,  # We don't track this currently
+                )
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Slack status sync failed for {topic}: {e}")
 
         return (
             f"✅ Status updated for '{topic}'\n"

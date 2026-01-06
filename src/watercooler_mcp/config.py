@@ -643,6 +643,10 @@ def get_slack_config() -> Dict[str, Any]:
         "bot_token": os.getenv("WATERCOOLER_SLACK_BOT_TOKEN", slack.bot_token),
         "app_token": os.getenv("WATERCOOLER_SLACK_APP_TOKEN", slack.app_token),
         "default_channel": os.getenv("WATERCOOLER_SLACK_CHANNEL", slack.default_channel),
+        # Phase 2+ config
+        "channel_prefix": os.getenv("WATERCOOLER_SLACK_CHANNEL_PREFIX", slack.channel_prefix),
+        "auto_create_channels": _get_bool("WATERCOOLER_SLACK_AUTO_CREATE_CHANNELS", slack.auto_create_channels),
+        # Notification toggles
         "notify_on_say": _get_bool("WATERCOOLER_SLACK_NOTIFY_SAY", slack.notify_on_say),
         "notify_on_ball_flip": _get_bool("WATERCOOLER_SLACK_NOTIFY_BALL_FLIP", slack.notify_on_ball_flip),
         "notify_on_status_change": _get_bool("WATERCOOLER_SLACK_NOTIFY_STATUS", slack.notify_on_status_change),
@@ -652,9 +656,15 @@ def get_slack_config() -> Dict[str, Any]:
 
 
 def is_slack_enabled() -> bool:
-    """Check if Slack notifications are enabled."""
+    """Check if Slack notifications are enabled (webhook or bot token)."""
     slack_config = get_slack_config()
-    return bool(slack_config.get("webhook_url"))
+    return bool(slack_config.get("webhook_url")) or bool(slack_config.get("bot_token"))
+
+
+def is_slack_bot_enabled() -> bool:
+    """Check if Slack bot API is enabled (Phase 2+)."""
+    slack_config = get_slack_config()
+    return bool(slack_config.get("bot_token"))
 
 
 # Type hint import (deferred to avoid circular imports)
