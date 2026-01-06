@@ -68,6 +68,63 @@ class TestCallbackRegistry:
         unregister_memory_sync_callback("backend_b")
 
 
+class TestMemoryDisabled:
+    """Tests for is_memory_disabled and WATERCOOLER_MEMORY_DISABLED."""
+
+    def test_is_memory_disabled_returns_false_by_default(self, monkeypatch):
+        """Test that memory is enabled by default."""
+        from watercooler.baseline_graph.sync import is_memory_disabled
+
+        monkeypatch.delenv("WATERCOOLER_MEMORY_DISABLED", raising=False)
+        assert is_memory_disabled() is False
+
+    def test_is_memory_disabled_with_1(self, monkeypatch):
+        """Test that WATERCOOLER_MEMORY_DISABLED=1 disables memory."""
+        from watercooler.baseline_graph.sync import is_memory_disabled
+
+        monkeypatch.setenv("WATERCOOLER_MEMORY_DISABLED", "1")
+        assert is_memory_disabled() is True
+
+    def test_is_memory_disabled_with_true(self, monkeypatch):
+        """Test that WATERCOOLER_MEMORY_DISABLED=true disables memory."""
+        from watercooler.baseline_graph.sync import is_memory_disabled
+
+        monkeypatch.setenv("WATERCOOLER_MEMORY_DISABLED", "true")
+        assert is_memory_disabled() is True
+
+    def test_is_memory_disabled_with_yes(self, monkeypatch):
+        """Test that WATERCOOLER_MEMORY_DISABLED=yes disables memory."""
+        from watercooler.baseline_graph.sync import is_memory_disabled
+
+        monkeypatch.setenv("WATERCOOLER_MEMORY_DISABLED", "yes")
+        assert is_memory_disabled() is True
+
+    def test_get_memory_backend_config_returns_none_when_disabled(self, monkeypatch):
+        """Test that get_memory_backend_config returns None when disabled."""
+        from watercooler.baseline_graph.sync import get_memory_backend_config
+
+        monkeypatch.setenv("WATERCOOLER_MEMORY_DISABLED", "1")
+        monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
+
+        config = get_memory_backend_config()
+        assert config is None
+
+    def test_sync_returns_false_when_globally_disabled(self, monkeypatch):
+        """Test that sync_to_memory_backend returns False when globally disabled."""
+        from watercooler.baseline_graph.sync import sync_to_memory_backend
+
+        monkeypatch.setenv("WATERCOOLER_MEMORY_DISABLED", "1")
+        monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
+
+        result = sync_to_memory_backend(
+            threads_dir=Path("/tmp"),
+            topic="test-topic",
+            entry_id="entry-1",
+            entry_body="test body",
+        )
+        assert result is False
+
+
 class TestSyncToMemoryBackend:
     """Tests for sync_to_memory_backend function."""
 
@@ -76,6 +133,7 @@ class TestSyncToMemoryBackend:
         from watercooler.baseline_graph.sync import sync_to_memory_backend
 
         monkeypatch.delenv("WATERCOOLER_MEMORY_BACKEND", raising=False)
+        monkeypatch.delenv("WATERCOOLER_MEMORY_DISABLED", raising=False)
 
         result = sync_to_memory_backend(
             threads_dir=Path("/tmp"),
