@@ -54,6 +54,7 @@ def write_git_native_mapping(
     slack_channel_id: str,
     slack_channel_name: str,
     slack_thread_ts: str,
+    branch: Optional[str] = None,
 ) -> Path:
     """Write Slack thread mapping to the repo for git-native sync.
 
@@ -68,6 +69,7 @@ def write_git_native_mapping(
         slack_channel_id: Slack channel ID
         slack_channel_name: Slack channel name (for reference)
         slack_thread_ts: Slack thread timestamp (parent message ts)
+        branch: Git branch for this thread (enables branch-aware sync)
 
     Returns:
         Path to the created mapping file
@@ -76,13 +78,16 @@ def write_git_native_mapping(
     mappings_dir.mkdir(parents=True, exist_ok=True)
 
     mapping_file = mappings_dir / f"{topic}.json"
-    mapping_data = {
+    mapping_data: Dict[str, Any] = {
         "slackTeamId": slack_team_id,
         "slackChannelId": slack_channel_id,
         "slackChannelName": slack_channel_name,
         "slackThreadTs": slack_thread_ts,
         "createdAt": datetime.now(timezone.utc).isoformat(),
     }
+    # Include branch if provided - critical for branch-aware inbound sync
+    if branch:
+        mapping_data["branch"] = branch
 
     with open(mapping_file, "w") as f:
         json.dump(mapping_data, f, indent=2)
@@ -131,6 +136,7 @@ def sync_entry_to_slack(
     entry_count: int = 0,
     spec: Optional[str] = None,
     threads_dir: Optional[Path] = None,
+    branch: Optional[str] = None,
 ) -> Optional[str]:
     """Sync a watercooler entry to Slack as a threaded reply.
 
@@ -152,6 +158,7 @@ def sync_entry_to_slack(
         entry_count: Total entries in thread (for parent message)
         spec: Agent specialization
         threads_dir: Path to threads directory (for git-native mapping)
+        branch: Git branch for this thread (enables branch-aware inbound sync)
 
     Returns:
         Slack message ts if successful, None if sync not enabled or failed
@@ -192,6 +199,7 @@ def sync_entry_to_slack(
                 ball_owner=ball_owner,
                 entry_count=entry_count,
                 repo=repo,
+                branch=branch,
                 include_buttons=True,
             )
             text = thread_parent_text(topic, status, ball_owner, entry_count)
@@ -211,6 +219,7 @@ def sync_entry_to_slack(
                     slack_channel_id=channel_id,
                     slack_channel_name=channel_name.lstrip("#"),
                     slack_thread_ts=thread_ts,
+                    branch=branch,
                 )
                 logger.info(f"Wrote git-native Slack mapping for {topic}")
 

@@ -166,6 +166,7 @@ def _say_impl(
                     ball_owner=ball,
                     spec=agent_spec,
                     threads_dir=threads_dir,
+                    branch=context.code_branch,
                 )
             except Exception as e:
                 # Log but don't fail the operation - Slack sync is best-effort

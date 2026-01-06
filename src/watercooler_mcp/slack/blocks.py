@@ -76,6 +76,7 @@ def thread_parent_blocks(
     ball_owner: str = "",
     entry_count: int = 0,
     repo: Optional[str] = None,
+    branch: Optional[str] = None,
     include_buttons: bool = True,
 ) -> List[Dict[str, Any]]:
     """Create Block Kit blocks for thread parent message.
@@ -86,6 +87,7 @@ def thread_parent_blocks(
         ball_owner: Current ball owner (agent name)
         entry_count: Number of entries in thread
         repo: Repository name for context
+        branch: Git branch for this thread (enables branch-aware sync)
         include_buttons: Whether to include action buttons
 
     Returns:
@@ -114,9 +116,13 @@ def thread_parent_blocks(
     blocks.append(_context(status_parts))
 
     # Parseable metadata for watercooler-site auto-discovery
-    # Format: wc:repo/topic - enables reverse lookup from Slack events
+    # Format: wc:repo/topic@branch - enables reverse lookup from Slack events
+    # Branch suffix is optional but critical for branch-aware sync
     if repo:
-        blocks.append(_context([f"`wc:{repo}/{topic}`"]))
+        if branch:
+            blocks.append(_context([f"`wc:{repo}/{topic}@{branch}`"]))
+        else:
+            blocks.append(_context([f"`wc:{repo}/{topic}`"]))
 
     # Action buttons (for interactive messages)
     if include_buttons:
