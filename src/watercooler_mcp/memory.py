@@ -54,6 +54,11 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
             WATERCOOLER_GRAPHITI_RERANKER: Reranker algorithm (default: "rrf")
                 Options: rrf, mmr, cross_encoder, node_distance, episode_mentions
 
+        Deprecated Fallback:
+            OPENAI_API_KEY: Falls back to this if LLM_API_KEY or EMBEDDING_API_KEY
+                is not set. This fallback is deprecated and will be removed in a
+                future release. A warning is logged when the fallback is used.
+
     Returns:
         GraphitiConfig instance or None if disabled/invalid
 
@@ -76,11 +81,21 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
     # LLM configuration (required)
     llm_api_key = os.getenv("LLM_API_KEY", "")
     if not llm_api_key:
-        log_warning(
-            "MEMORY: Graphiti enabled but LLM_API_KEY not set. "
-            "Memory queries will fail."
-        )
-        return None
+        # Temporary fallback to OPENAI_API_KEY with deprecation warning
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        if openai_key:
+            llm_api_key = openai_key
+            log_warning(
+                "MEMORY: Using OPENAI_API_KEY as fallback for LLM_API_KEY. "
+                "This is deprecated and will be removed in a future release. "
+                "Please set LLM_API_KEY and EMBEDDING_API_KEY explicitly."
+            )
+        else:
+            log_warning(
+                "MEMORY: Graphiti enabled but LLM_API_KEY not set. "
+                "Memory queries will fail."
+            )
+            return None
 
     llm_api_base = os.getenv("LLM_API_BASE") or None  # None = OpenAI default
     llm_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
@@ -88,11 +103,23 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
     # Embedding configuration (required)
     embedding_api_key = os.getenv("EMBEDDING_API_KEY", "")
     if not embedding_api_key:
-        log_warning(
-            "MEMORY: Graphiti enabled but EMBEDDING_API_KEY not set. "
-            "Memory queries will fail."
-        )
-        return None
+        # Temporary fallback to OPENAI_API_KEY with deprecation warning
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        if openai_key:
+            embedding_api_key = openai_key
+            # Only warn if we didn't already warn for LLM
+            if os.getenv("LLM_API_KEY"):
+                log_warning(
+                    "MEMORY: Using OPENAI_API_KEY as fallback for EMBEDDING_API_KEY. "
+                    "This is deprecated and will be removed in a future release. "
+                    "Please set LLM_API_KEY and EMBEDDING_API_KEY explicitly."
+                )
+        else:
+            log_warning(
+                "MEMORY: Graphiti enabled but EMBEDDING_API_KEY not set. "
+                "Memory queries will fail."
+            )
+            return None
 
     embedding_api_base = os.getenv("EMBEDDING_API_BASE") or None  # None = OpenAI default
     embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")

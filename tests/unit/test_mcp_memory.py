@@ -33,18 +33,20 @@ class TestLoadGraphitiConfig:
         assert config is None
 
     def test_load_config_missing_llm_api_key(self, monkeypatch):
-        """Test config loading fails gracefully without LLM_API_KEY."""
+        """Test config loading fails gracefully without LLM_API_KEY (and no fallback)."""
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
         monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # Clear fallback too
         config = memory.load_graphiti_config()
         assert config is None
 
     def test_load_config_missing_embedding_api_key(self, monkeypatch):
-        """Test config loading fails gracefully without EMBEDDING_API_KEY."""
+        """Test config loading fails gracefully without EMBEDDING_API_KEY (and no fallback)."""
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
         monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # Clear fallback too
         config = memory.load_graphiti_config()
         assert config is None
 
@@ -69,6 +71,41 @@ class TestLoadGraphitiConfig:
         assert config.embedding_api_key == "sk-embed-from-env"
         assert config.llm_model == "gpt-4"
         assert config.embedding_model == "bge-m3"
+
+    def test_load_config_openai_api_key_fallback(self, monkeypatch, caplog):
+        """Test deprecated OPENAI_API_KEY fallback works with warning."""
+        import logging
+        caplog.set_level(logging.WARNING)
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-legacy")
+
+        config = memory.load_graphiti_config()
+
+        # Should work with fallback
+        assert config is not None
+        assert config.llm_api_key == "sk-openai-legacy"
+        assert config.embedding_api_key == "sk-openai-legacy"
+
+        # Should log deprecation warning
+        log_text = caplog.text.lower()
+        assert "deprecated" in log_text or "openai_api_key" in log_text
+
+    def test_load_config_prefers_explicit_keys_over_fallback(self, monkeypatch):
+        """Test that explicit LLM_API_KEY/EMBEDDING_API_KEY take precedence."""
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
+        monkeypatch.setenv("LLM_API_KEY", "sk-explicit-llm")
+        monkeypatch.setenv("EMBEDDING_API_KEY", "sk-explicit-embed")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-should-not-use")
+
+        config = memory.load_graphiti_config()
+
+        assert config is not None
+        # Explicit keys should be used, not the fallback
+        assert config.llm_api_key == "sk-explicit-llm"
+        assert config.embedding_api_key == "sk-explicit-embed"
 
 
 class TestGetGraphitiBackend:

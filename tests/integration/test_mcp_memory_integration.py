@@ -35,10 +35,11 @@ class TestGraphitiMemoryIntegration:
         config = memory.load_graphiti_config()
         assert config is None
 
-        # Test with enabled but no API keys
+        # Test with enabled but no API keys (and no fallback)
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.delenv("LLM_API_KEY", raising=False)
         monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # Clear fallback too
         config = memory.load_graphiti_config()
         assert config is None
 
