@@ -18,9 +18,10 @@ def mock_env_disabled(monkeypatch):
 
 @pytest.fixture
 def mock_env_enabled(monkeypatch):
-    """Mock environment with Graphiti enabled."""
+    """Mock environment with Graphiti enabled and required API keys."""
     monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
 
 
 class TestLoadGraphitiConfig:
@@ -31,10 +32,19 @@ class TestLoadGraphitiConfig:
         config = memory.load_graphiti_config()
         assert config is None
 
-    def test_load_config_missing_api_key(self, monkeypatch):
-        """Test config loading fails gracefully without API key."""
+    def test_load_config_missing_llm_api_key(self, monkeypatch):
+        """Test config loading fails gracefully without LLM_API_KEY."""
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        config = memory.load_graphiti_config()
+        assert config is None
+
+    def test_load_config_missing_embedding_api_key(self, monkeypatch):
+        """Test config loading fails gracefully without EMBEDDING_API_KEY."""
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
+        monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
         config = memory.load_graphiti_config()
         assert config is None
 
@@ -42,16 +52,23 @@ class TestLoadGraphitiConfig:
         """Test config loading with valid environment."""
         config = memory.load_graphiti_config()
         assert config is not None
-        assert config.openai_api_key == "sk-test"
+        assert config.llm_api_key == "sk-test-llm"
+        assert config.embedding_api_key == "sk-test-embed"
 
-    def test_load_config_uses_openai_api_key(self, monkeypatch):
-        """Test config uses OPENAI_API_KEY."""
+    def test_load_config_uses_env_vars(self, monkeypatch):
+        """Test config uses LLM_API_KEY and EMBEDDING_API_KEY."""
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+        monkeypatch.setenv("LLM_API_KEY", "sk-llm-from-env")
+        monkeypatch.setenv("EMBEDDING_API_KEY", "sk-embed-from-env")
+        monkeypatch.setenv("LLM_MODEL", "gpt-4")
+        monkeypatch.setenv("EMBEDDING_MODEL", "bge-m3")
 
         config = memory.load_graphiti_config()
         assert config is not None
-        assert config.openai_api_key == "sk-from-env"
+        assert config.llm_api_key == "sk-llm-from-env"
+        assert config.embedding_api_key == "sk-embed-from-env"
+        assert config.llm_model == "gpt-4"
+        assert config.embedding_model == "bge-m3"
 
 
 class TestGetGraphitiBackend:
@@ -543,7 +560,8 @@ class TestValidateMemoryPrerequisites:
     def test_validate_prerequisites_backend_import_error(self, monkeypatch):
         """Test validation when backend import fails."""
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
+        monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
 
         # Mock get_graphiti_backend to return error dict
         with patch('watercooler_mcp.memory.get_graphiti_backend') as mock_backend:
@@ -565,7 +583,8 @@ class TestValidateMemoryPrerequisites:
     def test_validate_prerequisites_success(self, monkeypatch):
         """Test successful validation."""
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
+        monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
 
         # Mock successful backend initialization
         mock_backend_instance = MagicMock()

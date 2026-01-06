@@ -191,12 +191,12 @@ default_spec = "general-purpose"
 [mcp.graph]
 
 # Generate LLM summaries for entries on write
-# Requires LLM service (Ollama, llama.cpp, etc.) at [servers.llm] endpoint
+# Requires LLM service (Ollama, llama.cpp, etc.)
 # Env: WATERCOOLER_GRAPH_SUMMARIES
 generate_summaries = true
 
 # Generate embedding vectors for entries on write
-# Requires embedding service at [servers.embedding] endpoint
+# Requires embedding service (llama.cpp, Ollama, OpenAI, etc.)
 # Env: WATERCOOLER_GRAPH_EMBEDDINGS
 generate_embeddings = true
 
@@ -204,19 +204,19 @@ generate_embeddings = true
 # Env: WATERCOOLER_GRAPH_EXTRACTIVE
 # prefer_extractive = false
 
-# LLM service endpoint override (defaults to [servers.llm].api_base)
+# LLM service endpoint for summarization
 # Env: BASELINE_GRAPH_API_BASE
 # summarizer_api_base = "http://localhost:11434/v1"
 
-# LLM model override (defaults to [servers.llm].model)
+# LLM model for summarization
 # Env: BASELINE_GRAPH_MODEL
 # summarizer_model = "llama3.2:3b"
 
-# Embedding service endpoint override (defaults to [servers.embedding].api_base)
+# Embedding service endpoint
 # Env: EMBEDDING_API_BASE
 # embedding_api_base = "http://localhost:8080/v1"
 
-# Embedding model override (defaults to [servers.embedding].model)
+# Embedding model
 # Env: EMBEDDING_MODEL
 # embedding_model = "bge-m3"
 
@@ -311,155 +311,30 @@ auto_detect_services = true
 
 
 # =============================================================================
-# SERVER SETTINGS (RECOMMENDED)
-# Unified configuration for LLM and embedding servers
-# Used by baseline_graph pipeline and other watercooler tools
+# MEMORY BACKEND CONFIGURATION
+# =============================================================================
 #
-# RECOMMENDED: Use Ollama for both LLM and embeddings - simplest setup!
-#   1. Install Ollama: https://ollama.ai
-#   2. Pull models: ollama pull llama3.2:3b && ollama pull nomic-embed-text
-#   3. Ollama runs automatically on localhost:11434
+# Memory backends (Graphiti, LeanRAG) are configured via ENVIRONMENT VARIABLES,
+# not this config file. This is intentional - each memory backend has its own
+# config system, and env vars provide a consistent interface across all of them.
+#
+# See docs/ENVIRONMENT_VARS.md for complete documentation.
+#
+# Quick reference:
+#
+#   # Required for Graphiti
+#   WATERCOOLER_GRAPHITI_ENABLED=1
+#   LLM_API_KEY=<your-key>           # Required
+#   LLM_API_BASE=http://localhost:11434/v1  # Optional (defaults to OpenAI)
+#   LLM_MODEL=llama3.2:3b            # Optional
+#   EMBEDDING_API_KEY=<your-key>     # Required
+#   EMBEDDING_API_BASE=http://localhost:8080/v1  # Optional
+#   EMBEDDING_MODEL=bge-m3           # Optional
+#
+#   # Disable all memory backends (for CI or non-memory workflows)
+#   WATERCOOLER_MEMORY_DISABLED=1
+#
 # =============================================================================
-
-# -----------------------------------------------------------------------------
-# LLM Server
-# For summarization, chat, and other LLM tasks
-# -----------------------------------------------------------------------------
-[servers.llm]
-
-# API endpoint - any OpenAI-compatible API
-# Env: LLM_API_BASE
-api_base = "http://localhost:11434/v1"  # Ollama (recommended)
-
-# Model name - use any Ollama model: llama3.2, qwen3, mistral, etc.
-# Env: LLM_MODEL
-model = "llama3.2:3b"
-
-# Request timeout (seconds) - increase for larger models or slower hardware
-# Env: LLM_TIMEOUT
-timeout = 120.0
-
-# Max tokens for generation - 512-1024 recommended for summaries
-# Env: LLM_MAX_TOKENS
-max_tokens = 512
-
-
-# -----------------------------------------------------------------------------
-# Embedding Server
-# For vector embeddings (semantic search, RAG)
-# Using Ollama for embeddings is simplest - only one server needed!
-# -----------------------------------------------------------------------------
-[servers.embedding]
-
-# API endpoint - Ollama supports embeddings via the same endpoint
-# Env: EMBEDDING_API_BASE
-api_base = "http://localhost:11434/v1"  # Ollama (recommended - same server!)
-
-# Model name - nomic-embed-text is excellent and available in Ollama
-# Env: EMBEDDING_MODEL
-model = "nomic-embed-text"
-
-# Batch size for embedding requests
-# Env: EMBEDDING_BATCH_SIZE
-batch_size = 32
-
-# Request timeout (seconds)
-# Env: EMBEDDING_TIMEOUT
-timeout = 60.0
-
-
-# -----------------------------------------------------------------------------
-# Alternative: Separate embedding server (advanced)
-# If you prefer llama.cpp or other dedicated embedding servers:
-# -----------------------------------------------------------------------------
-# [servers.embedding]
-# api_base = "http://localhost:8080/v1"  # llama.cpp server
-# model = "bge-m3"                        # or any GGUF embedding model
-
-
-# =============================================================================
-# MEMORY GRAPH SETTINGS (DEPRECATED)
-# Use [servers.*] sections above instead.
-# These settings are kept for backwards compatibility.
-# =============================================================================
-[memory_graph]
-
-# -----------------------------------------------------------------------------
-# LLM Settings (for summarization)
-# -----------------------------------------------------------------------------
-[memory_graph.llm]
-
-# API endpoint - supports any OpenAI-compatible API
-# Env: LLM_API_BASE
-# Default: DeepSeek API (requires DEEPSEEK_API_KEY)
-# api_base = "https://api.deepseek.com/v1"
-
-# For local models (Ollama, llama.cpp, vLLM):
-# api_base = "http://localhost:11434/v1"  # Ollama
-# api_base = "http://localhost:8080/v1"   # llama.cpp server
-# api_base = "http://localhost:8000/v1"   # vLLM
-
-# Model name
-# Env: LLM_MODEL
-# model = "deepseek-chat"
-
-# For local: model = "llama3.2", "qwen2.5:7b", etc.
-
-# Request timeout (seconds)
-# Env: LLM_TIMEOUT
-# timeout = 120.0
-
-# Max retries on failure
-# Env: LLM_MAX_RETRIES
-# max_retries = 3
-
-# Max tokens for summary generation
-# Env: LLM_MAX_TOKENS
-# max_tokens = 256
-
-# Concurrent requests (for async summarization)
-# Env: LLM_MAX_CONCURRENT
-# max_concurrent = 8
-
-
-# -----------------------------------------------------------------------------
-# Embedding Settings
-# -----------------------------------------------------------------------------
-[memory_graph.embedding]
-
-# API endpoint - supports any OpenAI-compatible embedding API
-# Env: EMBEDDING_API_BASE
-# Ollama recommended (same server as LLM):
-# api_base = "http://localhost:11434/v1"
-
-# Model name
-# Env: EMBEDDING_MODEL
-# model = "nomic-embed-text"
-
-# Batch size for embedding requests
-# Env: EMBEDDING_BATCH_SIZE
-# batch_size = 32
-
-# Request timeout (seconds)
-# Env: EMBEDDING_TIMEOUT
-# timeout = 60.0
-
-
-# -----------------------------------------------------------------------------
-# Chunking Settings
-# -----------------------------------------------------------------------------
-[memory_graph.chunking]
-
-# Maximum tokens per chunk
-# Env: MAX_TOKENS
-# max_tokens = 512
-
-# Token overlap between chunks
-# Env: OVERLAP_TOKENS
-# overlap_tokens = 50
-
-# Tokenizer model (for token counting)
-# tokenizer = "cl100k_base"
 
 
 # =============================================================================
@@ -499,18 +374,11 @@ timeout = 60.0
 # validation.on_write            WATERCOOLER_VALIDATE_ON_WRITE
 # validation.fail_on_violation   WATERCOOLER_FAIL_ON_VIOLATION
 #
-# memory_graph.llm.api_base      LLM_API_BASE
-# memory_graph.llm.model         LLM_MODEL
-# memory_graph.llm.timeout       LLM_TIMEOUT
-# memory_graph.llm.max_retries   LLM_MAX_RETRIES
-# memory_graph.llm.max_tokens    LLM_MAX_TOKENS
-# memory_graph.llm.max_concurrent LLM_MAX_CONCURRENT
-# memory_graph.embedding.api_base EMBEDDING_API_BASE
-# memory_graph.embedding.model   EMBEDDING_MODEL
-# memory_graph.embedding.batch_size EMBEDDING_BATCH_SIZE
-# memory_graph.embedding.timeout EMBEDDING_TIMEOUT
-# memory_graph.chunking.max_tokens MAX_TOKENS
-# memory_graph.chunking.overlap_tokens OVERLAP_TOKENS
+# Memory backend configuration (env vars only, not in config.toml):
+# See docs/ENVIRONMENT_VARS.md for complete list including:
+#   LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+#   EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL
+#   WATERCOOLER_GRAPHITI_ENABLED, WATERCOOLER_MEMORY_DISABLED
 #
 # Priority (highest first): CLI args > Env vars > Project config > User config > Defaults
 # =============================================================================

@@ -38,9 +38,21 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
     Environment Variables:
         WATERCOOLER_MEMORY_DISABLED: "1" to disable all memory backends
         WATERCOOLER_GRAPHITI_ENABLED: "1" to enable (default: "0")
-        OPENAI_API_KEY: OpenAI API key (required if enabled)
-        WATERCOOLER_GRAPHITI_RERANKER: Reranker algorithm (default: "rrf")
-            Options: rrf, mmr, cross_encoder, node_distance, episode_mentions
+
+        LLM Configuration:
+            LLM_API_KEY: LLM API key (required)
+            LLM_API_BASE: LLM server endpoint (optional, defaults to OpenAI)
+            LLM_MODEL: LLM model name (optional, default: "gpt-4o-mini")
+
+        Embedding Configuration:
+            EMBEDDING_API_KEY: Embedding API key (required)
+            EMBEDDING_API_BASE: Embedding server endpoint (optional, defaults to OpenAI)
+            EMBEDDING_MODEL: Embedding model name (optional, default: "text-embedding-3-small")
+            EMBEDDING_DIM: Embedding dimension (optional, default: 1536)
+
+        Search Configuration:
+            WATERCOOLER_GRAPHITI_RERANKER: Reranker algorithm (default: "rrf")
+                Options: rrf, mmr, cross_encoder, node_distance, episode_mentions
 
     Returns:
         GraphitiConfig instance or None if disabled/invalid
@@ -61,22 +73,43 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
         log_debug("MEMORY: Graphiti disabled (WATERCOOLER_GRAPHITI_ENABLED != '1')")
         return None
 
-    # OpenAI API key is required
-    openai_api_key = os.getenv("OPENAI_API_KEY", "")
-    if not openai_api_key:
+    # LLM configuration (required)
+    llm_api_key = os.getenv("LLM_API_KEY", "")
+    if not llm_api_key:
         log_warning(
-            "MEMORY: Graphiti enabled but OPENAI_API_KEY not set. "
+            "MEMORY: Graphiti enabled but LLM_API_KEY not set. "
             "Memory queries will fail."
         )
         return None
 
+    llm_api_base = os.getenv("LLM_API_BASE") or None  # None = OpenAI default
+    llm_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+
+    # Embedding configuration (required)
+    embedding_api_key = os.getenv("EMBEDDING_API_KEY", "")
+    if not embedding_api_key:
+        log_warning(
+            "MEMORY: Graphiti enabled but EMBEDDING_API_KEY not set. "
+            "Memory queries will fail."
+        )
+        return None
+
+    embedding_api_base = os.getenv("EMBEDDING_API_BASE") or None  # None = OpenAI default
+    embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
+
     # Get reranker algorithm (default: rrf for speed)
     reranker = os.getenv("WATERCOOLER_GRAPHITI_RERANKER", "rrf").lower()
 
-    # Return backend's GraphitiConfig with defaults
-    # Only specify required/overridden fields - backend provides the rest
+    # Return backend's GraphitiConfig with all fields
     return GraphitiConfig(
-        openai_api_key=openai_api_key,
+        llm_api_key=llm_api_key,
+        llm_api_base=llm_api_base,
+        llm_model=llm_model,
+        embedding_api_key=embedding_api_key,
+        embedding_api_base=embedding_api_base,
+        embedding_model=embedding_model,
+        embedding_dim=embedding_dim,
         reranker=reranker,
     )
 

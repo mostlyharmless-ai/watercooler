@@ -18,7 +18,8 @@ class TestGraphitiSanitization:
         """Create Graphiti backend for testing (no test_mode)."""
         config = GraphitiConfig(
             work_dir=Path("/tmp/test"),
-            openai_api_key="test-key",
+            llm_api_key="test-llm-key",
+            embedding_api_key="test-embed-key",
             test_mode=False,
         )
         # Mock validation to avoid requiring Graphiti submodule in CI
@@ -30,7 +31,8 @@ class TestGraphitiSanitization:
         """Create Graphiti backend with test_mode enabled."""
         config = GraphitiConfig(
             work_dir=Path("/tmp/test"),
-            openai_api_key="test-key",
+            llm_api_key="test-llm-key",
+            embedding_api_key="test-embed-key",
             test_mode=True,
         )
         # Mock validation to avoid requiring Graphiti submodule in CI
@@ -154,7 +156,8 @@ class TestGraphitiAddEpisodeDirect:
         """Create Graphiti backend for testing."""
         config = GraphitiConfig(
             work_dir=Path("/tmp/test"),
-            openai_api_key="test-key",
+            llm_api_key="test-llm-key",
+            embedding_api_key="test-embed-key",
             test_mode=True,
         )
         with patch.object(GraphitiBackend, '_validate_config'):
@@ -248,3 +251,106 @@ class TestGraphitiAddEpisodeDirect:
                 )
 
         assert "Failed to add episode" in str(exc_info.value)
+
+
+class TestGraphitiConfigValidation:
+    """Unit tests for GraphitiConfig validation with new LLM/embedding fields."""
+
+    def test_config_with_new_fields(self):
+        """Test that new LLM/embedding config fields work correctly."""
+        config = GraphitiConfig(
+            llm_api_key="test-llm-key",
+            llm_api_base="http://localhost:8000/v1",
+            llm_model="gpt-4o",
+            embedding_api_key="test-embed-key",
+            embedding_api_base="http://localhost:8080/v1",
+            embedding_model="bge-m3",
+            embedding_dim=1024,
+        )
+
+        assert config.llm_api_key == "test-llm-key"
+        assert config.llm_api_base == "http://localhost:8000/v1"
+        assert config.llm_model == "gpt-4o"
+        assert config.embedding_api_key == "test-embed-key"
+        assert config.embedding_api_base == "http://localhost:8080/v1"
+        assert config.embedding_model == "bge-m3"
+        assert config.embedding_dim == 1024
+
+    def test_config_defaults(self):
+        """Test that default values are set correctly."""
+        config = GraphitiConfig(
+            llm_api_key="test-key",
+            embedding_api_key="test-key",
+        )
+
+        assert config.llm_api_base is None  # OpenAI default
+        assert config.llm_model == "gpt-4o-mini"
+        assert config.embedding_api_base is None  # OpenAI default
+        assert config.embedding_model == "text-embedding-3-small"
+        assert config.embedding_dim == 1536
+
+    def test_legacy_openai_fields_still_exist(self):
+        """Test that legacy openai_api_key fields still exist for backwards compat."""
+        config = GraphitiConfig(
+            llm_api_key="new-key",
+            embedding_api_key="embed-key",
+            openai_api_key="legacy-key",  # Legacy field
+            openai_api_base="http://legacy.api/v1",  # Legacy field
+            openai_model="legacy-model",  # Legacy field
+        )
+
+        assert config.openai_api_key == "legacy-key"
+        assert config.openai_api_base == "http://legacy.api/v1"
+        assert config.openai_model == "legacy-model"
+
+
+class TestGraphitiConfigMissingKeys:
+    """Unit tests for config validation with missing required keys."""
+
+    def test_missing_llm_api_key_raises_error(self):
+        """Test that missing LLM_API_KEY raises ConfigError."""
+        from watercooler_memory.backends import ConfigError
+
+        config = GraphitiConfig(
+            embedding_api_key="embed-key",
+            # No llm_api_key
+        )
+
+        # Mock graphiti_path to exist
+        with patch.object(Path, 'exists', return_value=True):
+            with pytest.raises(ConfigError) as exc_info:
+                GraphitiBackend(config)
+
+        assert "LLM_API_KEY" in str(exc_info.value)
+
+    def test_missing_embedding_api_key_raises_error(self):
+        """Test that missing EMBEDDING_API_KEY raises ConfigError."""
+        from watercooler_memory.backends import ConfigError
+
+        config = GraphitiConfig(
+            llm_api_key="llm-key",
+            # No embedding_api_key
+        )
+
+        # Mock graphiti_path to exist
+        with patch.object(Path, 'exists', return_value=True):
+            with pytest.raises(ConfigError) as exc_info:
+                GraphitiBackend(config)
+
+        assert "EMBEDDING_API_KEY" in str(exc_info.value)
+
+    def test_legacy_openai_key_fallback(self):
+        """Test that legacy openai_api_key is used as fallback for llm_api_key."""
+        config = GraphitiConfig(
+            embedding_api_key="embed-key",
+            openai_api_key="legacy-openai-key",  # Legacy fallback
+            # No llm_api_key
+        )
+
+        # Mock graphiti_path to exist and skip entry episode index init
+        with patch.object(Path, 'exists', return_value=True):
+            with patch.object(GraphitiBackend, '_init_entry_episode_index'):
+                backend = GraphitiBackend(config)
+
+        # Legacy key should be copied to llm_api_key
+        assert backend.config.llm_api_key == "legacy-openai-key"

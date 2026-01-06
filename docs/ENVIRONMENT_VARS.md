@@ -921,14 +921,17 @@ Variables used by the Graphiti memory backend.
 |----------|----------|---------|---------|
 | `WATERCOOLER_GRAPHITI_ENABLED` | No | `"0"` | Enable Graphiti memory queries |
 | `LLM_API_BASE` | No | OpenAI | LLM server endpoint |
-| `LLM_API_KEY` | Yes* | - | LLM API key |
+| `LLM_API_KEY` | Yes* | - | LLM API key (required, no fallback) |
 | `LLM_MODEL` | No | `gpt-4o-mini` | LLM model name |
 | `EMBEDDING_API_BASE` | No | OpenAI | Embedding server endpoint |
-| `EMBEDDING_API_KEY` | Yes* | - | Embedding API key |
+| `EMBEDDING_API_KEY` | Yes* | - | Embedding API key (required, no fallback) |
 | `EMBEDDING_MODEL` | No | `text-embedding-3-small` | Embedding model name |
+| `EMBEDDING_DIM` | No | `1536` | Embedding vector dimension |
 | `WATERCOOLER_GRAPHITI_RERANKER` | No | `rrf` | Reranker algorithm |
 
-*Required when Graphiti is enabled. For local servers, use `"not-needed-for-local"`.
+*Required when Graphiti is enabled. For local servers, use a dummy value like `"not-needed-for-local"`.
+
+**Note:** There is no fallback to `OPENAI_API_KEY`. You must explicitly set `LLM_API_KEY` and `EMBEDDING_API_KEY`.
 
 **Local server example:**
 ```bash
