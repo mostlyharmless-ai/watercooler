@@ -304,3 +304,104 @@ class TestConfigErrorHandling:
         token = test_config.get_github_token()
         # Could be None or a value from env/file
         assert token is None or isinstance(token, str)
+
+
+class TestDeprecatedCredentialsFunctions:
+    """Tests for deprecated credentials.py functions.
+
+    These functions should emit DeprecationWarning when called.
+    Users should migrate to environment variables directly.
+    """
+
+    def test_get_memory_graph_config_deprecated(self):
+        """Test get_memory_graph_config() emits DeprecationWarning."""
+        from watercooler.credentials import get_memory_graph_config
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            get_memory_graph_config()
+
+            # May emit multiple warnings if it calls other deprecated functions
+            assert len(w) >= 1
+            # First warning should be from the function itself
+            assert issubclass(w[0].category, DeprecationWarning)
+            assert "deprecated" in str(w[0].message).lower()
+
+    def test_get_server_config_deprecated(self):
+        """Test get_server_config() emits DeprecationWarning."""
+        from watercooler.credentials import get_server_config
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            get_server_config("llm")
+
+            assert len(w) == 1
+            assert issubclass(w[0].category, DeprecationWarning)
+            assert "deprecated" in str(w[0].message).lower()
+
+    def test_get_deepseek_api_key_deprecated(self):
+        """Test get_deepseek_api_key() emits DeprecationWarning."""
+        from watercooler.credentials import get_deepseek_api_key
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            get_deepseek_api_key()
+
+            assert len(w) == 1
+            assert issubclass(w[0].category, DeprecationWarning)
+            assert "LLM_API_KEY" in str(w[0].message)
+
+    def test_get_deepseek_api_base_deprecated(self):
+        """Test get_deepseek_api_base() emits DeprecationWarning."""
+        from watercooler.credentials import get_deepseek_api_base
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            get_deepseek_api_base()
+
+            assert len(w) == 1
+            assert issubclass(w[0].category, DeprecationWarning)
+            assert "LLM_API_BASE" in str(w[0].message)
+
+    def test_get_deepseek_model_deprecated(self):
+        """Test get_deepseek_model() emits DeprecationWarning."""
+        from watercooler.credentials import get_deepseek_model
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            get_deepseek_model()
+
+            assert len(w) == 1
+            assert issubclass(w[0].category, DeprecationWarning)
+            assert "LLM_MODEL" in str(w[0].message)
+
+    def test_get_embedding_api_base_deprecated(self):
+        """Test get_embedding_api_base() emits DeprecationWarning."""
+        from watercooler.credentials import get_embedding_api_base
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            get_embedding_api_base()
+
+            assert len(w) == 1
+            assert issubclass(w[0].category, DeprecationWarning)
+            assert "EMBEDDING_API_BASE" in str(w[0].message)
+
+    def test_get_embedding_api_key_deprecated(self):
+        """Test get_embedding_api_key() emits DeprecationWarning."""
+        from watercooler.credentials import get_embedding_api_key
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            get_embedding_api_key()
+
+            assert len(w) == 1
+            assert issubclass(w[0].category, DeprecationWarning)
+            assert "EMBEDDING_API_KEY" in str(w[0].message)

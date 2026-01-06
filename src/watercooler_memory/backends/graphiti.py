@@ -42,13 +42,20 @@ class GraphitiConfig:
     falkordb_username: str | None = None  # FalkorDB doesn't require auth
     falkordb_password: str | None = None
 
-    # LLM configuration (required for Graphiti)
-    openai_api_key: str | None = None
-    openai_api_base: str | None = None  # Optional for alt endpoints
-    openai_model: str | None = None
+    # LLM configuration (flexible provider - supports OpenAI, local, DeepSeek, etc.)
+    llm_api_base: str | None = None      # e.g., "http://localhost:8000/v1" for local
+    llm_api_key: str | None = None       # Required for all providers
+    llm_model: str = "gpt-4o-mini"       # Default model
 
-    # Embedding configuration
+    # Embedding configuration (flexible provider - supports OpenAI, local llama.cpp, etc.)
+    embedding_api_base: str | None = None  # e.g., "http://localhost:8080/v1" for local
+    embedding_api_key: str | None = None   # Required for all providers
     embedding_model: str = "text-embedding-3-small"
+
+    # Legacy fields (deprecated, use llm_* and embedding_* instead)
+    openai_api_key: str | None = None      # DEPRECATED: use llm_api_key
+    openai_api_base: str | None = None     # DEPRECATED: use llm_api_base
+    openai_model: str | None = None        # DEPRECATED: use llm_model
 
     # Search reranker algorithm (rrf, mmr, cross_encoder, node_distance, episode_mentions)
     # RRF (Reciprocal Rank Fusion) is fast and provides good results for most cases
@@ -146,16 +153,32 @@ class GraphitiBackend(MemoryBackend):
                 "Ensure Graphiti submodule is properly initialized."
             )
 
-        # Validate OpenAI API key is set (required for Graphiti)
-        if not self.config.openai_api_key:
-            import os
-
-            self.config.openai_api_key = os.environ.get("OPENAI_API_KEY")
-            if not self.config.openai_api_key:
+        # Validate LLM API key is set (required for Graphiti)
+        # Support legacy openai_api_key field for backwards compatibility
+        if not self.config.llm_api_key:
+            if self.config.openai_api_key:
+                # Legacy fallback: use openai_api_key if llm_api_key not set
+                self.config.llm_api_key = self.config.openai_api_key
+            else:
                 raise ConfigError(
-                    "OPENAI_API_KEY is required for Graphiti. "
-                    "Set via config or environment variable."
+                    "LLM_API_KEY is required for Graphiti. "
+                    "Set via environment variable or config."
                 )
+
+        # Validate embedding API key is set (required for Graphiti)
+        if not self.config.embedding_api_key:
+            raise ConfigError(
+                "EMBEDDING_API_KEY is required for Graphiti. "
+                "Set via environment variable or config."
+            )
+
+        # Support legacy openai_api_base field
+        if not self.config.llm_api_base and self.config.openai_api_base:
+            self.config.llm_api_base = self.config.openai_api_base
+
+        # Support legacy openai_model field
+        if self.config.openai_model and self.config.llm_model == "gpt-4o-mini":
+            self.config.llm_model = self.config.openai_model
 
     def _init_entry_episode_index(self) -> None:
         """Initialize the entry-episode index if enabled."""
@@ -408,7 +431,7 @@ class GraphitiBackend(MemoryBackend):
         return result.strip()
 
     def _create_graphiti_client(self) -> Any:
-        """Create and configure Graphiti client with FalkorDB and LLM.
+        """Create and configure Graphiti client with FalkorDB, LLM, and embedder.
 
         Returns:
             Configured Graphiti instance ready for operations.
@@ -419,8 +442,10 @@ class GraphitiBackend(MemoryBackend):
         try:
             from graphiti_core import Graphiti
             from graphiti_core.driver.falkordb_driver import FalkorDriver
-            from graphiti_core.llm_client import OpenAIClient
+            from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
             from graphiti_core.llm_client.config import LLMConfig
+            from graphiti_core.embedder import OpenAIEmbedder
+            from graphiti_core.embedder.openai import OpenAIEmbedderConfig
         except ImportError as e:
             raise ConfigError(
                 f"Graphiti dependencies not installed: {e}. "
@@ -435,20 +460,27 @@ class GraphitiBackend(MemoryBackend):
             password=self.config.falkordb_password,
         )
 
-        # Configure LLM client with explicit model
-        model_name = self.config.openai_model or "gpt-4o-mini"
+        # Configure LLM client (supports OpenAI, local servers, DeepSeek, etc.)
         llm_config = LLMConfig(
-            api_key=self.config.openai_api_key,
-            model=model_name,
-            base_url=self.config.openai_api_base,
+            api_key=self.config.llm_api_key,
+            model=self.config.llm_model,
+            base_url=self.config.llm_api_base,
         )
-        llm_client = OpenAIClient(
-            config=llm_config,
-            reasoning=None,  # Disable reasoning.effort (only for GPT-5 models)
-            verbosity=None,  # Disable text.verbosity (unsupported by gpt-4o-mini)
-        )
+        llm_client = OpenAIGenericClient(config=llm_config)
 
-        return Graphiti(graph_driver=falkor_driver, llm_client=llm_client)
+        # Configure embedder (supports OpenAI, local llama.cpp, etc.)
+        embedder_config = OpenAIEmbedderConfig(
+            embedding_model=self.config.embedding_model,
+            api_key=self.config.embedding_api_key,
+            base_url=self.config.embedding_api_base,
+        )
+        embedder = OpenAIEmbedder(config=embedder_config)
+
+        return Graphiti(
+            graph_driver=falkor_driver,
+            llm_client=llm_client,
+            embedder=embedder,
+        )
 
     def _get_search_config(self) -> Any:
         """Get SearchConfig based on configured reranker algorithm.

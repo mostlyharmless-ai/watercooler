@@ -371,9 +371,17 @@ def get_memory_graph_config() -> Dict[str, Any]:
         Dict with llm, embedding, and chunking settings.
 
     .. deprecated::
-        Use get_server_config() instead. This function remains for
-        backwards compatibility with existing config files.
+        Memory backend config is now via environment variables.
+        Use LLM_API_KEY, LLM_API_BASE, EMBEDDING_API_KEY, etc. directly.
+        See docs/ENVIRONMENT_VARS.md for complete list.
     """
+    warnings.warn(
+        "get_memory_graph_config() is deprecated. "
+        "Use environment variables (LLM_API_KEY, EMBEDDING_API_KEY, etc.) instead. "
+        "See docs/ENVIRONMENT_VARS.md",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # Delegate to unified config system (eliminates duplicate TOML loading)
     try:
         from .config_facade import config
@@ -406,6 +414,10 @@ _SERVER_DEFAULTS: Dict[str, Dict[str, Any]] = {
 def get_server_config(server_type: str) -> Dict[str, Any]:
     """Get unified server configuration.
 
+    .. deprecated::
+        Use environment variables directly (LLM_API_BASE, LLM_MODEL, etc.).
+        See docs/ENVIRONMENT_VARS.md for complete list.
+
     Loads configuration with the following priority:
     1. Environment variables (SERVER_TYPE_SETTING, e.g., LLM_API_BASE)
     2. [servers.{type}] section in config.toml (preferred)
@@ -423,6 +435,13 @@ def get_server_config(server_type: str) -> Dict[str, Any]:
         >>> print(config["api_base"])
         http://localhost:11434/v1
     """
+    warnings.warn(
+        f"get_server_config('{server_type}') is deprecated. "
+        f"Use environment variables ({server_type.upper()}_API_BASE, etc.) directly. "
+        "See docs/ENVIRONMENT_VARS.md",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if server_type not in _SERVER_DEFAULTS:
         raise ValueError(f"Unknown server type: {server_type}. Use 'llm' or 'embedding'.")
 
@@ -471,8 +490,16 @@ def get_server_config(server_type: str) -> Dict[str, Any]:
 def get_deepseek_api_key() -> Optional[str]:
     """Get DeepSeek API key from credentials or environment.
 
+    .. deprecated::
+        Use LLM_API_KEY environment variable directly.
+
     Priority: Environment > Credentials file
     """
+    warnings.warn(
+        "get_deepseek_api_key() is deprecated. Use os.getenv('LLM_API_KEY') instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # Check environment first
     env_key = os.getenv("DEEPSEEK_API_KEY")
     if env_key:
@@ -486,21 +513,34 @@ def get_deepseek_api_key() -> Optional[str]:
 def get_deepseek_api_base() -> str:
     """Get DeepSeek API base URL from config or environment.
 
+    .. deprecated::
+        Use LLM_API_BASE environment variable directly.
+
     Priority: Environment > config.toml > Default
     """
+    warnings.warn(
+        "get_deepseek_api_base() is deprecated. Use os.getenv('LLM_API_BASE') instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # Check environment first
     env_base = os.getenv("LLM_API_BASE")
     if env_base:
         return env_base
 
-    # Load from config.toml
-    mg_config = get_memory_graph_config()
+    # Load from config.toml (will also warn)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        mg_config = get_memory_graph_config()
     llm_config = mg_config.get("llm", {})
     return llm_config.get("api_base", "https://api.deepseek.com/v1")
 
 
 def get_deepseek_model() -> str:
     """Get DeepSeek model name from config or environment.
+
+    .. deprecated::
+        Use LLM_MODEL environment variable directly.
 
     Priority: Environment > config.toml > Default
 
@@ -509,13 +549,20 @@ def get_deepseek_model() -> str:
     - deepseek-v3.2: Reasoning-first model for agents
     - deepseek-v3.2-speciale: Extended reasoning capabilities
     """
+    warnings.warn(
+        "get_deepseek_model() is deprecated. Use os.getenv('LLM_MODEL') instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # Check environment first
     env_model = os.getenv("DEEPSEEK_MODEL")
     if env_model:
         return env_model
 
-    # Load from config.toml
-    mg_config = get_memory_graph_config()
+    # Load from config.toml (will also warn)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        mg_config = get_memory_graph_config()
     llm_config = mg_config.get("llm", {})
     return llm_config.get("model", "deepseek-v3.2")
 
@@ -523,15 +570,25 @@ def get_deepseek_model() -> str:
 def get_embedding_api_base() -> str:
     """Get embedding API base URL from config or environment.
 
+    .. deprecated::
+        Use EMBEDDING_API_BASE environment variable directly.
+
     Priority: Environment > config.toml > Default
     """
+    warnings.warn(
+        "get_embedding_api_base() is deprecated. Use os.getenv('EMBEDDING_API_BASE') instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # Check environment first
     env_base = os.getenv("EMBEDDING_API_BASE")
     if env_base:
         return env_base
 
-    # Load from config.toml
-    mg_config = get_memory_graph_config()
+    # Load from config.toml (will also warn)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        mg_config = get_memory_graph_config()
     emb_config = mg_config.get("embedding", {})
     return emb_config.get("api_base", "http://localhost:8080/v1")
 
@@ -539,8 +596,16 @@ def get_embedding_api_base() -> str:
 def get_embedding_api_key() -> Optional[str]:
     """Get embedding API key from credentials or environment.
 
+    .. deprecated::
+        Use EMBEDDING_API_KEY environment variable directly.
+
     Priority: Environment > Credentials file
     """
+    warnings.warn(
+        "get_embedding_api_key() is deprecated. Use os.getenv('EMBEDDING_API_KEY') instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # Check environment first
     env_key = os.getenv("EMBEDDING_API_KEY")
     if env_key:
