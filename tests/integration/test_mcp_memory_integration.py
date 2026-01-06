@@ -2,7 +2,7 @@
 
 These tests require:
 - FalkorDB running (localhost:6379)
-- OPENAI_API_KEY set in environment
+- LLM_API_KEY and EMBEDDING_API_KEY set in environment
 - Memory extras installed (pip install watercooler-cloud[memory])
 
 Run with: pytest -m integration_graphiti
@@ -35,15 +35,17 @@ class TestGraphitiMemoryIntegration:
         config = memory.load_graphiti_config()
         assert config is None
 
-        # Test with enabled but no API key
+        # Test with enabled but no API keys
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
         config = memory.load_graphiti_config()
         assert config is None
 
-        # Test with enabled and API key
+        # Test with enabled and API keys
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
+        monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
         config = memory.load_graphiti_config()
         assert config is not None
 
@@ -52,7 +54,8 @@ class TestGraphitiMemoryIntegration:
         from watercooler_mcp import memory
 
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
+        monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
 
         config = memory.load_graphiti_config()
         assert config is not None
