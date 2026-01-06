@@ -18,7 +18,6 @@ import os
 import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
 
 # ANSI colors for terminal output
 GREEN = "\033[92m"
@@ -258,7 +257,8 @@ def generate_env_template() -> str:
 WATERCOOLER_GRAPHITI_ENABLED=0
 
 # === Embedding Server ===
-# Start: python -m watercooler_memory.embedding_server
+# Uses llama-cpp-python with OpenAI-compatible API
+# Example: llama-cpp-python[server] or any OpenAI-compatible endpoint
 # Default: http://localhost:8080/v1
 EMBEDDING_API_BASE=http://localhost:8080/v1
 EMBEDDING_API_KEY=not-needed-for-local
@@ -270,7 +270,8 @@ GLM_MODEL=bge-m3
 GLM_EMBEDDING_MODEL=bge-m3
 
 # === LLM Server ===
-# Start: python -m watercooler_memory.local_server
+# Uses llama-cpp-python with OpenAI-compatible API, Ollama, or cloud provider
+# Example: http://localhost:11434/v1 (Ollama) or cloud endpoint
 # Default: http://localhost:8000/v1
 LLM_API_BASE=http://localhost:8000/v1
 LLM_API_KEY=not-needed-for-local
@@ -318,9 +319,11 @@ def main() -> int:
     print(f"{BOLD}Memory Backend Configuration Check{RESET}")
     print("=" * 35)
 
-    # Check disable switch
-    if get_env("WATERCOOLER_MEMORY_DISABLED") == "1":
+    # Check disable switch (consistent with is_memory_disabled() in baseline_graph/sync.py)
+    disable_val = get_env("WATERCOOLER_MEMORY_DISABLED") or ""
+    if disable_val.lower() in ("1", "true", "yes"):
         print(f"\n{YELLOW}Memory backends disabled (WATERCOOLER_MEMORY_DISABLED=1){RESET}")
+        print("  No configuration checks performed.")
         return 0
 
     # Load configurations
@@ -378,8 +381,9 @@ def main() -> int:
     # === FalkorDB ===
     print_header("FalkorDB")
 
-    falkordb_host = get_env("FALKORDB_HOST", "localhost")
-    falkordb_port = int(get_env("FALKORDB_PORT", "6379") or "6379")
+    falkordb_host = get_env("FALKORDB_HOST") or "localhost"
+    port_str = get_env("FALKORDB_PORT") or "6379"
+    falkordb_port = int(port_str)
 
     if not args.skip_health_check:
         healthy, message = check_falkordb_health(falkordb_host, falkordb_port)

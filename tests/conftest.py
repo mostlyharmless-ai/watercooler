@@ -106,13 +106,21 @@ def memory_test_env(
     monkeypatch: pytest.MonkeyPatch,
     stub_memory_api_keys: None,
 ) -> Generator[None, None, None]:
-    """Complete memory test environment with Graphiti enabled.
+    """Graphiti test environment with stub API keys.
 
-    Combines stub keys with Graphiti enabled. Use with mocked backends.
+    Sets WATERCOOLER_GRAPHITI_ENABLED=1 with stub API keys.
+    Does NOT include local server endpoints - use with stub_local_memory_servers
+    if you need server URL configuration.
+
+    Use with mocked backends to prevent outbound connections.
 
     Usage:
         def test_graphiti_feature(memory_test_env):
-            # Graphiti enabled with stub keys
+            # Graphiti enabled with stub keys (no server URLs)
+            ...
+
+        def test_with_servers(memory_test_env, stub_local_memory_servers):
+            # Graphiti enabled with stub keys AND local server URLs
             ...
     """
     monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
