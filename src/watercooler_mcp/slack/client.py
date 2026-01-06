@@ -55,7 +55,7 @@ class SlackClient:
         """
         if bot_token is None:
             config = get_slack_config()
-            bot_token = config.bot_token if config else ""
+            bot_token = config.get("bot_token", "") if config else ""
 
         if not bot_token:
             raise ValueError("Slack bot token not configured")
