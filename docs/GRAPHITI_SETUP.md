@@ -2,6 +2,103 @@
 
 This guide covers setting up Graphiti as a memory backend for watercooler-cloud.
 
+## Quick Start for Teammates
+
+**Get up and running in 5 minutes:**
+
+### 1. Start FalkorDB (Graph Database)
+
+```bash
+# Start FalkorDB container (if not already running)
+docker run -d -p 6379:6379 -p 3000:3000 --name falkordb falkordb/falkordb:latest
+
+# Verify it's running
+docker exec falkordb redis-cli PING  # Should return: PONG
+```
+
+### 2. Install Graphiti Dependencies
+
+```bash
+# From watercooler-cloud root directory
+# Use uv (recommended for this project)
+uv pip install -e "external/graphiti[falkordb]"
+
+# Or if using pip directly
+pip install -e "external/graphiti[falkordb]"
+```
+
+### 3. Configure Environment Variables
+
+Add to your MCP config (`.mcp.json` for Claude Code):
+
+```json
+{
+  "mcpServers": {
+    "watercooler-cloud": {
+      "env": {
+        "WATERCOOLER_GRAPHITI_ENABLED": "1",
+        "LLM_API_KEY": "sk-...",
+        "EMBEDDING_API_KEY": "sk-..."
+      }
+    }
+  }
+}
+```
+
+Or for local LLM/embedding servers:
+
+```json
+{
+  "mcpServers": {
+    "watercooler-cloud": {
+      "env": {
+        "WATERCOOLER_GRAPHITI_ENABLED": "1",
+        "LLM_API_BASE": "http://localhost:11434/v1",
+        "LLM_API_KEY": "not-needed-for-local",
+        "LLM_MODEL": "llama3.2:3b",
+        "EMBEDDING_API_BASE": "http://localhost:8080/v1",
+        "EMBEDDING_API_KEY": "not-needed-for-local",
+        "EMBEDDING_MODEL": "bge-m3"
+      }
+    }
+  }
+}
+```
+
+### 4. Restart MCP Server
+
+In Claude Code, run `/mcp` to reconnect the MCP server and pick up the new configuration.
+
+### 5. Test It Works
+
+**Add a test episode:**
+```
+Use watercooler_graphiti_add_episode to add:
+- content: "Testing the Graphiti memory backend"
+- group_id: "test-graphiti"
+- title: "Test Episode"
+```
+
+**Query the memory:**
+```
+Use watercooler_query_memory with:
+- query: "Graphiti memory"
+- code_path: "."
+```
+
+You should see the test episode returned with extracted entities and facts.
+
+### Troubleshooting Quick Start
+
+| Symptom | Solution |
+|---------|----------|
+| `No module named 'graphiti_core'` | Run `uv pip install -e "external/graphiti[falkordb]"` and restart MCP server |
+| `Database connection failed` | Ensure FalkorDB is running: `docker ps \| grep falkor` |
+| `no episode UUID` error | Update to latest code (fixed in PR #93) |
+| `unexpected keyword argument 'max_nodes'` | Update to latest code (fixed in PR #93) |
+
+---
+
 ## Overview
 
 **Graphiti** is a temporal, entity-based memory layer featuring episodic ingestion and hybrid search. As a watercooler memory backend, it provides:

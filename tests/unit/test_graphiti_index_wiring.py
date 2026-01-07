@@ -195,14 +195,17 @@ class TestGraphitiBackendIndexDuringIndex:
         backend, mock_client = backend_with_mocked_graphiti
 
         # Create mock episode response with incrementing UUIDs
+        # AddEpisodeResults has an 'episode' field containing the EpisodicNode
         episode_uuids = ["ep-uuid-1", "ep-uuid-2", "ep-uuid-3"]
         call_count = [0]
 
         async def mock_add_episode(*args, **kwargs):
             mock_episode = MagicMock()
             mock_episode.uuid = episode_uuids[call_count[0] % len(episode_uuids)]
+            mock_result = MagicMock()
+            mock_result.episode = mock_episode
             call_count[0] += 1
-            return mock_episode
+            return mock_result
 
         mock_client.add_episode = AsyncMock(side_effect=mock_add_episode)
 

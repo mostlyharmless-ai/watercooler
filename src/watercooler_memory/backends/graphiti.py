@@ -287,7 +287,9 @@ class GraphitiBackend(MemoryBackend):
             )
 
             # Extract episode UUID from result - fail if missing
-            episode_uuid = getattr(result, "uuid", None)
+            # AddEpisodeResults has an 'episode' field containing the EpisodicNode
+            episode = getattr(result, "episode", None)
+            episode_uuid = getattr(episode, "uuid", None) if episode else None
             if not episode_uuid:
                 raise BackendError(
                     "Graphiti returned success but no episode UUID - "
@@ -851,8 +853,11 @@ class GraphitiBackend(MemoryBackend):
                         metadata = episode.get("metadata", {})
                         entry_id = metadata.get("entry_id")
                         thread_id = metadata.get("thread_id", episode.get("group_id", "unknown"))
-                        if entry_id and result and hasattr(result, "uuid"):
-                            indexed_mappings.append((entry_id, result.uuid, thread_id))
+                        # AddEpisodeResults has 'episode' field containing EpisodicNode with uuid
+                        result_episode = getattr(result, "episode", None)
+                        result_uuid = getattr(result_episode, "uuid", None) if result_episode else None
+                        if entry_id and result_uuid:
+                            indexed_mappings.append((entry_id, result_uuid, thread_id))
 
                         count += 1
                     except Exception as e:
@@ -1192,6 +1197,11 @@ class GraphitiBackend(MemoryBackend):
         to avoid blocking. This pattern matches the existing query() method
         and avoids nested event loop issues.
 
+        Note: For single group_id queries, the driver is cloned to point at
+        the specific database. This is required because Graphiti's
+        @handle_multiple_group_ids decorator only activates for >1 group_ids.
+        This pattern matches the query() method implementation.
+
         Args:
             query: Search query string
             group_ids: Optional list of group IDs to filter by
@@ -1235,17 +1245,29 @@ class GraphitiBackend(MemoryBackend):
             # Use NODE_HYBRID_SEARCH_RRF (official Graphiti MCP server approach)
             from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
             from graphiti_core.search.search_filters import SearchFilters
-            
+
             # Always create SearchFilters (match official implementation)
             search_filters = SearchFilters(node_labels=entity_types)
 
-            # Execute search with node-specific config
-            search_results = await graphiti.search_(
-                query=query,
-                config=NODE_HYBRID_SEARCH_RRF,
-                group_ids=sanitized_group_ids,
-                search_filter=search_filters,  # Note: singular 'filter' not 'filters'
-            )
+            # Handle single group_id case: clone driver to point at specific database
+            # (matches query() method pattern - @handle_multiple_group_ids only works for >1)
+            if sanitized_group_ids and len(sanitized_group_ids) == 1:
+                driver = graphiti.clients.driver.clone(database=sanitized_group_ids[0])
+                search_results = await graphiti.search_(
+                    query=query,
+                    config=NODE_HYBRID_SEARCH_RRF,
+                    group_ids=sanitized_group_ids,
+                    search_filter=search_filters,
+                    driver=driver,
+                )
+            else:
+                # Multiple group_ids or None - let decorator handle it
+                search_results = await graphiti.search_(
+                    query=query,
+                    config=NODE_HYBRID_SEARCH_RRF,
+                    group_ids=sanitized_group_ids,
+                    search_filter=search_filters,
+                )
             
             # Extract nodes from results (official approach)
             limit = min(max_results, self.MAX_SEARCH_RESULTS)
@@ -1571,6 +1593,11 @@ class GraphitiBackend(MemoryBackend):
     ) -> list[dict[str, Any]]:
         """Search for facts (edges) with optional center-node traversal.
 
+        Note: For single group_id queries, the driver is cloned to point at
+        the specific database. This is required because Graphiti's
+        @handle_multiple_group_ids decorator only activates for >1 group_ids.
+        This pattern matches the query() method implementation.
+
         Args:
             query: Search query string
             group_ids: Optional list of group IDs to filter by
@@ -1601,14 +1628,27 @@ class GraphitiBackend(MemoryBackend):
             # Use search_() API for facts with reranker scores (match query_memory pattern)
             limit = min(max_facts, self.MAX_SEARCH_RESULTS)
             search_config = self._get_search_config()
-            
-            search_results = await graphiti.search_(
-                query=query,
-                config=search_config,
-                group_ids=sanitized_group_ids,
-                center_node_uuid=center_node_uuid,
-            )
-            
+
+            # Handle single group_id case: clone driver to point at specific database
+            # (matches query() method pattern - @handle_multiple_group_ids only works for >1)
+            if sanitized_group_ids and len(sanitized_group_ids) == 1:
+                driver = graphiti.clients.driver.clone(database=sanitized_group_ids[0])
+                search_results = await graphiti.search_(
+                    query=query,
+                    config=search_config,
+                    group_ids=sanitized_group_ids,
+                    center_node_uuid=center_node_uuid,
+                    driver=driver,
+                )
+            else:
+                # Multiple group_ids or None - let decorator handle it
+                search_results = await graphiti.search_(
+                    query=query,
+                    config=search_config,
+                    group_ids=sanitized_group_ids,
+                    center_node_uuid=center_node_uuid,
+                )
+
             # Extract edges with scores
             edges = search_results.edges[:limit] if search_results.edges else []
             
@@ -1650,6 +1690,11 @@ class GraphitiBackend(MemoryBackend):
         Note: Graphiti doesn't support enumerating all episodes. This tool
         performs semantic episode search using the query string.
 
+        Note: For single group_id queries, the driver is cloned to point at
+        the specific database. This is required because Graphiti's
+        @handle_multiple_group_ids decorator only activates for >1 group_ids.
+        This pattern matches the query() method implementation.
+
         Args:
             query: Search query string (required, must be non-empty)
             group_ids: Optional list of group IDs to filter by
@@ -1684,13 +1729,25 @@ class GraphitiBackend(MemoryBackend):
             # Search episodes via COMBINED config (retrieves episodes + edges + nodes)
             limit = min(max_episodes, self.MAX_SEARCH_RESULTS)
             search_config = self._get_search_config()
-            
-            search_results = await graphiti.search_(
-                query=query,
-                config=search_config,
-                group_ids=sanitized_group_ids,
-            )
-            
+
+            # Handle single group_id case: clone driver to point at specific database
+            # (matches query() method pattern - @handle_multiple_group_ids only works for >1)
+            if sanitized_group_ids and len(sanitized_group_ids) == 1:
+                driver = graphiti.clients.driver.clone(database=sanitized_group_ids[0])
+                search_results = await graphiti.search_(
+                    query=query,
+                    config=search_config,
+                    group_ids=sanitized_group_ids,
+                    driver=driver,
+                )
+            else:
+                # Multiple group_ids or None - let decorator handle it
+                search_results = await graphiti.search_(
+                    query=query,
+                    config=search_config,
+                    group_ids=sanitized_group_ids,
+                )
+
             # Extract episodes from search results
             episodes = search_results.episodes[:limit] if search_results.episodes else []
 

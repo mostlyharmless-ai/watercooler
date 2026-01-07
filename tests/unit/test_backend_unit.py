@@ -167,8 +167,11 @@ class TestGraphitiAddEpisodeDirect:
     async def test_add_episode_direct_success(self, backend: GraphitiBackend):
         """Test successful episode addition returns expected result."""
         # Create mock result with expected attributes
+        # AddEpisodeResults has episode.uuid, not direct uuid
+        mock_episode = Mock()
+        mock_episode.uuid = "ep-uuid-123"
         mock_result = Mock()
-        mock_result.uuid = "ep-uuid-123"
+        mock_result.episode = mock_episode
         mock_result.nodes = [Mock(name="Entity1"), Mock(name="Entity2")]
         mock_result.edges = [Mock(), Mock(), Mock()]
 
@@ -191,8 +194,11 @@ class TestGraphitiAddEpisodeDirect:
     @pytest.mark.anyio
     async def test_add_episode_direct_missing_uuid_raises_error(self, backend: GraphitiBackend):
         """Test that missing UUID in result raises BackendError."""
+        # AddEpisodeResults has episode.uuid, not direct uuid
+        mock_episode = Mock()
+        mock_episode.uuid = None  # Missing UUID
         mock_result = Mock()
-        mock_result.uuid = None  # Missing UUID
+        mock_result.episode = mock_episode
         mock_result.nodes = []
         mock_result.edges = []
 
