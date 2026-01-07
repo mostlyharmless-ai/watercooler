@@ -1197,6 +1197,11 @@ class GraphitiBackend(MemoryBackend):
         to avoid blocking. This pattern matches the existing query() method
         and avoids nested event loop issues.
 
+        Note: For single group_id queries, the driver is cloned to point at
+        the specific database. This is required because Graphiti's
+        @handle_multiple_group_ids decorator only activates for >1 group_ids.
+        This pattern matches the query() method implementation.
+
         Args:
             query: Search query string
             group_ids: Optional list of group IDs to filter by
@@ -1588,6 +1593,11 @@ class GraphitiBackend(MemoryBackend):
     ) -> list[dict[str, Any]]:
         """Search for facts (edges) with optional center-node traversal.
 
+        Note: For single group_id queries, the driver is cloned to point at
+        the specific database. This is required because Graphiti's
+        @handle_multiple_group_ids decorator only activates for >1 group_ids.
+        This pattern matches the query() method implementation.
+
         Args:
             query: Search query string
             group_ids: Optional list of group IDs to filter by
@@ -1679,6 +1689,11 @@ class GraphitiBackend(MemoryBackend):
 
         Note: Graphiti doesn't support enumerating all episodes. This tool
         performs semantic episode search using the query string.
+
+        Note: For single group_id queries, the driver is cloned to point at
+        the specific database. This is required because Graphiti's
+        @handle_multiple_group_ids decorator only activates for >1 group_ids.
+        This pattern matches the query() method implementation.
 
         Args:
             query: Search query string (required, must be non-empty)
