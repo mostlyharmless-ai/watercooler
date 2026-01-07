@@ -354,7 +354,7 @@ async def _search_nodes_impl(
                 backend.search_nodes,
                 query=query,
                 group_ids=group_ids,
-                max_nodes=max_nodes,
+                max_results=max_nodes,  # Backend uses max_results parameter
                 entity_types=entity_types,
             )
 

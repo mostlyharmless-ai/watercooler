@@ -287,7 +287,9 @@ class GraphitiBackend(MemoryBackend):
             )
 
             # Extract episode UUID from result - fail if missing
-            episode_uuid = getattr(result, "uuid", None)
+            # AddEpisodeResults has an 'episode' field containing the EpisodicNode
+            episode = getattr(result, "episode", None)
+            episode_uuid = getattr(episode, "uuid", None) if episode else None
             if not episode_uuid:
                 raise BackendError(
                     "Graphiti returned success but no episode UUID - "
@@ -851,8 +853,11 @@ class GraphitiBackend(MemoryBackend):
                         metadata = episode.get("metadata", {})
                         entry_id = metadata.get("entry_id")
                         thread_id = metadata.get("thread_id", episode.get("group_id", "unknown"))
-                        if entry_id and result and hasattr(result, "uuid"):
-                            indexed_mappings.append((entry_id, result.uuid, thread_id))
+                        # AddEpisodeResults has 'episode' field containing EpisodicNode with uuid
+                        result_episode = getattr(result, "episode", None)
+                        result_uuid = getattr(result_episode, "uuid", None) if result_episode else None
+                        if entry_id and result_uuid:
+                            indexed_mappings.append((entry_id, result_uuid, thread_id))
 
                         count += 1
                     except Exception as e:
