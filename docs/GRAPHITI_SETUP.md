@@ -94,8 +94,8 @@ You should see the test episode returned with extracted entities and facts.
 |---------|----------|
 | `No module named 'graphiti_core'` | Run `uv pip install -e "external/graphiti[falkordb]"` and restart MCP server |
 | `Database connection failed` | Ensure FalkorDB is running: `docker ps \| grep falkor` |
-| `no episode UUID` error | Update to latest code (fixed in `fix/graphiti-add-episode-uuid` branch) |
-| `unexpected keyword argument 'max_nodes'` | Update to latest code (same fix) |
+| `no episode UUID` error | Update to latest code (fixed in PR #93) |
+| `unexpected keyword argument 'max_nodes'` | Update to latest code (fixed in PR #93) |
 
 ---
 
