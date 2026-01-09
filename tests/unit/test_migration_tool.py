@@ -532,6 +532,375 @@ Closed thread content.
             assert "closed-thread" not in topics
 
 
+class TestChunkedMigration:
+    """Tests for chunked migration with episode linking."""
+
+    @pytest.fixture
+    def mock_context(self):
+        """Create mock MCP context."""
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_threads_dir_large_entry(self, tmp_path):
+        """Create mock threads directory with a large entry that will be chunked."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create thread with large body that will result in multiple chunks
+        large_body = "\n\n".join([
+            f"Paragraph {i}: " + "This is a substantial paragraph with meaningful content. " * 20
+            for i in range(10)
+        ])
+
+        thread = threads_dir / "large-entry.md"
+        thread.write_text(f"""# large-entry — Thread
+
+Status: OPEN
+Ball: Claude (dev)
+
+---
+
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: Large entry for chunking test
+<!-- Entry-ID: 01LARGE01 -->
+
+{large_body}
+""")
+
+        return threads_dir
+
+    @pytest.fixture
+    def mock_threads_dir_small_entry(self, tmp_path):
+        """Create mock threads directory with a small entry (single chunk)."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        thread = threads_dir / "small-entry.md"
+        thread.write_text("""# small-entry — Thread
+
+Status: OPEN
+Ball: Claude (dev)
+
+---
+
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: Small entry
+<!-- Entry-ID: 01SMALL01 -->
+
+This is a small entry that fits in a single chunk.
+""")
+
+        return threads_dir
+
+    async def test_chunked_migration_calls_backend_with_previous_uuids(
+        self, mock_context, mock_threads_dir_large_entry
+    ):
+        """Chunked migration should link episodes using previous_episode_uuids."""
+        from watercooler_mcp.tools.migration import _migrate_to_memory_backend_impl
+
+        # Track all calls to add_episode_direct
+        call_count = [0]
+        episode_uuids = []
+
+        async def mock_add_episode(**kwargs):
+            call_count[0] += 1
+            ep_uuid = f"ep-chunk-{call_count[0]}"
+            episode_uuids.append(ep_uuid)
+            return {"episode_uuid": ep_uuid}
+
+        mock_graphiti = MagicMock()
+        mock_graphiti.add_episode_direct = AsyncMock(side_effect=mock_add_episode)
+
+        with patch(
+            "watercooler_mcp.tools.migration._check_backend_availability",
+            return_value={"available": True},
+        ), patch(
+            "watercooler_mcp.tools.migration._get_migration_backend",
+            return_value=mock_graphiti,
+        ):
+            result = await _migrate_to_memory_backend_impl(
+                threads_dir=mock_threads_dir_large_entry,
+                backend="graphiti",
+                ctx=mock_context,
+                dry_run=False,
+                chunk_max_tokens=200,  # Small chunks to force multiple
+                chunk_overlap=20,
+            )
+
+            result_data = json.loads(result)
+
+            # Should have migrated at least one entry with chunks
+            assert result_data["entries_migrated"] >= 1
+            assert result_data["chunks_migrated"] >= 1
+
+            # Verify episode linking pattern:
+            # - First chunk: previous_episode_uuids should be None
+            # - Subsequent chunks: should link to previous chunk
+            calls = mock_graphiti.add_episode_direct.call_args_list
+            if len(calls) > 1:
+                # First chunk should have None for previous_episode_uuids
+                first_call = calls[0]
+                assert first_call.kwargs.get("previous_episode_uuids") is None
+
+                # Second chunk should link to first chunk's UUID
+                second_call = calls[1]
+                prev_uuids = second_call.kwargs.get("previous_episode_uuids")
+                if prev_uuids:  # Only check if we got multiple chunks from same entry
+                    assert isinstance(prev_uuids, list)
+                    assert len(prev_uuids) == 1
+
+    async def test_single_chunk_entry_no_linking(
+        self, mock_context, mock_threads_dir_small_entry
+    ):
+        """Single-chunk entries should not use episode linking."""
+        from watercooler_mcp.tools.migration import _migrate_to_memory_backend_impl
+
+        mock_graphiti = MagicMock()
+        mock_graphiti.add_episode_direct = AsyncMock(
+            return_value={"episode_uuid": "ep-single"}
+        )
+
+        with patch(
+            "watercooler_mcp.tools.migration._check_backend_availability",
+            return_value={"available": True},
+        ), patch(
+            "watercooler_mcp.tools.migration._get_migration_backend",
+            return_value=mock_graphiti,
+        ):
+            await _migrate_to_memory_backend_impl(
+                threads_dir=mock_threads_dir_small_entry,
+                backend="graphiti",
+                ctx=mock_context,
+                dry_run=False,
+            )
+
+            # Single chunk should have previous_episode_uuids=None
+            calls = mock_graphiti.add_episode_direct.call_args_list
+            assert len(calls) == 1
+            assert calls[0].kwargs.get("previous_episode_uuids") is None
+
+    async def test_dry_run_estimates_chunks(
+        self, mock_context, mock_threads_dir_large_entry
+    ):
+        """Dry run should estimate number of chunks."""
+        from watercooler_mcp.tools.migration import _migrate_to_memory_backend_impl
+
+        with patch(
+            "watercooler_mcp.tools.migration._check_backend_availability",
+            return_value={"available": True},
+        ):
+            result = await _migrate_to_memory_backend_impl(
+                threads_dir=mock_threads_dir_large_entry,
+                backend="graphiti",
+                ctx=mock_context,
+                dry_run=True,
+                chunk_max_tokens=200,
+            )
+
+            result_data = json.loads(result)
+
+            # Should show estimated chunks
+            assert "estimated_total_chunks" in result_data
+            assert result_data["estimated_total_chunks"] >= 1
+
+            # would_migrate entries should have estimated_chunks
+            for entry in result_data.get("would_migrate", []):
+                assert "estimated_chunks" in entry
+
+
+class TestCheckpointV2:
+    """Tests for checkpoint v2 format with chunk progress."""
+
+    @pytest.fixture
+    def mock_context(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_threads_dir(self, tmp_path):
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+        return threads_dir
+
+    def test_checkpoint_v2_structure(self, mock_threads_dir):
+        """Checkpoint v2 should have correct structure."""
+        from watercooler_mcp.tools.migration import (
+            CheckpointV2,
+            EntryProgress,
+            ChunkProgress,
+            _save_checkpoint_v2,
+            _load_checkpoint,
+        )
+
+        checkpoint = CheckpointV2(backend="graphiti")
+        checkpoint.entries["01ABC123"] = EntryProgress(
+            thread_id="test-thread",
+            status="complete",
+            total_chunks=2,
+            last_completed_chunk_index=1,
+            chunks=[
+                ChunkProgress(chunk_index=0, chunk_id="chunk0", episode_uuid="ep0"),
+                ChunkProgress(chunk_index=1, chunk_id="chunk1", episode_uuid="ep1"),
+            ],
+            mode="chunked",
+        )
+
+        _save_checkpoint_v2(mock_threads_dir, checkpoint)
+
+        # Load and verify
+        loaded = _load_checkpoint(mock_threads_dir)
+        assert loaded.version == 2
+        assert loaded.backend == "graphiti"
+        assert "01ABC123" in loaded.entries
+        assert loaded.entries["01ABC123"].total_chunks == 2
+        assert len(loaded.entries["01ABC123"].chunks) == 2
+
+    def test_checkpoint_v1_upgrade(self, mock_threads_dir):
+        """V1 checkpoint should be upgraded to v2 on load."""
+        from watercooler_mcp.tools.migration import _load_checkpoint
+
+        # Create v1 checkpoint
+        v1_checkpoint = {
+            "migrated_entries": ["01ABC123", "01DEF456"],
+            "backend": "graphiti",
+            "last_updated": "2025-01-15T10:00:00Z",
+        }
+        checkpoint_file = mock_threads_dir / ".migration_checkpoint.json"
+        checkpoint_file.write_text(json.dumps(v1_checkpoint))
+
+        # Load should return v2
+        loaded = _load_checkpoint(mock_threads_dir)
+        assert loaded.version == 2
+        assert loaded.backend == "graphiti"
+        assert "01ABC123" in loaded.entries
+        assert loaded.entries["01ABC123"].status == "complete"
+        assert loaded.entries["01ABC123"].mode == "single"
+
+    def test_checkpoint_is_entry_complete(self):
+        """is_entry_complete should correctly report status."""
+        from watercooler_mcp.tools.migration import CheckpointV2, EntryProgress
+
+        checkpoint = CheckpointV2(backend="graphiti")
+        checkpoint.entries["complete"] = EntryProgress(
+            thread_id="t", status="complete", total_chunks=1, last_completed_chunk_index=0
+        )
+        checkpoint.entries["in_progress"] = EntryProgress(
+            thread_id="t", status="in_progress", total_chunks=2, last_completed_chunk_index=0
+        )
+
+        assert checkpoint.is_entry_complete("complete") is True
+        assert checkpoint.is_entry_complete("in_progress") is False
+        assert checkpoint.is_entry_complete("nonexistent") is False
+
+    def test_checkpoint_get_resume_chunk_index(self):
+        """get_resume_chunk_index should return correct index."""
+        from watercooler_mcp.tools.migration import CheckpointV2, EntryProgress
+
+        checkpoint = CheckpointV2(backend="graphiti")
+        checkpoint.entries["partial"] = EntryProgress(
+            thread_id="t",
+            status="in_progress",
+            total_chunks=5,
+            last_completed_chunk_index=2,  # Completed chunks 0, 1, 2
+        )
+
+        # Should resume from chunk 3
+        assert checkpoint.get_resume_chunk_index("partial") == 3
+        # New entry should start from 0
+        assert checkpoint.get_resume_chunk_index("new_entry") == 0
+
+
+class TestEpisodeLinkingChain:
+    """Tests specifically for episode linking chain correctness."""
+
+    @pytest.fixture
+    def mock_context(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_threads_dir(self, tmp_path):
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create entry that will produce exactly 3 chunks
+        body = "\n\n".join([
+            f"Section {i}: " + "Content " * 100
+            for i in range(3)
+        ])
+
+        thread = threads_dir / "chain-test.md"
+        thread.write_text(f"""# chain-test — Thread
+
+Status: OPEN
+Ball: Claude (dev)
+
+---
+
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: Chain test entry
+<!-- Entry-ID: 01CHAIN01 -->
+
+{body}
+""")
+
+        return threads_dir
+
+    async def test_episode_chain_none_first_then_previous(
+        self, mock_context, mock_threads_dir
+    ):
+        """Episode chain should be: None -> [ep0] -> [ep1] -> ..."""
+        from watercooler_mcp.tools.migration import _migrate_to_memory_backend_impl
+
+        call_count = [0]
+
+        async def mock_add_episode(**kwargs):
+            call_count[0] += 1
+            return {"episode_uuid": f"ep-{call_count[0]}"}
+
+        mock_graphiti = MagicMock()
+        mock_graphiti.add_episode_direct = AsyncMock(side_effect=mock_add_episode)
+
+        with patch(
+            "watercooler_mcp.tools.migration._check_backend_availability",
+            return_value={"available": True},
+        ), patch(
+            "watercooler_mcp.tools.migration._get_migration_backend",
+            return_value=mock_graphiti,
+        ):
+            await _migrate_to_memory_backend_impl(
+                threads_dir=mock_threads_dir,
+                backend="graphiti",
+                ctx=mock_context,
+                dry_run=False,
+                chunk_max_tokens=150,  # Force multiple chunks
+                chunk_overlap=10,
+            )
+
+            calls = mock_graphiti.add_episode_direct.call_args_list
+
+            # Verify the chain pattern
+            for i, call in enumerate(calls):
+                prev_uuids = call.kwargs.get("previous_episode_uuids")
+                if i == 0:
+                    # First chunk: no previous
+                    assert prev_uuids is None, f"First chunk should have None, got {prev_uuids}"
+                else:
+                    # Subsequent chunks: should link to previous
+                    assert prev_uuids is not None, f"Chunk {i} should have previous UUIDs"
+                    assert isinstance(prev_uuids, list)
+                    assert len(prev_uuids) == 1
+                    # Should link to the previous episode
+                    expected_prev = f"ep-{i}"
+                    assert prev_uuids[0] == expected_prev, (
+                        f"Chunk {i} should link to {expected_prev}, got {prev_uuids[0]}"
+                    )
+
+
 class TestToolRegistration:
     """Test tool registration."""
 

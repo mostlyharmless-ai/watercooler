@@ -246,6 +246,7 @@ class GraphitiBackend(MemoryBackend):
         source_description: str,
         reference_time: datetime,
         group_id: str,
+        previous_episode_uuids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Add an episode directly to Graphiti without the prepare/index workflow.
 
@@ -259,6 +260,10 @@ class GraphitiBackend(MemoryBackend):
             source_description: Description of the source
             reference_time: Timestamp for the episode (datetime object)
             group_id: Group/thread identifier for partitioning
+            previous_episode_uuids: Optional list of episode UUIDs that this episode
+                follows. Used to establish explicit temporal ordering when multiple
+                episodes share the same reference_time (e.g., chunks of the same entry).
+                When None, Graphiti uses default context retrieval.
 
         Returns:
             Dict with episode_uuid, entities_extracted, and facts_extracted
@@ -284,6 +289,7 @@ class GraphitiBackend(MemoryBackend):
                 source_description=source_description,
                 reference_time=reference_time,
                 group_id=group_id,
+                previous_episode_uuids=previous_episode_uuids,
             )
 
             # Extract episode UUID from result - fail if missing

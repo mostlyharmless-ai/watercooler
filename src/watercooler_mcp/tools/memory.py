@@ -932,6 +932,7 @@ async def _graphiti_add_episode_impl(
     timestamp: str = "",
     title: str = "",
     source_description: str = "",
+    previous_episode_uuids: list[str] | None = None,
 ) -> ToolResult:
     """Add an episode directly to Graphiti temporal graph.
 
@@ -948,6 +949,8 @@ async def _graphiti_add_episode_impl(
         timestamp: Optional ISO 8601 timestamp (defaults to now)
         title: Optional episode title (defaults to first 50 chars of content)
         source_description: Optional source metadata
+        previous_episode_uuids: Optional list of episode UUIDs this episode follows.
+            Used for explicit temporal ordering when chunks share the same timestamp.
 
     Returns:
         JSON with episode_uuid, entities_extracted, and success status
@@ -1044,6 +1047,7 @@ async def _graphiti_add_episode_impl(
                 source_description=source_desc,
                 reference_time=ref_time,
                 group_id=group_id,
+                previous_episode_uuids=previous_episode_uuids,
             )
 
             episode_uuid = result.get("episode_uuid", "unknown")
