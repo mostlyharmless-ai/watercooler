@@ -67,6 +67,29 @@ def _actions(elements: List[Dict]) -> Dict[str, Any]:
     return {"type": "actions", "elements": elements}
 
 
+def _overflow(
+    action_id: str,
+    options: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    """Create an overflow menu element.
+
+    Args:
+        action_id: Unique action identifier
+        options: List of {text, value} dicts for menu items
+    """
+    return {
+        "type": "overflow",
+        "action_id": action_id,
+        "options": [
+            {
+                "text": {"type": "plain_text", "text": opt["text"], "emoji": True},
+                "value": opt["value"],
+            }
+            for opt in options
+        ],
+    }
+
+
 # Thread parent message blocks
 
 
@@ -78,6 +101,8 @@ def thread_parent_blocks(
     repo: Optional[str] = None,
     branch: Optional[str] = None,
     include_buttons: bool = True,
+    is_closed: bool = False,
+    closure_summary: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Create Block Kit blocks for thread parent message.
 
@@ -89,11 +114,37 @@ def thread_parent_blocks(
         repo: Repository name for context
         branch: Git branch for this thread (enables branch-aware sync)
         include_buttons: Whether to include action buttons
+        is_closed: If True, render closed variant (no buttons, CLOSED status)
+        closure_summary: Optional summary text to display when closed
 
     Returns:
         List of Block Kit blocks
     """
-    # Status emoji mapping
+    # Branch indicator - show prominently for non-main branches
+    branch_indicator = ""
+    if branch and branch != "main":
+        branch_indicator = f" `[{branch}]`"
+
+    # Handle closed threads with distinct visual styling (early return, no buttons)
+    if is_closed:
+        blocks: List[Dict[str, Any]] = [
+            # Strikethrough topic + checkmark for visual distinction
+            _section(f"~🧵 *{topic}*~ ✅{branch_indicator}"),
+            _context([f"⚪ CLOSED • {entry_count} entries archived"]),
+        ]
+        # Closure summary shown prominently
+        if closure_summary:
+            blocks.append(_divider())
+            blocks.append(_section(f"📋 *Resolution*\n{closure_summary}"))
+        # Parseable metadata for watercooler-site auto-discovery
+        if repo:
+            if branch:
+                blocks.append(_context([f"`wc:{repo}/{topic}@{branch}`"]))
+            else:
+                blocks.append(_context([f"`wc:{repo}/{topic}`"]))
+        return blocks  # No action buttons for closed threads
+
+    # Status emoji mapping (for open threads)
     status_emoji = {
         "OPEN": "🟢",
         "IN_REVIEW": "🟡",
@@ -101,9 +152,9 @@ def thread_parent_blocks(
         "BLOCKED": "🔴",
     }.get(status.upper(), "⚪")
 
-    # Header with topic
+    # Header with topic and branch badge
     blocks: List[Dict[str, Any]] = [
-        _section(f"🧵 *{topic}*"),
+        _section(f"🧵 *{topic}*{branch_indicator}"),
     ]
 
     # Status line
@@ -127,17 +178,32 @@ def thread_parent_blocks(
     # Action buttons (for interactive messages)
     if include_buttons:
         # Value encodes topic for action handlers
+        # Format: owner/repo:topic:branch (branch optional)
         action_value = topic
         if repo:
-            action_value = f"{repo}:{topic}"
+            if branch:
+                action_value = f"{repo}:{topic}:{branch}"
+            else:
+                action_value = f"{repo}:{topic}"
 
-        buttons = [
+        # Primary actions row
+        buttons: List[Dict[str, Any]] = [
             _button("✓ Ack", "wc_ack", action_value),
             _button("🔄 Handoff", "wc_handoff", action_value),
+            _button("📝 Add Entry", "wc_add_entry", action_value),
         ]
 
+        # Overflow menu with secondary actions
+        overflow_options = [
+            {"text": "📊 Change Status", "value": f"status:{action_value}"},
+            {"text": "🔗 View in Dashboard", "value": f"dashboard:{action_value}"},
+            {"text": "📋 Copy Thread Link", "value": f"copy_link:{action_value}"},
+        ]
+        buttons.append(_overflow("wc_overflow", overflow_options))
+
+        # Close button only if not already closed
         if status.upper() != "CLOSED":
-            buttons.append(_button("📋 Close", "wc_close", action_value, style="danger"))
+            buttons.append(_button("Close", "wc_close", action_value, style="danger"))
 
         blocks.append(_actions(buttons))
 

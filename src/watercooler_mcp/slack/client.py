@@ -375,6 +375,185 @@ class SlackClient:
         result = self.post_message(channel_id, text, thread_ts=thread_ts)
         return result.get("ts", "")
 
+    # Thread operations
+
+    def get_thread_replies(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        include_parent: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Get all messages in a Slack thread.
+
+        Uses conversations.replies API with pagination to get all replies.
+
+        Args:
+            channel_id: Channel containing the thread
+            thread_ts: Thread parent message timestamp
+            include_parent: If True, include the parent message in results
+
+        Returns:
+            List of message objects sorted by timestamp (oldest first)
+        """
+        messages: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+
+        while True:
+            payload: Dict[str, Any] = {
+                "channel": channel_id,
+                "ts": thread_ts,
+                "limit": 200,
+            }
+            if cursor:
+                payload["cursor"] = cursor
+
+            result = self._request("POST", "conversations.replies", payload)
+            batch = result.get("messages", [])
+
+            # First message is always the parent
+            if not include_parent and batch:
+                batch = [m for m in batch if m.get("ts") != thread_ts]
+
+            messages.extend(batch)
+
+            # Check for pagination
+            response_metadata = result.get("response_metadata", {})
+            cursor = response_metadata.get("next_cursor")
+            if not cursor:
+                break
+
+        # Sort by timestamp (oldest first)
+        messages.sort(key=lambda m: float(m.get("ts", "0")))
+        return messages
+
+    def delete_message(
+        self,
+        channel_id: str,
+        message_ts: str,
+    ) -> bool:
+        """Delete a single message from Slack.
+
+        Uses chat.delete API. Requires appropriate permissions.
+        Bot can only delete its own messages.
+
+        Args:
+            channel_id: Channel containing the message
+            message_ts: Message timestamp to delete
+
+        Returns:
+            True if deleted successfully
+
+        Raises:
+            SlackAPIError: If deletion fails (e.g., message not found,
+                          permission denied)
+        """
+        try:
+            self._request(
+                "POST",
+                "chat.delete",
+                {"channel": channel_id, "ts": message_ts},
+            )
+            return True
+        except SlackAPIError as e:
+            # message_not_found is ok - already deleted
+            if e.error == "message_not_found":
+                logger.debug(f"Message {message_ts} already deleted")
+                return True
+            raise
+
+    def batch_delete_messages(
+        self,
+        channel_id: str,
+        message_timestamps: List[str],
+        batch_size: int = 20,
+        delay_between_batches: float = 1.0,
+    ) -> int:
+        """Delete messages in batches with rate limit awareness.
+
+        Processes messages in batches with configurable delays between
+        batches to avoid Slack rate limits. Handles rate limit errors
+        gracefully by respecting retry_after.
+
+        Args:
+            channel_id: Channel containing the messages
+            message_timestamps: List of message timestamps to delete
+            batch_size: Number of messages per batch (default: 20)
+            delay_between_batches: Seconds to wait between batches (default: 1.0)
+
+        Returns:
+            Number of messages successfully deleted
+        """
+        import time
+
+        deleted = 0
+        total = len(message_timestamps)
+
+        for i in range(0, total, batch_size):
+            batch = message_timestamps[i : i + batch_size]
+
+            for ts in batch:
+                try:
+                    if self.delete_message(channel_id, ts):
+                        deleted += 1
+                except SlackAPIError as e:
+                    if e.error == "ratelimited":
+                        # Respect Slack's retry_after header
+                        retry_after = 1.0
+                        if e.response:
+                            retry_after = float(e.response.get("retry_after", 1))
+                        logger.warning(
+                            f"Rate limited, waiting {retry_after}s before retry"
+                        )
+                        time.sleep(retry_after)
+                        # Retry this message
+                        try:
+                            if self.delete_message(channel_id, ts):
+                                deleted += 1
+                        except SlackAPIError:
+                            logger.error(f"Failed to delete message {ts} after retry")
+                    else:
+                        logger.error(f"Failed to delete message {ts}: {e.error}")
+
+            # Delay between batches to avoid rate limits
+            if i + batch_size < total:
+                time.sleep(delay_between_batches)
+
+        logger.info(f"Batch delete complete: {deleted}/{total} messages deleted")
+        return deleted
+
+    def update_message(
+        self,
+        channel_id: str,
+        message_ts: str,
+        text: str,
+        blocks: Optional[List[Dict]] = None,
+    ) -> Dict[str, Any]:
+        """Update an existing message.
+
+        Uses chat.update API. Bot can only update its own messages.
+
+        Args:
+            channel_id: Channel containing the message
+            message_ts: Message timestamp to update
+            text: New message text (fallback for notifications)
+            blocks: New Block Kit blocks (optional)
+
+        Returns:
+            Updated message object
+
+        Raises:
+            SlackAPIError: If update fails
+        """
+        payload: Dict[str, Any] = {
+            "channel": channel_id,
+            "ts": message_ts,
+            "text": text,
+        }
+        if blocks:
+            payload["blocks"] = blocks
+
+        return self._request("POST", "chat.update", payload)
+
     # User operations
 
     def get_user_info(self, user_id: str) -> Dict[str, Any]:

@@ -489,3 +489,262 @@ def update_thread_parent(
     except Exception as e:
         logger.error(f"Error updating thread parent: {e}")
         return False
+
+
+def teardown_slack_thread(repo: str, topic: str) -> int:
+    """Delete all entry reply messages in a Slack thread.
+
+    Preserves the parent message but clears all replies.
+    Clears entry_message_map in mapping store.
+
+    Args:
+        repo: Repository name
+        topic: Thread topic
+
+    Returns:
+        Number of messages deleted
+
+    Raises:
+        SlackSyncError: If teardown fails due to API error
+    """
+    if not is_sync_enabled():
+        return 0
+
+    try:
+        store = get_mapping_store()
+        mapping = store.get_thread(repo, topic)
+
+        if mapping is None:
+            logger.debug(f"No Slack mapping for {repo}/{topic}, nothing to tear down")
+            return 0
+
+        client = get_slack_client()
+
+        # Get all messages in the thread (excluding parent)
+        replies = client.get_thread_replies(
+            mapping.slack_channel_id,
+            mapping.slack_thread_ts,
+            include_parent=False,
+        )
+
+        deleted_count = 0
+        for message in replies:
+            message_ts = message.get("ts")
+            if message_ts:
+                try:
+                    if client.delete_message(mapping.slack_channel_id, message_ts):
+                        deleted_count += 1
+                except SlackAPIError as e:
+                    # Log but continue - some messages may not be deletable
+                    logger.warning(f"Could not delete message {message_ts}: {e.error}")
+
+        # Clear the entry_message_map in the mapping
+        if mapping.entry_message_map:
+            mapping.entry_message_map.clear()
+            store.set_thread(mapping)
+
+        logger.info(f"Tore down {deleted_count} messages from {repo}/{topic}")
+        return deleted_count
+
+    except SlackAPIError as e:
+        logger.error(f"Slack API error during teardown: {e}")
+        raise SlackSyncError(f"Slack API error: {e.error}") from e
+
+    except Exception as e:
+        logger.error(f"Unexpected error during teardown: {e}")
+        raise SlackSyncError(str(e)) from e
+
+
+def close_thread_slack_representation(
+    repo: str,
+    topic: str,
+    closure_summary: Optional[str] = None,
+    entry_count: int = 0,
+) -> bool:
+    """Update Slack representation for closed thread.
+
+    Updates the parent message to:
+    - Show CLOSED status with ⚪ emoji
+    - Remove all action buttons
+    - Optionally display closure summary
+
+    Args:
+        repo: Repository name
+        topic: Thread topic
+        closure_summary: Optional summary text for the closure
+        entry_count: Number of entries in thread
+
+    Returns:
+        True if updated successfully, False otherwise
+    """
+    if not is_sync_enabled():
+        return False
+
+    try:
+        store = get_mapping_store()
+        mapping = store.get_thread(repo, topic)
+
+        if mapping is None:
+            logger.debug(f"No Slack mapping for {repo}/{topic}, cannot close representation")
+            return False
+
+        client = get_slack_client()
+
+        # Build closed variant of parent message
+        blocks = thread_parent_blocks(
+            topic=topic,
+            status="CLOSED",
+            ball_owner="",
+            entry_count=entry_count,
+            repo=repo,
+            include_buttons=False,
+            is_closed=True,
+            closure_summary=closure_summary,
+        )
+        text = thread_parent_text(topic, "CLOSED", "", entry_count)
+
+        # Update the parent message
+        client.update_message(
+            mapping.slack_channel_id,
+            mapping.slack_thread_ts,
+            text,
+            blocks,
+        )
+
+        logger.info(f"Closed Slack representation for {repo}/{topic}")
+        return True
+
+    except SlackAPIError as e:
+        logger.error(f"Slack API error closing thread representation: {e}")
+        return False
+
+    except Exception as e:
+        logger.error(f"Error closing thread representation: {e}")
+        return False
+
+
+def rebuild_slack_thread(
+    repo: str,
+    topic: str,
+    entries: list,
+    status: str,
+    ball_owner: str,
+    is_closed: bool = False,
+    closure_summary: Optional[str] = None,
+    branch: Optional[str] = None,
+) -> Dict[str, str]:
+    """Rebuild Slack thread from watercooler source.
+
+    Tears down existing messages and reposts entries in chronological order.
+    Useful for:
+    - Recovery from out-of-sequence sync
+    - Fixing corrupted mappings
+    - Full thread refresh
+
+    Args:
+        repo: Repository name
+        topic: Thread topic
+        entries: List of entry dicts with keys:
+            entry_id, agent, role, entry_type, title, body, timestamp
+        status: Thread status
+        ball_owner: Current ball owner
+        is_closed: If True, render closed variant
+        closure_summary: Optional summary for closed threads
+        branch: Git branch for metadata
+
+    Returns:
+        New entry_message_map (entry_id -> message_ts)
+
+    Raises:
+        SlackSyncError: If rebuild fails
+    """
+    if not is_sync_enabled():
+        return {}
+
+    try:
+        store = get_mapping_store()
+        mapping = store.get_thread(repo, topic)
+
+        if mapping is None:
+            logger.warning(f"No Slack mapping for {repo}/{topic}, cannot rebuild")
+            return {}
+
+        client = get_slack_client()
+
+        # Step 1: Tear down existing messages
+        teardown_slack_thread(repo, topic)
+
+        # Step 2: Update parent message
+        blocks = thread_parent_blocks(
+            topic=topic,
+            status=status if not is_closed else "CLOSED",
+            ball_owner=ball_owner if not is_closed else "",
+            entry_count=len(entries),
+            repo=repo,
+            branch=branch,
+            include_buttons=not is_closed,
+            is_closed=is_closed,
+            closure_summary=closure_summary,
+        )
+        text = thread_parent_text(
+            topic,
+            status if not is_closed else "CLOSED",
+            ball_owner if not is_closed else "",
+            len(entries),
+        )
+
+        client.update_message(
+            mapping.slack_channel_id,
+            mapping.slack_thread_ts,
+            text,
+            blocks,
+        )
+
+        # Step 3: Repost entries in chronological order
+        new_entry_map: Dict[str, str] = {}
+
+        for entry in entries:
+            entry_blocks = entry_reply_blocks(
+                entry_id=entry.get("entry_id", ""),
+                agent=entry.get("agent", "Unknown"),
+                role=entry.get("role", "implementer"),
+                entry_type=entry.get("entry_type", "Note"),
+                title=entry.get("title", ""),
+                body=entry.get("body", ""),
+                timestamp=entry.get("timestamp", ""),
+                spec=entry.get("spec"),
+            )
+            entry_text = entry_reply_text(
+                entry.get("agent", "Unknown"),
+                entry.get("role", "implementer"),
+                entry.get("entry_type", "Note"),
+                entry.get("title", ""),
+                entry.get("body", ""),
+                entry.get("timestamp", ""),
+            )
+
+            result = client.post_message(
+                channel_id=mapping.slack_channel_id,
+                text=entry_text,
+                blocks=entry_blocks,
+                thread_ts=mapping.slack_thread_ts,
+            )
+            message_ts = result.get("ts", "")
+
+            if message_ts and entry.get("entry_id"):
+                new_entry_map[entry["entry_id"]] = message_ts
+
+        # Step 4: Update mapping with new entry_message_map
+        mapping.entry_message_map = new_entry_map
+        store.set_thread(mapping)
+
+        logger.info(f"Rebuilt Slack thread {repo}/{topic} with {len(entries)} entries")
+        return new_entry_map
+
+    except SlackAPIError as e:
+        logger.error(f"Slack API error during rebuild: {e}")
+        raise SlackSyncError(f"Slack API error: {e.error}") from e
+
+    except Exception as e:
+        logger.error(f"Unexpected error during rebuild: {e}")
+        raise SlackSyncError(str(e)) from e
