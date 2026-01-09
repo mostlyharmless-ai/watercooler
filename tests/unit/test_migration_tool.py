@@ -653,16 +653,20 @@ This is a small entry that fits in a single chunk.
                     assert isinstance(prev_uuids, list)
                     assert len(prev_uuids) == 1
 
-    async def test_single_chunk_entry_no_linking(
+    async def test_small_entry_has_header_chunk(
         self, mock_context, mock_threads_dir_small_entry
     ):
-        """Single-chunk entries should not use episode linking."""
+        """Small entries get header chunk + body chunk with watercooler_preset."""
         from watercooler_mcp.tools.migration import _migrate_to_memory_backend_impl
 
+        call_count = [0]
+
+        async def mock_add_episode(**kwargs):
+            call_count[0] += 1
+            return {"episode_uuid": f"ep-{call_count[0]}"}
+
         mock_graphiti = MagicMock()
-        mock_graphiti.add_episode_direct = AsyncMock(
-            return_value={"episode_uuid": "ep-single"}
-        )
+        mock_graphiti.add_episode_direct = AsyncMock(side_effect=mock_add_episode)
 
         with patch(
             "watercooler_mcp.tools.migration._check_backend_availability",
@@ -678,10 +682,19 @@ This is a small entry that fits in a single chunk.
                 dry_run=False,
             )
 
-            # Single chunk should have previous_episode_uuids=None
+            # With watercooler_preset, even small entries get header + body = 2 chunks
             calls = mock_graphiti.add_episode_direct.call_args_list
-            assert len(calls) == 1
-            assert calls[0].kwargs.get("previous_episode_uuids") is None
+            assert len(calls) == 2
+
+            # First chunk (header) should have previous_episode_uuids=None
+            header_call = calls[0]
+            assert header_call.kwargs.get("previous_episode_uuids") is None
+            # Header content starts with "agent:"
+            assert "agent:" in header_call.kwargs.get("episode_body", "")
+
+            # Second chunk (body) should link to header
+            body_call = calls[1]
+            assert body_call.kwargs.get("previous_episode_uuids") == ["ep-1"]
 
     async def test_dry_run_estimates_chunks(
         self, mock_context, mock_threads_dir_large_entry

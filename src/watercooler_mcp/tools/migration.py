@@ -22,8 +22,8 @@ from fastmcp import Context
 
 from watercooler.thread_entries import parse_thread_entries, ThreadEntry
 from watercooler_memory.backends import TransientError, BackendError
-from watercooler_memory.chunker import chunk_text, ChunkerConfig
-import hashlib
+from watercooler_memory.chunker import chunk_entry, ChunkerConfig, ChunkNode
+from watercooler_memory.schema import EntryNode
 
 logger = logging.getLogger(__name__)
 
@@ -186,52 +186,62 @@ class CheckpointV2:
         return [c.episode_uuid for c in ep.chunks]
 
 
-@dataclass
-class MigrationChunk:
-    """Simple chunk representation for migration.
+def _entry_dict_to_node(entry: Dict[str, Any], index: int = 0) -> EntryNode:
+    """Convert a parsed entry dict to an EntryNode.
 
-    Attributes:
-        text: Chunk text content
-        chunk_id: SHA256 hash of the text (truncated)
-        index: 0-based position within entry
-        token_count: Number of tokens in chunk
+    Args:
+        entry: Parsed entry dict from _parse_thread_entries_from_file
+        index: Entry index within thread
+
+    Returns:
+        EntryNode suitable for chunking
     """
-    text: str
-    chunk_id: str
-    index: int
-    token_count: int
+    return EntryNode(
+        entry_id=entry.get("id", f"unknown-{index}"),
+        thread_id=entry.get("topic", ""),
+        index=index,
+        agent=entry.get("agent"),
+        role=entry.get("role"),
+        entry_type=entry.get("entry_type"),
+        title=entry.get("title"),
+        timestamp=entry.get("timestamp"),
+        body=entry.get("body", ""),
+    )
 
 
 def _chunk_entry_for_migration(
-    body: str,
+    entry: Dict[str, Any],
+    index: int = 0,
     max_tokens: int = DEFAULT_CHUNK_MAX_TOKENS,
     overlap: int = DEFAULT_CHUNK_OVERLAP,
-) -> List[MigrationChunk]:
-    """Chunk an entry body for migration.
+) -> List[ChunkNode]:
+    """Chunk an entry for migration using watercooler_preset.
+
+    Uses the same chunking approach as index_graphiti.py:
+    - ChunkerConfig.watercooler_preset() with include_header=True
+    - Creates header chunk with metadata followed by body chunks
+    - Returns ChunkNode objects with full metadata
 
     Args:
-        body: Entry body text
+        entry: Parsed entry dict from _parse_thread_entries_from_file
+        index: Entry index within thread
         max_tokens: Maximum tokens per chunk
         overlap: Overlap tokens between chunks
 
     Returns:
-        List of MigrationChunk objects
+        List of ChunkNode objects (header chunk first, then body chunks)
     """
-    config = ChunkerConfig(max_tokens=max_tokens, overlap=overlap)
-    raw_chunks = chunk_text(body, config)  # Returns list of (text, token_count) tuples
+    # Convert to EntryNode for chunk_entry()
+    entry_node = _entry_dict_to_node(entry, index)
 
-    chunks = []
-    for i, (chunk_text_content, token_count) in enumerate(raw_chunks):
-        # Create chunk_id as SHA256 hash of content
-        chunk_id = hashlib.sha256(chunk_text_content.encode()).hexdigest()[:16]
-        chunks.append(MigrationChunk(
-            text=chunk_text_content,
-            chunk_id=chunk_id,
-            index=i,
-            token_count=token_count,
-        ))
+    # Use watercooler_preset for consistent chunking with MemoryGraph/LeanRAG
+    config = ChunkerConfig.watercooler_preset(
+        max_tokens=max_tokens,
+        overlap=overlap,
+    )
 
-    return chunks
+    # chunk_entry returns ChunkNode objects with header chunk first
+    return chunk_entry(entry_node, config)
 
 
 def _validate_backend(backend: str) -> Optional[str]:
@@ -272,7 +282,7 @@ def _check_backend_availability(backend: str) -> Dict[str, Any]:
             if not config:
                 return {"available": False, "error": "Graphiti not enabled"}
 
-            graphiti_backend = mem.get_graphiti_backend()
+            graphiti_backend = mem.get_graphiti_backend(config)
             if not graphiti_backend:
                 return {"available": False, "error": "Graphiti backend unavailable"}
 
@@ -300,7 +310,10 @@ def _get_migration_backend(backend: str):
     if backend == "graphiti":
         from .. import memory as mem
 
-        return mem.get_graphiti_backend()
+        config = mem.load_graphiti_config()
+        if not config:
+            return None
+        return mem.get_graphiti_backend(config)
 
     return None
 
@@ -641,7 +654,7 @@ async def _migrate_to_memory_backend_impl(
 
         try:
             entries = _parse_thread_entries_from_file(thread_file)
-            for entry in entries:
+            for entry_idx, entry in enumerate(entries):
                 entry_id = entry.get("id", "")
                 body = entry.get("body", "").strip()
 
@@ -653,8 +666,8 @@ async def _migrate_to_memory_backend_impl(
                         result["entries_skipped"] += 1
                         continue
 
-                # Estimate chunks for dry run
-                chunks = _chunk_entry_for_migration(body, chunk_max_tokens, chunk_overlap)
+                # Estimate chunks for dry run (uses watercooler_preset with header)
+                chunks = _chunk_entry_for_migration(entry, entry_idx, chunk_max_tokens, chunk_overlap)
 
                 would_migrate.append({
                     "topic": entry.get("topic"),
@@ -663,6 +676,7 @@ async def _migrate_to_memory_backend_impl(
                     "agent": entry.get("agent"),
                     "body_preview": body[:100] if body else "",
                     "estimated_chunks": len(chunks),
+                    "has_header_chunk": len(chunks) > 0 and chunks[0].text.startswith("agent:"),
                 })
 
             result["threads_processed"] += 1
@@ -692,7 +706,7 @@ async def _migrate_to_memory_backend_impl(
 
         try:
             entries = _parse_thread_entries_from_file(thread_file)
-            for entry in entries:
+            for entry_idx, entry in enumerate(entries):
                 entry_id = entry.get("id", "")
 
                 # Check if already complete
@@ -738,8 +752,8 @@ async def _migrate_to_memory_backend_impl(
                 if role:
                     base_source_desc += f" ({role})"
 
-                # Chunk the entry body
-                chunks = _chunk_entry_for_migration(body, chunk_max_tokens, chunk_overlap)
+                # Chunk entry using watercooler_preset (header chunk + body chunks)
+                chunks = _chunk_entry_for_migration(entry, entry_idx, chunk_max_tokens, chunk_overlap)
                 total_chunks = len(chunks)
 
                 # Get or create entry progress
