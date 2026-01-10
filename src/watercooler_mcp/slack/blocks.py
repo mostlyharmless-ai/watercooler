@@ -195,6 +195,7 @@ def thread_parent_blocks(
 
         # Overflow menu with secondary actions
         overflow_options = [
+            {"text": "🔄 Rebuild Thread", "value": f"rebuild:{action_value}"},
             {"text": "📊 Change Status", "value": f"status:{action_value}"},
             {"text": "🔗 View in Dashboard", "value": f"dashboard:{action_value}"},
             {"text": "📋 Copy Thread Link", "value": f"copy_link:{action_value}"},
