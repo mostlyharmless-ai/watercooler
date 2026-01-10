@@ -1,5 +1,26 @@
 """Block Kit message templates for Slack.
 
+**DEPRECATED - REFERENCE IMPLEMENTATION ONLY**
+
+This module is preserved as a reference implementation of Block Kit formatting
+for local development and testing. The authoritative implementation for the
+multi-user Slack integration is:
+
+    watercooler-site/lib/slackBlocks.ts
+
+Changes to this file will NOT affect the production Slack integration.
+
+For multi-user service changes, edit the TypeScript implementation.
+
+Historical Context:
+- Originally created for local MCP server interactions
+- Ported to TypeScript in watercooler-site for multi-user scalability
+- Maintained here for reference and local testing purposes
+
+Last synchronized: 2026-01-10
+
+---
+
 Provides formatted message blocks for:
 - Thread parent messages (topic header)
 - Entry replies (structured content)

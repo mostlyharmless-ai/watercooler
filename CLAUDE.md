@@ -493,6 +493,38 @@ python3 -m watercooler_mcp
 7. **Error handling**: Provide clear, actionable error messages
 8. **Documentation**: Keep docs up-to-date with code changes
 
+## Slack Integration Architecture
+
+### Block Kit Formatting
+
+The Slack Block Kit formatting is implemented in **TypeScript** for the multi-user service:
+- **Authoritative**: `watercooler-site/lib/slackBlocks.ts`
+- **Reference (deprecated)**: `src/watercooler_mcp/slack/blocks.py`
+
+The Python implementation is preserved for reference and local testing but is NOT used
+by the production Slack integration. Changes to Python blocks.py will not affect the
+deployed service.
+
+### Why TypeScript?
+
+1. **Scalability**: Multi-user service requires serverless deployment (Vercel)
+2. **Consistency**: Single codebase for all Slack interactions (events, commands, formatting)
+3. **Collision protection**: Database-level concurrency control not available in local Python
+4. **Deployment**: No mixed-language deployment complexity
+
+### Concurrency Control
+
+The Slack integration uses optimistic locking to prevent race conditions during rebuild operations:
+- **Schema**: `SlackThreadMapping` table includes `rebuildVersion`, `rebuildLockedAt`, `rebuildLockedBy`
+- **Lock timeout**: 5 minutes (stale locks automatically cleaned)
+- **Version increment**: On successful rebuild completion
+- **User feedback**: Ephemeral messages when rebuild already in progress
+
+### Local Development
+
+For local watercooler CLI work, the Python MCP server remains the primary interface.
+Slack integration testing should use the TypeScript implementation in watercooler-site.
+
 ## Watercooler Tool Requirements
 
 **Mandatory Tool Usage**: When addressing "threads", "watercooler threads", or "wc" (or any variation), you MUST use the watercooler-cloud MCP tools exclusively. Do not attempt to read, write, or manipulate thread files directly.
