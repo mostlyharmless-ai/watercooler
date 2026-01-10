@@ -283,9 +283,13 @@ class GraphitiBackend(MemoryBackend):
             raise BackendError(f"Failed to create Graphiti client: {e}") from e
 
         try:
+            # Sanitize episode_body to prevent RediSearch operator errors during
+            # entity deduplication (same as _map_entries_to_episodes does for index())
+            sanitized_body = self._sanitize_redisearch_operators(episode_body)
+
             result = await graphiti.add_episode(
                 name=name,
-                episode_body=episode_body,
+                episode_body=sanitized_body,
                 source_description=source_description,
                 reference_time=reference_time,
                 group_id=group_id,

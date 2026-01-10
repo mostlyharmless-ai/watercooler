@@ -790,9 +790,12 @@ async def _migrate_to_memory_backend_impl(
                                 source_desc += f" - {entry_type}"
 
                         # Get previous episode UUIDs for linking
-                        # First chunk: None (let Graphiti use default context)
+                        # First chunk: [] (no previous context - prevents unbounded context growth)
                         # Subsequent chunks: link to previous chunk's episode
-                        previous_uuids = None
+                        # Note: Using [] instead of None prevents Graphiti from retrieving
+                        # RELEVANT_SCHEMA_LIMIT (10) previous episodes, which can exceed
+                        # LLM context limits. Cross-entry dedup still works via graph merges.
+                        previous_uuids: list[str] = []
                         if i > 0 and entry_progress.chunks:
                             # Link to the previous chunk's episode
                             previous_uuids = [entry_progress.chunks[-1].episode_uuid]
