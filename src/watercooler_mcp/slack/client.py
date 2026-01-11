@@ -24,6 +24,7 @@ from .mapping import (
     SlackMappingStore,
     get_mapping_store,
 )
+from .token_service import get_workspace_token, is_token_service_configured
 
 logger = logging.getLogger(__name__)
 
@@ -42,23 +43,47 @@ class SlackClient:
 
     Uses bot token for authentication. All methods are synchronous
     to keep the implementation simple - async can be added later if needed.
+
+    Token resolution order:
+    1. Explicit bot_token parameter
+    2. Token service API (if workspace_id provided and service configured)
+    3. WATERCOOLER_SLACK_BOT_TOKEN env var / config file
     """
 
     BASE_URL = "https://slack.com/api"
     DEFAULT_TIMEOUT = 10.0
 
-    def __init__(self, bot_token: Optional[str] = None):
+    def __init__(
+        self,
+        bot_token: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ):
         """Initialize Slack client.
 
         Args:
-            bot_token: Slack bot token (xoxb-...). If None, reads from config.
+            bot_token: Slack bot token (xoxb-...). If None, tries other sources.
+            workspace_id: Slack workspace ID (T...). Used to fetch token from
+                         token service if bot_token is not provided.
         """
+        self._workspace_id = workspace_id
+
+        # Token resolution
+        if bot_token is None and workspace_id and is_token_service_configured():
+            # Try token service first for multi-workspace support
+            bot_token = get_workspace_token(workspace_id)
+            if bot_token:
+                logger.info(f"Using token from token service for workspace {workspace_id}")
+
         if bot_token is None:
+            # Fall back to config/env var
             config = get_slack_config()
             bot_token = config.get("bot_token", "") if config else ""
 
         if not bot_token:
-            raise ValueError("Slack bot token not configured")
+            raise ValueError(
+                "Slack bot token not configured. Set WATERCOOLER_SLACK_BOT_TOKEN "
+                "or configure token service (WATERCOOLER_TOKEN_API_URL + WATERCOOLER_TOKEN_API_KEY)"
+            )
 
         self._token = bot_token
         self._store = get_mapping_store()
@@ -623,19 +648,40 @@ class SlackClient:
 
 
 # Convenience function for one-off operations
-_client: Optional[SlackClient] = None
+# Cache keyed by workspace_id (None for default/single workspace)
+_client_cache: Dict[Optional[str], SlackClient] = {}
 
 
-def get_slack_client(bot_token: Optional[str] = None) -> SlackClient:
-    """Get or create the Slack client singleton.
+def get_slack_client(
+    bot_token: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+) -> SlackClient:
+    """Get or create a Slack client.
+
+    For multi-workspace support, pass workspace_id to get a client
+    with the correct token for that workspace.
 
     Args:
-        bot_token: Optional token override
+        bot_token: Optional token override (bypasses token service)
+        workspace_id: Slack workspace ID for multi-workspace support
 
     Returns:
         SlackClient instance
     """
-    global _client
-    if _client is None or bot_token:
-        _client = SlackClient(bot_token)
-    return _client
+    # Explicit token always creates new client (no caching)
+    if bot_token:
+        return SlackClient(bot_token=bot_token, workspace_id=workspace_id)
+
+    # Check cache
+    if workspace_id in _client_cache:
+        return _client_cache[workspace_id]
+
+    # Create and cache new client
+    client = SlackClient(workspace_id=workspace_id)
+    _client_cache[workspace_id] = client
+    return client
+
+
+def clear_client_cache() -> None:
+    """Clear the client cache. Useful for testing."""
+    _client_cache.clear()

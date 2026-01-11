@@ -28,6 +28,13 @@ from watercooler_mcp.slack.client import (
     SlackClient,
     SlackAPIError,
     get_slack_client,
+    clear_client_cache,
+)
+from watercooler_mcp.slack.token_service import (
+    get_workspace_token,
+    is_token_service_configured,
+    clear_token_cache,
+    invalidate_workspace_token,
 )
 from watercooler_mcp.slack.blocks import (
     thread_parent_blocks,
@@ -64,6 +71,12 @@ __all__ = [
     "SlackClient",
     "SlackAPIError",
     "get_slack_client",
+    "clear_client_cache",
+    # Token service (multi-workspace)
+    "get_workspace_token",
+    "is_token_service_configured",
+    "clear_token_cache",
+    "invalidate_workspace_token",
     # Block Kit templates (Phase 2+)
     "thread_parent_blocks",
     "thread_parent_text",
