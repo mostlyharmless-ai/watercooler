@@ -67,6 +67,21 @@ def _require_context(code_path: str) -> tuple[str | None, ThreadContext | None]:
         if drive.isalpha() and code_path[2] == "/":
             code_path = f"{drive}:{code_path[2:].replace('/', os.sep)}"
 
+    # Detect if a threads repo was passed instead of a code repo
+    code_path_obj = Path(code_path).resolve()
+    if code_path_obj.name.endswith("-threads"):
+        # Check if a matching code repo exists (same path without -threads suffix)
+        potential_code_repo = code_path_obj.parent / code_path_obj.name[:-8]  # Remove "-threads"
+        if potential_code_repo.exists() and potential_code_repo.is_dir():
+            return (
+                f"Error: code_path appears to be a threads repo, not a code repo.\n"
+                f"You passed: {code_path}\n"
+                f"Did you mean: {potential_code_repo}\n\n"
+                f"The code_path parameter should point to your code repository,\n"
+                f"not the threads repository. The threads repo is managed automatically.",
+                None,
+            )
+
     if config.env.get_bool("WATERCOOLER_DEBUG_CODE_PATH", False):
         log_dir = config.env.get("WATERCOOLER_DEBUG_LOG_DIR", "")
         log_path = (
