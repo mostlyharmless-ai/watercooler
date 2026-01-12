@@ -33,12 +33,11 @@ The Slack integration uses a **Git-Native** architecture where watercooler-site 
 │                    GIT-NATIVE ARCHITECTURE                       │
 └─────────────────────────────────────────────────────────────────┘
 
-                    ┌─────────────────┐
-                    │  Threads Repo   │
-                    │  (GitHub)       │
-                    │  Source of      │
-                    │  Truth          │
-                    └────────┬────────┘
+                    ┌──────────────────────────┐
+                    │  Baseline Graph (JSONL)  │
+                    │  in Threads Repo (GitHub)│
+                    │  Source of Truth         │
+                    └───────────┬──────────────┘
                              │
            ┌─────────────────┼─────────────────┐
            │                 │                 │
@@ -64,7 +63,7 @@ The Slack integration uses a **Git-Native** architecture where watercooler-site 
 **Key Benefits:**
 - No separate HTTP server to deploy or maintain
 - No infrastructure costs beyond Vercel (free tier works)
-- Git remains the single source of truth
+- Baseline graph JSONL in Git remains the single source of truth (markdown is a human projection)
 - All changes converge on the same repository
 - Stateless architecture (Vercel-friendly)
 

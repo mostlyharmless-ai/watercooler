@@ -655,11 +655,15 @@ def _load_thread_entries_graph_first(
     topic: str,
     context: ThreadContext,
 ) -> tuple[str | None, list[ThreadEntry]]:
-    """Load thread entries, trying graph first with markdown fallback.
+    """Load thread entries from canonical graph JSONL, with legacy markdown backfill.
 
-    This provides graph-accelerated reads while maintaining markdown as
-    source of truth. If the graph is unavailable or stale, falls back
-    to direct markdown parsing.
+    Canonical source of truth is the baseline graph JSONL (`graph/baseline/*`) in the
+    threads repo. Markdown is a derived, human-friendly projection.
+
+    This function prefers graph reads. If graph data is missing/stale (e.g., older
+    repos or incomplete backfills), it may temporarily fall back to markdown parsing
+    to keep UX usable, and optionally auto-repair the graph from markdown. That
+    fallback path is compatibility-only and should shrink over time.
 
     Args:
         topic: Thread topic
@@ -763,7 +767,7 @@ def _list_threads_graph_first(
     threads_dir: Path,
     open_only: bool | None = None,
 ) -> list[tuple[str, str, str, str, Path, bool]]:
-    """List threads, trying graph first with markdown fallback.
+    """List threads from canonical graph JSONL, with legacy markdown backfill.
 
     Args:
         threads_dir: Threads directory

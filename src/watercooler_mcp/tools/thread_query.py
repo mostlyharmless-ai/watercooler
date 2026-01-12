@@ -127,7 +127,7 @@ def _list_threads_impl(
             log_debug("list_threads created empty threads directory")
             return ToolResult(content=[TextContent(type="text", text=f"No threads found. Threads directory created at: {threads_dir}\n\nCreate your first thread with watercooler_say.")])
 
-        # Get thread list (graph-first with markdown fallback)
+        # Get thread list (canonical graph-first; markdown is legacy/backfill only)
         scan_start = time.time()
         threads = _list_threads_graph_first(threads_dir, open_only=open_only)
         scan_elapsed = time.time() - scan_start

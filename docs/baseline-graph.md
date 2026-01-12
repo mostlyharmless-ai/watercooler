@@ -1,14 +1,17 @@
 # Baseline Graph Module
 
-**Free-tier knowledge graph generation for Watercooler threads.**
+**Baseline graph JSONL (canonical representation) for Watercooler collaboration.**
 
-The baseline graph module converts Watercooler threads into a lightweight knowledge graph format (JSONL) using local LLMs or pure extractive summarization—no API costs required.
+The baseline graph module maintains Watercooler’s canonical, git-friendly graph representation in JSONL.
+Markdown thread files remain available as a **human projection**, but the baseline graph JSONL is the
+authoritative record going forward.
 
 ## Overview
 
 ### What It Does
 
-- Parses Watercooler thread files and extracts structured metadata
+- Maintains a canonical graph representation of threads and entries (JSONL)
+- Optionally parses markdown thread projections (for backfill / legacy import)
 - Generates summaries for threads and entries (LLM or extractive)
 - Exports to JSONL format suitable for graph databases or visualization
 - Extracts cross-references (file paths, PR numbers, commit SHAs)

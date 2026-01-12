@@ -1,6 +1,8 @@
 # Memory Module
 
-The `watercooler_memory` module provides tools for building a memory graph from watercooler threads, enabling semantic search, entity extraction, and integration with LeanRAG.
+The `watercooler_memory` module provides tools for building higher-tier memory systems
+from Watercooler’s canonical **baseline graph JSONL** (and its human markdown projections),
+enabling semantic search, entity extraction, and integration with LeanRAG.
 
 ## Installation
 

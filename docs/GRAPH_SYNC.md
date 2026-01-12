@@ -1,10 +1,19 @@
 # Watercooler Graph Sync
 
-This document describes the automatic graph synchronization system that keeps the baseline knowledge graph in sync with markdown thread files.
+This document describes the synchronization contract between Watercooler’s
+**baseline graph (JSONL)** and the **human-readable markdown thread view**.
+
+**Forward-looking contract (source of truth):**
+- **Baseline graph JSONL is canonical** (`graph/baseline/*` in the threads repo)
+- **Markdown is a derived projection** (maintained for human usability)
 
 ## Overview
 
-Every MCP write operation (`say`, `ack`, `handoff`, `set_status`) automatically updates the baseline graph in addition to the markdown files. This enables:
+Every write operation (`say`, `ack`, `handoff`, `set_status`) produces a canonical
+update to the baseline graph JSONL, and then updates (or regenerates) the markdown
+projection.
+
+This enables:
 
 - **Fast queries**: Read operations can query the graph instead of parsing markdown
 - **Semantic search**: Graph nodes include embeddings for similarity search
@@ -14,35 +23,31 @@ Every MCP write operation (`say`, `ack`, `handoff`, `set_status`) automatically 
 ## Architecture
 
 ```
-MCP Write Operation
-       │
-       ▼
-┌─────────────────┐
-│  Markdown Write │  ← Source of truth
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   Graph Sync    │  ← Derived index (non-blocking)
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   JSONL Export  │  ← Git-friendly storage
-└─────────────────┘
+Write Operation
+      │
+      ▼
+┌──────────────────────┐
+│ Baseline Graph Write │  ← Source of truth (JSONL)
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ Markdown Projection  │  ← Derived view (human)
+└──────────────────────┘
 ```
 
 ### Key Principles
 
-1. **Markdown is source of truth** - Graph is a derived index
-2. **Non-blocking sync** - Graph failures don't block markdown writes
-3. **Atomic operations** - JSONL writes use temp file + rename
-4. **Eventually consistent** - Reconciliation tools fix drift
-5. **Per-topic locking** - Concurrent writes serialized per topic
+1. **Graph JSONL is source of truth** - Markdown is a derived view
+2. **Entry validity** - An entry is “real” only when it exists in the graph JSONL
+3. **Non-blocking projection** - Markdown projection failures do not invalidate the graph write
+4. **Atomic operations** - JSONL writes use temp file + rename (and projections should be atomic too)
+5. **Eventually consistent** - Reconciliation tools fix drift between graph and projections
+6. **Per-topic locking** - Concurrent writes serialized per topic
 
 ## Storage Format
 
-Graph data is stored in JSONL format at `{threads-repo}/graph/baseline/`:
+Canonical graph data is stored in JSONL format at `{threads-repo}/graph/baseline/`:
 
 ```
 graph/baseline/
@@ -120,20 +125,19 @@ Each topic tracks its sync status in `sync_state.json`:
 
 | Status | Description |
 |--------|-------------|
-| `ok` | Graph is in sync with markdown |
-| `error` | Sync failed - see error_message |
-| `pending` | Sync queued but not yet complete |
+| `ok` | Markdown projection is in sync with the graph |
+| `error` | Projection failed - see error_message |
+| `pending` | Projection queued but not yet complete |
 
 ## Failure Handling
 
-When graph sync fails:
+When markdown projection fails:
 
-1. **Error is logged** but write operation succeeds
-2. **Status marked as `error`** in sync state
-3. **Error message preserved** for debugging
-4. **Reconciliation available** via CLI or MCP tool
+1. **Error is logged** and recorded in sync state
+2. **Graph write remains authoritative**
+3. **Reconciliation can regenerate markdown from graph**
 
-This ensures graph issues never block thread operations.
+This ensures projection issues never corrupt or block the canonical record.
 
 ## Health Checking
 
@@ -155,7 +159,7 @@ Health report includes:
 
 ## Reconciliation
 
-Fix graph drift by reconciling with markdown:
+Fix drift by reconciling markdown projections with the graph:
 
 ```python
 from watercooler.baseline_graph.sync import reconcile_graph
@@ -169,9 +173,8 @@ results = reconcile_graph(threads_dir, topics=["feature-auth"])
 
 Reconciliation:
 1. Identifies stale/error topics
-2. Re-parses markdown files
-3. Rebuilds graph nodes/edges
-4. Updates sync state
+2. Rebuilds markdown projections from graph JSONL
+3. Updates sync state
 
 ## Configuration
 
