@@ -678,6 +678,8 @@ def _load_thread_entries_graph_first(
     if _use_graph_for_reads(threads_dir):
         try:
             result = read_thread_from_graph(threads_dir, topic)
+            if not result:
+                log_debug(f"[GRAPH] Topic '{topic}' not in graph, falling back to markdown")
             if result:
                 graph_thread, graph_entries = result
                 # Graph entries may not have full body - need to get from markdown
@@ -760,6 +762,7 @@ def _load_thread_entries_graph_first(
             )
 
     # Fallback to markdown parsing
+    log_debug(f"[GRAPH] Using markdown fallback for '{topic}' entries")
     return _load_thread_entries(topic, context)
 
 
@@ -780,6 +783,8 @@ def _list_threads_graph_first(
     if _use_graph_for_reads(threads_dir):
         try:
             graph_threads = list_threads_from_graph(threads_dir, open_only)
+            if not graph_threads:
+                log_debug("[GRAPH] No threads in graph, falling back to markdown")
             if graph_threads:
                 # Convert to expected tuple format
                 result = []
@@ -806,6 +811,7 @@ def _list_threads_graph_first(
             )
 
     # Fallback to markdown
+    log_debug("[GRAPH] Using markdown fallback for list_threads")
     return commands.list_threads(threads_dir=threads_dir, open_only=open_only)
 
 

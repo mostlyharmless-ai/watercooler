@@ -56,6 +56,8 @@ from .sync import (
     record_graph_sync_error,
     check_graph_health,
     reconcile_graph,
+    backfill_missing,
+    BackfillResult,
 )
 
 from .search import (
@@ -110,6 +112,8 @@ __all__ = [
     "record_graph_sync_error",
     "check_graph_health",
     "reconcile_graph",
+    "backfill_missing",
+    "BackfillResult",
     # Search
     "SearchQuery",
     "SearchResult",

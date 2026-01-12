@@ -995,6 +995,191 @@ def reconcile_graph(
     return results
 
 
+@dataclass
+class BackfillResult:
+    """Result of backfill operation."""
+
+    threads_processed: int = 0
+    threads_missing_summary: int = 0
+    threads_summary_generated: int = 0
+    entries_processed: int = 0
+    entries_missing_summary: int = 0
+    entries_summary_generated: int = 0
+    entries_missing_embedding: int = 0
+    entries_embedding_generated: int = 0
+    errors: List[str] = field(default_factory=list)
+
+
+def backfill_missing(
+    threads_dir: Path,
+    backfill_summaries: bool = True,
+    backfill_embeddings: bool = True,
+    batch_size: int = 10,
+) -> BackfillResult:
+    """Backfill missing summaries and embeddings in existing graph nodes.
+
+    Unlike reconcile_graph which syncs stale threads from markdown, this function
+    updates existing graph nodes that are missing summaries or embeddings.
+
+    Args:
+        threads_dir: Threads directory
+        backfill_summaries: Generate missing summaries (thread + entry)
+        backfill_embeddings: Generate missing entry embeddings
+        batch_size: Number of items to process before writing (for progress)
+
+    Returns:
+        BackfillResult with counts of processed/generated items
+    """
+    from watercooler.baseline_graph.reader import get_graph_dir
+
+    result = BackfillResult()
+    graph_dir = get_graph_dir(threads_dir)
+    nodes_file = graph_dir / "nodes.jsonl"
+
+    if not nodes_file.exists():
+        result.errors.append(f"Graph not found at {nodes_file}")
+        return result
+
+    # Load all nodes
+    nodes: List[Dict[str, Any]] = []
+    with open(nodes_file) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    nodes.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    # Separate threads and entries
+    thread_nodes = [n for n in nodes if n.get("type") == "thread"]
+    entry_nodes = [n for n in nodes if n.get("type") == "entry"]
+
+    result.threads_processed = len(thread_nodes)
+    result.entries_processed = len(entry_nodes)
+
+    # Check service availability
+    llm_available = False
+    embedding_available = False
+
+    if backfill_summaries:
+        llm_available = is_llm_service_available()
+        if not llm_available:
+            logger.warning("LLM service not available, skipping summary backfill")
+
+    if backfill_embeddings:
+        embedding_available = is_embedding_available()
+        if not embedding_available:
+            logger.warning("Embedding service not available, skipping embedding backfill")
+
+    if not llm_available and not embedding_available:
+        result.errors.append("No services available for backfill")
+        return result
+
+    # Build index of nodes by ID for updates
+    nodes_by_id: Dict[str, Dict[str, Any]] = {n.get("id", ""): n for n in nodes}
+    updated = False
+
+    # Get summarizer config
+    config = create_summarizer_config()
+
+    # Backfill thread summaries
+    if backfill_summaries and llm_available:
+        for thread in thread_nodes:
+            if not thread.get("summary"):
+                result.threads_missing_summary += 1
+                topic = thread.get("topic", "")
+                try:
+                    # Get entries for this thread to generate summary
+                    thread_entries = [
+                        e for e in entry_nodes
+                        if e.get("thread_topic") == topic
+                    ]
+                    if thread_entries:
+                        # Format entries for summarization
+                        entries_data = [
+                            {
+                                "body": e.get("body", ""),
+                                "title": e.get("title", ""),
+                                "type": e.get("entry_type", "Note"),
+                            }
+                            for e in sorted(thread_entries, key=lambda x: x.get("index", 0))
+                        ]
+                        summary = summarize_thread(
+                            entries_data,
+                            thread_title=thread.get("title", topic),
+                            config=config,
+                        )
+                        if summary:
+                            thread["summary"] = summary
+                            result.threads_summary_generated += 1
+                            updated = True
+                            logger.debug(f"Generated summary for thread {topic}")
+                except Exception as e:
+                    result.errors.append(f"Thread {topic}: {e}")
+
+    # Backfill entry summaries and embeddings
+    for entry in entry_nodes:
+        entry_id = entry.get("entry_id", entry.get("id", ""))
+
+        # Summary backfill
+        if backfill_summaries and llm_available:
+            if not entry.get("summary"):
+                result.entries_missing_summary += 1
+                try:
+                    summary = summarize_entry(
+                        entry_body=entry.get("body", ""),
+                        entry_title=entry.get("title", ""),
+                        entry_type=entry.get("entry_type", "Note"),
+                        config=config,
+                    )
+                    if summary:
+                        entry["summary"] = summary
+                        result.entries_summary_generated += 1
+                        updated = True
+                except Exception as e:
+                    result.errors.append(f"Entry {entry_id} summary: {e}")
+
+        # Embedding backfill
+        if backfill_embeddings and embedding_available:
+            if not entry.get("embedding"):
+                result.entries_missing_embedding += 1
+                try:
+                    text = entry.get("body", "")
+                    if entry.get("title"):
+                        text = f"{entry['title']}\n\n{text}"
+                    embedding = generate_embedding(text)
+                    if embedding:
+                        entry["embedding"] = embedding
+                        result.entries_embedding_generated += 1
+                        updated = True
+                except Exception as e:
+                    result.errors.append(f"Entry {entry_id} embedding: {e}")
+
+    # Write updated nodes back
+    if updated:
+        # Write atomically via temp file
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=graph_dir,
+            suffix=".jsonl",
+            delete=False,
+        ) as tmp:
+            for node in nodes:
+                tmp.write(json.dumps(node, separators=(",", ":")) + "\n")
+            tmp_path = Path(tmp.name)
+
+        # Atomic rename
+        tmp_path.rename(nodes_file)
+        logger.info(
+            f"Backfill complete: {result.threads_summary_generated} thread summaries, "
+            f"{result.entries_summary_generated} entry summaries, "
+            f"{result.entries_embedding_generated} embeddings"
+        )
+
+    return result
+
+
 # ============================================================================
 # Memory Backend Sync Hook (Milestone 5.3)
 # ============================================================================

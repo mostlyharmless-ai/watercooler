@@ -7,6 +7,7 @@ Tools:
 - watercooler_find_similar: Find similar entries
 - watercooler_graph_health: Graph sync health
 - watercooler_reconcile_graph: Reconcile graph with markdown
+- watercooler_backfill_graph: Backfill missing summaries/embeddings
 - watercooler_access_stats: Access statistics
 """
 
@@ -497,6 +498,7 @@ search_graph_tool = None
 find_similar_entries_tool = None
 graph_health_tool = None
 reconcile_graph_tool = None
+backfill_graph_tool = None
 access_stats_tool = None
 
 
@@ -960,6 +962,81 @@ def _reconcile_graph_impl(
         return f"Error reconciling graph: {str(e)}"
 
 
+def _backfill_graph_impl(
+    ctx: Context,
+    code_path: str = "",
+    backfill_summaries: bool = True,
+    backfill_embeddings: bool = True,
+    batch_size: int = 10,
+) -> str:
+    """Backfill missing summaries and embeddings in existing graph nodes.
+
+    Unlike reconcile_graph which syncs stale threads from markdown, this function
+    updates existing graph nodes that are missing summaries or embeddings. This is
+    useful after a graph build when services were unavailable, or for incremental
+    enrichment of the graph.
+
+    Args:
+        code_path: Path to code repository (for resolving threads dir).
+        backfill_summaries: Generate missing thread and entry summaries.
+            Requires LLM service (Ollama) to be running. Default: True.
+        backfill_embeddings: Generate missing entry embeddings.
+            Requires embedding service (llama.cpp) to be running. Default: True.
+        batch_size: Number of items to process before writing (for progress).
+            Default: 10.
+
+    Returns:
+        JSON report with counts of processed and generated items.
+    """
+    try:
+        from watercooler.baseline_graph.sync import backfill_missing
+
+        error, context = validation._require_context(code_path)
+        if error:
+            return error
+        if context is None or not context.threads_dir:
+            return "Error: Unable to resolve threads directory."
+
+        threads_dir = context.threads_dir
+        if not threads_dir.exists():
+            return f"Threads directory not found: {threads_dir}"
+
+        # Define the backfill operation
+        def _do_backfill() -> dict:
+            result = backfill_missing(
+                threads_dir=threads_dir,
+                backfill_summaries=backfill_summaries,
+                backfill_embeddings=backfill_embeddings,
+                batch_size=max(1, min(batch_size, 100)),
+            )
+            return {
+                "threads_processed": result.threads_processed,
+                "threads_missing_summary": result.threads_missing_summary,
+                "threads_summary_generated": result.threads_summary_generated,
+                "entries_processed": result.entries_processed,
+                "entries_missing_summary": result.entries_missing_summary,
+                "entries_summary_generated": result.entries_summary_generated,
+                "entries_missing_embedding": result.entries_missing_embedding,
+                "entries_embedding_generated": result.entries_embedding_generated,
+                "errors": result.errors[:10],  # Limit errors in output
+                "error_count": len(result.errors),
+            }
+
+        # Run with full parity protocol (preflight + commit + push)
+        output = run_with_graph_sync(
+            context,
+            _do_backfill,
+            "graph: backfill summaries/embeddings",
+        )
+
+        return json.dumps(output, indent=2)
+
+    except BranchPairingError as e:
+        return f"Branch parity error: {str(e)}"
+    except Exception as e:
+        return f"Error backfilling graph: {str(e)}"
+
+
 def _access_stats_impl(
     ctx: Context,
     code_path: str = "",
@@ -1029,7 +1106,8 @@ def register_graph_tools(mcp):
         mcp: The FastMCP server instance
     """
     global baseline_graph_stats, baseline_graph_build, search_graph_tool
-    global find_similar_entries_tool, graph_health_tool, reconcile_graph_tool, access_stats_tool
+    global find_similar_entries_tool, graph_health_tool, reconcile_graph_tool
+    global backfill_graph_tool, access_stats_tool
 
     # Register tools and store references for testing
     baseline_graph_stats = mcp.tool(name="watercooler_baseline_graph_stats")(_baseline_graph_stats_impl)
@@ -1038,4 +1116,5 @@ def register_graph_tools(mcp):
     find_similar_entries_tool = mcp.tool(name="watercooler_find_similar")(_find_similar_entries_impl)
     graph_health_tool = mcp.tool(name="watercooler_graph_health")(_graph_health_impl)
     reconcile_graph_tool = mcp.tool(name="watercooler_reconcile_graph")(_reconcile_graph_impl)
+    backfill_graph_tool = mcp.tool(name="watercooler_backfill_graph")(_backfill_graph_impl)
     access_stats_tool = mcp.tool(name="watercooler_access_stats")(_access_stats_impl)
