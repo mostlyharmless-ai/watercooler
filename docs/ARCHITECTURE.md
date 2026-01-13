@@ -290,6 +290,123 @@ See [WATERCOOLER_SETUP.md](../.github/WATERCOOLER_SETUP.md) for complete setup g
 
 ---
 
+## HTTP Deployment Architecture
+
+The MCP server supports both STDIO (local) and HTTP (hosted) transport modes,
+enabling flexible deployment options.
+
+### Transport Modes
+
+**STDIO Mode (Default):**
+- Used by local AI assistants (Claude Code, Cursor, etc.)
+- Launched as subprocess via MCP configuration
+- No network exposure, direct process communication
+
+**HTTP Mode:**
+- Used for hosted deployments (Vercel, Railway, etc.)
+- Exposes MCP tools via HTTP endpoints
+- Supports token-based authentication
+
+### HTTP Server Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    HTTP Server                          │
+├─────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │
+│  │   auth.py   │  │  cache.py   │  │ server.py   │     │
+│  │ Token Svc   │  │  Memory +   │  │  FastMCP    │     │
+│  │  Client     │  │  Database   │  │   Tools     │     │
+│  └─────────────┘  └─────────────┘  └─────────────┘     │
+└─────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+        ┌────────────────────────────────┐
+        │     watercooler-site API       │
+        │  /api/github/token (auth)      │
+        │  /api/cache (caching)          │
+        └────────────────────────────────┘
+```
+
+### Key Modules
+
+| Module | Purpose |
+|--------|---------|
+| `server.py` | Main FastMCP server with tool registration |
+| `server_http.py` | HTTP transport wrapper with auth middleware |
+| `auth.py` | Token resolution from watercooler-site API |
+| `cache.py` | In-memory + database cache abstraction |
+
+### Environment Variables
+
+**Transport Configuration:**
+```bash
+WATERCOOLER_MCP_TRANSPORT=http  # "stdio" or "http"
+WATERCOOLER_MCP_HOST=0.0.0.0     # HTTP bind host
+WATERCOOLER_MCP_PORT=8080        # HTTP bind port
+```
+
+**Authentication (Hosted Mode):**
+```bash
+WATERCOOLER_AUTH_MODE=hosted            # "local" or "hosted"
+WATERCOOLER_TOKEN_API_URL=https://...   # Token service URL
+WATERCOOLER_TOKEN_API_KEY=...           # API key for token service
+```
+
+**Caching:**
+```bash
+WATERCOOLER_CACHE_BACKEND=memory  # "memory" or "database"
+WATERCOOLER_CACHE_TTL=300         # Default TTL in seconds
+```
+
+### Deployment Options
+
+**1. Standalone HTTP Server:**
+```bash
+WATERCOOLER_MCP_TRANSPORT=http python -m watercooler_mcp
+```
+
+**2. Vercel Serverless (Python Runtime):**
+```python
+# api/mcp.py
+from watercooler_mcp.server_http import app
+```
+
+**3. Docker Container:**
+```dockerfile
+FROM python:3.11-slim
+RUN pip install watercooler-cloud[http]
+CMD ["python", "-m", "watercooler_mcp.server_http"]
+```
+
+### Graph-First Write Flow (HTTP)
+
+```
+Client Request
+      │
+      ▼
+┌─────────────────────┐
+│  Auth Middleware    │  ← Validate token, extract user context
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│  MCP Tool Handler   │  ← watercooler_say, etc.
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ run_with_graph_sync │  ← Graph JSONL (source of truth)
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ Markdown Projection │  ← Derived view
+└─────────────────────┘
+```
+
+---
+
 ## Additional Resources
 
 - **[Installation Guide](INSTALLATION.md)** - Setup and configuration
@@ -297,3 +414,4 @@ See [WATERCOOLER_SETUP.md](../.github/WATERCOOLER_SETUP.md) for complete setup g
 - **[Use Cases Guide](archive/USE_CASES.md)** - Real-world examples
 - **[Integration Guide](archive/integration.md)** - Python API reference
 - **[MCP Server Guide](mcp-server.md)** - AI agent integration
+- **[HTTP Transport Guide](http-transport.md)** - HTTP deployment details

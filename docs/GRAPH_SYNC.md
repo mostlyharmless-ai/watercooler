@@ -201,6 +201,82 @@ Graph sync is safe under concurrent writes:
 2. **Atomic JSONL writes**: temp file + rename prevents corruption
 3. **Deduplication**: JSONL append merges by node/edge ID
 
+## Conflict Resolution
+
+The sync layer handles conflicts between concurrent writers using a JSONL-native
+strategy that preserves all writes while avoiding duplicate entries.
+
+### JSONL Conflict Strategy
+
+**Key Insight**: JSONL is append-only, so "conflicts" are really just duplicate
+entries with the same ID that need deduplication.
+
+**Resolution Steps**:
+1. Read existing JSONL into a dict keyed by node/edge ID
+2. Apply new entries (upsert semantics - newer wins)
+3. Write merged result atomically (temp file + rename)
+
+```python
+# From sync/conflict.py
+def upsert_jsonl_nodes(path: Path, new_nodes: list[dict]) -> int:
+    """Upsert nodes into JSONL file.
+
+    Args:
+        path: Path to nodes.jsonl
+        new_nodes: List of node dicts with 'id' field
+
+    Returns:
+        Number of nodes written (new + updated)
+    """
+    existing = _read_jsonl_as_dict(path, key="id")
+    for node in new_nodes:
+        existing[node["id"]] = node  # Upsert
+    _write_jsonl_atomic(path, list(existing.values()))
+    return len(new_nodes)
+```
+
+### Markdown Conflict Strategy
+
+Markdown projections are append-only (new entries at end), which makes them
+inherently conflict-resistant. However, metadata updates (status, ball) can
+conflict.
+
+**Resolution**: On markdown projection, regenerate from graph JSONL source of
+truth rather than patching existing markdown.
+
+### Git Merge Conflicts
+
+When git pull/rebase encounters conflicts in graph JSONL:
+
+1. **Ours strategy**: Keep local version, retry push
+2. **Theirs strategy**: Accept remote version, re-apply local changes
+3. **Union strategy**: Merge both (default for JSONL)
+
+The `sync/primitives.py` module handles these cases:
+
+```python
+def resolve_jsonl_merge_conflict(path: Path) -> bool:
+    """Resolve JSONL merge conflict by keeping both sides.
+
+    JSONL files can safely keep both sides of a conflict since
+    duplicate entries are deduplicated on next upsert.
+    """
+    # Read both sides from conflict markers
+    ours, theirs = _parse_conflict_markers(path)
+    merged = _merge_jsonl_entries(ours, theirs)
+    _write_jsonl_atomic(path, merged)
+    return True
+```
+
+### Multi-Writer Scenarios
+
+| Scenario | Resolution |
+|----------|------------|
+| Two agents write same topic simultaneously | Per-topic lock serializes writes |
+| Dashboard and MCP write same entry | JSONL upsert keeps latest timestamp |
+| Slack and Dashboard update status | Last write wins (by timestamp) |
+| Git push race condition | Rebase + retry (up to 3 attempts) |
+
 ## Performance
 
 ### Sync Latency

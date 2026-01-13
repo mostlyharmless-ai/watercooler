@@ -931,6 +931,76 @@ export WATERCOOLER_MEMORY_BACKEND=graphiti
 
 The sync is non-blocking - errors are logged but never fail the baseline sync.
 
+### Memory Sync Callback Registry
+
+The memory module uses a callback registry pattern to enable pluggable memory
+backend integration. This allows baseline graph sync to notify memory backends
+of new entries without tight coupling.
+
+**Architecture:**
+
+```
+┌─────────────────────────┐
+│ baseline_graph/sync.py  │
+│  sync_entry_to_graph()  │
+└───────────┬─────────────┘
+            │ calls registered callbacks
+            ▼
+┌─────────────────────────┐     ┌─────────────────────────┐
+│  graphiti_sync_callback │     │  leanrag_sync_callback  │
+│   (memory_sync.py)      │     │   (memory_sync.py)      │
+└─────────────────────────┘     └─────────────────────────┘
+```
+
+**Registration API:**
+
+```python
+from watercooler.baseline_graph.sync import register_memory_sync_callback
+
+def my_backend_callback(
+    topic: str,
+    entry_id: str,
+    content: str,
+    metadata: dict,
+) -> None:
+    """Called after each entry is synced to the baseline graph.
+
+    Args:
+        topic: Thread topic identifier
+        entry_id: Entry ULID
+        content: Entry body text
+        metadata: Entry metadata (agent, role, timestamp, etc.)
+    """
+    # Sync to your backend...
+    pass
+
+# Register at MCP startup
+register_memory_sync_callback("my_backend", my_backend_callback)
+```
+
+**Built-in Callbacks:**
+
+| Callback | Backend | Purpose |
+|----------|---------|---------|
+| `graphiti_sync_callback` | Graphiti | Add episode to temporal graph |
+| `leanrag_sync_callback` | LeanRAG | Queue for clustering pipeline |
+
+**Initialization:**
+
+Callbacks are registered at MCP server startup via `init_memory_sync_callbacks()`:
+
+```python
+# In server.py
+from .memory_sync import init_memory_sync_callbacks
+init_memory_sync_callbacks()
+```
+
+**Error Handling:**
+
+- Callbacks run in a ThreadPoolExecutor (fire-and-forget)
+- Errors are logged but never block the baseline sync
+- Failed syncs can be recovered via migration tools
+
 ---
 
 ## See Also
