@@ -38,14 +38,29 @@ def check_first_run() -> None:
         pass
 
 
+def _is_localhost_url(url: str) -> bool:
+    """Check if URL points to localhost."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        host = parsed.netloc.split(":")[0].lower()
+        return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+    except Exception:
+        return False
+
+
 def ensure_ollama_running() -> None:
     """Start Ollama if graph features are enabled and it's not running.
 
     This reduces friction for new users - if they have Ollama installed
     and graph features enabled, we'll start it automatically.
+
+    Only attempts auto-start for localhost URLs (won't try to start remote services).
     """
     try:
         from .config import get_watercooler_config
+        from watercooler.memory_config import resolve_baseline_graph_llm_config
+
         config = get_watercooler_config()
         graph_config = config.mcp.graph
 
@@ -53,10 +68,21 @@ def ensure_ollama_running() -> None:
         if not (graph_config.generate_summaries or graph_config.generate_embeddings):
             return
 
-        # Check if Ollama is already responding
+        # Get configured LLM API base from unified config
+        llm_config = resolve_baseline_graph_llm_config()
+        api_base = llm_config.api_base.rstrip("/")
+
+        # Only attempt auto-start for localhost URLs
+        if not _is_localhost_url(api_base):
+            log_debug(f"LLM API base is not localhost ({api_base}), skipping Ollama auto-start")
+            return
+
+        models_url = f"{api_base}/models"
+
+        # Check if LLM service is already responding
         try:
             req = urllib.request.Request(
-                "http://localhost:11434/v1/models",
+                models_url,
                 headers={"Content-Type": "application/json"}
             )
             with urllib.request.urlopen(req, timeout=2) as resp:
@@ -80,7 +106,7 @@ def ensure_ollama_running() -> None:
                 for _ in range(10):
                     time.sleep(0.5)
                     try:
-                        req = urllib.request.Request("http://localhost:11434/v1/models")
+                        req = urllib.request.Request(models_url)
                         with urllib.request.urlopen(req, timeout=2):
                             log_debug("Ollama started successfully via systemctl.")
                             return
@@ -109,7 +135,7 @@ def ensure_ollama_running() -> None:
                 for _ in range(10):
                     time.sleep(0.5)
                     try:
-                        req = urllib.request.Request("http://localhost:11434/v1/models")
+                        req = urllib.request.Request(models_url)
                         with urllib.request.urlopen(req, timeout=2):
                             log_debug("Ollama started successfully via ollama serve.")
                             return

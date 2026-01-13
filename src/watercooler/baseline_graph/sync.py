@@ -75,30 +75,50 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 
+def _get_default_embedding_api_base() -> str:
+    """Get default embedding API base from unified config (checks env vars first)."""
+    from watercooler.memory_config import resolve_baseline_graph_embedding_config
+    return resolve_baseline_graph_embedding_config().api_base
+
+
+def _get_default_embedding_model() -> str:
+    """Get default embedding model from unified config (checks env vars first)."""
+    from watercooler.memory_config import resolve_baseline_graph_embedding_config
+    return resolve_baseline_graph_embedding_config().model
+
+
 @dataclass
 class EmbeddingConfig:
     """Embedding server configuration for real-time sync.
 
-    Consistent with pipeline.config.EmbeddingConfig defaults.
+    Settings are resolved via unified config with priority:
+    1. Environment variables (EMBEDDING_API_BASE, EMBEDDING_MODEL)
+    2. Legacy env vars (BASELINE_GRAPH_EMBEDDING_API_BASE, etc.)
+    3. TOML config ([memory.embedding])
+    4. Built-in defaults (localhost:8080 for llama.cpp)
     """
 
-    api_base: str = "http://localhost:8080/v1"
-    model: str = "bge-m3"
+    api_base: str = field(default_factory=_get_default_embedding_api_base)
+    model: str = field(default_factory=_get_default_embedding_model)
     timeout: float = 30.0
 
     @classmethod
     def from_env(cls) -> "EmbeddingConfig":
-        """Load from environment or credentials config."""
-        try:
-            from watercooler.credentials import get_server_config
-            config = get_server_config("embedding")
-        except ImportError:
-            config = {}
+        """Load from unified config (checks env vars, TOML, then defaults)."""
+        from watercooler.memory_config import resolve_baseline_graph_embedding_config
+        embed_config = resolve_baseline_graph_embedding_config()
+
+        timeout = cls.timeout
+        if timeout_str := os.environ.get("EMBEDDING_TIMEOUT"):
+            try:
+                timeout = float(timeout_str)
+            except ValueError:
+                pass
 
         return cls(
-            api_base=config.get("api_base", os.environ.get("EMBEDDING_API_BASE", cls.api_base)),
-            model=config.get("model", os.environ.get("EMBEDDING_MODEL", cls.model)),
-            timeout=config.get("timeout", float(os.environ.get("EMBEDDING_TIMEOUT", cls.timeout))),
+            api_base=embed_config.api_base,
+            model=embed_config.model,
+            timeout=timeout,
         )
 
 
@@ -172,10 +192,19 @@ def _try_auto_start_service(service_type: str, api_base: str) -> bool:
         return False
 
     try:
+        from watercooler.memory_config import (
+            resolve_baseline_graph_llm_config,
+            resolve_baseline_graph_embedding_config,
+        )
         from watercooler_memory.pipeline.server_manager import ServerManager
+
+        # Use unified config for URLs instead of hardcoded defaults
+        llm_config = resolve_baseline_graph_llm_config()
+        embedding_config = resolve_baseline_graph_embedding_config()
+
         manager = ServerManager(
-            llm_api_base=api_base if service_type == "llm" else "http://localhost:11434/v1",
-            embedding_api_base=api_base if service_type == "embedding" else "http://localhost:8080/v1",
+            llm_api_base=api_base if service_type == "llm" else llm_config.api_base,
+            embedding_api_base=api_base if service_type == "embedding" else embedding_config.api_base,
             interactive=False,
             auto_approve=True,
             verbose=False,

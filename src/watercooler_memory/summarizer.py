@@ -13,7 +13,7 @@ import asyncio
 import os
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from .cache import SummaryCache, ThreadSummaryCache
@@ -28,26 +28,67 @@ except ImportError:
     HTTPX_AVAILABLE = False
 
 
-# Default configuration
-DEFAULT_API_BASE = "https://api.deepseek.com/v1"
-DEFAULT_MODEL = "deepseek-chat"
+# Default configuration resolved via unified config
+# Standard env vars (highest priority):
+#   LLM_API_BASE - LLM service endpoint
+#   LLM_MODEL - Model name
+#   LLM_API_KEY - API key
+#
+# Resolution is done via watercooler.memory_config which checks:
+#   1. Environment variables
+#   2. TOML config
+#   3. Built-in defaults
 DEFAULT_TIMEOUT = 120.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_MAX_TOKENS = 256
 DEFAULT_MAX_CONCURRENT = 8
 
 
+def _get_default_api_base() -> str:
+    """Get default LLM API base from unified config."""
+    try:
+        from watercooler.memory_config import resolve_llm_config
+        return resolve_llm_config().api_base
+    except ImportError:
+        # Fallback if watercooler not available
+        return os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")
+
+
+def _get_default_model() -> str:
+    """Get default LLM model from unified config."""
+    try:
+        from watercooler.memory_config import resolve_llm_config
+        return resolve_llm_config().model
+    except ImportError:
+        return os.environ.get("LLM_MODEL", "gpt-4o-mini")
+
+
+def _get_default_api_key() -> Optional[str]:
+    """Get default LLM API key from unified config."""
+    try:
+        from watercooler.memory_config import resolve_llm_config
+        return resolve_llm_config().api_key or None
+    except ImportError:
+        return os.environ.get("LLM_API_KEY")
+
+
 @dataclass
 class SummarizerConfig:
-    """Configuration for summary generation."""
+    """Configuration for summary generation.
 
-    api_base: str = DEFAULT_API_BASE
-    model: str = DEFAULT_MODEL
+    Settings are resolved via unified config with priority:
+    1. Environment variables (LLM_API_BASE, LLM_MODEL, LLM_API_KEY)
+    2. TOML config
+    3. Built-in defaults
+    """
+
+    api_base: str = field(default_factory=_get_default_api_base)
+    model: str = field(default_factory=_get_default_model)
     timeout: float = DEFAULT_TIMEOUT
     max_retries: int = DEFAULT_MAX_RETRIES
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_concurrent: int = DEFAULT_MAX_CONCURRENT
-    api_key: Optional[str] = None
+    api_key: Optional[str] = field(default_factory=_get_default_api_key)
 
     def __post_init__(self) -> None:
         """Validate config values after initialization."""
@@ -62,44 +103,20 @@ class SummarizerConfig:
 
     @classmethod
     def from_env(cls) -> SummarizerConfig:
-        """Create config from environment variables and credentials file.
+        """Create config from unified config system.
 
-        Priority: Environment variables > ~/.watercooler/credentials.toml > Defaults
+        Priority: Environment variables > TOML config > Built-in defaults
 
-        Security Note:
-            API keys from environment variables may be visible in process listings
-            and shell history. For production use, prefer storing credentials in
-            ~/.watercooler/credentials.toml (mode 0600).
+        Uses watercooler.memory_config for resolution when available.
         """
-        # Try to load from credentials system
-        api_key = None
-        api_base = DEFAULT_API_BASE
-
-        try:
-            from watercooler.credentials import get_deepseek_api_key, get_deepseek_api_base
-            api_key = get_deepseek_api_key()
-            api_base = get_deepseek_api_base()
-        except ImportError:
-            # Credentials module not available, fall back to env only
-            api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("LLM_API_KEY")
-            api_base = os.environ.get("LLM_API_BASE", DEFAULT_API_BASE)
-            if api_key:
-                warnings.warn(
-                    "LLM API key loaded from environment variable. "
-                    "For improved security, store API keys in "
-                    "~/.watercooler/credentials.toml (mode 0600).",
-                    UserWarning,
-                    stacklevel=2,
-                )
-
         return cls(
-            api_base=api_base,
-            model=os.environ.get("LLM_MODEL", DEFAULT_MODEL),
+            api_base=_get_default_api_base(),
+            model=_get_default_model(),
             timeout=float(os.environ.get("LLM_TIMEOUT", DEFAULT_TIMEOUT)),
             max_retries=int(os.environ.get("LLM_MAX_RETRIES", DEFAULT_MAX_RETRIES)),
             max_tokens=int(os.environ.get("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS)),
             max_concurrent=int(os.environ.get("LLM_MAX_CONCURRENT", DEFAULT_MAX_CONCURRENT)),
-            api_key=api_key,
+            api_key=_get_default_api_key(),
         )
 
 

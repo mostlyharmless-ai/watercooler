@@ -59,6 +59,47 @@ class LeanRAGConfig:
     # Test mode: Add pytest__ prefix to database names for isolation
     test_mode: bool = False
 
+    # Max workers for graph building
+    max_workers: int = 8
+
+    @classmethod
+    def from_unified(cls) -> "LeanRAGConfig":
+        """Create LeanRAGConfig from unified watercooler configuration.
+
+        Uses the unified config system with proper priority chain:
+        1. Environment variables (highest)
+        2. Backend-specific TOML overrides ([memory.leanrag])
+        3. Shared TOML settings ([memory.llm], [memory.embedding], [memory.database])
+        4. Built-in defaults (lowest)
+
+        Returns:
+            LeanRAGConfig instance with all settings resolved
+
+        Example:
+            >>> config = LeanRAGConfig.from_unified()
+            >>> backend = LeanRAGBackend(config)
+        """
+        from watercooler.memory_config import (
+            resolve_llm_config,
+            resolve_embedding_config,
+            resolve_database_config,
+            get_leanrag_max_workers,
+        )
+
+        llm = resolve_llm_config("leanrag")
+        embedding = resolve_embedding_config("leanrag")
+        db = resolve_database_config()
+
+        return cls(
+            llm_api_base=llm.api_base if llm.api_base != "https://api.openai.com/v1" else None,
+            llm_model=llm.model,
+            embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
+            embedding_model=embedding.model,
+            falkordb_host=db.host,
+            falkordb_port=db.port,
+            max_workers=get_leanrag_max_workers(),
+        )
+
 
 class LeanRAGBackend(MemoryBackend):
     """

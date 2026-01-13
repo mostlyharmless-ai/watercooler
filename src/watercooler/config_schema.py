@@ -185,7 +185,15 @@ class LoggingConfig(BaseModel):
 
 
 class GraphConfig(BaseModel):
-    """Baseline graph configuration for summaries and embeddings."""
+    """Baseline graph configuration for summaries and embeddings.
+
+    LLM/embedding settings resolve via priority chain:
+    1. Environment variables (LLM_API_BASE, EMBEDDING_API_BASE, etc.)
+    2. TOML config values (if non-empty)
+    3. Built-in defaults from memory_config module
+
+    Empty string values signal "resolve from unified config at runtime".
+    """
 
     # Summary generation
     generate_summaries: bool = Field(
@@ -193,12 +201,12 @@ class GraphConfig(BaseModel):
         description="Generate LLM summaries for entries on write (requires LLM service)",
     )
     summarizer_api_base: str = Field(
-        default="http://localhost:11434/v1",
-        description="Summarizer API base URL (Ollama default)",
+        default="",
+        description="Summarizer API base URL (empty = resolve from unified config)",
     )
     summarizer_model: str = Field(
-        default="llama3.2:3b",
-        description="Model for summarization",
+        default="",
+        description="Model for summarization (empty = resolve from unified config)",
     )
 
     # Embedding generation
@@ -207,12 +215,12 @@ class GraphConfig(BaseModel):
         description="Generate embedding vectors for entries on write (requires embedding service)",
     )
     embedding_api_base: str = Field(
-        default="http://localhost:8080/v1",
-        description="Embedding API base URL (llama.cpp default)",
+        default="",
+        description="Embedding API base URL (empty = resolve from unified config)",
     )
     embedding_model: str = Field(
-        default="bge-m3",
-        description="Model for embeddings",
+        default="",
+        description="Model for embeddings (empty = resolve from unified config)",
     )
 
     # Behavior
@@ -408,6 +416,180 @@ class ValidationConfig(BaseModel):
     commit: CommitValidationConfig = Field(default_factory=CommitValidationConfig)
 
 
+# =============================================================================
+# Memory Backend Configuration
+# =============================================================================
+
+
+class LLMServiceConfig(BaseModel):
+    """LLM service configuration for memory backends.
+
+    Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+    """
+
+    api_key: str = Field(
+        default="",
+        description="LLM API key (set via env for security)",
+    )
+    api_base: str = Field(
+        default="https://api.openai.com/v1",
+        description="LLM API base URL",
+    )
+    model: str = Field(
+        default="gpt-4o-mini",
+        description="LLM model name",
+    )
+
+
+class EmbeddingServiceConfig(BaseModel):
+    """Embedding service configuration for memory backends.
+
+    Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM
+    """
+
+    api_key: str = Field(
+        default="",
+        description="Embedding API key (often not needed for local servers)",
+    )
+    api_base: str = Field(
+        default="http://localhost:8080/v1",
+        description="Embedding API base URL (llama.cpp default)",
+    )
+    model: str = Field(
+        default="bge-m3",
+        description="Embedding model name",
+    )
+    dim: int = Field(
+        default=1024,
+        ge=1,
+        description="Embedding dimension",
+    )
+
+
+class MemoryDatabaseConfig(BaseModel):
+    """Database (FalkorDB) configuration for memory backends.
+
+    Env overrides: FALKORDB_HOST, FALKORDB_PORT, FALKORDB_PASSWORD
+    """
+
+    host: str = Field(
+        default="localhost",
+        description="Database host",
+    )
+    port: int = Field(
+        default=6379,
+        ge=1,
+        le=65535,
+        description="Database port",
+    )
+    username: str = Field(
+        default="",
+        description="Database username (optional)",
+    )
+    password: str = Field(
+        default="",
+        description="Database password (optional)",
+    )
+
+
+class GraphitiBackendConfig(BaseModel):
+    """Graphiti-specific configuration overrides.
+
+    These override shared [memory.llm] and [memory.embedding] settings.
+    """
+
+    # LLM overrides (empty = use shared)
+    llm_model: str = Field(
+        default="",
+        description="Override LLM model for Graphiti",
+    )
+    llm_api_base: str = Field(
+        default="",
+        description="Override LLM API base for Graphiti",
+    )
+
+    # Embedding overrides (empty = use shared)
+    embedding_model: str = Field(
+        default="",
+        description="Override embedding model for Graphiti",
+    )
+    embedding_api_base: str = Field(
+        default="",
+        description="Override embedding API base for Graphiti",
+    )
+
+    # Graphiti-specific settings
+    reranker: str = Field(
+        default="rrf",
+        description="Reranker algorithm: rrf, mmr, cross_encoder, node_distance, episode_mentions",
+    )
+    track_entry_episodes: bool = Field(
+        default=True,
+        description="Track entry-episode mappings in index",
+    )
+
+
+class LeanRAGBackendConfig(BaseModel):
+    """LeanRAG-specific configuration overrides.
+
+    These override shared [memory.llm] and [memory.embedding] settings.
+    """
+
+    # LLM overrides (empty = use shared)
+    llm_model: str = Field(
+        default="",
+        description="Override LLM model for LeanRAG",
+    )
+    llm_api_base: str = Field(
+        default="",
+        description="Override LLM API base for LeanRAG",
+    )
+
+    # Embedding overrides (empty = use shared)
+    embedding_model: str = Field(
+        default="",
+        description="Override embedding model for LeanRAG",
+    )
+    embedding_api_base: str = Field(
+        default="",
+        description="Override embedding API base for LeanRAG",
+    )
+
+    # LeanRAG-specific settings
+    max_workers: int = Field(
+        default=8,
+        ge=1,
+        description="Max parallel workers for graph building",
+    )
+
+
+class MemoryConfig(BaseModel):
+    """Memory backend configuration.
+
+    Single source of truth for LLM and embedding settings across all memory backends.
+    Environment variables override TOML settings.
+    Backend-specific sections override shared settings.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable memory backends globally",
+    )
+    backend: Literal["graphiti", "leanrag", "null"] = Field(
+        default="graphiti",
+        description="Default memory backend",
+    )
+
+    # Shared service configs
+    llm: LLMServiceConfig = Field(default_factory=LLMServiceConfig)
+    embedding: EmbeddingServiceConfig = Field(default_factory=EmbeddingServiceConfig)
+    database: MemoryDatabaseConfig = Field(default_factory=MemoryDatabaseConfig)
+
+    # Backend-specific overrides
+    graphiti: GraphitiBackendConfig = Field(default_factory=GraphitiBackendConfig)
+    leanrag: LeanRAGBackendConfig = Field(default_factory=LeanRAGBackendConfig)
+
+
 class WatercoolerConfig(BaseModel):
     """Root configuration model."""
 
@@ -421,6 +603,7 @@ class WatercoolerConfig(BaseModel):
     mcp: McpConfig = Field(default_factory=McpConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
     @classmethod
     def default(cls) -> "WatercoolerConfig":

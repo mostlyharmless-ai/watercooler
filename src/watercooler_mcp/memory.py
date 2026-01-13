@@ -16,6 +16,15 @@ from mcp.types import TextContent
 
 from .observability import log_debug, log_warning
 
+# Import unified config helpers
+from watercooler.memory_config import (
+    is_memory_enabled,
+    resolve_llm_config,
+    resolve_embedding_config,
+    resolve_database_config,
+    get_graphiti_reranker,
+)
+
 # Import backend's GraphitiConfig directly (consolidates duplicate configs)
 try:
     from watercooler_memory.backends.graphiti import GraphitiConfig
@@ -30,33 +39,46 @@ except ImportError:
 
 
 def load_graphiti_config() -> Optional[GraphitiConfig]:
-    """Load Graphiti configuration from environment variables.
+    """Load Graphiti configuration from unified config system.
+
+    Uses the new unified configuration with priority chain:
+    1. Environment variables (highest)
+    2. Backend-specific TOML overrides (memory.graphiti.*)
+    3. Shared TOML settings (memory.llm.*, memory.embedding.*)
+    4. Built-in defaults (lowest)
 
     Returns None if Graphiti is disabled or configuration is invalid.
     Logs warnings for configuration issues.
 
-    Environment Variables:
-        WATERCOOLER_MEMORY_DISABLED: "1" to disable all memory backends
-        WATERCOOLER_GRAPHITI_ENABLED: "1" to enable (default: "0")
+    Configuration Sources:
+        TOML (config.toml):
+            [memory]
+            enabled = true
+            backend = "graphiti"
 
-        LLM Configuration:
-            LLM_API_KEY: LLM API key (required)
-            LLM_API_BASE: LLM server endpoint (optional, defaults to OpenAI)
-            LLM_MODEL: LLM model name (optional, default: "gpt-4o-mini")
+            [memory.llm]
+            api_key = ""
+            api_base = "https://api.openai.com/v1"
+            model = "gpt-4o-mini"
 
-        Embedding Configuration:
-            EMBEDDING_API_KEY: Embedding API key (required)
-            EMBEDDING_API_BASE: Embedding server endpoint (optional, defaults to OpenAI)
-            EMBEDDING_MODEL: Embedding model name (optional, default: "text-embedding-3-small")
+            [memory.embedding]
+            api_key = ""
+            api_base = "http://localhost:8080/v1"
+            model = "bge-m3"
 
-        Search Configuration:
-            WATERCOOLER_GRAPHITI_RERANKER: Reranker algorithm (default: "rrf")
-                Options: rrf, mmr, cross_encoder, node_distance, episode_mentions
+            [memory.graphiti]
+            reranker = "rrf"
+
+        Environment Variables (override TOML):
+            WATERCOOLER_MEMORY_DISABLED: "1" to disable all memory backends
+            WATERCOOLER_GRAPHITI_ENABLED: "1" to enable (default: "0")
+            LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+            EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL
+            WATERCOOLER_GRAPHITI_RERANKER
 
         Deprecated Fallback:
             OPENAI_API_KEY: Falls back to this if LLM_API_KEY or EMBEDDING_API_KEY
-                is not set. This fallback is deprecated and will be removed in a
-                future release. A warning is logged when the fallback is used.
+                is not set. A warning is logged when the fallback is used.
 
     Returns:
         GraphitiConfig instance or None if disabled/invalid
@@ -67,7 +89,7 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
         ...     backend = get_graphiti_backend(config)
     """
     # Check global memory disable switch first
-    if os.getenv("WATERCOOLER_MEMORY_DISABLED", "").lower() in ("1", "true", "yes"):
+    if not is_memory_enabled():
         log_debug("MEMORY: All memory backends disabled (WATERCOOLER_MEMORY_DISABLED=1)")
         return None
 
@@ -77,63 +99,41 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
         log_debug("MEMORY: Graphiti disabled (WATERCOOLER_GRAPHITI_ENABLED != '1')")
         return None
 
-    # LLM configuration (required)
-    llm_api_key = os.getenv("LLM_API_KEY", "")
-    if not llm_api_key:
-        # Temporary fallback to OPENAI_API_KEY with deprecation warning
-        openai_key = os.getenv("OPENAI_API_KEY", "")
-        if openai_key:
-            llm_api_key = openai_key
-            log_warning(
-                "MEMORY: Using OPENAI_API_KEY as fallback for LLM_API_KEY. "
-                "This is deprecated and will be removed in a future release. "
-                "Please set LLM_API_KEY and EMBEDDING_API_KEY explicitly."
-            )
-        else:
-            log_warning(
-                "MEMORY: Graphiti enabled but LLM_API_KEY not set. "
-                "Memory queries will fail."
-            )
-            return None
+    # Resolve LLM configuration using unified config
+    llm = resolve_llm_config("graphiti")
+    if not llm.api_key:
+        log_warning(
+            "MEMORY: Graphiti enabled but LLM_API_KEY not set. "
+            "Memory queries will fail. Set LLM_API_KEY or configure [memory.llm].api_key in config.toml."
+        )
+        return None
 
-    llm_api_base = os.getenv("LLM_API_BASE") or None  # None = OpenAI default
-    llm_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    # Resolve embedding configuration using unified config
+    embedding = resolve_embedding_config("graphiti")
+    if not embedding.api_key:
+        log_warning(
+            "MEMORY: Graphiti enabled but EMBEDDING_API_KEY not set. "
+            "Memory queries will fail. Set EMBEDDING_API_KEY or configure [memory.embedding].api_key in config.toml."
+        )
+        return None
 
-    # Embedding configuration (required)
-    embedding_api_key = os.getenv("EMBEDDING_API_KEY", "")
-    if not embedding_api_key:
-        # Temporary fallback to OPENAI_API_KEY with deprecation warning
-        openai_key = os.getenv("OPENAI_API_KEY", "")
-        if openai_key:
-            embedding_api_key = openai_key
-            # Only warn if we didn't already warn for LLM
-            if os.getenv("LLM_API_KEY"):
-                log_warning(
-                    "MEMORY: Using OPENAI_API_KEY as fallback for EMBEDDING_API_KEY. "
-                    "This is deprecated and will be removed in a future release. "
-                    "Please set LLM_API_KEY and EMBEDDING_API_KEY explicitly."
-                )
-        else:
-            log_warning(
-                "MEMORY: Graphiti enabled but EMBEDDING_API_KEY not set. "
-                "Memory queries will fail."
-            )
-            return None
+    # Resolve database configuration
+    db = resolve_database_config()
 
-    embedding_api_base = os.getenv("EMBEDDING_API_BASE") or None  # None = OpenAI default
-    embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-
-    # Get reranker algorithm (default: rrf for speed)
-    reranker = os.getenv("WATERCOOLER_GRAPHITI_RERANKER", "rrf").lower()
+    # Get reranker algorithm
+    reranker = get_graphiti_reranker()
 
     # Return backend's GraphitiConfig with all fields
     return GraphitiConfig(
-        llm_api_key=llm_api_key,
-        llm_api_base=llm_api_base,
-        llm_model=llm_model,
-        embedding_api_key=embedding_api_key,
-        embedding_api_base=embedding_api_base,
-        embedding_model=embedding_model,
+        llm_api_key=llm.api_key,
+        llm_api_base=llm.api_base if llm.api_base != "https://api.openai.com/v1" else None,
+        llm_model=llm.model,
+        embedding_api_key=embedding.api_key,
+        embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
+        embedding_model=embedding.model,
+        falkordb_host=db.host,
+        falkordb_port=db.port,
+        falkordb_password=db.password if db.password else None,
         reranker=reranker,
     )
 
@@ -188,24 +188,13 @@ def get_graphiti_backend(config: GraphitiConfig) -> Any:
             "python_version": python_version,
         }
 
-    # Config is already the backend's GraphitiConfig, just use it directly
-    # (with optional FalkorDB environment overrides)
-    backend_config = config
-    if os.getenv("FALKORDB_HOST") or os.getenv("FALKORDB_PORT") or os.getenv("FALKORDB_PASSWORD"):
-        # Override FalkorDB settings from environment if specified
-        from dataclasses import replace
-        backend_config = replace(
-            config,
-            falkordb_host=os.getenv("FALKORDB_HOST", config.falkordb_host),
-            falkordb_port=int(os.getenv("FALKORDB_PORT", str(config.falkordb_port))),
-            falkordb_password=os.getenv("FALKORDB_PASSWORD") or config.falkordb_password,
-        )
-
+    # Config already has all settings resolved via unified config system
+    # (FalkorDB settings are included from load_graphiti_config)
     try:
-        backend = GraphitiBackend(backend_config)
+        backend = GraphitiBackend(config)
         log_debug(
             f"MEMORY: Initialized Graphiti backend "
-            f"(work_dir={backend_config.work_dir})"
+            f"(work_dir={config.work_dir})"
         )
         return backend
     except Exception as e:
@@ -217,7 +206,7 @@ def get_graphiti_backend(config: GraphitiConfig) -> Any:
             "error": "init_failed",
             "details": str(e),
             "python_version": python_version,
-            "backend_config": str(backend_config),
+            "backend_config": str(config),
         }
 
 

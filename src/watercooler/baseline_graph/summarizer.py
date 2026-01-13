@@ -7,20 +7,45 @@ Falls back to extractive summarization when LLM is unavailable.
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
+def _get_default_api_base() -> str:
+    """Get default API base from unified config (checks env vars first)."""
+    from watercooler.memory_config import resolve_baseline_graph_llm_config
+    return resolve_baseline_graph_llm_config().api_base
+
+
+def _get_default_model() -> str:
+    """Get default model from unified config (checks env vars first)."""
+    from watercooler.memory_config import resolve_baseline_graph_llm_config
+    return resolve_baseline_graph_llm_config().model
+
+
+def _get_default_api_key() -> str:
+    """Get default API key from unified config (checks env vars first)."""
+    from watercooler.memory_config import resolve_baseline_graph_llm_config
+    return resolve_baseline_graph_llm_config().api_key
+
+
 @dataclass
 class SummarizerConfig:
-    """Configuration for the summarizer."""
+    """Configuration for the summarizer.
 
-    # LLM settings (OpenAI-compatible API)
-    api_base: str = "http://localhost:11434/v1"  # Ollama default
-    model: str = "llama3.2:3b"  # Small local model
-    api_key: str = "ollama"  # Ollama doesn't require key
+    LLM settings are resolved via unified config with priority:
+    1. Environment variables (LLM_API_BASE, LLM_MODEL, LLM_API_KEY)
+    2. Legacy env vars (BASELINE_GRAPH_API_BASE, etc.)
+    3. TOML config ([memory.llm])
+    4. Built-in defaults (localhost:11434 for Ollama)
+    """
+
+    # LLM settings (resolved via unified config by default)
+    api_base: str = field(default_factory=_get_default_api_base)
+    model: str = field(default_factory=_get_default_model)
+    api_key: str = field(default_factory=_get_default_api_key)
     timeout: float = 30.0
     max_tokens: int = 256
 
@@ -39,13 +64,16 @@ class SummarizerConfig:
     @classmethod
     def from_config_dict(cls, config: Dict[str, Any]) -> "SummarizerConfig":
         """Create config from dictionary (e.g., from config.toml)."""
+        from watercooler.memory_config import resolve_baseline_graph_llm_config
+        llm_defaults = resolve_baseline_graph_llm_config()
+
         llm = config.get("llm", {})
         extractive = config.get("extractive", {})
 
         return cls(
-            api_base=llm.get("api_base", cls.api_base),
-            model=llm.get("model", cls.model),
-            api_key=llm.get("api_key", cls.api_key),
+            api_base=llm.get("api_base", llm_defaults.api_base),
+            model=llm.get("model", llm_defaults.model),
+            api_key=llm.get("api_key", llm_defaults.api_key),
             timeout=llm.get("timeout", cls.timeout),
             max_tokens=llm.get("max_tokens", cls.max_tokens),
             extractive_max_chars=extractive.get("max_chars", cls.extractive_max_chars),
@@ -57,7 +85,17 @@ class SummarizerConfig:
 
     @classmethod
     def from_env(cls) -> "SummarizerConfig":
-        """Create config from environment variables."""
+        """Create config from environment variables.
+
+        Uses unified config with priority:
+        1. LLM_API_BASE, LLM_MODEL, LLM_API_KEY (preferred)
+        2. BASELINE_GRAPH_API_BASE, etc. (legacy, backward compatible)
+        3. TOML config
+        4. Built-in defaults
+        """
+        from watercooler.memory_config import resolve_baseline_graph_llm_config
+        llm_config = resolve_baseline_graph_llm_config()
+
         # Parse numeric values with fallback to defaults on invalid input
         timeout = cls.timeout
         if timeout_str := os.environ.get("BASELINE_GRAPH_TIMEOUT"):
@@ -74,9 +112,9 @@ class SummarizerConfig:
                 logger.warning(f"Invalid BASELINE_GRAPH_MAX_TOKENS value: {max_tokens_str!r}, using default")
 
         return cls(
-            api_base=os.environ.get("BASELINE_GRAPH_API_BASE", cls.api_base),
-            model=os.environ.get("BASELINE_GRAPH_MODEL", cls.model),
-            api_key=os.environ.get("BASELINE_GRAPH_API_KEY", cls.api_key),
+            api_base=llm_config.api_base,
+            model=llm_config.model,
+            api_key=llm_config.api_key,
             timeout=timeout,
             max_tokens=max_tokens,
             prefer_extractive=os.environ.get("BASELINE_GRAPH_EXTRACTIVE_ONLY", "").lower() in ("1", "true", "yes"),

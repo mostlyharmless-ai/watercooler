@@ -6,39 +6,89 @@ from typing import Optional
 import os
 
 
+def _get_default_llm_api_base() -> str:
+    """Get default LLM API base from unified config."""
+    try:
+        from watercooler.memory_config import resolve_baseline_graph_llm_config
+        return resolve_baseline_graph_llm_config().api_base
+    except ImportError:
+        return os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")
+
+
+def _get_default_llm_model() -> str:
+    """Get default LLM model from unified config."""
+    try:
+        from watercooler.memory_config import resolve_baseline_graph_llm_config
+        return resolve_baseline_graph_llm_config().model
+    except ImportError:
+        return os.environ.get("LLM_MODEL", "gpt-4o-mini")
+
+
+def _get_default_llm_api_key() -> str:
+    """Get default LLM API key from unified config."""
+    try:
+        from watercooler.memory_config import resolve_baseline_graph_llm_config
+        return resolve_baseline_graph_llm_config().api_key
+    except ImportError:
+        return os.environ.get("LLM_API_KEY", "")
+
+
+def _get_default_embedding_api_base() -> str:
+    """Get default embedding API base from unified config."""
+    try:
+        from watercooler.memory_config import resolve_baseline_graph_embedding_config
+        return resolve_baseline_graph_embedding_config().api_base
+    except ImportError:
+        return os.environ.get("EMBEDDING_API_BASE", "http://localhost:8080/v1")
+
+
+def _get_default_embedding_model() -> str:
+    """Get default embedding model from unified config."""
+    try:
+        from watercooler.memory_config import resolve_baseline_graph_embedding_config
+        return resolve_baseline_graph_embedding_config().model
+    except ImportError:
+        return os.environ.get("EMBEDDING_MODEL", "bge-m3")
+
+
+def _get_default_embedding_dim() -> int:
+    """Get default embedding dimension from unified config."""
+    try:
+        from watercooler.memory_config import resolve_baseline_graph_embedding_config
+        return resolve_baseline_graph_embedding_config().dim
+    except ImportError:
+        dim_str = os.environ.get("EMBEDDING_DIM", "1024")
+        try:
+            return int(dim_str)
+        except ValueError:
+            return 1024
+
+
 @dataclass
 class LLMConfig:
     """LLM server configuration.
 
-    Loaded via get_server_config("llm") with priority:
-    1. Environment variables (LLM_API_BASE, LLM_MODEL, etc.)
-    2. [servers.llm] in config.toml
-    3. [memory_graph.llm] in config.toml (deprecated)
-    4. Built-in defaults (Ollama on localhost:11434)
+    Resolved via unified config with priority:
+    1. Environment variables (LLM_API_BASE, LLM_MODEL, LLM_API_KEY)
+    2. TOML config ([memory.llm])
+    3. Built-in defaults from memory_config
     """
 
-    api_base: str = "http://localhost:11434/v1"
-    model: str = "llama3.2:3b"
-    api_key: str = "ollama"
+    api_base: str = field(default_factory=_get_default_llm_api_base)
+    model: str = field(default_factory=_get_default_llm_model)
+    api_key: str = field(default_factory=_get_default_llm_api_key)
     timeout: float = 120.0
     max_tokens: int = 256
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
-        """Load from unified server configuration."""
-        try:
-            from watercooler.credentials import get_server_config
-            config = get_server_config("llm")
-        except ImportError:
-            # Fallback if credentials module unavailable
-            config = {}
-
+        """Load from unified config system."""
         return cls(
-            api_base=config.get("api_base", cls.api_base),
-            model=config.get("model", cls.model),
-            api_key=config.get("api_key", cls.api_key),
-            timeout=config.get("timeout", cls.timeout),
-            max_tokens=config.get("max_tokens", cls.max_tokens),
+            api_base=_get_default_llm_api_base(),
+            model=_get_default_llm_model(),
+            api_key=_get_default_llm_api_key(),
+            timeout=float(os.environ.get("LLM_TIMEOUT", 120.0)),
+            max_tokens=int(os.environ.get("LLM_MAX_TOKENS", 256)),
         )
 
 
@@ -46,32 +96,25 @@ class LLMConfig:
 class EmbeddingConfig:
     """Embedding server configuration.
 
-    Loaded via get_server_config("embedding") with priority:
+    Resolved via unified config with priority:
     1. Environment variables (EMBEDDING_API_BASE, EMBEDDING_MODEL, etc.)
-    2. [servers.embedding] in config.toml
-    3. [memory_graph.embedding] in config.toml (deprecated)
-    4. Built-in defaults (llama.cpp on localhost:8080)
+    2. TOML config ([memory.embedding])
+    3. Built-in defaults from memory_config
     """
 
-    api_base: str = "http://localhost:8080/v1"
-    model: str = "bge-m3"
+    api_base: str = field(default_factory=_get_default_embedding_api_base)
+    model: str = field(default_factory=_get_default_embedding_model)
     timeout: float = 60.0
-    embedding_dim: int = 1024
+    embedding_dim: int = field(default_factory=_get_default_embedding_dim)
 
     @classmethod
     def from_env(cls) -> "EmbeddingConfig":
-        """Load from unified server configuration."""
-        try:
-            from watercooler.credentials import get_server_config
-            config = get_server_config("embedding")
-        except ImportError:
-            # Fallback if credentials module unavailable
-            config = {}
-
+        """Load from unified config system."""
         return cls(
-            api_base=config.get("api_base", cls.api_base),
-            model=config.get("model", cls.model),
-            timeout=config.get("timeout", cls.timeout),
+            api_base=_get_default_embedding_api_base(),
+            model=_get_default_embedding_model(),
+            timeout=float(os.environ.get("EMBEDDING_TIMEOUT", 60.0)),
+            embedding_dim=_get_default_embedding_dim(),
         )
 
 

@@ -85,6 +85,50 @@ class GraphitiConfig:
                 Path.home() / ".watercooler" / "graphiti" / "entry_episode_index.json"
             )
 
+    @classmethod
+    def from_unified(cls) -> "GraphitiConfig":
+        """Create GraphitiConfig from unified watercooler configuration.
+
+        Uses the unified config system with proper priority chain:
+        1. Environment variables (highest)
+        2. Backend-specific TOML overrides ([memory.graphiti])
+        3. Shared TOML settings ([memory.llm], [memory.embedding], [memory.database])
+        4. Built-in defaults (lowest)
+
+        Returns:
+            GraphitiConfig instance with all settings resolved
+
+        Example:
+            >>> config = GraphitiConfig.from_unified()
+            >>> backend = GraphitiBackend(config)
+        """
+        from watercooler.memory_config import (
+            resolve_llm_config,
+            resolve_embedding_config,
+            resolve_database_config,
+            get_graphiti_reranker,
+            get_graphiti_track_entry_episodes,
+        )
+
+        llm = resolve_llm_config("graphiti")
+        embedding = resolve_embedding_config("graphiti")
+        db = resolve_database_config()
+
+        return cls(
+            llm_api_key=llm.api_key,
+            llm_api_base=llm.api_base if llm.api_base != "https://api.openai.com/v1" else None,
+            llm_model=llm.model,
+            embedding_api_key=embedding.api_key,
+            embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
+            embedding_model=embedding.model,
+            falkordb_host=db.host,
+            falkordb_port=db.port,
+            falkordb_username=db.username if db.username else None,
+            falkordb_password=db.password if db.password else None,
+            reranker=get_graphiti_reranker(),
+            track_entry_episodes=get_graphiti_track_entry_episodes(),
+        )
+
 
 class GraphitiBackend(MemoryBackend):
     """
