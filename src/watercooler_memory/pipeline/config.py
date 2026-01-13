@@ -28,37 +28,89 @@ def _load_env_pipeline() -> None:
 
 _load_env_pipeline()
 
-# Import credentials module for unified credential access
-from watercooler.credentials import (
-    get_deepseek_api_key,
-    get_deepseek_api_base,
-    get_deepseek_model,
-    get_embedding_api_base,
-)
+
+# =============================================================================
+# Unified config resolution functions
+# Priority: Environment variables > TOML config > Built-in defaults
+# =============================================================================
+
+def _get_llm_api_key() -> str:
+    """Get LLM API key from unified config."""
+    try:
+        from watercooler.memory_config import resolve_llm_config
+        return resolve_llm_config().api_key or ""
+    except ImportError:
+        return os.environ.get("LLM_API_KEY", "")
 
 
-def _get_api_key() -> str:
-    """Get DeepSeek API key from credentials or environment."""
-    key = get_deepseek_api_key()
-    return key or ""
+def _get_llm_api_base() -> str:
+    """Get LLM API base from unified config."""
+    try:
+        from watercooler.memory_config import resolve_llm_config
+        return resolve_llm_config().api_base
+    except ImportError:
+        return os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")
+
+
+def _get_llm_model() -> str:
+    """Get LLM model from unified config."""
+    try:
+        from watercooler.memory_config import resolve_llm_config
+        return resolve_llm_config().model
+    except ImportError:
+        return os.environ.get("LLM_MODEL", "gpt-4o-mini")
+
+
+def _get_embedding_api_base() -> str:
+    """Get embedding API base from unified config."""
+    try:
+        from watercooler.memory_config import resolve_embedding_config
+        return resolve_embedding_config().api_base
+    except ImportError:
+        return os.environ.get("EMBEDDING_API_BASE", "http://localhost:8080/v1")
+
+
+def _get_embedding_model() -> str:
+    """Get embedding model from unified config."""
+    try:
+        from watercooler.memory_config import resolve_embedding_config
+        return resolve_embedding_config().model
+    except ImportError:
+        return os.environ.get("EMBEDDING_MODEL", "bge-m3")
+
+
+def _get_embedding_dim() -> int:
+    """Get embedding dimension from unified config."""
+    try:
+        from watercooler.memory_config import resolve_embedding_config
+        return resolve_embedding_config().dim
+    except ImportError:
+        dim_str = os.environ.get("EMBEDDING_DIM", "1024")
+        try:
+            return int(dim_str)
+        except ValueError:
+            return 1024
 
 
 @dataclass
 class LLMConfig:
     """LLM service configuration.
 
-    Model priority: DEEPSEEK_MODEL env > config.toml [memory_graph.llm].model > default
+    Resolved via unified config with priority:
+    1. Environment variables (LLM_API_KEY, LLM_API_BASE, LLM_MODEL)
+    2. TOML config ([memory.llm])
+    3. Built-in defaults
     """
 
-    api_key: str = field(default_factory=_get_api_key)
-    model: str = field(default_factory=get_deepseek_model)
-    base_url: str = field(default_factory=get_deepseek_api_base)
+    api_key: str = field(default_factory=_get_llm_api_key)
+    model: str = field(default_factory=_get_llm_model)
+    base_url: str = field(default_factory=_get_llm_api_base)
 
     def validate(self) -> list[str]:
         """Validate configuration. Returns list of errors."""
         errors = []
         if not self.api_key:
-            errors.append("DEEPSEEK_API_KEY not set (env or ~/.watercooler/credentials.toml)")
+            errors.append("LLM_API_KEY not set (env or ~/.watercooler/config.toml)")
         if self.base_url and not self.base_url.startswith(("http://", "https://")):
             errors.append(f"Invalid LLM API base URL (must start with http:// or https://): {self.base_url}")
         return errors
@@ -68,15 +120,15 @@ class LLMConfig:
 class EmbeddingConfig:
     """Embedding service configuration.
 
-    Standard env vars (per MEMORY_INTEGRATION_ROADMAP.md):
-    - EMBEDDING_API_BASE=http://localhost:8080/v1
-    - EMBEDDING_MODEL=bge-m3
-    - EMBEDDING_DIM=1024
+    Resolved via unified config with priority:
+    1. Environment variables (EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM)
+    2. TOML config ([memory.embedding])
+    3. Built-in defaults
     """
 
-    model: str = field(default_factory=lambda: os.environ.get("EMBEDDING_MODEL", "bge-m3"))
-    base_url: str = field(default_factory=get_embedding_api_base)
-    embedding_dim: int = field(default_factory=lambda: int(os.environ.get("EMBEDDING_DIM", "1024")))
+    model: str = field(default_factory=_get_embedding_model)
+    base_url: str = field(default_factory=_get_embedding_api_base)
+    embedding_dim: int = field(default_factory=_get_embedding_dim)
     batch_size: int = field(default_factory=lambda: max(1, int(os.environ.get("EMBEDDING_BATCH_SIZE", "8"))))
 
     def validate(self) -> list[str]:
