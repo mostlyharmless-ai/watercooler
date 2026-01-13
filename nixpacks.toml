@@ -5,4 +5,4 @@ cmds = ["uv sync --locked --no-dev --extra http --extra mcp"]
 cmds = ["uv sync --locked --no-dev --no-editable --extra http --extra mcp"]
 
 [start]
-cmd = "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"
+cmd = "cd /app && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"
