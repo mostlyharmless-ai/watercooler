@@ -2587,12 +2587,14 @@ name = "watercooler-cloud"
 version = "0.1.5.dev0"
 source = { editable = "." }
 dependencies = [
+    { name = "fastapi" },
     { name = "fastmcp" },
     { name = "gitpython" },
     { name = "pydantic" },
     { name = "python-ulid" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "tomlkit" },
+    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.optional-dependencies]
@@ -2640,6 +2642,7 @@ visualization = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", specifier = ">=0.100" },
     { name = "fastapi", marker = "extra == 'http'", specifier = ">=0.100" },
     { name = "fastmcp", specifier = ">=2.0" },
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2.0" },
@@ -2667,6 +2670,7 @@ requires-dist = [
     { name = "tiktoken", marker = "extra == 'memory'", specifier = ">=0.5" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "tomlkit", specifier = ">=0.12" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.20" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'http'", specifier = ">=0.20" },
 ]
 provides-extras = ["dev", "mcp", "http", "baseline", "memory", "graphiti", "local", "graph-local", "visualization"]

@@ -19,6 +19,9 @@ dependencies = [
     "pydantic>=2.0",
     "tomli>=2.0;python_version<'3.11'",
     "tomlkit>=0.12",
+    # HTTP server dependencies (required for Railway deployment)
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
