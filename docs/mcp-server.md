@@ -19,6 +19,56 @@ pip install -e .[mcp]
 
 This installs `fastmcp>=2.0` and creates the `watercooler-mcp` command.
 
+## Transport Modes
+
+The MCP server supports two transport modes:
+
+### STDIO Mode (Default)
+
+Standard transport for local MCP clients (Claude Code, Cursor, Codex, Claude Desktop).
+
+```bash
+# Runs with STDIO transport by default
+watercooler-mcp
+```
+
+### HTTP Mode (Hosted Deployment)
+
+HTTP transport for hosted deployments, enabling web applications to call MCP tools directly.
+
+```bash
+# Run as HTTP server
+WATERCOOLER_MCP_TRANSPORT=http python -m watercooler_mcp
+
+# Or with explicit host/port
+WATERCOOLER_MCP_TRANSPORT=http \
+WATERCOOLER_MCP_HOST=0.0.0.0 \
+WATERCOOLER_MCP_PORT=8080 \
+python -m watercooler_mcp
+```
+
+**HTTP Server Endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | API information |
+| `/health` | GET | Health check for load balancers |
+| `/mcp` | POST | MCP protocol endpoint |
+| `/docs` | GET | OpenAPI documentation |
+
+**When to use HTTP mode:**
+- Running as a centralized service for watercooler-site dashboard
+- Slack integration backend
+- Multi-user hosted deployments
+- Serverless platforms (Vercel, Railway, Fly.io)
+
+**Required for hosted mode:**
+- `WATERCOOLER_AUTH_MODE=hosted` - Enable token service authentication
+- `WATERCOOLER_TOKEN_API_URL` - Token service URL
+- `WATERCOOLER_TOKEN_API_KEY` - Token service API key
+
+See [HTTP Transport Guide](./http-transport.md) for detailed deployment instructions.
+
 ## Quick Start
 
 **For complete setup instructions, see [SETUP_AND_QUICKSTART.md](./SETUP_AND_QUICKSTART.md)**

@@ -1,18 +1,31 @@
 # HTTP Transport for Watercooler MCP Server
 
-The Watercooler MCP server supports both **stdio** (default) and **HTTP** transports.
+The Watercooler MCP server supports both **stdio** (default) and **HTTP** transports. HTTP mode enables hosted deployments where web applications call MCP tools directly.
 
 ## Why HTTP Transport?
 
+- **Hosted Deployments:** Run as a centralized service for web applications
+- **Multi-User:** Authenticate requests per-user via token service
 - **Reliability:** Better error handling than stdio
 - **Debugging:** Easy to monitor with standard HTTP tools
-- **Scalability:** Can handle larger payloads without buffer issues
-- **Web Clients:** Enables future web-based MCP clients
+- **Scalability:** Deploy on serverless platforms (Vercel, Railway, Fly.io)
 - **Logging:** Standard HTTP access logs
+
+## Architecture
+
+```
+STDIO Mode (Local):
+  Claude Code → STDIO → MCP Server → Local Git → GitHub
+
+HTTP Mode (Hosted):
+  Dashboard/Slack → HTTP → MCP Server → Token Service → GitHub
+                            ↓
+                         Cache Layer
+```
 
 ## Quick Start
 
-### Option 1: Using the Daemon Script (Recommended)
+### Option 1: Using the Daemon Script (Local Development)
 
 ```bash
 # Start server
@@ -29,24 +42,58 @@ The Watercooler MCP server supports both **stdio** (default) and **HTTP** transp
 
 # Stop server
 ./scripts/mcp-server-daemon.sh stop
-
-# Restart server
-./scripts/mcp-server-daemon.sh restart
 ```
 
-### Option 2: Manual Start
+### Option 2: Manual Start (Development)
 
 ```bash
 # Set environment variables
 export WATERCOOLER_MCP_TRANSPORT=http
 export WATERCOOLER_MCP_HOST=127.0.0.1
-export WATERCOOLER_MCP_PORT=3000
+export WATERCOOLER_MCP_PORT=8080
 
 # Start server
 python3 -m watercooler_mcp
 ```
 
-The server will start on `http://127.0.0.1:3000/mcp` using Server-Sent Events (SSE) for the MCP protocol.
+### Option 3: Hosted Mode (Production)
+
+```bash
+# Required for multi-user hosted deployments
+export WATERCOOLER_MCP_TRANSPORT=http
+export WATERCOOLER_MCP_HOST=0.0.0.0
+export WATERCOOLER_MCP_PORT=8080
+
+# Enable token-based authentication
+export WATERCOOLER_AUTH_MODE=hosted
+export WATERCOOLER_TOKEN_API_URL=https://your-watercooler-site.com
+export WATERCOOLER_TOKEN_API_KEY=your-secure-api-key
+
+# Start server
+python3 -m watercooler_mcp
+```
+
+## HTTP Server Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | API information and available endpoints |
+| `/health` | GET | Health check (returns auth mode, cache stats) |
+| `/mcp` | POST | MCP protocol endpoint (JSON-RPC style) |
+| `/docs` | GET | OpenAPI/Swagger documentation |
+
+**Health Check Response:**
+```json
+{
+  "status": "healthy",
+  "mode": "hosted",
+  "cache": {
+    "backend": "memory",
+    "total_entries": 42,
+    "active_entries": 38
+  }
+}
+```
 
 ## Configuration
 
@@ -55,17 +102,270 @@ The server will start on `http://127.0.0.1:3000/mcp` using Server-Sent Events (S
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WATERCOOLER_MCP_TRANSPORT` | `stdio` | Transport type: `http` or `stdio` |
-| `WATERCOOLER_MCP_HOST` | `127.0.0.1` | HTTP server host (HTTP mode only) |
-| `WATERCOOLER_MCP_PORT` | `3000` | HTTP server port (HTTP mode only) |
+| `WATERCOOLER_MCP_HOST` | `127.0.0.1` | HTTP server host |
+| `WATERCOOLER_MCP_PORT` | `8080` | HTTP server port |
+| `WATERCOOLER_AUTH_MODE` | `local` | Authentication: `local` or `hosted` |
+| `WATERCOOLER_TOKEN_API_URL` | - | Token service base URL (hosted mode) |
+| `WATERCOOLER_TOKEN_API_KEY` | - | Token service API key (hosted mode) |
+| `WATERCOOLER_CACHE_BACKEND` | `memory` | Cache: `memory` or `database` |
+| `WATERCOOLER_CACHE_TTL` | `300` | Default cache TTL in seconds |
+| `WATERCOOLER_CORS_ORIGINS` | `*` | Allowed CORS origins |
 | `WATERCOOLER_LOG_DIR` | `~/.watercooler` | Directory for logs and PID files |
 
-### Custom Port Example
+See [ENVIRONMENT_VARS.md](./ENVIRONMENT_VARS.md) for complete reference.
 
-```bash
-WATERCOOLER_MCP_PORT=3001 ./scripts/mcp-server-daemon.sh start
+---
+
+## Hosted Mode Architecture
+
+Hosted mode enables multi-user deployments where each request is authenticated via the token service.
+
+### Authentication Module (`auth.py`)
+
+The auth module handles GitHub token resolution for multi-user deployments.
+
+**Token Resolution Flow:**
+
+1. Request arrives with `X-User-ID` header
+2. MCP server calls token service: `GET /api/github/token?userId={user_id}`
+3. Token service decrypts stored OAuth token and returns it
+4. MCP server uses token for GitHub API calls
+5. Tokens are cached in-memory for subsequent requests
+
+**Usage in Code:**
+
+```python
+from watercooler_mcp.auth import get_github_token, is_hosted_mode, get_auth_headers
+
+if is_hosted_mode():
+    token_info = get_github_token(user_id="user_123")
+    if token_info:
+        print(f"GitHub user: {token_info.github_username}")
+        # Use token for API calls
+        headers = get_auth_headers(user_id="user_123")
 ```
 
-## Client Configuration
+**Token Cache Management:**
+
+```python
+from watercooler_mcp.auth import invalidate_user_token, clear_token_cache
+
+# Invalidate a specific user's token (e.g., on 401 from GitHub)
+invalidate_user_token("user_123")
+
+# Clear all cached tokens (for testing/rotation)
+clear_token_cache()
+```
+
+### Cache Module (`cache.py`)
+
+The cache module reduces API calls and improves response times.
+
+**Cache Backends:**
+
+| Backend | Description | Use Case |
+|---------|-------------|----------|
+| `memory` | Thread-safe in-memory cache | Local dev, single-process |
+| `database` | Remote cache via API | Serverless, multi-instance |
+
+**Usage:**
+
+```python
+from watercooler_mcp.cache import cache, CacheKey
+
+# Simple caching
+data = cache.get("thread:my-topic")
+if data is None:
+    data = load_thread_data()
+    cache.set("thread:my-topic", data, ttl=300)
+
+# Structured cache keys
+key = CacheKey(resource="thread", topic="my-topic", branch="main")
+cache.set(str(key), data)
+
+# Invalidate by pattern
+cache.invalidate_pattern("thread:my-topic")
+
+# Get cache stats
+stats = cache.stats()
+# {"backend": "memory", "total_entries": 42, "active_entries": 38}
+```
+
+### Request Context
+
+HTTP requests include context headers:
+
+| Header | Description |
+|--------|-------------|
+| `X-User-ID` | User identifier (required in hosted mode) |
+| `X-Session-ID` | Session identifier (optional) |
+
+Query parameters for context:
+- `repo` - Repository context (e.g., `org/repo`)
+- `branch` - Branch context (e.g., `main`)
+
+---
+
+## Token Service API Contract
+
+The MCP server expects the token service (watercooler-site) to implement:
+
+### GET /api/github/token
+
+Fetches a GitHub OAuth token for a user.
+
+**Request:**
+```http
+GET /api/github/token?userId={user_id}
+Host: your-watercooler-site.com
+x-api-key: your-api-key
+Accept: application/json
+```
+
+**Response (Success - 200):**
+```json
+{
+  "token": "gho_xxxxxxxxxxxx",
+  "githubUsername": "user123",
+  "scopes": "repo,read:org,read:user",
+  "expiresAt": "2025-12-31T23:59:59Z"
+}
+```
+
+**Response (User Not Found - 404):**
+```json
+{
+  "error": "User not found"
+}
+```
+
+**Response (Unauthorized - 401):**
+```json
+{
+  "error": "Invalid API key"
+}
+```
+
+---
+
+## Deployment Examples
+
+### Docker
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY . .
+RUN pip install -e .[http]
+
+ENV WATERCOOLER_MCP_TRANSPORT=http
+ENV WATERCOOLER_MCP_HOST=0.0.0.0
+ENV WATERCOOLER_MCP_PORT=8080
+
+EXPOSE 8080
+CMD ["python", "-m", "watercooler_mcp"]
+```
+
+### Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  watercooler-mcp:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      WATERCOOLER_MCP_TRANSPORT: http
+      WATERCOOLER_AUTH_MODE: hosted
+      WATERCOOLER_TOKEN_API_URL: https://your-site.com
+      WATERCOOLER_TOKEN_API_KEY: ${MCP_API_KEY}
+```
+
+### Railway
+
+```toml
+# railway.toml
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python -m watercooler_mcp"
+healthcheckPath = "/health"
+healthcheckTimeout = 10
+
+[variables]
+WATERCOOLER_MCP_TRANSPORT = "http"
+WATERCOOLER_AUTH_MODE = "hosted"
+```
+
+### Vercel (Python Runtime)
+
+Create `api/mcp.py`:
+
+```python
+from watercooler_mcp.server_http import app
+
+# Vercel auto-discovers FastAPI/Starlette apps
+```
+
+---
+
+## Client Integration
+
+### TypeScript/JavaScript (watercooler-site)
+
+```typescript
+// lib/mcpClient.ts
+const MCP_API_URL = process.env.MCP_API_URL;
+const MCP_API_KEY = process.env.MCP_API_KEY;
+
+export async function callMcpTool(
+  userId: string,
+  tool: string,
+  params: Record<string, unknown>
+) {
+  const response = await fetch(`${MCP_API_URL}/mcp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': MCP_API_KEY,
+      'X-User-ID': userId,
+    },
+    body: JSON.stringify({
+      method: 'tools/call',
+      params: { name: tool, arguments: params },
+    }),
+  });
+  return response.json();
+}
+```
+
+### Python
+
+```python
+import httpx
+
+async def call_mcp_tool(user_id: str, tool: str, params: dict):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{MCP_API_URL}/mcp",
+            headers={
+                "x-api-key": MCP_API_KEY,
+                "X-User-ID": user_id,
+            },
+            json={
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": params},
+            },
+        )
+        return response.json()
+```
+
+---
+
+## Client Configuration (Local HTTP)
 
 ### Claude Code
 
@@ -89,7 +389,7 @@ Update `~/.config/claude/claude-code/mcp-settings.json`:
 {
   "mcpServers": {
     "watercooler-cloud": {
-      "url": "http://127.0.0.1:3000/mcp",
+      "url": "http://127.0.0.1:8080/mcp",
       "transport": "sse"
     }
   }
@@ -100,38 +400,38 @@ Update `~/.config/claude/claude-code/mcp-settings.json`:
 
 Update `.cursor/mcp.json` with the same HTTP configuration.
 
-## Health Checks
+---
 
-The MCP server exposes a `watercooler_health` tool via the MCP protocol for health checking. This is accessible through any MCP client, but not as a simple HTTP endpoint.
+## Security Considerations
 
-For monitoring, you can:
-1. Check if the process is running: `./scripts/mcp-server-daemon.sh status`
-2. Monitor the logs: `./scripts/mcp-server-daemon.sh logs`
-3. Use the MCP health tool via a connected client
+### Production Checklist
 
-## Logs
+- [ ] Set `WATERCOOLER_AUTH_MODE=hosted` for multi-user deployments
+- [ ] Generate strong random API keys (32+ characters)
+- [ ] Configure `WATERCOOLER_CORS_ORIGINS` to restrict allowed domains
+- [ ] Use HTTPS for all production traffic
+- [ ] Store API keys in environment variables, never in code
+- [ ] Monitor logs for unauthorized access attempts
 
-Logs are written to `$WATERCOOLER_LOG_DIR/mcp-server.log` (default: `~/.watercooler/mcp-server.log`).
+### CORS Configuration
 
-View logs:
 ```bash
-# Last 50 lines
-./scripts/mcp-server-daemon.sh logs
+# Production - restrict to your domains
+export WATERCOOLER_CORS_ORIGINS="https://watercoolerdev.com,https://api.watercooler.dev"
 
-# Follow in real-time
-./scripts/mcp-server-daemon.sh logs -f
-
-# Direct file access
-tail -f ~/.watercooler/mcp-server.log
+# Development - allow all
+export WATERCOOLER_CORS_ORIGINS="*"
 ```
+
+---
 
 ## Troubleshooting
 
 ### Port Already in Use
 
-If port 3000 is already in use:
 ```bash
-WATERCOOLER_MCP_PORT=3001 ./scripts/mcp-server-daemon.sh start
+# Use a different port
+WATERCOOLER_MCP_PORT=8081 ./scripts/mcp-server-daemon.sh start
 ```
 
 ### Server Won't Start
@@ -143,8 +443,33 @@ cat ~/.watercooler/mcp-server.log
 
 Common issues:
 - Python environment not activated
-- Missing dependencies: `pip install -e ".[mcp]"`
+- Missing dependencies: `pip install -e ".[http]"`
 - Port already in use
+- Invalid environment variable values
+
+### Token Service Connection Errors
+
+Check:
+- `WATERCOOLER_TOKEN_API_URL` is correct and reachable
+- `WATERCOOLER_TOKEN_API_KEY` matches token service configuration
+- Token service is running and healthy
+
+```bash
+# Test token service connectivity
+curl -H "x-api-key: your-key" \
+  "https://your-site.com/api/github/token?userId=test"
+```
+
+### CORS Errors in Browser
+
+```bash
+# Check current config
+curl -I http://localhost:8080/
+
+# Update allowed origins and restart
+export WATERCOOLER_CORS_ORIGINS="http://localhost:3000"
+./scripts/mcp-server-daemon.sh restart
+```
 
 ### Server Not Responding
 
@@ -159,6 +484,8 @@ Common issues:
 ./scripts/mcp-server-daemon.sh logs
 ```
 
+---
+
 ## Backward Compatibility
 
 The default transport is `stdio` for backward compatibility. Existing configurations will continue to work without changes.
@@ -168,11 +495,20 @@ To switch to HTTP, either:
 2. Use the daemon script (automatically uses HTTP)
 3. Update your client configuration to use the HTTP URL
 
+---
+
 ## Technical Details
 
-- **Protocol:** MCP over Server-Sent Events (SSE)
-- **Endpoint:** `http://127.0.0.1:3000/mcp` (default)
-- **Transport:** Streamable-HTTP
-- **Server:** Uvicorn (via FastMCP)
+- **Protocol:** MCP over Server-Sent Events (SSE) / JSON-RPC
+- **Endpoint:** `http://127.0.0.1:8080/mcp` (default)
+- **Transport:** Streamable-HTTP via FastMCP
+- **Server:** Uvicorn (via FastMCP/FastAPI)
+- **Authentication:** Token-based (hosted mode) or local git credentials
 
-The HTTP transport uses Server-Sent Events (SSE) for streaming MCP protocol messages. This provides better reliability than stdio while maintaining compatibility with the MCP protocol specification.
+---
+
+## See Also
+
+- [MCP Server Guide](./mcp-server.md) - Complete MCP tool reference
+- [ENVIRONMENT_VARS.md](./ENVIRONMENT_VARS.md) - All configuration options
+- [SETUP_AND_QUICKSTART.md](./SETUP_AND_QUICKSTART.md) - Initial setup guide
