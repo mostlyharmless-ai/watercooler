@@ -6,6 +6,10 @@ Tools:
 - watercooler_list_thread_entries: List entry headers with pagination
 - watercooler_get_thread_entry: Get single entry by index/ID
 - watercooler_get_thread_entry_range: Get contiguous range of entries
+
+Modes:
+- Local (stdio): Uses filesystem operations and git sync
+- Hosted (HTTP): Uses GitHub API via hosted_ops module
 """
 
 import json
@@ -42,9 +46,24 @@ from ..helpers import (
     _load_thread_entries_graph_first,
     _list_threads_graph_first,
 )
+from ..errors import (
+    ContextError,
+    EntryNotFoundError,
+    HostedModeError,
+    IndexOutOfRangeError,
+    ThreadNotFoundError,
+    ValidationError,
+)
+from ..hosted_ops import (
+    list_threads_hosted,
+    read_thread_hosted,
+    load_thread_entries_hosted,
+    thread_exists_hosted,
+)
 from ..sync import ensure_readable
 from ..observability import log_debug, log_error
 from .. import validation  # Import module for runtime access (enables test patching)
+from ..validation import is_hosted_context
 
 
 # Module-level references to registered tools (populated by register_thread_query_tools)
@@ -90,22 +109,84 @@ def _list_threads_impl(
     try:
         start_ts = time.time()
         if format != "markdown":
-            return ToolResult(content=[TextContent(type="text", text=f"Error: Phase 1A only supports format='markdown'. JSON support coming in Phase 1B.")])
+            raise ValidationError(
+                "Phase 1A only supports format='markdown'. JSON support coming in Phase 1B.",
+                field="format",
+            )
 
         error, context = validation._require_context(code_path)
         if error:
-            return ToolResult(content=[TextContent(type="text", text=error)])
+            raise ContextError(error, code_path=code_path)
         if context is None:
-            return ToolResult(content=[TextContent(type="text", text="Error: Unable to resolve code context for the provided code_path.")])
+            raise ContextError(
+                "Unable to resolve code context for the provided code_path.",
+                code_path=code_path,
+            )
         log_debug(f"list_threads start code_path={code_path!r} open_only={open_only}")
+
+        # =====================================================================
+        # Hosted Mode Path (GitHub API)
+        # =====================================================================
+        if is_hosted_context(context):
+            log_debug("list_threads: using hosted mode (GitHub API)")
+            agent = get_agent_name(ctx.client_id)
+
+            list_error, hosted_threads = list_threads_hosted(open_only=open_only)
+            if list_error:
+                raise HostedModeError(list_error, operation="list_threads")
+
+            if not hosted_threads:
+                status_filter = "open " if open_only is True else ("closed " if open_only is False else "")
+                return ToolResult(content=[TextContent(type="text", text=f"No {status_filter}threads found in repository: {context.code_repo}")])
+
+            # Format output for hosted mode
+            output = []
+            output.append(f"# Watercooler Threads ({len(hosted_threads)} total)\n")
+
+            # Classify threads by ball ownership
+            agent_lower = agent.lower()
+            your_turn = []
+            waiting = []
+
+            for ht in hosted_threads:
+                ball_lower = (ht.ball or "").lower()
+                has_ball = ball_lower == agent_lower
+                if has_ball:
+                    your_turn.append(ht)
+                else:
+                    waiting.append(ht)
+
+            # Your turn section
+            if your_turn:
+                output.append(f"\n## 🎾 Your Turn ({len(your_turn)} threads)\n")
+                for ht in your_turn:
+                    output.append(f"- **{ht.topic}** - {ht.title}")
+                    output.append(f"  Status: {ht.status} | Ball: {ht.ball} | Updated: {ht.last_updated}")
+
+            # Waiting section
+            if waiting:
+                output.append(f"\n## ⏳ Waiting on Others ({len(waiting)} threads)\n")
+                for ht in waiting:
+                    output.append(f"- **{ht.topic}** - {ht.title}")
+                    output.append(f"  Status: {ht.status} | Ball: {ht.ball} | Updated: {ht.last_updated}")
+
+            output.append(f"\n---\n*You are: {agent}*")
+            output.append(f"*Repository: {context.code_repo}*")
+
+            response = "\n".join(output)
+            log_debug(f"list_threads hosted mode: returning {len(hosted_threads)} threads")
+            return ToolResult(content=[TextContent(type="text", text=_format_warnings_for_response(response))])
+
+        # =====================================================================
+        # Local Mode Path (Filesystem)
+        # =====================================================================
         if context and validation._dynamic_context_missing(context):
             log_debug("list_threads dynamic context missing")
-            return ToolResult(content=[TextContent(type="text", text=(
-                "Dynamic threads repo was not resolved from your git context.\n"
-                "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO on the MCP server.\n"
-                f"Resolved threads dir: {context.threads_dir} (local fallback).\n"
-                f"Code root: {context.code_root or Path.cwd()}"
-            ))])
+            raise ContextError(
+                "Dynamic threads repo was not resolved from your git context. "
+                "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO on the MCP server.",
+                code_path=code_path,
+            )
 
         agent = get_agent_name(ctx.client_id)
 
@@ -234,9 +315,12 @@ def _list_threads_impl(
         log_debug("list_threads returning response")
         return ToolResult(content=[TextContent(type="text", text=_format_warnings_for_response(response))])
 
+    except (ValidationError, ContextError, HostedModeError, ThreadNotFoundError) as e:
+        # Re-raise custom exceptions for proper JSON-RPC error response
+        raise
     except Exception as e:
-        log_error(f"list_threads error: {e}")
-        return ToolResult(content=[TextContent(type="text", text=f"Error listing threads: {str(e)}")])
+        log_error(f"list_threads unexpected error: {e}")
+        raise HostedModeError(f"Unexpected error listing threads: {e}", operation="list_threads")
 
 
 def _read_thread_impl(
@@ -270,18 +354,68 @@ def _read_thread_impl(
     try:
         fmt_error, resolved_format = _resolve_format(format, default="markdown")
         if fmt_error:
-            return fmt_error
+            raise ValidationError(fmt_error, field="format")
 
         error, context = validation._require_context(code_path)
         if error:
-            return error
+            raise ContextError(error, code_path=code_path)
         if context is None:
-            return "Error: Unable to resolve code context for the provided code_path."
+            raise ContextError(
+                "Unable to resolve code context for the provided code_path.",
+                code_path=code_path,
+            )
 
+        # =====================================================================
+        # Hosted Mode Path (GitHub API)
+        # =====================================================================
+        if is_hosted_context(context):
+            log_debug(f"read_thread: using hosted mode for topic={topic}")
+
+            read_error, content = read_thread_hosted(topic)
+            if read_error:
+                # Check if it's a "not found" error
+                if "not found" in read_error.lower():
+                    raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
+                raise HostedModeError(read_error, operation="read_thread")
+
+            if resolved_format == "markdown":
+                return _format_warnings_for_response(content)
+
+            # For JSON format, parse entries
+            load_error, entries = load_thread_entries_hosted(topic)
+            if load_error:
+                raise HostedModeError(load_error, operation="load_entries")
+
+            # Extract metadata from content
+            header_block = content.split("---", 1)[0].strip() if "---" in content else ""
+            title, status, ball, last = _extract_thread_metadata(content, topic)
+
+            payload = {
+                "topic": topic,
+                "format": "json",
+                "entry_count": len(entries),
+                "meta": {
+                    "title": title,
+                    "status": status,
+                    "ball": ball,
+                    "last_entry_at": last,
+                    "header": header_block,
+                },
+                "entries": [_entry_full_payload(entry) for entry in entries],
+            }
+            warnings = _get_startup_warnings()
+            if warnings:
+                payload["_warnings"] = warnings
+            return json.dumps(payload, indent=2)
+
+        # =====================================================================
+        # Local Mode Path (Filesystem)
+        # =====================================================================
         if validation._dynamic_context_missing(context):
-            return (
-                "Dynamic threads repo was not resolved from your git context.\n"
-                "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO."
+            raise ContextError(
+                "Dynamic threads repo was not resolved from your git context. "
+                "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO.",
+                code_path=code_path,
             )
 
         # Lightweight read sync: auto-pull if behind origin (never blocks)
@@ -299,7 +433,7 @@ def _read_thread_impl(
         thread_path = fs.thread_path(topic, threads_dir)
 
         if not thread_path.exists():
-            return f"Error: Thread '{topic}' not found in {threads_dir}\n\nAvailable threads: {', '.join(p.stem for p in threads_dir.glob('*.md')) if threads_dir.exists() else 'none'}"
+            raise ThreadNotFoundError(topic=topic)
 
         # Track thread access (non-blocking)
         _track_access(threads_dir, "thread", topic)
@@ -337,8 +471,12 @@ def _read_thread_impl(
             payload["_warnings"] = warnings
         return json.dumps(payload, indent=2)
 
+    except (ValidationError, ContextError, HostedModeError, ThreadNotFoundError) as e:
+        # Re-raise custom exceptions for proper JSON-RPC error response
+        raise
     except Exception as e:
-        return f"Error reading thread '{topic}': {str(e)}"
+        log_error(f"read_thread unexpected error for '{topic}': {e}")
+        raise HostedModeError(f"Unexpected error reading thread '{topic}': {e}", operation="read_thread")
 
 
 def _list_thread_entries_impl(
@@ -352,30 +490,76 @@ def _list_thread_entries_impl(
 
     fmt_error, resolved_format = _resolve_format(format, default="json")
     if fmt_error:
-        return ToolResult(content=[TextContent(type="text", text=fmt_error)])
+        raise ValidationError(fmt_error, field="format")
 
     error, context = validation._validate_thread_context(code_path)
     if error or context is None:
-        return ToolResult(content=[TextContent(type="text", text=error or "Unknown error")])
+        raise ContextError(error or "Unknown context error", code_path=code_path)
 
     if offset < 0:
-        return ToolResult(content=[TextContent(type="text", text="Error: offset must be non-negative.")])
+        raise ValidationError("offset must be non-negative", field="offset")
     if offset > _MAX_OFFSET:
-        return ToolResult(content=[TextContent(type="text", text=f"Error: offset must not exceed {_MAX_OFFSET}.")])
+        raise ValidationError(f"offset must not exceed {_MAX_OFFSET}", field="offset")
     if limit is not None and limit < 0:
-        return ToolResult(content=[TextContent(type="text", text="Error: limit must be non-negative when provided.")])
+        raise ValidationError("limit must be non-negative when provided", field="limit")
     if limit is not None and limit > _MAX_LIMIT:
-        return ToolResult(content=[TextContent(type="text", text=f"Error: limit must not exceed {_MAX_LIMIT}.")])
+        raise ValidationError(f"limit must not exceed {_MAX_LIMIT}", field="limit")
 
+    # =========================================================================
+    # Hosted Mode Path (GitHub API)
+    # =========================================================================
+    if is_hosted_context(context):
+        log_debug(f"list_thread_entries: using hosted mode for topic={topic}")
+        load_error, entries = load_thread_entries_hosted(topic)
+        if load_error:
+            if "not found" in load_error.lower():
+                raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
+            raise HostedModeError(load_error, operation="list_entries")
+
+        total = len(entries)
+        start = min(offset, total)
+        end = total if limit is None else min(start + limit, total)
+        slice_entries = entries[start:end]
+
+        payload = {
+            "topic": topic,
+            "entry_count": total,
+            "offset": start,
+            "limit": limit,
+            "entries": [_entry_header_payload(entry) for entry in slice_entries],
+        }
+
+        if resolved_format == "markdown":
+            lines = [f"Entries for '{topic}' ({total} total)"]
+            if slice_entries:
+                for entry in slice_entries:
+                    timestamp = entry.timestamp or "unknown"
+                    title = entry.title or "(untitled)"
+                    entry_id = entry.entry_id or "(no Entry-ID)"
+                    lines.append(
+                        f"- [{entry.index}] {timestamp} — {title} ({entry.role or 'role?'} / {entry.entry_type or 'type?'}) id={entry_id}"
+                    )
+            else:
+                lines.append("- (no entries in range)")
+            text = "\n".join(lines)
+            return ToolResult(content=[TextContent(type="text", text=text)])
+
+        return ToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))])
+
+    # =========================================================================
+    # Local Mode Path (Filesystem)
+    # =========================================================================
     # Lightweight read sync: auto-pull if behind origin (never blocks)
-    sync_ok, sync_actions = ensure_readable(context.threads_dir, context.code_root)
+    _sync_ok, sync_actions = ensure_readable(context.threads_dir, context.code_root)
     if sync_actions:
         log_debug(f"list_thread_entries read sync: {sync_actions}")
 
     validation._refresh_threads(context)
     load_error, entries = _load_thread_entries_graph_first(topic, context)
     if load_error:
-        return ToolResult(content=[TextContent(type="text", text=load_error)])
+        if "not found" in load_error.lower():
+            raise ThreadNotFoundError(topic=topic)
+        raise ContextError(load_error, code_path=code_path)
 
     total = len(entries)
     start = min(offset, total)
@@ -419,24 +603,73 @@ def _get_thread_entry_impl(
 
     fmt_error, resolved_format = _resolve_format(format, default="json")
     if fmt_error:
-        return ToolResult(content=[TextContent(type="text", text=fmt_error)])
+        raise ValidationError(fmt_error, field="format")
 
     if index is None and entry_id is None:
-        return ToolResult(content=[TextContent(type="text", text="Error: provide either index or entry_id to select an entry.")])
+        raise ValidationError("provide either index or entry_id to select an entry")
 
     error, context = validation._validate_thread_context(code_path)
     if error or context is None:
-        return ToolResult(content=[TextContent(type="text", text=error or "Unknown error")])
+        raise ContextError(error or "Unknown context error", code_path=code_path)
 
+    # =========================================================================
+    # Hosted Mode Path (GitHub API)
+    # =========================================================================
+    if is_hosted_context(context):
+        log_debug(f"get_thread_entry: using hosted mode for topic={topic}")
+        load_error, entries = load_thread_entries_hosted(topic)
+        if load_error:
+            if "not found" in load_error.lower():
+                raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
+            raise HostedModeError(load_error, operation="get_entry")
+
+        selected: ThreadEntry | None = None
+
+        if index is not None:
+            if index < 0:
+                index = len(entries) + index
+            if index < 0 or index >= len(entries):
+                raise IndexOutOfRangeError(index=index, total=len(entries), topic=topic)
+            selected = entries[index]
+
+        if entry_id is not None:
+            matching = next((entry for entry in entries if entry.entry_id == entry_id), None)
+            if matching is None:
+                raise EntryNotFoundError(topic=topic, entry_id=entry_id)
+            if selected is not None and matching.index != selected.index:
+                raise ValidationError("index and entry_id refer to different entries")
+            selected = matching
+
+        if selected is None:
+            raise EntryNotFoundError(topic=topic)
+
+        payload = {
+            "topic": topic,
+            "entry_count": len(entries),
+            "index": selected.index,
+            "entry": _entry_full_payload(selected),
+        }
+
+        if resolved_format == "markdown":
+            markdown = payload["entry"]["markdown"]  # type: ignore[index]
+            return ToolResult(content=[TextContent(type="text", text=markdown)])
+
+        return ToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))])
+
+    # =========================================================================
+    # Local Mode Path (Filesystem)
+    # =========================================================================
     # Lightweight read sync: auto-pull if behind origin (never blocks)
-    sync_ok, sync_actions = ensure_readable(context.threads_dir, context.code_root)
+    _sync_ok, sync_actions = ensure_readable(context.threads_dir, context.code_root)
     if sync_actions:
         log_debug(f"get_thread_entry read sync: {sync_actions}")
 
     validation._refresh_threads(context)
     load_error, entries = _load_thread_entries_graph_first(topic, context)
     if load_error:
-        return ToolResult(content=[TextContent(type="text", text=load_error)])
+        if "not found" in load_error.lower():
+            raise ThreadNotFoundError(topic=topic)
+        raise ContextError(load_error, code_path=code_path)
 
     selected: ThreadEntry | None = None
 
@@ -445,19 +678,19 @@ def _get_thread_entry_impl(
         if index < 0:
             index = len(entries) + index
         if index < 0 or index >= len(entries):
-            return ToolResult(content=[TextContent(type="text", text=f"Error: index {index} out of range (entries={len(entries)}).")])
+            raise IndexOutOfRangeError(index=index, total=len(entries), topic=topic)
         selected = entries[index]
 
     if entry_id is not None:
         matching = next((entry for entry in entries if entry.entry_id == entry_id), None)
         if matching is None:
-            return ToolResult(content=[TextContent(type="text", text=f"Error: entry_id '{entry_id}' not found in thread '{topic}'.")])
+            raise EntryNotFoundError(topic=topic, entry_id=entry_id)
         if selected is not None and matching.index != selected.index:
-            return ToolResult(content=[TextContent(type="text", text="Error: index and entry_id refer to different entries.")])
+            raise ValidationError("index and entry_id refer to different entries")
         selected = matching
 
     if selected is None:
-        return ToolResult(content=[TextContent(type="text", text="Error: failed to resolve the requested entry.")])
+        raise EntryNotFoundError(topic=topic)
 
     # Track entry access (non-blocking)
     if selected.entry_id and context.threads_dir:
@@ -488,39 +721,88 @@ def _get_thread_entry_range_impl(
 
     fmt_error, resolved_format = _resolve_format(format, default="json")
     if fmt_error:
-        return ToolResult(content=[TextContent(type="text", text=fmt_error)])
+        raise ValidationError(fmt_error, field="format")
 
     if start_index < 0:
-        return ToolResult(content=[TextContent(type="text", text="Error: start_index must be non-negative.")])
+        raise ValidationError("start_index must be non-negative", field="start_index")
     if start_index > _MAX_OFFSET:
-        return ToolResult(content=[TextContent(type="text", text=f"Error: start_index must not exceed {_MAX_OFFSET}.")])
+        raise ValidationError(f"start_index must not exceed {_MAX_OFFSET}", field="start_index")
     if end_index is not None and end_index < start_index:
-        return ToolResult(content=[TextContent(type="text", text="Error: end_index must be greater than or equal to start_index.")])
+        raise ValidationError("end_index must be greater than or equal to start_index", field="end_index")
     if end_index is not None and (end_index - start_index) > _MAX_LIMIT:
-        return ToolResult(content=[TextContent(type="text", text=f"Error: requested range size must not exceed {_MAX_LIMIT} entries.")])
+        raise ValidationError(f"requested range size must not exceed {_MAX_LIMIT} entries", field="range")
 
     error, context = validation._validate_thread_context(code_path)
     if error or context is None:
-        return ToolResult(content=[TextContent(type="text", text=error or "Unknown error")])
+        raise ContextError(error or "Unknown context error", code_path=code_path)
 
+    # =========================================================================
+    # Hosted Mode Path (GitHub API)
+    # =========================================================================
+    if is_hosted_context(context):
+        log_debug(f"get_thread_entry_range: using hosted mode for topic={topic}")
+        load_error, entries = load_thread_entries_hosted(topic)
+        if load_error:
+            if "not found" in load_error.lower():
+                raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
+            raise HostedModeError(load_error, operation="get_entry_range")
+
+        total = len(entries)
+        if start_index >= total and total > 0:
+            raise IndexOutOfRangeError(index=start_index, total=total, topic=topic)
+
+        last_index = total - 1 if total else -1
+        effective_end = last_index if end_index is None else min(end_index, last_index)
+        if effective_end < start_index and total:
+            raise ValidationError("computed end index is before start index", field="end_index")
+
+        selected_entries = entries[start_index : effective_end + 1] if total else []
+
+        payload = {
+            "topic": topic,
+            "entry_count": total,
+            "start_index": start_index,
+            "end_index": effective_end if selected_entries else None,
+            "entries": [_entry_full_payload(entry) for entry in selected_entries],
+        }
+
+        if resolved_format == "markdown":
+            if not selected_entries:
+                return ToolResult(content=[TextContent(type="text", text="(no entries in range)")])
+            markdown_blocks = []
+            for entry in selected_entries:
+                block = entry.header
+                if entry.body:
+                    block += "\n\n" + entry.body
+                markdown_blocks.append(block)
+            text = "\n\n---\n\n".join(markdown_blocks)
+            return ToolResult(content=[TextContent(type="text", text=text)])
+
+        return ToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))])
+
+    # =========================================================================
+    # Local Mode Path (Filesystem)
+    # =========================================================================
     # Lightweight read sync: auto-pull if behind origin (never blocks)
-    sync_ok, sync_actions = ensure_readable(context.threads_dir, context.code_root)
+    _sync_ok, sync_actions = ensure_readable(context.threads_dir, context.code_root)
     if sync_actions:
         log_debug(f"get_thread_entry_range read sync: {sync_actions}")
 
     validation._refresh_threads(context)
     load_error, entries = _load_thread_entries_graph_first(topic, context)
     if load_error:
-        return ToolResult(content=[TextContent(type="text", text=load_error)])
+        if "not found" in load_error.lower():
+            raise ThreadNotFoundError(topic=topic)
+        raise ContextError(load_error, code_path=code_path)
 
     total = len(entries)
     if start_index >= total and total > 0:
-        return ToolResult(content=[TextContent(type="text", text=f"Error: start_index {start_index} out of range (entries={total}).")])
+        raise IndexOutOfRangeError(index=start_index, total=total, topic=topic)
 
     last_index = total - 1 if total else -1
     effective_end = last_index if end_index is None else min(end_index, last_index)
     if effective_end < start_index and total:
-        return ToolResult(content=[TextContent(type="text", text="Error: computed end index is before start index.")])
+        raise ValidationError("computed end index is before start index", field="end_index")
 
     selected_entries = entries[start_index : effective_end + 1] if total else []
 

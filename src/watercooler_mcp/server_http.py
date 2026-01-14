@@ -95,6 +95,7 @@ def create_http_app():
 
     from .auth import extract_request_context, is_hosted_mode, get_github_token
     from .cache import cache
+    from .context import HttpRequestContext, set_http_context
 
     # Import the main MCP server
     from .server import mcp
@@ -163,7 +164,7 @@ def create_http_app():
         request.state.repo = ctx.repo
         request.state.branch = ctx.branch
 
-        # For hosted mode, validate user has token
+        # For hosted mode, validate user has token and set context variable
         if is_hosted_mode() and request.url.path.startswith("/mcp"):
             if not ctx.user_id:
                 return JSONResponse(
@@ -178,6 +179,15 @@ def create_http_app():
                 )
             # Store token in request state for MCP tools to use
             request.state.github_token = token_info.token
+
+            # Set context variable for MCP tools to access
+            # This bridges the gap between HTTP middleware and MCP tool execution
+            set_http_context(HttpRequestContext(
+                user_id=ctx.user_id,
+                repo=headers.get("X-Repo") or headers.get("x-repo"),
+                branch=headers.get("X-Branch") or headers.get("x-branch"),
+                github_token=token_info.token,
+            ))
 
         response = await call_next(request)
         return response

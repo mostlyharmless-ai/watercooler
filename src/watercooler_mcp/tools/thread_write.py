@@ -5,6 +5,10 @@ Tools:
 - watercooler_ack: Acknowledge without flip
 - watercooler_handoff: Explicit handoff
 - watercooler_set_status: Update thread status
+
+Modes:
+- Local (stdio): Uses filesystem operations and git sync
+- Hosted (HTTP): Uses GitHub API via hosted_ops module
 """
 
 import logging
@@ -17,9 +21,23 @@ from watercooler import commands, fs
 from watercooler.metadata import thread_meta
 
 from ..config import get_agent_name, is_slack_enabled, is_slack_bot_enabled
+from ..errors import (
+    ContextError,
+    HostedModeError,
+    IdentityError,
+    ThreadNotFoundError,
+)
 from ..helpers import _format_warnings_for_response
+from ..hosted_ops import (
+    say_hosted,
+    ack_hosted,
+    handoff_hosted,
+    set_status_hosted,
+)
 from ..middleware import run_with_sync
 from .. import validation  # Import module for runtime access (enables test patching)
+from ..validation import is_hosted_context
+from ..observability import log_debug, log_error
 # Phase 1: Webhook notifications
 from ..slack import notify_new_entry, notify_ball_flip, notify_handoff, notify_status_change
 # Phase 2: Bidirectional sync
@@ -87,90 +105,46 @@ def _say_impl(
             role="implementer", entry_type="Note", code_path="/path/to/repo",
             agent_func="Cursor:Composer 1:implementer")
     """
-    try:
-        error, context = validation._require_context(code_path)
-        if error:
-            return error
-        if context is None:
-            return "Error: Unable to resolve code context for the provided code_path."
+    error, context = validation._require_context(code_path)
+    if error:
+        raise ContextError(error, code_path=code_path)
+    if context is None:
+        raise ContextError("Unable to resolve code context for the provided code_path.", code_path=code_path)
 
-        if not agent_func or ":" not in agent_func:
-            return "identity required: pass agent_func as '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')"
-        agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
-        if not agent_base or not agent_spec:
-            return "identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')"
+    if not agent_func or ":" not in agent_func:
+        raise IdentityError()
+    agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
+    if not agent_base or not agent_spec:
+        raise IdentityError("identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')")
 
-        threads_dir = context.threads_dir
-        agent = agent_base or get_agent_name(ctx.client_id)
+    agent = agent_base or get_agent_name(ctx.client_id)
 
-        # Generate unique Entry-ID for idempotency
+    # =====================================================================
+    # Hosted Mode Path (GitHub API)
+    # =====================================================================
+    if is_hosted_context(context):
+        log_debug(f"say: using hosted mode for topic={topic}")
+
         entry_id = str(ULID())
-
-        # Define the append operation
-        def append_operation():
-            commands.say(
-                topic,
-                threads_dir=threads_dir,
-                agent=agent,
-                role=role,
-                title=title,
-                entry_type=entry_type,
-                body=body,
-                entry_id=entry_id,
-            )
-
-        run_with_sync(
-            context,
-            f"{agent}: {title} ({topic})",
-            append_operation,
+        write_error, result = say_hosted(
             topic=topic,
+            title=title,
+            body=body,
+            agent=agent,
+            role=role,
+            entry_type=entry_type,
             entry_id=entry_id,
-            agent_spec=agent_spec,
-            priority_flush=True,
+            create_if_missing=create_if_missing,
         )
 
-        # Get updated thread meta to show new ball owner
-        thread_path = fs.thread_path(topic, threads_dir)
-        _, status, ball, _ = thread_meta(thread_path)
+        if write_error:
+            log_error(f"say hosted mode failed: {write_error}")
+            if "not found" in write_error.lower():
+                raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
+            raise HostedModeError(write_error, operation="say")
 
-        # Send Slack notification (fire-and-forget, non-blocking)
-        if is_slack_enabled():
-            notify_new_entry(
-                topic=topic,
-                agent=agent,
-                title=title,
-                role=role,
-                entry_type=entry_type,
-                code_repo=context.code_repo,
-                ball=ball,
-            )
-
-        # Phase 2: Sync entry to Slack channel/thread (if bot enabled)
-        if is_slack_bot_enabled():
-            try:
-                # Extract repo name from code_repo (e.g., "org/repo" -> "repo")
-                repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
-                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-                sync_entry_to_slack(
-                    repo=repo_name,
-                    topic=topic,
-                    entry_id=entry_id,
-                    agent=agent,
-                    role=role,
-                    entry_type=entry_type,
-                    title=title,
-                    body=body,
-                    timestamp=timestamp,
-                    status=status,
-                    ball_owner=ball,
-                    spec=agent_spec,
-                    threads_dir=threads_dir,
-                    branch=context.code_branch,
-                )
-            except Exception as e:
-                # Log but don't fail the operation - Slack sync is best-effort
-                logging.getLogger(__name__).warning(f"Slack sync failed for {topic}: {e}")
+        status = result.get("status", "OPEN")
+        ball = result.get("ball", "Agent")
 
         return _format_warnings_for_response(
             f"✅ Entry added to '{topic}'\n"
@@ -180,8 +154,87 @@ def _say_impl(
             f"Status: {status}"
         )
 
-    except Exception as e:
-        return f"Error adding entry to '{topic}': {str(e)}"
+    # =====================================================================
+    # Local Mode Path (Filesystem)
+    # =====================================================================
+    threads_dir = context.threads_dir
+
+    # Generate unique Entry-ID for idempotency
+    entry_id = str(ULID())
+
+    # Define the append operation
+    def append_operation():
+        commands.say(
+            topic,
+            threads_dir=threads_dir,
+            agent=agent,
+            role=role,
+            title=title,
+            entry_type=entry_type,
+            body=body,
+            entry_id=entry_id,
+        )
+
+    run_with_sync(
+        context,
+        f"{agent}: {title} ({topic})",
+        append_operation,
+        topic=topic,
+        entry_id=entry_id,
+        agent_spec=agent_spec,
+        priority_flush=True,
+    )
+
+    # Get updated thread meta to show new ball owner
+    thread_path = fs.thread_path(topic, threads_dir)
+    _, status, ball, _ = thread_meta(thread_path)
+
+    # Send Slack notification (fire-and-forget, non-blocking)
+    if is_slack_enabled():
+        notify_new_entry(
+            topic=topic,
+            agent=agent,
+            title=title,
+            role=role,
+            entry_type=entry_type,
+            code_repo=context.code_repo,
+            ball=ball,
+        )
+
+    # Phase 2: Sync entry to Slack channel/thread (if bot enabled)
+    if is_slack_bot_enabled():
+        try:
+            # Extract repo name from code_repo (e.g., "org/repo" -> "repo")
+            repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+            sync_entry_to_slack(
+                repo=repo_name,
+                topic=topic,
+                entry_id=entry_id,
+                agent=agent,
+                role=role,
+                entry_type=entry_type,
+                title=title,
+                body=body,
+                timestamp=timestamp,
+                status=status,
+                ball_owner=ball,
+                spec=agent_spec,
+                threads_dir=threads_dir,
+                branch=context.code_branch,
+            )
+        except Exception as e:
+            # Log but don't fail the operation - Slack sync is best-effort
+            logging.getLogger(__name__).warning(f"Slack sync failed for {topic}: {e}")
+
+    return _format_warnings_for_response(
+        f"✅ Entry added to '{topic}'\n"
+        f"Title: {title}\n"
+        f"Role: {role} | Type: {entry_type}\n"
+        f"Ball flipped to: {ball}\n"
+        f"Status: {status}"
+    )
 
 
 def _ack_impl(
@@ -218,46 +271,40 @@ def _ack_impl(
         ack("feature-auth", "Noted", "Thanks for the update, looks good!",
             code_path="/path/to/repo", agent_func="Claude Code:sonnet-4:reviewer")
     """
-    try:
-        error, context = validation._require_context(code_path)
-        if error:
-            return error
-        if context is None:
-            return "Error: Unable to resolve code context for the provided code_path."
-        if validation._dynamic_context_missing(context):
-            return (
-                "Dynamic threads repo was not resolved from your git context.\n"
-                "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO."
-            )
+    error, context = validation._require_context(code_path)
+    if error:
+        raise ContextError(error, code_path=code_path)
+    if context is None:
+        raise ContextError("Unable to resolve code context for the provided code_path.", code_path=code_path)
 
-        if not agent_func or ":" not in agent_func:
-            return "identity required: pass agent_func as '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')"
-        agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
-        if not agent_base or not agent_spec:
-            return "identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')"
-        threads_dir = context.threads_dir
-        agent = agent_base or get_agent_name(ctx.client_id)
+    if not agent_func or ":" not in agent_func:
+        raise IdentityError()
+    agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
+    if not agent_base or not agent_spec:
+        raise IdentityError("identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')")
+    agent = agent_base or get_agent_name(ctx.client_id)
 
-        def ack_operation():
-            commands.ack(
-                topic,
-                threads_dir=threads_dir,
-                agent=agent,
-                title=title or None,
-                body=body or None,
-            )
+    # =====================================================================
+    # Hosted Mode Path (GitHub API)
+    # =====================================================================
+    if is_hosted_context(context):
+        log_debug(f"ack: using hosted mode for topic={topic}")
 
-        run_with_sync(
-            context,
-            f"{agent}: {title or 'Ack'} ({topic})",
-            ack_operation,
+        write_error, result = ack_hosted(
             topic=topic,
-            agent_spec=agent_spec,
+            agent=agent,
+            title=title or "Ack",
+            body=body or "Acknowledged",
         )
 
-        # Get updated thread meta
-        thread_path = fs.thread_path(topic, threads_dir)
-        _, status, ball, _ = thread_meta(thread_path)
+        if write_error:
+            log_error(f"ack hosted mode failed: {write_error}")
+            if "not found" in write_error.lower():
+                raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
+            raise HostedModeError(write_error, operation="ack")
+
+        status = result.get("status", "OPEN")
+        ball = result.get("ball", "Agent")
 
         ack_title = title or "Ack"
         return (
@@ -267,8 +314,46 @@ def _ack_impl(
             f"Status: {status}"
         )
 
-    except Exception as e:
-        return f"Error acknowledging '{topic}': {str(e)}"
+    # =====================================================================
+    # Local Mode Path (Filesystem)
+    # =====================================================================
+    if validation._dynamic_context_missing(context):
+        raise ContextError(
+            "Dynamic threads repo was not resolved from your git context. "
+            "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO.",
+            code_path=code_path,
+        )
+
+    threads_dir = context.threads_dir
+
+    def ack_operation():
+        commands.ack(
+            topic,
+            threads_dir=threads_dir,
+            agent=agent,
+            title=title or None,
+            body=body or None,
+        )
+
+    run_with_sync(
+        context,
+        f"{agent}: {title or 'Ack'} ({topic})",
+        ack_operation,
+        topic=topic,
+        agent_spec=agent_spec,
+    )
+
+    # Get updated thread meta
+    thread_path = fs.thread_path(topic, threads_dir)
+    _, status, ball, _ = thread_meta(thread_path)
+
+    ack_title = title or "Ack"
+    return (
+        f"✅ Acknowledged '{topic}'\n"
+        f"Title: {ack_title}\n"
+        f"Ball remains with: {ball}\n"
+        f"Status: {status}"
+    )
 
 
 def _handoff_impl(
@@ -305,134 +390,165 @@ def _handoff_impl(
         handoff("feature-auth", "Ready for your review", target_agent="Claude",
                 code_path="/path/to/repo", agent_func="Cursor:Composer 1:implementer")
     """
-    try:
-        error, context = validation._require_context(code_path)
-        if error:
-            return error
-        if context is None:
-            return "Error: Unable to resolve code context for the provided code_path."
-        if validation._dynamic_context_missing(context):
-            return (
-                "Dynamic threads repo was not resolved from your git context.\n"
-                "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO."
-            )
+    error, context = validation._require_context(code_path)
+    if error:
+        raise ContextError(error, code_path=code_path)
+    if context is None:
+        raise ContextError("Unable to resolve code context for the provided code_path.", code_path=code_path)
 
-        if not agent_func or ":" not in agent_func:
-            return "identity required: pass agent_func as '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')"
-        agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
-        if not agent_base or not agent_spec:
-            return "identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')"
-        threads_dir = context.threads_dir
-        agent = agent_base or get_agent_name(ctx.client_id)
+    if not agent_func or ":" not in agent_func:
+        raise IdentityError()
+    agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
+    if not agent_base or not agent_spec:
+        raise IdentityError("identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')")
+    agent = agent_base or get_agent_name(ctx.client_id)
 
-        if target_agent:
-            def op():
-                commands.set_ball(topic, threads_dir=threads_dir, ball=target_agent)
-                if note:
-                    commands.append_entry(
-                        topic,
-                        threads_dir=threads_dir,
-                        agent=agent,
-                        role="pm",
-                        title=f"Handoff to {target_agent}",
-                        entry_type="Note",
-                        body=note,
-                        ball=target_agent,
-                    )
+    # =====================================================================
+    # Hosted Mode Path (GitHub API)
+    # =====================================================================
+    if is_hosted_context(context):
+        log_debug(f"handoff: using hosted mode for topic={topic}")
 
-            run_with_sync(
-                context,
-                f"{agent}: Handoff to {target_agent} ({topic})",
-                op,
+        write_error, result = handoff_hosted(
+            topic=topic,
+            agent=agent,
+            target_agent=target_agent,
+            note=note,
+        )
+
+        if write_error:
+            log_error(f"handoff hosted mode failed: {write_error}")
+            if "not found" in write_error.lower():
+                raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
+            raise HostedModeError(write_error, operation="handoff")
+
+        new_ball = result.get("ball", target_agent or "Agent")
+        status = result.get("status", "OPEN")
+
+        return (
+            f"✅ Ball handed off to: {new_ball}\n"
+            f"Thread: {topic}\n"
+            f"Status: {status}\n"
+            + (f"Note: {note}" if note else "")
+        )
+
+    # =====================================================================
+    # Local Mode Path (Filesystem)
+    # =====================================================================
+    if validation._dynamic_context_missing(context):
+        raise ContextError(
+            "Dynamic threads repo was not resolved from your git context. "
+            "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO.",
+            code_path=code_path,
+        )
+
+    threads_dir = context.threads_dir
+
+    if target_agent:
+        def op():
+            commands.set_ball(topic, threads_dir=threads_dir, ball=target_agent)
+            if note:
+                commands.append_entry(
+                    topic,
+                    threads_dir=threads_dir,
+                    agent=agent,
+                    role="pm",
+                    title=f"Handoff to {target_agent}",
+                    entry_type="Note",
+                    body=note,
+                    ball=target_agent,
+                )
+
+        run_with_sync(
+            context,
+            f"{agent}: Handoff to {target_agent} ({topic})",
+            op,
+            topic=topic,
+            agent_spec=agent_spec,
+            priority_flush=True,
+        )
+
+        # Send Slack notification (fire-and-forget, non-blocking)
+        if is_slack_enabled():
+            notify_handoff(
                 topic=topic,
-                agent_spec=agent_spec,
-                priority_flush=True,
+                from_agent=agent,
+                to_agent=target_agent,
+                note=note or None,
+                code_repo=context.code_repo,
             )
 
-            # Send Slack notification (fire-and-forget, non-blocking)
-            if is_slack_enabled():
-                notify_handoff(
+        # Phase 2: Sync handoff to Slack thread (if bot enabled)
+        if is_slack_bot_enabled():
+            try:
+                repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
+                slack_sync_handoff(
+                    repo=repo_name,
                     topic=topic,
                     from_agent=agent,
                     to_agent=target_agent,
                     note=note or None,
-                    code_repo=context.code_repo,
                 )
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Slack handoff sync failed for {topic}: {e}")
 
-            # Phase 2: Sync handoff to Slack thread (if bot enabled)
-            if is_slack_bot_enabled():
-                try:
-                    repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
-                    slack_sync_handoff(
-                        repo=repo_name,
-                        topic=topic,
-                        from_agent=agent,
-                        to_agent=target_agent,
-                        note=note or None,
-                    )
-                except Exception as e:
-                    logging.getLogger(__name__).warning(f"Slack handoff sync failed for {topic}: {e}")
-
-            return (
-                f"✅ Ball handed off to: {target_agent}\n"
-                f"Thread: {topic}\n"
-                + (f"Note: {note}" if note else "")
+        return (
+            f"✅ Ball handed off to: {target_agent}\n"
+            f"Thread: {topic}\n"
+            + (f"Note: {note}" if note else "")
+        )
+    else:
+        def op():
+            commands.handoff(
+                topic,
+                threads_dir=threads_dir,
+                agent=agent,
+                note=note or None,
             )
-        else:
-            def op():
-                commands.handoff(
-                    topic,
-                    threads_dir=threads_dir,
-                    agent=agent,
-                    note=note or None,
-                )
 
-            run_with_sync(
-                context,
-                f"{agent}: Handoff ({topic})",
-                op,
+        run_with_sync(
+            context,
+            f"{agent}: Handoff ({topic})",
+            op,
+            topic=topic,
+            agent_spec=agent_spec,
+            priority_flush=True,
+        )
+
+        # Get updated thread meta
+        thread_path = fs.thread_path(topic, threads_dir)
+        _, status, ball, _ = thread_meta(thread_path)
+
+        # Send Slack notification (fire-and-forget, non-blocking)
+        if is_slack_enabled():
+            notify_handoff(
                 topic=topic,
-                agent_spec=agent_spec,
-                priority_flush=True,
+                from_agent=agent,
+                to_agent=ball or "unknown",
+                note=note or None,
+                code_repo=context.code_repo,
             )
 
-            # Get updated thread meta
-            thread_path = fs.thread_path(topic, threads_dir)
-            _, status, ball, _ = thread_meta(thread_path)
-
-            # Send Slack notification (fire-and-forget, non-blocking)
-            if is_slack_enabled():
-                notify_handoff(
+        # Phase 2: Sync handoff to Slack thread (if bot enabled)
+        if is_slack_bot_enabled():
+            try:
+                repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
+                slack_sync_handoff(
+                    repo=repo_name,
                     topic=topic,
                     from_agent=agent,
                     to_agent=ball or "unknown",
                     note=note or None,
-                    code_repo=context.code_repo,
                 )
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Slack handoff sync failed for {topic}: {e}")
 
-            # Phase 2: Sync handoff to Slack thread (if bot enabled)
-            if is_slack_bot_enabled():
-                try:
-                    repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
-                    slack_sync_handoff(
-                        repo=repo_name,
-                        topic=topic,
-                        from_agent=agent,
-                        to_agent=ball or "unknown",
-                        note=note or None,
-                    )
-                except Exception as e:
-                    logging.getLogger(__name__).warning(f"Slack handoff sync failed for {topic}: {e}")
-
-            return (
-                f"✅ Ball handed off to: {ball}\n"
-                f"Thread: {topic}\n"
-                f"Status: {status}\n"
-                + (f"Note: {note}" if note else "")
-            )
-
-    except Exception as e:
-        return f"Error handing off '{topic}': {str(e)}"
+        return (
+            f"✅ Ball handed off to: {ball}\n"
+            f"Thread: {topic}\n"
+            f"Status: {status}\n"
+            + (f"Note: {note}" if note else "")
+        )
 
 
 def _set_status_impl(
@@ -465,88 +581,112 @@ def _set_status_impl(
         set_status("feature-auth", "IN_REVIEW", code_path="/path/to/repo",
                    agent_func="Claude Code:sonnet-4:pm")
     """
-    try:
-        error, context = validation._require_context(code_path)
-        if error:
-            return error
-        if context is None:
-            return "Error: Unable to resolve code context for the provided code_path."
-        if validation._dynamic_context_missing(context):
-            return (
-                "Dynamic threads repo was not resolved from your git context.\n"
-                "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO."
-            )
+    error, context = validation._require_context(code_path)
+    if error:
+        raise ContextError(error, code_path=code_path)
+    if context is None:
+        raise ContextError("Unable to resolve code context for the provided code_path.", code_path=code_path)
 
-        if not agent_func or ":" not in agent_func:
-            return "identity required: pass agent_func as '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')"
-        agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
-        if not agent_base or not agent_spec:
-            return "identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')"
-        threads_dir = context.threads_dir
+    if not agent_func or ":" not in agent_func:
+        raise IdentityError()
+    agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
+    if not agent_base or not agent_spec:
+        raise IdentityError("identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')")
 
-        # Get old status before change (for notification)
-        thread_path = fs.thread_path(topic, threads_dir)
-        old_status = None
-        try:
-            _, old_status, _, _ = thread_meta(thread_path)
-        except Exception:
-            pass  # Thread may not exist yet
+    # =====================================================================
+    # Hosted Mode Path (GitHub API)
+    # =====================================================================
+    if is_hosted_context(context):
+        log_debug(f"set_status: using hosted mode for topic={topic}")
 
-        def op():
-            commands.set_status(topic, threads_dir=threads_dir, status=status)
-
-        priority_flush = status.strip().upper() == "CLOSED"
-
-        run_with_sync(
-            context,
-            f"{agent_base}: Status changed to {status} ({topic})",
-            op,
+        write_error, result = set_status_hosted(
             topic=topic,
-            agent_spec=agent_spec,
-            priority_flush=priority_flush,
+            status=status,
         )
 
-        # Send Slack notification (fire-and-forget, non-blocking)
-        if is_slack_enabled():
-            notify_status_change(
-                topic=topic,
-                old_status=old_status,
-                new_status=status,
-                agent=agent_base,
-                code_repo=context.code_repo,
-            )
-
-        # Phase 2: Sync status change to Slack thread (if bot enabled)
-        if is_slack_bot_enabled():
-            try:
-                repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
-                slack_sync_status_change(
-                    repo=repo_name,
-                    topic=topic,
-                    old_status=old_status or "UNKNOWN",
-                    new_status=status,
-                    changed_by=agent_base,
-                )
-                # Also update thread parent message with new status
-                thread_path = fs.thread_path(topic, threads_dir)
-                _, _, ball, _ = thread_meta(thread_path)
-                update_thread_parent(
-                    repo=repo_name,
-                    topic=topic,
-                    status=status,
-                    ball_owner=ball or "",
-                    entry_count=0,  # We don't track this currently
-                )
-            except Exception as e:
-                logging.getLogger(__name__).warning(f"Slack status sync failed for {topic}: {e}")
+        if write_error:
+            log_error(f"set_status hosted mode failed: {write_error}")
+            if "not found" in write_error.lower():
+                raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
+            raise HostedModeError(write_error, operation="set_status")
 
         return (
             f"✅ Status updated for '{topic}'\n"
             f"New status: {status}"
         )
 
-    except Exception as e:
-        return f"Error setting status for '{topic}': {str(e)}"
+    # =====================================================================
+    # Local Mode Path (Filesystem)
+    # =====================================================================
+    if validation._dynamic_context_missing(context):
+        raise ContextError(
+            "Dynamic threads repo was not resolved from your git context. "
+            "Run from inside your code repo or set WATERCOOLER_CODE_REPO/WATERCOOLER_GIT_REPO.",
+            code_path=code_path,
+        )
+
+    threads_dir = context.threads_dir
+
+    # Get old status before change (for notification)
+    thread_path = fs.thread_path(topic, threads_dir)
+    old_status = None
+    try:
+        _, old_status, _, _ = thread_meta(thread_path)
+    except Exception:
+        pass  # Thread may not exist yet
+
+    def op():
+        commands.set_status(topic, threads_dir=threads_dir, status=status)
+
+    priority_flush = status.strip().upper() == "CLOSED"
+
+    run_with_sync(
+        context,
+        f"{agent_base}: Status changed to {status} ({topic})",
+        op,
+        topic=topic,
+        agent_spec=agent_spec,
+        priority_flush=priority_flush,
+    )
+
+    # Send Slack notification (fire-and-forget, non-blocking)
+    if is_slack_enabled():
+        notify_status_change(
+            topic=topic,
+            old_status=old_status,
+            new_status=status,
+            agent=agent_base,
+            code_repo=context.code_repo,
+        )
+
+    # Phase 2: Sync status change to Slack thread (if bot enabled)
+    if is_slack_bot_enabled():
+        try:
+            repo_name = context.code_repo.split("/")[-1] if context.code_repo else ""
+            slack_sync_status_change(
+                repo=repo_name,
+                topic=topic,
+                old_status=old_status or "UNKNOWN",
+                new_status=status,
+                changed_by=agent_base,
+            )
+            # Also update thread parent message with new status
+            thread_path = fs.thread_path(topic, threads_dir)
+            _, _, ball, _ = thread_meta(thread_path)
+            update_thread_parent(
+                repo=repo_name,
+                topic=topic,
+                status=status,
+                ball_owner=ball or "",
+                entry_count=0,  # We don't track this currently
+            )
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Slack status sync failed for {topic}: {e}")
+
+    return (
+        f"✅ Status updated for '{topic}'\n"
+        f"New status: {status}"
+    )
 
 
 def register_thread_write_tools(mcp):
