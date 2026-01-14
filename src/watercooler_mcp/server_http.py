@@ -89,7 +89,6 @@ def create_http_app():
             "Install with: pip install watercooler-cloud[http]"
         )
 
-    from contextlib import asynccontextmanager
     from fastapi import FastAPI, Request, Response
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
@@ -100,23 +99,18 @@ def create_http_app():
     # Import the main MCP server
     from .server import mcp
 
-    # Create lifespan context manager for proper MCP initialization
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        """Lifespan context manager to initialize and cleanup MCP server."""
-        # FastMCP needs to run() to initialize its task group
-        # We use mcp.run() as an async context manager
-        async with mcp.run():
-            logger.info("FastMCP server initialized")
-            yield
-        logger.info("FastMCP server shutdown")
+    # Get the MCP HTTP app FIRST so we can use its lifespan
+    # FastMCP requires the parent app to use http_app().lifespan for proper
+    # task group initialization (see https://gofastmcp.com/deployment/asgi)
+    mcp_asgi = mcp.http_app(path="/")
 
-    # Create FastAPI wrapper with lifespan
+    # Create FastAPI wrapper with MCP's lifespan
+    # This ensures the MCP task group is properly initialized
     app = FastAPI(
         title="Watercooler MCP HTTP Server",
         description="HTTP interface for Watercooler MCP tools",
         version="1.0.0",
-        lifespan=lifespan,
+        lifespan=mcp_asgi.lifespan,
     )
 
     # Configure CORS for browser-based clients
@@ -182,18 +176,10 @@ def create_http_app():
         response = await call_next(request)
         return response
 
-    # Mount the FastMCP app using HTTP transport
-    # This provides the /mcp endpoint that handles MCP JSON-RPC requests
-    try:
-        # Use http_app() which is the current recommended method
-        mcp_asgi = mcp.http_app(path="/")
-        app.mount("/mcp", mcp_asgi)
-        logger.info("Mounted FastMCP HTTP app at /mcp")
-    except AttributeError as e:
-        logger.warning(
-            f"FastMCP HTTP mounting not available ({e}). "
-            "MCP endpoint will not be functional."
-        )
+    # Mount the FastMCP app at /mcp
+    # mcp_asgi was created earlier to get its lifespan
+    app.mount("/mcp", mcp_asgi)
+    logger.info("Mounted FastMCP HTTP app at /mcp")
 
     return app
 
