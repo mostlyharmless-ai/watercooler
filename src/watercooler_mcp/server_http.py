@@ -102,7 +102,13 @@ def create_http_app():
     # Get the MCP HTTP app FIRST so we can use its lifespan
     # FastMCP requires the parent app to use http_app().lifespan for proper
     # task group initialization (see https://gofastmcp.com/deployment/asgi)
-    mcp_asgi = mcp.http_app(path="/")
+    # Use stateless_http=True and json_response=True for simple JSON-RPC
+    # without SSE/sessions (compatible with mcpClient.ts)
+    mcp_asgi = mcp.http_app(
+        path="/",
+        stateless_http=True,
+        json_response=True,
+    )
 
     # Create FastAPI wrapper with MCP's lifespan
     # This ensures the MCP task group is properly initialized
