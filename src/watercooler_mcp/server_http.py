@@ -169,35 +169,17 @@ def create_http_app():
         response = await call_next(request)
         return response
 
-    # Mount the FastMCP app at /mcp
-    # FastMCP provides its own HTTP handling when run with transport="http"
-    # We expose it through FastAPI for additional middleware
-
-    @app.post("/mcp")
-    async def mcp_endpoint(request: Request):
-        """MCP protocol endpoint.
-
-        Accepts JSON-RPC style MCP requests and forwards to FastMCP.
-        """
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Invalid JSON body"},
-            )
-
-        # For now, we need to run the MCP server natively
-        # This endpoint is a placeholder for direct HTTP->MCP bridging
-        # The actual implementation uses FastMCP's built-in HTTP transport
-
-        return JSONResponse(
-            status_code=501,
-            content={
-                "error": "Direct MCP endpoint not yet implemented",
-                "hint": "Use FastMCP's native HTTP transport instead",
-                "command": "WATERCOOLER_MCP_TRANSPORT=http python -m watercooler_mcp",
-            },
+    # Mount the FastMCP app using HTTP transport
+    # This provides the /mcp endpoint that handles MCP JSON-RPC requests
+    try:
+        # Use http_app() which is the current recommended method
+        mcp_asgi = mcp.http_app(path="/")
+        app.mount("/mcp", mcp_asgi)
+        logger.info("Mounted FastMCP HTTP app at /mcp")
+    except AttributeError as e:
+        logger.warning(
+            f"FastMCP HTTP mounting not available ({e}). "
+            "MCP endpoint will not be functional."
         )
 
     return app
