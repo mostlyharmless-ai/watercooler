@@ -1,15 +1,9 @@
-"""Minimal test entry point for Railway deployment debugging."""
+"""Entry point for Railway/ASGI deployments.
 
-from fastapi import FastAPI
+Railway and other ASGI platforms auto-detect `main:app`.
+This file re-exports the FastAPI app from the watercooler_mcp package.
+"""
 
-app = FastAPI(title="Watercooler MCP Test")
-
-@app.get("/")
-def root():
-    return {"status": "minimal test app running"}
-
-@app.get("/health")
-def health():
-    return {"status": "healthy", "mode": "test"}
+from watercooler_mcp.server_http import app
 
 __all__ = ["app"]

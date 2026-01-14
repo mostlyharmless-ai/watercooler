@@ -8,6 +8,8 @@ Environment variables:
 - WATERCOOLER_TOKEN_API_URL: Base URL of the token service (e.g., https://watercoolerdev.com)
 - WATERCOOLER_TOKEN_API_KEY: API key for authenticating with the token service
 - WATERCOOLER_AUTH_MODE: "local" (default, use git credentials) or "hosted" (use token service)
+- VERCEL_AUTOMATION_BYPASS_SECRET: Optional secret to bypass Vercel preview auth
+  (required when token service is on a Vercel preview deployment with auth enabled)
 
 Token Resolution Flow (hosted mode):
     1. Request arrives with user context (user_id or session)
@@ -60,12 +62,13 @@ def get_auth_config() -> Dict[str, str]:
     """Get authentication configuration from environment.
 
     Returns:
-        Dict with auth_mode, token_api_url, and token_api_key
+        Dict with auth_mode, token_api_url, token_api_key, and vercel_bypass_secret
     """
     return {
         "auth_mode": os.getenv("WATERCOOLER_AUTH_MODE", "local"),
         "token_api_url": os.getenv("WATERCOOLER_TOKEN_API_URL", ""),
         "token_api_key": os.getenv("WATERCOOLER_TOKEN_API_KEY", ""),
+        "vercel_bypass_secret": os.getenv("VERCEL_AUTOMATION_BYPASS_SECRET", ""),
     }
 
 
@@ -122,6 +125,7 @@ def get_github_token(
     config = get_auth_config()
     api_url = config["token_api_url"]
     api_key = config["token_api_key"]
+    vercel_bypass_secret = config["vercel_bypass_secret"]
 
     if not api_url or not api_key:
         logger.debug("Token service not configured, skipping API call")
@@ -130,13 +134,19 @@ def get_github_token(
     # Build request URL
     url = f"{api_url.rstrip('/')}/api/github/token?userId={user_id}"
 
+    # Build headers - include Vercel bypass if configured (for preview deployments)
+    headers = {
+        "x-api-key": api_key,
+        "Accept": "application/json",
+    }
+    if vercel_bypass_secret:
+        headers["x-vercel-protection-bypass"] = vercel_bypass_secret
+        logger.debug("Including Vercel preview bypass header in token service request")
+
     try:
         request = urllib.request.Request(
             url,
-            headers={
-                "x-api-key": api_key,
-                "Accept": "application/json",
-            },
+            headers=headers,
             method="GET",
         )
 
