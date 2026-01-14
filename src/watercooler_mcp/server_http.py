@@ -89,6 +89,7 @@ def create_http_app():
             "Install with: pip install watercooler-cloud[http]"
         )
 
+    from contextlib import asynccontextmanager
     from fastapi import FastAPI, Request, Response
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
@@ -99,11 +100,23 @@ def create_http_app():
     # Import the main MCP server
     from .server import mcp
 
-    # Create FastAPI wrapper
+    # Create lifespan context manager for proper MCP initialization
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Lifespan context manager to initialize and cleanup MCP server."""
+        # FastMCP needs to run() to initialize its task group
+        # We use mcp.run() as an async context manager
+        async with mcp.run():
+            logger.info("FastMCP server initialized")
+            yield
+        logger.info("FastMCP server shutdown")
+
+    # Create FastAPI wrapper with lifespan
     app = FastAPI(
         title="Watercooler MCP HTTP Server",
         description="HTTP interface for Watercooler MCP tools",
         version="1.0.0",
+        lifespan=lifespan,
     )
 
     # Configure CORS for browser-based clients
