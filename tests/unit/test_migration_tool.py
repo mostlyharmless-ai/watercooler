@@ -209,6 +209,7 @@ Test entry content.
 
         mock_graphiti = MagicMock()
         mock_graphiti.add_episode_direct = AsyncMock()
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(return_value=None)
 
         with patch(
             "watercooler_mcp.tools.migration._check_backend_availability",
@@ -278,6 +279,7 @@ Second entry content.
         mock_graphiti.add_episode_direct = AsyncMock(
             return_value={"episode_uuid": "ep-123"}
         )
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(return_value=None)
 
         with patch(
             "watercooler_mcp.tools.migration._check_backend_availability",
@@ -305,6 +307,7 @@ Second entry content.
         mock_graphiti.add_episode_direct = AsyncMock(
             return_value={"episode_uuid": "ep-123"}
         )
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(return_value=None)
 
         with patch(
             "watercooler_mcp.tools.migration._check_backend_availability",
@@ -367,6 +370,7 @@ Content.
         mock_graphiti.add_episode_direct = AsyncMock(
             return_value={"episode_uuid": "ep-123"}
         )
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(return_value=None)
 
         with patch(
             "watercooler_mcp.tools.migration._check_backend_availability",
@@ -420,6 +424,7 @@ Already migrated content.
         mock_graphiti.add_episode_direct = AsyncMock(
             return_value={"episode_uuid": "ep-123"}
         )
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(return_value=None)
 
         with patch(
             "watercooler_mcp.tools.migration._check_backend_availability",
@@ -614,6 +619,7 @@ This is a small entry that fits in a single chunk.
 
         mock_graphiti = MagicMock()
         mock_graphiti.add_episode_direct = AsyncMock(side_effect=mock_add_episode)
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(return_value=None)
 
         with patch(
             "watercooler_mcp.tools.migration._check_backend_availability",
@@ -642,9 +648,9 @@ This is a small entry that fits in a single chunk.
             # - Subsequent chunks: should link to previous chunk
             calls = mock_graphiti.add_episode_direct.call_args_list
             if len(calls) > 1:
-                # First chunk should have None for previous_episode_uuids
+                # First chunk should have [] for previous_episode_uuids (not None - to prevent context overflow)
                 first_call = calls[0]
-                assert first_call.kwargs.get("previous_episode_uuids") is None
+                assert first_call.kwargs.get("previous_episode_uuids") == []
 
                 # Second chunk should link to first chunk's UUID
                 second_call = calls[1]
@@ -667,6 +673,7 @@ This is a small entry that fits in a single chunk.
 
         mock_graphiti = MagicMock()
         mock_graphiti.add_episode_direct = AsyncMock(side_effect=mock_add_episode)
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(return_value=None)
 
         with patch(
             "watercooler_mcp.tools.migration._check_backend_availability",
@@ -686,9 +693,9 @@ This is a small entry that fits in a single chunk.
             calls = mock_graphiti.add_episode_direct.call_args_list
             assert len(calls) == 2
 
-            # First chunk (header) should have previous_episode_uuids=None
+            # First chunk (header) should have previous_episode_uuids=[] (not None - to prevent context overflow)
             header_call = calls[0]
-            assert header_call.kwargs.get("previous_episode_uuids") is None
+            assert header_call.kwargs.get("previous_episode_uuids") == []
             # Header content starts with "agent:"
             assert "agent:" in header_call.kwargs.get("episode_body", "")
 
@@ -877,6 +884,7 @@ Title: Chain test entry
 
         mock_graphiti = MagicMock()
         mock_graphiti.add_episode_direct = AsyncMock(side_effect=mock_add_episode)
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(return_value=None)
 
         with patch(
             "watercooler_mcp.tools.migration._check_backend_availability",
@@ -900,8 +908,8 @@ Title: Chain test entry
             for i, call in enumerate(calls):
                 prev_uuids = call.kwargs.get("previous_episode_uuids")
                 if i == 0:
-                    # First chunk: no previous
-                    assert prev_uuids is None, f"First chunk should have None, got {prev_uuids}"
+                    # First chunk: empty list (not None - to prevent context overflow)
+                    assert prev_uuids == [], f"First chunk should have [], got {prev_uuids}"
                 else:
                     # Subsequent chunks: should link to previous
                     assert prev_uuids is not None, f"Chunk {i} should have previous UUIDs"

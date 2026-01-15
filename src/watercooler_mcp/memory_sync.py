@@ -35,22 +35,26 @@ _queue_lock = threading.Lock()
 
 async def _call_graphiti_add_episode(
     content: str,
-    group_id: str,
+    topic: str,
     entry_id: Optional[str] = None,
     timestamp: Optional[str] = None,
     title: Optional[str] = None,
+    code_path: str = "",
 ) -> Dict[str, Any]:
     """Call graphiti_add_episode to sync entry to Graphiti.
 
     This is the internal async implementation that interfaces with
-    the Graphiti backend.
+    the Graphiti backend. Uses unified project group_id (config.database)
+    instead of per-thread group_ids, allowing entities to be shared across
+    threads within the same project.
 
     Args:
         content: Entry body text
-        group_id: Thread topic identifier
+        topic: Thread topic (included in source_description for traceability)
         entry_id: Entry ID for provenance tracking
         timestamp: Entry timestamp (ISO 8601)
         title: Entry title
+        code_path: Path to code repository (for database name derivation)
 
     Returns:
         Result dict with success status and episode_uuid
@@ -58,7 +62,7 @@ async def _call_graphiti_add_episode(
     try:
         from watercooler_mcp import memory as mem
 
-        config = mem.load_graphiti_config()
+        config = mem.load_graphiti_config(code_path=code_path)
         if config is None:
             return {"success": False, "error": "Graphiti not enabled"}
 
@@ -68,6 +72,9 @@ async def _call_graphiti_add_episode(
             if isinstance(backend, dict):
                 error_msg = backend.get("message", error_msg)
             return {"success": False, "error": error_msg}
+
+        # Use unified project group_id (derived from code_path via config)
+        unified_group_id = config.database
 
         # Parse timestamp
         if timestamp:
@@ -81,20 +88,23 @@ async def _call_graphiti_add_episode(
         # Create episode title
         episode_title = title if title else content[:50] + ("..." if len(content) > 50 else "")
 
+        # Include thread topic in source_description for traceability
+        source_desc = f"thread:{topic} | Sync from baseline graph"
+
         # Add episode directly to Graphiti
         result = await backend.add_episode_direct(
             name=episode_title,
             episode_body=content,
-            source_description="Sync from baseline graph",
+            source_description=source_desc,
             reference_time=ref_time,
-            group_id=group_id,
+            group_id=unified_group_id,
         )
 
         episode_uuid = result.get("episode_uuid", "unknown")
 
         # Track entry-episode mapping if entry_id provided
         if entry_id and episode_uuid != "unknown":
-            backend.index_entry_as_episode(entry_id, episode_uuid, group_id)
+            backend.index_entry_as_episode(entry_id, episode_uuid, unified_group_id)
 
         logger.debug(f"MEMORY: Synced entry {entry_id} as episode {episode_uuid}")
 
@@ -129,9 +139,12 @@ def _graphiti_sync_callback(
     This callback is registered with baseline_graph.sync and invoked
     for each entry when WATERCOOLER_MEMORY_BACKEND=graphiti.
 
+    Uses unified project group_id (derived from code_path) instead of
+    per-thread group_ids, allowing entities to be shared across threads.
+
     Args:
-        threads_dir: Threads directory
-        topic: Thread topic (used as group_id)
+        threads_dir: Threads directory (used to derive code_path)
+        topic: Thread topic (included in source_description for traceability)
         entry_id: Entry ID for provenance tracking
         entry_body: Entry content to sync
         entry_title: Optional entry title
@@ -151,15 +164,20 @@ def _graphiti_sync_callback(
         return True
 
     try:
+        # Derive code_path from threads_dir
+        # threads_dir: /path/to/project-threads -> code_path: /path/to/project
+        code_path = str(threads_dir).removesuffix("-threads")
+
         # Callbacks run in ThreadPoolExecutor workers which have no event loop,
         # so asyncio.run() is always safe here.
         result = asyncio.run(
             _call_graphiti_add_episode(
                 content=entry_body,
-                group_id=topic,
+                topic=topic,
                 entry_id=entry_id,
                 timestamp=timestamp,
                 title=entry_title,
+                code_path=code_path,
             )
         )
 

@@ -22,6 +22,7 @@ from fastmcp import Context
 
 from watercooler.thread_entries import parse_thread_entries, ThreadEntry
 from watercooler_memory.backends import TransientError, BackendError
+from watercooler_memory.backends.graphiti import _derive_database_name
 from watercooler_memory.chunker import chunk_entry, ChunkerConfig, ChunkNode
 from watercooler_memory.schema import EntryNode
 
@@ -260,11 +261,12 @@ def _validate_backend(backend: str) -> Optional[str]:
     return None
 
 
-def _check_backend_availability(backend: str) -> Dict[str, Any]:
+def _check_backend_availability(backend: str, code_path: str = "") -> Dict[str, Any]:
     """Check if the target memory backend is available.
 
     Args:
         backend: Backend name ("graphiti" or "leanrag")
+        code_path: Path to code repository (for database name derivation)
 
     Returns:
         Dict with "available" bool and optional version/error info
@@ -278,14 +280,13 @@ def _check_backend_availability(backend: str) -> Dict[str, Any]:
         try:
             from .. import memory as mem
 
-            config = mem.load_graphiti_config()
+            config = mem.load_graphiti_config(code_path=code_path)
             if not config:
                 return {"available": False, "error": "Graphiti not enabled"}
 
-            graphiti_backend = mem.get_graphiti_backend(config)
-            if not graphiti_backend:
-                return {"available": False, "error": "Graphiti backend unavailable"}
-
+            # Don't create a full backend here - just check config is valid
+            # Creating a backend opens FalkorDB connections that can interfere
+            # with the actual migration backend created later
             return {"available": True, "version": "1.0.0"}
         except Exception as e:
             return {"available": False, "error": str(e)}
@@ -298,11 +299,12 @@ def _check_backend_availability(backend: str) -> Dict[str, Any]:
     return {"available": False, "error": f"Unknown backend: {backend}"}
 
 
-def _get_migration_backend(backend: str):
+def _get_migration_backend(backend: str, code_path: str = ""):
     """Get the migration backend instance.
 
     Args:
         backend: Backend name
+        code_path: Path to code repository (for database name derivation)
 
     Returns:
         Backend instance or None
@@ -310,7 +312,7 @@ def _get_migration_backend(backend: str):
     if backend == "graphiti":
         from .. import memory as mem
 
-        config = mem.load_graphiti_config()
+        config = mem.load_graphiti_config(code_path=code_path)
         if not config:
             return None
         return mem.get_graphiti_backend(config)
@@ -482,6 +484,7 @@ async def _migration_preflight_impl(
     threads_dir: Path,
     backend: str,
     ctx: Context,
+    code_path: str = "",
 ) -> str:
     """Check migration prerequisites.
 
@@ -489,6 +492,7 @@ async def _migration_preflight_impl(
         threads_dir: Path to threads directory
         backend: Target backend ("graphiti" or "leanrag")
         ctx: MCP context
+        code_path: Path to code repository (for database name derivation)
 
     Returns:
         JSON with preflight check results
@@ -523,7 +527,7 @@ async def _migration_preflight_impl(
         result["issues"].append(f"Threads directory not found: {threads_dir}")
 
     # Check backend availability
-    backend_check = _check_backend_availability(backend)
+    backend_check = _check_backend_availability(backend, code_path=code_path)
     result["backend_available"] = backend_check.get("available", False)
     if not result["backend_available"]:
         result["issues"].append(
@@ -560,6 +564,7 @@ async def _migrate_to_memory_backend_impl(
     threads_dir: Path,
     backend: str,
     ctx: Context,
+    code_path: str = "",
     dry_run: bool = True,
     topics: str = "",
     skip_closed: bool = False,
@@ -579,6 +584,7 @@ async def _migrate_to_memory_backend_impl(
         threads_dir: Path to threads directory
         backend: Target backend ("graphiti" or "leanrag")
         ctx: MCP context
+        code_path: Path to code repository (for database name derivation)
         dry_run: If True, show what would be migrated without executing
         topics: Comma-separated list of topics to migrate (empty = all)
         skip_closed: Skip closed threads
@@ -598,16 +604,23 @@ async def _migrate_to_memory_backend_impl(
         "entries_failed": 0,
         "entries_skipped": 0,
         "chunks_migrated": 0,
+        "chunks_deduplicated": 0,
         "threads_processed": 0,
         "errors": [],
     }
 
-    # Check backend availability
-    backend_check = _check_backend_availability(backend)
+    # Check backend availability (config-only check, no backend creation)
+    import sys
+    backend_check = _check_backend_availability(backend, code_path=code_path)
     if not backend_check.get("available"):
         result["success"] = False
         result["error"] = f"Backend unavailable: {backend_check.get('error')}"
         return json.dumps(result, indent=2)
+
+    # Derive unified group_id from code_path (all threads share the same project database)
+    # This allows entities to be naturally shared across threads within the same project
+    unified_group_id = _derive_database_name(code_path)
+    result["unified_group_id"] = unified_group_id
 
     # Get thread files
     thread_files = list(threads_dir.glob("*.md"))
@@ -693,7 +706,7 @@ async def _migrate_to_memory_backend_impl(
         return json.dumps(result, indent=2)
 
     # Execute actual migration
-    migration_backend = _get_migration_backend(backend)
+    migration_backend = _get_migration_backend(backend, code_path=code_path)
     if not migration_backend:
         result["success"] = False
         result["error"] = "Failed to get migration backend"
@@ -745,10 +758,11 @@ async def _migrate_to_memory_backend_impl(
                     base_name = f"Entry {entry_id}" if entry_id else "Untitled Entry"
 
                 # Build source description from entry metadata
+                # Include thread topic for traceability (group_id is now unified project-level)
                 agent = entry.get("agent", "Unknown")
                 role = entry.get("role", "")
                 entry_type = entry.get("entry_type", "Note")
-                base_source_desc = f"Migration: {agent}"
+                base_source_desc = f"thread:{topic} | Migration: {agent}"
                 if role:
                     base_source_desc += f" ({role})"
 
@@ -800,17 +814,34 @@ async def _migrate_to_memory_backend_impl(
                             # Link to the previous chunk's episode
                             previous_uuids = [entry_progress.chunks[-1].episode_uuid]
 
-                        # Call backend to add episode (SEQUENTIAL await - critical!)
-                        ep_result = await migration_backend.add_episode_direct(
-                            name=episode_name,
-                            episode_body=chunk.text,
-                            source_description=source_desc,
-                            reference_time=ref_time,
-                            group_id=topic,
-                            previous_episode_uuids=previous_uuids,
+                        # DEDUPLICATION: Check if this chunk already exists in the graph
+                        # This prevents duplicates if checkpoint is lost/deleted or migration is re-run
+                        # Use async version to avoid event loop conflicts in MCP context
+                        existing_episode = await migration_backend.find_episode_by_chunk_id_async(
+                            chunk_id=chunk.chunk_id,
+                            group_id=unified_group_id,
                         )
 
-                        episode_uuid = ep_result.get("episode_uuid", "unknown")
+                        if existing_episode:
+                            # Episode already exists - use existing UUID
+                            episode_uuid = existing_episode["uuid"]
+                            logger.info(
+                                f"Dedup: Entry {entry_id} chunk {i + 1}/{total_chunks} "
+                                f"already exists as episode {episode_uuid}"
+                            )
+                            result["chunks_deduplicated"] += 1
+                        else:
+                            # Call backend to add episode (SEQUENTIAL await - critical!)
+                            ep_result = await migration_backend.add_episode_direct(
+                                name=episode_name,
+                                episode_body=chunk.text,
+                                source_description=source_desc,
+                                reference_time=ref_time,
+                                group_id=unified_group_id,
+                                previous_episode_uuids=previous_uuids,
+                            )
+
+                            episode_uuid = ep_result.get("episode_uuid", "unknown")
 
                         # Update progress
                         entry_progress.chunks.append(ChunkProgress(
@@ -904,6 +935,7 @@ def register_migration_tools(mcp):
             threads_dir=context.threads_dir,
             backend=backend,
             ctx=ctx,
+            code_path=code_path,
         )
 
     async def migrate_wrapper(
@@ -952,6 +984,7 @@ def register_migration_tools(mcp):
             threads_dir=context.threads_dir,
             backend=backend,
             ctx=ctx,
+            code_path=code_path,
             dry_run=dry_run,
             topics=topics,
             skip_closed=skip_closed,

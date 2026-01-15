@@ -82,6 +82,7 @@ def route_search(
     query: str,
     backend: str,
     mode: str,
+    code_path: str = "",
     **kwargs: Any,
 ) -> str:
     """Route search to the appropriate backend based on tier and mode.
@@ -91,6 +92,7 @@ def route_search(
         threads_dir: Path to threads directory
         query: Search query
         backend: Resolved backend ("baseline", "graphiti", "leanrag")
+        code_path: Path to code repository (for database name derivation)
         mode: Resolved mode ("entries", "entities", "episodes")
         **kwargs: Additional search parameters
 
@@ -116,6 +118,7 @@ def route_search(
                         ctx=ctx,
                         threads_dir=threads_dir,
                         query=query,
+                        code_path=code_path,
                         **kwargs,
                     )
                 else:  # episodes
@@ -123,6 +126,7 @@ def route_search(
                         ctx=ctx,
                         threads_dir=threads_dir,
                         query=query,
+                        code_path=code_path,
                         **kwargs,
                     )
             except Exception as e:
@@ -139,6 +143,7 @@ def route_search(
                 ctx=ctx,
                 threads_dir=threads_dir,
                 query=query,
+                code_path=code_path,
                 **kwargs,
             )
         except Exception as e:
@@ -289,6 +294,7 @@ def _search_graphiti_impl(
     ctx: Context,
     threads_dir: Path,
     query: str,
+    code_path: str = "",
     limit: int = 10,
     **kwargs: Any,
 ) -> str:
@@ -298,11 +304,11 @@ def _search_graphiti_impl(
     """
     from .. import memory as mem
 
-    config = mem.load_graphiti_config()
+    config = mem.load_graphiti_config(code_path=code_path)
     if not config:
         raise RuntimeError("Graphiti backend not enabled")
 
-    backend = mem.get_graphiti_backend()
+    backend = mem.get_graphiti_backend(config)
     if not backend:
         raise RuntimeError("Graphiti backend unavailable")
 
@@ -337,17 +343,18 @@ def _search_graphiti_nodes_impl(
     ctx: Context,
     threads_dir: Path,
     query: str,
+    code_path: str = "",
     limit: int = 10,
     **kwargs: Any,
 ) -> str:
     """Search Graphiti for entity nodes."""
     from .. import memory as mem
 
-    config = mem.load_graphiti_config()
+    config = mem.load_graphiti_config(code_path=code_path)
     if not config:
         raise RuntimeError("Graphiti backend not enabled")
 
-    backend = mem.get_graphiti_backend()
+    backend = mem.get_graphiti_backend(config)
     if not backend:
         raise RuntimeError("Graphiti backend unavailable")
 
@@ -381,17 +388,18 @@ def _search_graphiti_episodes_impl(
     ctx: Context,
     threads_dir: Path,
     query: str,
+    code_path: str = "",
     limit: int = 10,
     **kwargs: Any,
 ) -> str:
     """Search Graphiti for episodes."""
     from .. import memory as mem
 
-    config = mem.load_graphiti_config()
+    config = mem.load_graphiti_config(code_path=code_path)
     if not config:
         raise RuntimeError("Graphiti backend not enabled")
 
-    backend = mem.get_graphiti_backend()
+    backend = mem.get_graphiti_backend(config)
     if not backend:
         raise RuntimeError("Graphiti backend unavailable")
 
@@ -698,6 +706,7 @@ def _search_graph_impl(
             query=query,
             backend=resolved_backend,
             mode=resolved_mode,
+            code_path=code_path,
             semantic=semantic,
             semantic_threshold=semantic_threshold,
             start_time=start_time,

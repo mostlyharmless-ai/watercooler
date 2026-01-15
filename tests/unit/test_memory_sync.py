@@ -351,7 +351,7 @@ class TestCallGraphitiAddEpisode:
 
                 result = await _call_graphiti_add_episode(
                     content="test",
-                    group_id="test-group",
+                    topic="test-topic",
                 )
 
                 return result
@@ -371,7 +371,7 @@ class TestCallGraphitiAddEpisode:
 
                 result = await _call_graphiti_add_episode(
                     content="test",
-                    group_id="test-group",
+                    topic="test-topic",
                 )
 
                 return result

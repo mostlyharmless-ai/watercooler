@@ -27,7 +27,7 @@ from watercooler.memory_config import (
 
 # Import backend's GraphitiConfig directly (consolidates duplicate configs)
 try:
-    from watercooler_memory.backends.graphiti import GraphitiConfig
+    from watercooler_memory.backends.graphiti import GraphitiConfig, _derive_database_name
 except ImportError:
     # If backend not installed, define minimal config for type hints
     from dataclasses import dataclass
@@ -37,8 +37,16 @@ except ImportError:
         openai_api_key: str
         reranker: str = "rrf"
 
+    def _derive_database_name(code_path: Path | str | None) -> str:
+        """Fallback database name derivation."""
+        if code_path is None:
+            return "watercooler"
+        path = Path(code_path) if isinstance(code_path, str) else code_path
+        name = path.resolve().name
+        return name.replace("-", "_").lower() or "watercooler"
 
-def load_graphiti_config() -> Optional[GraphitiConfig]:
+
+def load_graphiti_config(code_path: str | Path | None = None) -> Optional[GraphitiConfig]:
     """Load Graphiti configuration from unified config system.
 
     Uses the new unified configuration with priority chain:
@@ -49,6 +57,11 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
 
     Returns None if Graphiti is disabled or configuration is invalid.
     Logs warnings for configuration issues.
+
+    Args:
+        code_path: Path to the project directory. Used to derive the database name
+            for the unified project graph (e.g., 'watercooler-cloud' -> 'watercooler_cloud').
+            If not provided, defaults to 'watercooler'.
 
     Configuration Sources:
         TOML (config.toml):
@@ -72,6 +85,7 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
         Environment Variables (override TOML):
             WATERCOOLER_MEMORY_DISABLED: "1" to disable all memory backends
             WATERCOOLER_GRAPHITI_ENABLED: "1" to enable (default: "0")
+            WATERCOOLER_GRAPHITI_DATABASE: Override derived database name
             LLM_API_KEY, LLM_API_BASE, LLM_MODEL
             EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL
             WATERCOOLER_GRAPHITI_RERANKER
@@ -84,7 +98,7 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
         GraphitiConfig instance or None if disabled/invalid
 
     Example:
-        >>> config = load_graphiti_config()
+        >>> config = load_graphiti_config(code_path="/home/user/my-project")
         >>> if config:
         ...     backend = get_graphiti_backend(config)
     """
@@ -123,6 +137,11 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
     # Get reranker algorithm
     reranker = get_graphiti_reranker()
 
+    # Derive database name from code_path (or use env override)
+    database = os.getenv("WATERCOOLER_GRAPHITI_DATABASE")
+    if not database:
+        database = _derive_database_name(code_path)
+
     # Return backend's GraphitiConfig with all fields
     return GraphitiConfig(
         llm_api_key=llm.api_key,
@@ -135,6 +154,7 @@ def load_graphiti_config() -> Optional[GraphitiConfig]:
         falkordb_port=db.port,
         falkordb_password=db.password if db.password else None,
         reranker=reranker,
+        database=database,
     )
 
 
@@ -218,12 +238,17 @@ async def query_memory(
 ) -> tuple[Sequence[Mapping[str, Any]], Sequence[Mapping[str, Any]]]:
     """Execute memory query against Graphiti backend.
 
+    Note: In the unified group_id model, all threads in a project share a single
+    group_id (e.g., "watercooler_cloud"). Thread-level filtering is typically not
+    needed since entities are shared across threads.
+
     Args:
         backend: GraphitiBackend instance
         query_text: Search query string
         limit: Maximum results to return (1-50)
-        topic: Optional thread topic to filter by (will be converted to group_id)
-              If None, searches across ALL indexed threads.
+        topic: Optional group_id filter. In the unified model, this would be the
+              project database name (e.g., "watercooler_cloud"), not a thread topic.
+              If None, searches across ALL accessible groups.
 
     Returns:
         Tuple of (results, communities):
@@ -301,7 +326,10 @@ def create_error_response(
     )])
 
 
-def validate_memory_prerequisites(operation: str) -> tuple[Any, Optional[ToolResult]]:
+def validate_memory_prerequisites(
+    operation: str,
+    code_path: str | Path | None = None,
+) -> tuple[Any, Optional[ToolResult]]:
     """Validate memory module, config, and backend prerequisites.
 
     Centralizes common validation logic for all memory tools:
@@ -310,6 +338,7 @@ def validate_memory_prerequisites(operation: str) -> tuple[Any, Optional[ToolRes
 
     Args:
         operation: Tool name for error messages (e.g., "search_nodes")
+        code_path: Path to the project directory (used for database name derivation)
 
     Returns:
         Tuple of (backend, error_response):
@@ -317,13 +346,13 @@ def validate_memory_prerequisites(operation: str) -> tuple[Any, Optional[ToolRes
         - (None, error_response) if validation fails
 
     Example:
-        >>> backend, error = validate_memory_prerequisites("search_nodes")
+        >>> backend, error = validate_memory_prerequisites("search_nodes", "/path/to/project")
         >>> if error:
         ...     return error
         >>> # Use backend...
     """
     # Step 1: Load configuration
-    config = load_graphiti_config()
+    config = load_graphiti_config(code_path=code_path)
     if config is None:
         return None, create_error_response(
             "Graphiti not enabled",

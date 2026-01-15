@@ -213,6 +213,10 @@ class GraphitiBackend(MemoryBackend):
         self.config = config or GraphitiConfig()
         self._validate_config()
         self._init_entry_episode_index()
+        # Cache for graphiti client to avoid creating new connections per call
+        # This is critical for MCP migration which makes many sequential calls
+        self._cached_graphiti_client: Any = None
+        self._indices_built: bool = False
 
     def _validate_config(self) -> None:
         """Validate configuration and Graphiti availability."""
@@ -350,12 +354,8 @@ class GraphitiBackend(MemoryBackend):
             TransientError: If database connection fails
         """
         try:
-            graphiti = self._create_graphiti_client()
-            # Ensure indices are built before operations.
-            # FalkorDriver schedules build_indices_and_constraints as a background task,
-            # which can interfere with MCP stdio transport. Awaiting it here ensures
-            # indices are ready before any operations begin.
-            await graphiti.build_indices_and_constraints()
+            # Use cached client with indices already built to avoid per-call overhead
+            graphiti = await self._get_graphiti_client_with_indices()
         except (ConnectionError, TimeoutError, OSError) as e:
             raise TransientError(f"Database connection failed: {e}") from e
         except ConfigError:
@@ -524,8 +524,12 @@ class GraphitiBackend(MemoryBackend):
 
         return result.strip()
 
-    def _create_graphiti_client(self) -> Any:
+    def _create_graphiti_client(self, use_cache: bool = True) -> Any:
         """Create and configure Graphiti client with FalkorDB, LLM, and embedder.
+
+        Args:
+            use_cache: If True, return cached client if available. Set to False
+                to force creation of a new client (useful for testing).
 
         Returns:
             Configured Graphiti instance ready for operations.
@@ -533,6 +537,10 @@ class GraphitiBackend(MemoryBackend):
         Raises:
             ConfigError: If required dependencies are not installed.
         """
+        # Return cached client if available and caching enabled
+        if use_cache and self._cached_graphiti_client is not None:
+            return self._cached_graphiti_client
+
         try:
             from graphiti_core import Graphiti
             from graphiti_core.driver.falkordb_driver import FalkorDriver
@@ -549,13 +557,25 @@ class GraphitiBackend(MemoryBackend):
         # Create FalkorDB driver with unified database name
         # All threads share one database, partitioned by group_id property
         database_name = self.config.database or "watercooler"
-        falkor_driver = FalkorDriver(
-            host=self.config.falkordb_host,
-            port=self.config.falkordb_port,
-            username=self.config.falkordb_username,
-            password=self.config.falkordb_password,
-            database=database_name,
+
+        # Monkey patch to prevent FalkorDriver.__init__ from scheduling a background
+        # task via loop.create_task(). This background task causes race conditions
+        # with MCP stdio transport. We explicitly await build_indices_and_constraints()
+        # in operations that need it (add_episode_direct, find_episode_by_chunk_id_async).
+        original_get_running_loop = asyncio.get_running_loop
+        asyncio.get_running_loop = lambda: (_ for _ in ()).throw(
+            RuntimeError("patched to prevent background task")
         )
+        try:
+            falkor_driver = FalkorDriver(
+                host=self.config.falkordb_host,
+                port=self.config.falkordb_port,
+                username=self.config.falkordb_username,
+                password=self.config.falkordb_password,
+                database=database_name,
+            )
+        finally:
+            asyncio.get_running_loop = original_get_running_loop
 
         # Configure LLM client (supports OpenAI, local servers, DeepSeek, etc.)
         llm_config = LLMConfig(
@@ -573,11 +593,40 @@ class GraphitiBackend(MemoryBackend):
         )
         embedder = OpenAIEmbedder(config=embedder_config)
 
-        return Graphiti(
+        client = Graphiti(
             graph_driver=falkor_driver,
             llm_client=llm_client,
             embedder=embedder,
         )
+
+        # Cache the client for reuse
+        if use_cache:
+            self._cached_graphiti_client = client
+            self._indices_built = False  # Reset indices flag for new client
+
+        return client
+
+    async def _get_graphiti_client_with_indices(self) -> Any:
+        """Get cached graphiti client and ensure indices are built.
+
+        This is the preferred method for getting a graphiti client in async
+        contexts. It reuses the cached client and only builds indices once.
+
+        Returns:
+            Graphiti client with indices built.
+
+        Raises:
+            TransientError: If database connection fails.
+            ConfigError: If dependencies are not installed.
+        """
+        graphiti = self._create_graphiti_client(use_cache=True)
+
+        # Build indices once per client instance
+        if not self._indices_built:
+            await graphiti.build_indices_and_constraints()
+            self._indices_built = True
+
+        return graphiti
 
     def _get_search_config(self) -> Any:
         """Get SearchConfig based on configured reranker algorithm.
@@ -1826,9 +1875,8 @@ class GraphitiBackend(MemoryBackend):
         search_pattern = f"chunk:{chunk_id[:12]}"
 
         try:
-            graphiti = self._create_graphiti_client()
-            # Ensure indices are built before operations (see add_episode_direct comment)
-            await graphiti.build_indices_and_constraints()
+            # Use cached client with indices already built to avoid per-call overhead
+            graphiti = await self._get_graphiti_client_with_indices()
         except Exception as e:
             raise TransientError(f"Database connection failed: {e}") from e
 

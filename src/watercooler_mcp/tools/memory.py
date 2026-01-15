@@ -33,6 +33,9 @@ diagnose_memory = None
 graphiti_add_episode = None
 leanrag_run_pipeline = None
 
+# Cleanup tools
+clear_graph_group = None
+
 
 async def _query_memory_impl(
     query: str,
@@ -108,8 +111,8 @@ async def _query_memory_impl(
                 )
             )])
 
-        # Load configuration
-        config = mem.load_graphiti_config()
+        # Load configuration with project-based database name
+        config = mem.load_graphiti_config(code_path=code_path)
         if config is None:
             return ToolResult(content=[TextContent(
                 type="text",
@@ -276,7 +279,9 @@ async def _search_nodes_impl(
         query: Search query (e.g., "authentication implementation")
         ctx: MCP context
         code_path: Path to code repository (for resolving threads directory)
-        group_ids: Optional list of thread topics to filter by
+        group_ids: Optional list of project group_ids to filter by. In the unified
+            model, all threads share a single project group_id (e.g., "watercooler_cloud").
+            If not specified, searches all accessible groups.
         max_nodes: Maximum nodes to return (default: 10, max: 50)
         entity_types: Optional list of entity type names to filter
 
@@ -332,7 +337,7 @@ async def _search_nodes_impl(
             max_nodes = 50
 
         # Common validation (replaces ~100 lines of duplicated code)
-        backend, error = mem.validate_memory_prerequisites("search_nodes")
+        backend, error = mem.validate_memory_prerequisites("search_nodes", code_path=code_path)
         if error:
             # Add query/result fields to error response
             error_dict = json.loads(error.content[0].text)
@@ -419,8 +424,9 @@ async def _get_entity_edge_impl(
         uuid: Edge UUID to retrieve
         ctx: MCP context
         code_path: Path to code repository (for resolving threads directory)
-        group_id: Thread topic (database name) where edge is stored.
-                 Required for multi-database setups. Searches default database if not provided.
+        group_id: Project group_id (database name) where edge is stored.
+                 In the unified model, all threads share one group_id per project
+                 (e.g., "watercooler_cloud"). Searches default database if not provided.
 
     Returns:
         JSON response with edge details containing:
@@ -481,7 +487,7 @@ async def _get_entity_edge_impl(
             )
 
         # Common validation (replaces ~100 lines of duplicated code)
-        backend, error = mem.validate_memory_prerequisites("get_entity_edge")
+        backend, error = mem.validate_memory_prerequisites("get_entity_edge", code_path=code_path)
         if error:
             return error
 
@@ -554,7 +560,8 @@ async def _search_memory_facts_impl(
         query: Search query (e.g., "authentication decisions")
         ctx: MCP context
         code_path: Path to code repository (for resolving threads directory)
-        group_ids: Optional list of thread topics to filter by
+        group_ids: Optional list of project group_ids to filter by. In the unified
+            model, all threads share a single project group_id (e.g., "watercooler_cloud").
         max_facts: Maximum facts to return (default: 10, max: 50)
         center_node_uuid: Optional node UUID to center search around
 
@@ -612,7 +619,7 @@ async def _search_memory_facts_impl(
             max_facts = 50
 
         # Common validation (replaces ~100 lines of duplicated code)
-        backend, error = mem.validate_memory_prerequisites("search_memory_facts")
+        backend, error = mem.validate_memory_prerequisites("search_memory_facts", code_path=code_path)
         if error:
             # Add query/result fields to error response
             error_dict = json.loads(error.content[0].text)
@@ -709,7 +716,8 @@ async def _get_episodes_impl(
         query: Search query string (required, must be non-empty)
         ctx: MCP context
         code_path: Path to code repository (for resolving threads directory)
-        group_ids: Optional list of thread topics to filter by
+        group_ids: Optional list of project group_ids to filter by. In the unified
+            model, all threads share a single project group_id (e.g., "watercooler_cloud").
         max_episodes: Maximum episodes to return (default: 10, max: 50)
 
     Returns:
@@ -722,7 +730,7 @@ async def _get_episodes_impl(
         get_episodes(
             query="authentication implementation",
             code_path=".",
-            group_ids=["auth-feature", "api-design"],
+            group_ids=["watercooler_cloud"],
             max_episodes=5
         )
 
@@ -765,7 +773,7 @@ async def _get_episodes_impl(
             max_episodes = 50
 
         # Common validation (replaces ~100 lines of duplicated code)
-        backend, error = mem.validate_memory_prerequisites("get_episodes")
+        backend, error = mem.validate_memory_prerequisites("get_episodes", code_path=code_path)
         if error:
             # Add result fields to error response
             error_dict = json.loads(error.content[0].text)
@@ -928,6 +936,7 @@ async def _graphiti_add_episode_impl(
     content: str,
     group_id: str,
     ctx: Context,
+    code_path: str = "",
     entry_id: str = "",
     timestamp: str = "",
     title: str = "",
@@ -944,11 +953,15 @@ async def _graphiti_add_episode_impl(
 
     Args:
         content: The episode content/body text (required)
-        group_id: Thread/topic identifier for partitioning (required)
+        group_id: Project group_id for graph partitioning (required). In the unified
+            model, all threads in a project share the same group_id (e.g., "watercooler_cloud").
+            Use the project database name, not individual thread topics.
+        code_path: Path to code repository (for database name derivation)
         entry_id: Optional watercooler entry ID for provenance tracking
         timestamp: Optional ISO 8601 timestamp (defaults to now)
         title: Optional episode title (defaults to first 50 chars of content)
-        source_description: Optional source metadata
+        source_description: Optional source metadata. Include thread topic here for traceability
+            (e.g., "thread:auth-feature | Migration: Claude").
         previous_episode_uuids: Optional list of episode UUIDs this episode follows.
             Used for explicit temporal ordering when chunks share the same timestamp.
 
@@ -958,9 +971,10 @@ async def _graphiti_add_episode_impl(
     Example:
         graphiti_add_episode(
             content="We decided to use JWT tokens with RS256 signing",
-            group_id="auth-feature",
+            group_id="watercooler_cloud",
             entry_id="01ABC123",
-            timestamp="2025-01-15T10:00:00Z"
+            timestamp="2025-01-15T10:00:00Z",
+            source_description="thread:auth-feature | Migration: Claude"
         )
     """
     try:
@@ -999,7 +1013,7 @@ async def _graphiti_add_episode_impl(
             )])
 
         # Load configuration
-        config = mem.load_graphiti_config()
+        config = mem.load_graphiti_config(code_path=code_path)
         if config is None:
             return ToolResult(content=[TextContent(
                 type="text",
@@ -1092,6 +1106,161 @@ async def _graphiti_add_episode_impl(
                 "success": False,
                 "error": f"Unexpected error: {e}",
                 "episode_uuid": None,
+            }, indent=2)
+        )])
+
+
+async def _clear_graph_group_impl(
+    group_id: str,
+    ctx: Context,
+    code_path: str = "",
+    confirm: bool = False,
+) -> ToolResult:
+    """Clear all episodes for a specific project group_id.
+
+    This is a destructive operation that removes all Graphiti episodes
+    belonging to the specified group. Use for cleanup/testing purposes.
+
+    IMPORTANT: In the unified model, all threads in a project share one group_id
+    (e.g., "watercooler_cloud"). Clearing this group will remove ALL episodes
+    from ALL threads in the project.
+
+    IMPORTANT: This operation cannot be undone. Data will be permanently deleted.
+
+    Note: Entity nodes and edges created from these episodes may still remain
+    in the graph (Graphiti doesn't cascade delete). Only Episodic nodes are removed.
+
+    Prerequisites:
+        1. Graphiti backend enabled: WATERCOOLER_GRAPHITI_ENABLED=1
+        2. FalkorDB running: localhost:6379 (or configured host/port)
+
+    Args:
+        group_id: Project group_id to clear episodes for (required). In the unified
+            model, this is the project database name (e.g., "watercooler_cloud"),
+            not individual thread topics.
+        ctx: MCP context
+        code_path: Path to code repository (for database name derivation)
+        confirm: Must be True to execute deletion (safety check)
+
+    Returns:
+        JSON with operation results:
+        - success: True if episodes were cleared
+        - removed: Number of episodes deleted
+        - group_id: The sanitized group ID used
+        - message: Human-readable status message
+
+    Example Response:
+        {
+          "success": true,
+          "removed": 15,
+          "group_id": "cursor_greeting",
+          "message": "Removed 15 episodes"
+        }
+
+    Safety:
+        Set confirm=True to actually execute deletion.
+        Without confirm=True, returns error message explaining requirement.
+    """
+    try:
+        # Import memory module (lazy-load)
+        try:
+            from .. import memory as mem
+        except ImportError as e:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": f"Memory module unavailable: {e}",
+                    "removed": 0,
+                }, indent=2)
+            )])
+
+        # Validate group_id
+        if not group_id or not group_id.strip():
+            return mem.create_error_response(
+                "Invalid group_id",
+                "group_id parameter is required and must be non-empty",
+                "clear_graph_group",
+                removed=0,
+            )
+
+        # Safety check - require explicit confirmation
+        if not confirm:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": "Confirmation required",
+                    "message": (
+                        f"This will permanently delete all episodes for group '{group_id}'. "
+                        "Set confirm=True to proceed. This operation cannot be undone."
+                    ),
+                    "group_id": group_id,
+                    "removed": 0,
+                }, indent=2)
+            )])
+
+        # Load configuration and backend
+        config = mem.load_graphiti_config(code_path=code_path)
+        if config is None:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": "Graphiti not enabled. Set WATERCOOLER_GRAPHITI_ENABLED=1",
+                    "removed": 0,
+                }, indent=2)
+            )])
+
+        backend = mem.get_graphiti_backend(config)
+        if backend is None or isinstance(backend, dict):
+            error_msg = "Graphiti backend unavailable"
+            if isinstance(backend, dict):
+                error_msg = backend.get("message", error_msg)
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": error_msg,
+                    "removed": 0,
+                }, indent=2)
+            )])
+
+        # Execute cleanup
+        log_action("memory.clear_graph_group", group_id=group_id, confirm=confirm)
+
+        try:
+            result = backend.clear_group_episodes(group_id=group_id)
+
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "removed": result.get("removed", 0),
+                    "group_id": result.get("group_id", group_id),
+                    "message": result.get("message", "Episodes cleared"),
+                }, indent=2)
+            )])
+
+        except Exception as e:
+            log_error(f"MEMORY: Failed to clear episodes: {e}")
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": f"Failed to clear episodes: {e}",
+                    "removed": 0,
+                }, indent=2)
+            )])
+
+    except Exception as e:
+        log_error(f"MEMORY: Unexpected error in clear_graph_group: {e}")
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps({
+                "success": False,
+                "error": f"Unexpected error: {e}",
+                "removed": 0,
             }, indent=2)
         )])
 
@@ -1314,7 +1483,7 @@ def register_memory_tools(mcp):
     """
     global query_memory, search_nodes, get_entity_edge
     global search_memory_facts, get_episodes, diagnose_memory
-    global graphiti_add_episode, leanrag_run_pipeline
+    global graphiti_add_episode, leanrag_run_pipeline, clear_graph_group
 
     # Register tools and store references for testing
     query_memory = mcp.tool(name="watercooler_query_memory")(_query_memory_impl)
@@ -1327,3 +1496,6 @@ def register_memory_tools(mcp):
     # Write tools (Milestone 5.1, 5.2)
     graphiti_add_episode = mcp.tool(name="watercooler_graphiti_add_episode")(_graphiti_add_episode_impl)
     leanrag_run_pipeline = mcp.tool(name="watercooler_leanrag_run_pipeline")(_leanrag_run_pipeline_impl)
+
+    # Cleanup tools
+    clear_graph_group = mcp.tool(name="watercooler_clear_graph_group")(_clear_graph_group_impl)
