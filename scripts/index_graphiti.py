@@ -10,17 +10,20 @@ This script uses the same chunked approach as the migration tool:
 - Checkpoint/resume support for interrupted migrations
 
 Usage:
+    # Index all threads in a directory
+    python3 scripts/index_graphiti.py --threads-dir /path/to/threads --all
+
     # Index specific threads
-    python3 scripts/index_graphiti.py --threads graphiti-mcp-integration memory-backend
+    python3 scripts/index_graphiti.py --threads-dir /path/to/threads --threads topic1 topic2
 
     # Index from a list file
-    python3 scripts/index_graphiti.py --thread-list /path/to/threads-to-index.txt
+    python3 scripts/index_graphiti.py --threads-dir /path/to/threads --thread-list threads.txt
 
     # Resume interrupted migration
-    python3 scripts/index_graphiti.py --threads my-thread --resume
+    python3 scripts/index_graphiti.py --threads-dir /path/to/threads --threads my-thread --resume
 
     # Force re-index (ignore checkpoint, but still deduplicates)
-    python3 scripts/index_graphiti.py --threads my-thread --force
+    python3 scripts/index_graphiti.py --threads-dir /path/to/threads --threads my-thread --force
 """
 
 import argparse
@@ -449,17 +452,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Index all threads in a directory
+  python3 scripts/index_graphiti.py --threads-dir /path/to/threads --all
+
   # Index specific threads
-  python3 scripts/index_graphiti.py --threads auth-feature api-design
+  python3 scripts/index_graphiti.py --threads-dir /path/to/threads --threads auth-feature api-design
 
   # Index from a list file
-  python3 scripts/index_graphiti.py --thread-list threads-to-index.txt
+  python3 scripts/index_graphiti.py --threads-dir /path/to/threads --thread-list threads.txt
 
   # Resume interrupted migration
-  python3 scripts/index_graphiti.py --threads my-thread --resume
+  python3 scripts/index_graphiti.py --threads-dir /path/to/threads --threads my-thread --resume
 
   # Force re-index (still deduplicates, but ignores checkpoint)
-  python3 scripts/index_graphiti.py --threads my-thread --force
+  python3 scripts/index_graphiti.py --threads-dir /path/to/threads --threads my-thread --force
 """,
     )
     parser.add_argument("--threads-dir",
@@ -468,6 +474,8 @@ Examples:
                         help="Path to code repository (for database name derivation, defaults to threads-dir without -threads suffix)")
     parser.add_argument("--thread-list", help="Path to file with thread list (one per line)")
     parser.add_argument("--threads", nargs="+", help="List of thread topics (without .md)")
+    parser.add_argument("--all", action="store_true",
+                        help="Index all .md thread files in threads-dir")
     parser.add_argument("--work-dir", help="Work directory for Graphiti (default: ~/.watercooler/graphiti)")
     parser.add_argument("--chunk-max-tokens", type=int, default=768,
                         help="Maximum tokens per chunk (default: 768)")
@@ -500,7 +508,21 @@ Examples:
         return 1
 
     # Determine thread list
-    if args.thread_list:
+    if args.all:
+        # Auto-discover all .md files in threads_dir
+        if not args.threads_dir:
+            print("Error: --threads-dir is required when using --all", file=sys.stderr)
+            return 1
+        threads_dir = Path(args.threads_dir)
+        if not threads_dir.exists():
+            print(f"Error: Threads directory not found: {threads_dir}", file=sys.stderr)
+            return 1
+        thread_files = sorted([f.name for f in threads_dir.glob("*.md")])
+        if not thread_files:
+            print(f"Error: No .md files found in {threads_dir}", file=sys.stderr)
+            return 1
+        print(f"Discovered {len(thread_files)} thread files")
+    elif args.thread_list:
         thread_list_path = Path(args.thread_list)
         if not thread_list_path.exists():
             print(f"Error: Thread list file not found: {thread_list_path}", file=sys.stderr)
@@ -509,7 +531,7 @@ Examples:
     elif args.threads:
         thread_files = [f"{t}.md" if not t.endswith(".md") else t for t in args.threads]
     else:
-        print("Error: Specify either --thread-list or --threads", file=sys.stderr)
+        print("Error: Specify --all, --thread-list, or --threads", file=sys.stderr)
         parser.print_help()
         return 1
 
