@@ -892,12 +892,26 @@ The following MCP tools provide memory backend integration:
 | `watercooler_query_memory` | Query memory backend for facts/entities |
 | `watercooler_get_episodes` | Search Graphiti episodes |
 
-#### Migration Tools
+#### Migration
 
-| Tool | Description |
-|------|-------------|
-| `watercooler_migration_preflight` | Check migration prerequisites |
-| `watercooler_migrate_to_memory_backend` | Migrate entries to Graphiti/LeanRAG |
+Migration tools have been moved to a standalone script due to MCP SDK timeout limitations.
+Use `scripts/index_graphiti.py` to migrate threads to Graphiti:
+
+```bash
+# Set required environment variables
+export LLM_API_KEY=sk-...  # or "local" for local LLM
+export EMBEDDING_API_KEY=sk-...  # or "local" for local embeddings
+export LLM_API_BASE=http://localhost:8081/v1  # optional, for local LLM
+export EMBEDDING_API_BASE=http://localhost:8080/v1  # optional, for local embeddings
+
+# Migrate specific threads
+python scripts/index_graphiti.py --threads auth-feature api-design
+
+# Or migrate from a list file
+python scripts/index_graphiti.py --thread-list threads-to-index.txt
+```
+
+See [MCP SDK Issue #245](https://github.com/modelcontextprotocol/typescript-sdk/issues/245) for why migration was moved out of MCP.
 
 ### Search Routing
 

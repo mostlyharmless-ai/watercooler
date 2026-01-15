@@ -6,26 +6,186 @@ This script uses the same chunked approach as the migration tool:
 - Each chunk is added as a separate episode via add_episode_direct()
 - Chunks within an entry are linked via previous_episode_uuids
 - First chunk of each entry passes [] to prevent unbounded context growth
+- Deduplication via chunk_id prevents duplicate episodes on re-runs
+- Checkpoint/resume support for interrupted migrations
 
 Usage:
-    python3 scripts/index_graphiti.py --thread-list /path/to/threads-to-index.txt
+    # Index specific threads
     python3 scripts/index_graphiti.py --threads graphiti-mcp-integration memory-backend
+
+    # Index from a list file
+    python3 scripts/index_graphiti.py --thread-list /path/to/threads-to-index.txt
+
+    # Resume interrupted migration
+    python3 scripts/index_graphiti.py --threads my-thread --resume
+
+    # Force re-index (ignore checkpoint, but still deduplicates)
+    python3 scripts/index_graphiti.py --threads my-thread --force
 """
 
 import argparse
 import asyncio
+import json
 import os
 import sys
+import tempfile
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, List
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from watercooler_memory.backends.graphiti import GraphitiBackend, GraphitiConfig
+from watercooler_memory.backends.graphiti import (
+    GraphitiBackend,
+    GraphitiConfig,
+    _derive_database_name,
+)
 from watercooler_memory.graph import MemoryGraph
-from watercooler_memory.chunker import ChunkerConfig, chunk_entry
-from watercooler_memory.graph import GraphConfig, EntryNode
+from watercooler_memory.chunker import ChunkerConfig
+from watercooler_memory.graph import GraphConfig
+
+
+# --- Checkpoint Data Structures (aligned with migration.py) ---
+
+@dataclass
+class ChunkProgress:
+    """Progress tracking for a single chunk."""
+    chunk_index: int
+    chunk_id: str
+    episode_uuid: str
+
+
+@dataclass
+class EntryProgress:
+    """Progress tracking for a single entry migration."""
+    thread_id: str
+    status: str  # "in_progress" | "complete"
+    total_chunks: int
+    last_completed_chunk_index: int  # -1 when none completed
+    chunks: List[ChunkProgress] = field(default_factory=list)
+    last_updated_at: str = ""
+    run_id: str = ""
+
+    def __post_init__(self):
+        if not self.last_updated_at:
+            self.last_updated_at = datetime.now(timezone.utc).isoformat()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "thread_id": self.thread_id,
+            "status": self.status,
+            "total_chunks": self.total_chunks,
+            "last_completed_chunk_index": self.last_completed_chunk_index,
+            "chunks": [
+                {"chunk_index": c.chunk_index, "chunk_id": c.chunk_id, "episode_uuid": c.episode_uuid}
+                for c in self.chunks
+            ],
+            "last_updated_at": self.last_updated_at,
+            "run_id": self.run_id,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "EntryProgress":
+        chunks = [
+            ChunkProgress(
+                chunk_index=c["chunk_index"],
+                chunk_id=c["chunk_id"],
+                episode_uuid=c["episode_uuid"],
+            )
+            for c in d.get("chunks", [])
+        ]
+        return cls(
+            thread_id=d["thread_id"],
+            status=d["status"],
+            total_chunks=d["total_chunks"],
+            last_completed_chunk_index=d["last_completed_chunk_index"],
+            chunks=chunks,
+            last_updated_at=d.get("last_updated_at", ""),
+            run_id=d.get("run_id", ""),
+        )
+
+
+@dataclass
+class Checkpoint:
+    """Checkpoint for resumable migration."""
+    version: int = 2
+    backend: str = "graphiti"
+    entries: Dict[str, EntryProgress] = field(default_factory=dict)
+    run_id: str = ""
+
+    def __post_init__(self):
+        if not self.run_id:
+            self.run_id = str(uuid.uuid4())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "version": self.version,
+            "backend": self.backend,
+            "entries": {eid: ep.to_dict() for eid, ep in self.entries.items()},
+            "run_id": self.run_id,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Checkpoint":
+        entries = {
+            eid: EntryProgress.from_dict(ep_dict)
+            for eid, ep_dict in d.get("entries", {}).items()
+        }
+        return cls(
+            version=d.get("version", 2),
+            backend=d.get("backend", "graphiti"),
+            entries=entries,
+            run_id=d.get("run_id", ""),
+        )
+
+    def is_entry_complete(self, entry_id: str) -> bool:
+        """Check if an entry is fully migrated."""
+        ep = self.entries.get(entry_id)
+        return ep is not None and ep.status == "complete"
+
+    def get_resume_chunk_index(self, entry_id: str) -> int:
+        """Get the chunk index to resume from for an entry."""
+        ep = self.entries.get(entry_id)
+        if ep is None:
+            return 0
+        return ep.last_completed_chunk_index + 1
+
+
+def load_checkpoint(threads_dir: Path) -> Checkpoint:
+    """Load checkpoint if exists."""
+    checkpoint_file = threads_dir / ".migration_checkpoint.json"
+    if checkpoint_file.exists():
+        try:
+            data = json.loads(checkpoint_file.read_text())
+            return Checkpoint.from_dict(data)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Warning: Failed to load checkpoint: {e}")
+    return Checkpoint()
+
+
+def save_checkpoint(threads_dir: Path, checkpoint: Checkpoint) -> None:
+    """Save checkpoint atomically with fsync."""
+    checkpoint_file = threads_dir / ".migration_checkpoint.json"
+
+    # Atomic write: write to temp, fsync, then rename
+    fd, temp_path = tempfile.mkstemp(
+        dir=threads_dir,
+        prefix=".migration_checkpoint_",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(checkpoint.to_dict(), f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, checkpoint_file)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise
 
 
 def load_thread_list(list_file: Path) -> list[str]:
@@ -107,12 +267,16 @@ def build_entries_with_chunks(
 async def index_entries_chunked(
     backend: GraphitiBackend,
     entries: list[dict],
+    threads_dir: Path,
+    checkpoint: Checkpoint,
+    resume: bool = True,
 ) -> dict:
     """Index entries into Graphiti using chunked episodes.
 
-    Each chunk becomes a separate episode. Chunks within an entry
-    are linked via previous_episode_uuids for temporal ordering.
-    First chunk of each entry passes [] to prevent context overflow.
+    Features:
+    - Deduplication: Checks if chunk already exists before adding
+    - Checkpoint: Saves progress after each chunk for resume
+    - Episode linking: Chunks within an entry linked via previous_episode_uuids
 
     Returns:
         Dict with indexing statistics
@@ -120,7 +284,9 @@ async def index_entries_chunked(
     stats = {
         "entries_processed": 0,
         "entries_failed": 0,
+        "entries_skipped": 0,
         "chunks_indexed": 0,
+        "chunks_deduplicated": 0,
         "errors": [],
     }
 
@@ -131,6 +297,11 @@ async def index_entries_chunked(
 
         if not chunks:
             print(f"  Skipping entry {entry_id}: no chunks")
+            continue
+
+        # Check if already complete (checkpoint)
+        if resume and checkpoint.is_entry_complete(entry_id):
+            stats["entries_skipped"] += 1
             continue
 
         # Parse timestamp
@@ -164,11 +335,37 @@ async def index_entries_chunked(
 
         total_chunks = len(chunks)
         entry_failed = False
-        previous_episode_uuid: str | None = None
 
-        print(f"  [{entry_idx + 1}/{len(entries)}] {entry_id}: {total_chunks} chunks")
+        # Get or create entry progress
+        if entry_id not in checkpoint.entries:
+            checkpoint.entries[entry_id] = EntryProgress(
+                thread_id=thread_id,
+                status="in_progress",
+                total_chunks=total_chunks,
+                last_completed_chunk_index=-1,
+                chunks=[],
+                run_id=checkpoint.run_id,
+            )
+
+        entry_progress = checkpoint.entries[entry_id]
+        start_chunk_index = checkpoint.get_resume_chunk_index(entry_id) if resume else 0
+
+        # Track previous episode UUID for linking
+        previous_episode_uuid: str | None = None
+        if entry_progress.chunks:
+            previous_episode_uuid = entry_progress.chunks[-1].episode_uuid
+
+        print(f"  [{entry_idx + 1}/{len(entries)}] {entry_id}: {total_chunks} chunks", end="")
+        if start_chunk_index > 0:
+            print(f" (resuming from chunk {start_chunk_index + 1})")
+        else:
+            print()
 
         for i, chunk in enumerate(chunks):
+            # Skip already completed chunks
+            if i < start_chunk_index:
+                continue
+
             try:
                 # Build episode name with chunk suffix
                 if total_chunks > 1:
@@ -183,26 +380,46 @@ async def index_entries_chunked(
                 # Get previous episode UUIDs for linking
                 # First chunk: [] (no previous context - prevents unbounded context growth)
                 # Subsequent chunks: link to previous chunk's episode
-                # Note: Using [] instead of None prevents Graphiti from retrieving
-                # RELEVANT_SCHEMA_LIMIT (10) previous episodes, which can exceed
-                # LLM context limits. Cross-entry dedup still works via graph merges.
                 previous_uuids: list[str] = []
                 if i > 0 and previous_episode_uuid:
                     previous_uuids = [previous_episode_uuid]
 
-                # Add episode directly (bypasses prepare/index workflow)
-                result = await backend.add_episode_direct(
-                    name=episode_name,
-                    episode_body=chunk.text,
-                    source_description=source_desc,
-                    reference_time=ref_time,
+                # DEDUPLICATION: Check if this chunk already exists in the graph
+                existing_episode = await backend.find_episode_by_chunk_id_async(
+                    chunk_id=chunk.chunk_id,
                     group_id=thread_id,
-                    previous_episode_uuids=previous_uuids,
                 )
 
-                episode_uuid = result.get("episode_uuid", "")
+                if existing_episode:
+                    # Episode already exists - use existing UUID
+                    episode_uuid = existing_episode["uuid"]
+                    print(f"    ↳ Chunk {i + 1}/{total_chunks}: deduplicated (exists as {episode_uuid[:8]}...)")
+                    stats["chunks_deduplicated"] += 1
+                else:
+                    # Add episode
+                    result = await backend.add_episode_direct(
+                        name=episode_name,
+                        episode_body=chunk.text,
+                        source_description=source_desc,
+                        reference_time=ref_time,
+                        group_id=thread_id,
+                        previous_episode_uuids=previous_uuids,
+                    )
+                    episode_uuid = result.get("episode_uuid", "")
+                    stats["chunks_indexed"] += 1
+
+                # Update progress
                 previous_episode_uuid = episode_uuid
-                stats["chunks_indexed"] += 1
+                entry_progress.chunks.append(ChunkProgress(
+                    chunk_index=i,
+                    chunk_id=chunk.chunk_id,
+                    episode_uuid=episode_uuid,
+                ))
+                entry_progress.last_completed_chunk_index = i
+                entry_progress.last_updated_at = datetime.now(timezone.utc).isoformat()
+
+                # Save checkpoint after each chunk
+                save_checkpoint(threads_dir, checkpoint)
 
             except Exception as e:
                 print(f"    Error on chunk {i + 1}/{total_chunks}: {e}")
@@ -210,18 +427,40 @@ async def index_entries_chunked(
                 entry_failed = True
                 break
 
+        # Mark entry complete or failed
         if entry_failed:
             stats["entries_failed"] += 1
         else:
+            entry_progress.status = "complete"
+            save_checkpoint(threads_dir, checkpoint)
             stats["entries_processed"] += 1
 
     return stats
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Index watercooler threads into Graphiti")
+    parser = argparse.ArgumentParser(
+        description="Index watercooler threads into Graphiti",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Index specific threads
+  python3 scripts/index_graphiti.py --threads auth-feature api-design
+
+  # Index from a list file
+  python3 scripts/index_graphiti.py --thread-list threads-to-index.txt
+
+  # Resume interrupted migration
+  python3 scripts/index_graphiti.py --threads my-thread --resume
+
+  # Force re-index (still deduplicates, but ignores checkpoint)
+  python3 scripts/index_graphiti.py --threads my-thread --force
+""",
+    )
     parser.add_argument("--threads-dir", default="/home/jay/projects/watercooler-cloud-threads",
                         help="Path to threads directory")
+    parser.add_argument("--code-path", default="/home/jay/projects/watercooler-cloud",
+                        help="Path to code repository (for database name derivation)")
     parser.add_argument("--thread-list", help="Path to file with thread list (one per line)")
     parser.add_argument("--threads", nargs="+", help="List of thread topics (without .md)")
     parser.add_argument("--work-dir", help="Work directory for Graphiti (default: ~/.watercooler/graphiti)")
@@ -229,6 +468,10 @@ def main():
                         help="Maximum tokens per chunk (default: 768)")
     parser.add_argument("--chunk-overlap", type=int, default=64,
                         help="Overlap tokens between chunks (default: 64)")
+    parser.add_argument("--resume", action="store_true", default=True,
+                        help="Resume from checkpoint if available (default: true)")
+    parser.add_argument("--force", action="store_true",
+                        help="Ignore checkpoint and re-process all entries (still deduplicates)")
 
     args = parser.parse_args()
 
@@ -266,11 +509,17 @@ def main():
         print(f"Error: Threads directory not found: {threads_dir}", file=sys.stderr)
         return 1
 
+    # Derive database name from code_path (matches MCP server behavior)
+    code_path = Path(args.code_path)
+    database_name = _derive_database_name(code_path)
+    print(f"Database: {database_name} (derived from {code_path.name})")
+
     # Set up Graphiti backend with LLM/embedding configuration
     work_dir = Path(args.work_dir) if args.work_dir else Path.home() / ".watercooler" / "graphiti"
     config = GraphitiConfig(
         work_dir=work_dir,
         test_mode=False,
+        database=database_name,
         # LLM configuration (from environment)
         llm_api_key=llm_api_key,
         llm_api_base=os.environ.get("LLM_API_BASE"),
@@ -291,6 +540,17 @@ def main():
         return 1
     print(f"✓ Backend healthy: {health.details}")
 
+    # Load checkpoint
+    checkpoint = load_checkpoint(threads_dir)
+    resume = args.resume and not args.force
+    if checkpoint.entries and resume:
+        complete = sum(1 for e in checkpoint.entries.values() if e.status == "complete")
+        in_progress = sum(1 for e in checkpoint.entries.values() if e.status == "in_progress")
+        print(f"✓ Loaded checkpoint: {complete} complete, {in_progress} in-progress")
+    elif args.force:
+        print("✓ Force mode: ignoring checkpoint (will still deduplicate)")
+        checkpoint = Checkpoint()
+
     # Build entries with chunks
     entries = build_entries_with_chunks(
         threads_dir,
@@ -304,13 +564,18 @@ def main():
     print("\nIndexing into Graphiti (this may take several minutes)...")
     print("  Each chunk is added as a separate episode with LLM entity extraction.")
     print("  Chunks within an entry are linked for temporal ordering.")
+    print("  Deduplication prevents duplicate episodes on re-runs.")
 
-    stats = asyncio.run(index_entries_chunked(backend, entries))
+    stats = asyncio.run(index_entries_chunked(
+        backend, entries, threads_dir, checkpoint, resume=resume
+    ))
 
     print(f"\n✅ Indexing complete!")
     print(f"  Entries processed: {stats['entries_processed']}")
+    print(f"  Entries skipped (checkpoint): {stats['entries_skipped']}")
     print(f"  Entries failed: {stats['entries_failed']}")
     print(f"  Chunks indexed: {stats['chunks_indexed']}")
+    print(f"  Chunks deduplicated: {stats['chunks_deduplicated']}")
     if stats["errors"]:
         print(f"  Errors: {len(stats['errors'])}")
         for err in stats["errors"][:5]:
@@ -319,6 +584,7 @@ def main():
             print(f"    ... and {len(stats['errors']) - 5} more")
 
     print(f"\nWork directory: {work_dir}")
+    print(f"Checkpoint: {threads_dir / '.migration_checkpoint.json'}")
     print("\nYou can now query via MCP:")
     print('  watercooler_query_memory(query="your question", code_path=".", limit=10)')
 
