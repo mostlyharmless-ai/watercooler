@@ -42,6 +42,12 @@ DEFAULT_BATCH_SIZE = 32
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 3
 
+# Backward-compatible constants for tests and external consumers
+# These resolve to the built-in defaults (not env-aware at import time)
+DEFAULT_API_BASE = "http://localhost:8080/v1"
+DEFAULT_MODEL = "bge-m3"
+DEFAULT_DIM = 1024
+
 
 def _get_default_api_base() -> str:
     """Get default embedding API base from unified config."""

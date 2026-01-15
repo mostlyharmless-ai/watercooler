@@ -166,7 +166,16 @@ def _graphiti_sync_callback(
     try:
         # Derive code_path from threads_dir
         # threads_dir: /path/to/project-threads -> code_path: /path/to/project
-        code_path = str(threads_dir).removesuffix("-threads")
+        threads_dir_str = str(threads_dir)
+        if threads_dir_str.endswith("-threads"):
+            code_path = threads_dir_str.removesuffix("-threads")
+        else:
+            # Warn about non-standard naming, use threads_dir as fallback
+            log.warning(
+                f"MEMORY: threads_dir '{threads_dir}' doesn't end with '-threads'. "
+                f"Using it directly for code_path derivation."
+            )
+            code_path = threads_dir_str
 
         # Callbacks run in ThreadPoolExecutor workers which have no event loop,
         # so asyncio.run() is always safe here.

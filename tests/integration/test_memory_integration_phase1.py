@@ -177,10 +177,10 @@ Second integration test entry.
         # Save checkpoint
         _save_checkpoint(sample_threads_dir, ["01INT001"], "graphiti")
 
-        # Load checkpoint
+        # Load checkpoint (returns CheckpointV2 object)
         checkpoint = _load_checkpoint(sample_threads_dir)
-        assert checkpoint["backend"] == "graphiti"
-        assert "01INT001" in checkpoint["migrated_entries"]
+        assert checkpoint.backend == "graphiti"
+        assert "01INT001" in checkpoint.entries
 
         # Verify checkpoint file exists
         checkpoint_file = sample_threads_dir / ".migration_checkpoint.json"
@@ -299,9 +299,10 @@ End-to-end test content about authentication implementation.
         backend = get_search_backend("auto")
         assert backend == "baseline"
 
-        # Step 2: Check no checkpoint exists
+        # Step 2: Check no checkpoint exists (empty CheckpointV2)
         checkpoint = _load_checkpoint(threads_dir)
-        assert checkpoint == {}
+        assert checkpoint.entries == {}
+        assert checkpoint.backend == ""
 
         # Step 3: Simulate enabling graphiti
         with patch.dict(os.environ, {"WATERCOOLER_MEMORY_BACKEND": "graphiti"}):

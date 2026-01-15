@@ -461,10 +461,10 @@ Examples:
   python3 scripts/index_graphiti.py --threads my-thread --force
 """,
     )
-    parser.add_argument("--threads-dir", default="/home/jay/projects/watercooler-cloud-threads",
-                        help="Path to threads directory")
-    parser.add_argument("--code-path", default="/home/jay/projects/watercooler-cloud",
-                        help="Path to code repository (for database name derivation)")
+    parser.add_argument("--threads-dir",
+                        help="Path to threads directory (required, or derive from --code-path)")
+    parser.add_argument("--code-path",
+                        help="Path to code repository (for database name derivation, defaults to threads-dir without -threads suffix)")
     parser.add_argument("--thread-list", help="Path to file with thread list (one per line)")
     parser.add_argument("--threads", nargs="+", help="List of thread topics (without .md)")
     parser.add_argument("--work-dir", help="Work directory for Graphiti (default: ~/.watercooler/graphiti)")
@@ -508,13 +508,28 @@ Examples:
         parser.print_help()
         return 1
 
+    # Resolve threads_dir (required)
+    if not args.threads_dir:
+        print("Error: --threads-dir is required", file=sys.stderr)
+        parser.print_help()
+        return 1
     threads_dir = Path(args.threads_dir)
     if not threads_dir.exists():
         print(f"Error: Threads directory not found: {threads_dir}", file=sys.stderr)
         return 1
 
-    # Derive database name from code_path (matches MCP server behavior)
-    code_path = Path(args.code_path)
+    # Resolve code_path (derive from threads_dir if not specified)
+    if args.code_path:
+        code_path = Path(args.code_path)
+    else:
+        # Derive code_path from threads_dir by removing -threads suffix
+        threads_dir_str = str(threads_dir.resolve())
+        if threads_dir_str.endswith("-threads"):
+            code_path = Path(threads_dir_str.removesuffix("-threads"))
+        else:
+            print("Warning: Cannot derive --code-path from --threads-dir (no -threads suffix)", file=sys.stderr)
+            print("Using threads-dir as code-path for database name derivation", file=sys.stderr)
+            code_path = threads_dir
     database_name = _derive_database_name(code_path)
     print(f"Database: {database_name} (derived from {code_path.name})")
 
