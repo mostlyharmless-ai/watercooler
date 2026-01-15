@@ -29,6 +29,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -479,6 +480,10 @@ Examples:
 
     args = parser.parse_args()
 
+    # Initialize timing
+    timings: dict[str, float] = {}
+    total_start = time.perf_counter()
+
     # Check for LLM API key (supports local LLM servers)
     llm_api_key = os.environ.get("LLM_API_KEY")
     if not llm_api_key:
@@ -551,15 +556,18 @@ Examples:
     backend = GraphitiBackend(config)
 
     # Check health
+    step_start = time.perf_counter()
     print("Checking Graphiti backend health...")
     health = backend.healthcheck()
     if not health.ok:
         print(f"Error: Backend health check failed: {health.details}", file=sys.stderr)
         print("\nMake sure FalkorDB is running: docker run -d -p 6379:6379 falkordb/falkordb:latest", file=sys.stderr)
         return 1
+    timings["Health check"] = time.perf_counter() - step_start
     print(f"✓ Backend healthy: {health.details}")
 
     # Load checkpoint
+    step_start = time.perf_counter()
     checkpoint = load_checkpoint(threads_dir)
     resume = args.resume and not args.force
     if checkpoint.entries and resume:
@@ -569,14 +577,17 @@ Examples:
     elif args.force:
         print("✓ Force mode: ignoring checkpoint (will still deduplicate)")
         checkpoint = Checkpoint()
+    timings["Checkpoint load"] = time.perf_counter() - step_start
 
     # Build entries with chunks
+    step_start = time.perf_counter()
     entries = build_entries_with_chunks(
         threads_dir,
         thread_files,
         max_tokens=args.chunk_max_tokens,
         overlap=args.chunk_overlap,
     )
+    timings["Build entries"] = time.perf_counter() - step_start
     print(f"\n✓ Built {len(entries)} entries")
 
     # Index using chunked episodes
@@ -585,9 +596,11 @@ Examples:
     print("  Chunks within an entry are linked for temporal ordering.")
     print("  Deduplication prevents duplicate episodes on re-runs.")
 
+    step_start = time.perf_counter()
     stats = asyncio.run(index_entries_chunked(
         backend, entries, threads_dir, checkpoint, database_name, resume=resume
     ))
+    timings["Index entries"] = time.perf_counter() - step_start
 
     print(f"\n✅ Indexing complete!")
     print(f"  Entries processed: {stats['entries_processed']}")
@@ -601,6 +614,33 @@ Examples:
             print(f"    - {err}")
         if len(stats["errors"]) > 5:
             print(f"    ... and {len(stats['errors']) - 5} more")
+
+    # Timing report
+    total_elapsed = time.perf_counter() - total_start
+    print(f"\nTiming:")
+    for step_name, elapsed in timings.items():
+        print(f"  {step_name + ':':20} {elapsed:.1f}s")
+    print(f"  {'─' * 25}")
+    print(f"  {'Total:':20} {total_elapsed:.1f}s")
+
+    # Summary stats
+    total_entries = len(entries)
+    total_chunks = sum(len(e["chunks"]) for e in entries)
+    avg_chunks_per_entry = total_chunks / total_entries if total_entries > 0 else 0
+    chunks_indexed = stats["chunks_indexed"]
+    chunks_deduped = stats["chunks_deduplicated"]
+    index_time = timings.get("Index entries", 0)
+    chunks_per_sec = chunks_indexed / index_time if index_time > 0 else 0
+    entries_processed = stats["entries_processed"]
+    entries_per_min = (entries_processed / index_time * 60) if index_time > 0 else 0
+    dedup_pct = (chunks_deduped / (chunks_indexed + chunks_deduped) * 100) if (chunks_indexed + chunks_deduped) > 0 else 0
+
+    print(f"\nSummary:")
+    print(f"  Input:             {total_entries} entries, {total_chunks} chunks ({avg_chunks_per_entry:.1f} avg/entry)")
+    print(f"  Indexed:           {chunks_indexed} chunks at {chunks_per_sec:.1f} chunks/sec")
+    if chunks_deduped > 0:
+        print(f"  Deduplicated:      {chunks_deduped} chunks ({dedup_pct:.1f}%)")
+    print(f"  Throughput:        {entries_per_min:.1f} entries/min")
 
     print(f"\nWork directory: {work_dir}")
     print(f"Checkpoint: {threads_dir / '.migration_checkpoint.json'}")
