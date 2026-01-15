@@ -269,9 +269,13 @@ async def index_entries_chunked(
     entries: list[dict],
     threads_dir: Path,
     checkpoint: Checkpoint,
+    database_name: str,
     resume: bool = True,
 ) -> dict:
     """Index entries into Graphiti using chunked episodes.
+
+    All episodes use the project database_name as group_id (unified graph).
+    Thread topic is included in source_description for traceability.
 
     Features:
     - Deduplication: Checks if chunk already exists before adding
@@ -325,11 +329,11 @@ async def index_entries_chunked(
         else:
             base_name = f"Entry {entry_id}"
 
-        # Build source description
+        # Build source description (includes thread topic for traceability)
         agent = entry.get("agent", "Unknown")
         role = entry.get("role", "")
         entry_type = entry.get("entry_type", "Note")
-        base_source_desc = f"Index: {agent}"
+        base_source_desc = f"thread:{thread_id} | Index: {agent}"
         if role:
             base_source_desc += f" ({role})"
 
@@ -387,7 +391,7 @@ async def index_entries_chunked(
                 # DEDUPLICATION: Check if this chunk already exists in the graph
                 existing_episode = await backend.find_episode_by_chunk_id_async(
                     chunk_id=chunk.chunk_id,
-                    group_id=thread_id,
+                    group_id=database_name,
                 )
 
                 if existing_episode:
@@ -396,13 +400,13 @@ async def index_entries_chunked(
                     print(f"    ↳ Chunk {i + 1}/{total_chunks}: deduplicated (exists as {episode_uuid[:8]}...)")
                     stats["chunks_deduplicated"] += 1
                 else:
-                    # Add episode
+                    # Add episode (unified graph: all threads share database_name as group_id)
                     result = await backend.add_episode_direct(
                         name=episode_name,
                         episode_body=chunk.text,
                         source_description=source_desc,
                         reference_time=ref_time,
-                        group_id=thread_id,
+                        group_id=database_name,
                         previous_episode_uuids=previous_uuids,
                     )
                     episode_uuid = result.get("episode_uuid", "")
@@ -567,7 +571,7 @@ Examples:
     print("  Deduplication prevents duplicate episodes on re-runs.")
 
     stats = asyncio.run(index_entries_chunked(
-        backend, entries, threads_dir, checkpoint, resume=resume
+        backend, entries, threads_dir, checkpoint, database_name, resume=resume
     ))
 
     print(f"\n✅ Indexing complete!")
