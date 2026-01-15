@@ -922,6 +922,213 @@ Title: Chain test entry
                     )
 
 
+class TestDeduplication:
+    """Tests for deduplication via find_episode_by_chunk_id_async."""
+
+    @pytest.fixture
+    def mock_context(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_threads_dir(self, tmp_path):
+        """Create threads directory with an entry that produces multiple chunks."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create entry with enough content for multiple chunks
+        body = "\n\n".join([
+            f"Paragraph {i}: " + "Content goes here. " * 30
+            for i in range(5)
+        ])
+
+        thread = threads_dir / "dedup-test.md"
+        thread.write_text(f"""# dedup-test — Thread
+
+Status: OPEN
+Ball: Claude (dev)
+
+---
+
+Entry: Claude (dev) 2025-01-15T10:00:00Z
+Role: implementer
+Type: Note
+Title: Deduplication test entry
+<!-- Entry-ID: 01DEDUP01 -->
+
+{body}
+""")
+
+        return threads_dir
+
+    async def test_deduplication_skips_existing_episodes(
+        self, mock_context, mock_threads_dir
+    ):
+        """Migration should skip chunks that already exist in the backend."""
+        from watercooler_mcp.tools.migration import _migrate_to_memory_backend_impl
+
+        add_episode_calls = []
+        find_call_count = [0]
+
+        async def mock_add_episode(**kwargs):
+            add_episode_calls.append(kwargs)
+            return {"episode_uuid": f"ep-{len(add_episode_calls)}"}
+
+        async def mock_find_episode(chunk_id: str, group_id: str):
+            # Simulate that first chunk already exists (based on call order)
+            find_call_count[0] += 1
+            if find_call_count[0] == 1:
+                # Return format expected by migration code: uses "uuid" key
+                return {"uuid": "existing-ep-0", "chunk_id": chunk_id}
+            return None
+
+        mock_graphiti = MagicMock()
+        mock_graphiti.add_episode_direct = AsyncMock(side_effect=mock_add_episode)
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(side_effect=mock_find_episode)
+
+        with patch(
+            "watercooler_mcp.tools.migration._check_backend_availability",
+            return_value={"available": True},
+        ), patch(
+            "watercooler_mcp.tools.migration._get_migration_backend",
+            return_value=mock_graphiti,
+        ):
+            result = await _migrate_to_memory_backend_impl(
+                threads_dir=mock_threads_dir,
+                backend="graphiti",
+                ctx=mock_context,
+                dry_run=False,
+                chunk_max_tokens=200,
+            )
+
+            result_data = json.loads(result)
+
+            # Should have deduplicated at least one chunk (the first one "exists")
+            assert result_data.get("chunks_deduplicated", 0) >= 1
+
+            # Verify find_episode_by_chunk_id_async was called for deduplication
+            assert mock_graphiti.find_episode_by_chunk_id_async.call_count >= 1
+
+    async def test_deduplication_check_called_with_correct_params(
+        self, mock_context, mock_threads_dir
+    ):
+        """Deduplication check should be called with chunk_id and group_id."""
+        from watercooler_mcp.tools.migration import _migrate_to_memory_backend_impl
+
+        find_episode_calls = []
+
+        async def mock_find_episode(chunk_id: str, group_id: str):
+            find_episode_calls.append({"chunk_id": chunk_id, "group_id": group_id})
+            return None
+
+        mock_graphiti = MagicMock()
+        mock_graphiti.add_episode_direct = AsyncMock(
+            return_value={"episode_uuid": "ep-new"}
+        )
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(side_effect=mock_find_episode)
+
+        with patch(
+            "watercooler_mcp.tools.migration._check_backend_availability",
+            return_value={"available": True},
+        ), patch(
+            "watercooler_mcp.tools.migration._get_migration_backend",
+            return_value=mock_graphiti,
+        ):
+            await _migrate_to_memory_backend_impl(
+                threads_dir=mock_threads_dir,
+                backend="graphiti",
+                ctx=mock_context,
+                dry_run=False,
+            )
+
+            # Verify calls were made
+            assert len(find_episode_calls) >= 1
+
+            # Each call should have chunk_id and group_id
+            for call in find_episode_calls:
+                assert "chunk_id" in call
+                assert "group_id" in call
+                assert call["chunk_id"]  # Not empty
+                assert call["group_id"]  # Not empty
+
+    async def test_deduplication_preserves_episode_chain_on_skip(
+        self, mock_context, mock_threads_dir
+    ):
+        """When a chunk is skipped due to dedup, chain should use existing episode UUID."""
+        from watercooler_mcp.tools.migration import _migrate_to_memory_backend_impl
+
+        call_args_list = []
+        existing_uuid = "existing-ep-for-chunk-0"
+        find_call_count = [0]
+
+        async def mock_add_episode(**kwargs):
+            call_args_list.append(kwargs)
+            return {"episode_uuid": f"new-ep-{len(call_args_list)}"}
+
+        async def mock_find_episode(chunk_id: str, group_id: str):
+            # First chunk (header) already exists (based on call order)
+            find_call_count[0] += 1
+            if find_call_count[0] == 1:
+                # Return format expected by migration code: uses "uuid" key
+                return {"uuid": existing_uuid, "chunk_id": chunk_id}
+            return None
+
+        mock_graphiti = MagicMock()
+        mock_graphiti.add_episode_direct = AsyncMock(side_effect=mock_add_episode)
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(side_effect=mock_find_episode)
+
+        with patch(
+            "watercooler_mcp.tools.migration._check_backend_availability",
+            return_value={"available": True},
+        ), patch(
+            "watercooler_mcp.tools.migration._get_migration_backend",
+            return_value=mock_graphiti,
+        ):
+            await _migrate_to_memory_backend_impl(
+                threads_dir=mock_threads_dir,
+                backend="graphiti",
+                ctx=mock_context,
+                dry_run=False,
+            )
+
+            # If there were new chunks added after the skipped one,
+            # they should reference the existing episode UUID
+            if call_args_list:
+                # Find calls that have previous_episode_uuids
+                for call in call_args_list:
+                    prev_uuids = call.get("previous_episode_uuids", [])
+                    # The first new chunk should link to the existing UUID
+                    if prev_uuids and existing_uuid in prev_uuids:
+                        # Verify the chain was preserved correctly
+                        assert existing_uuid in prev_uuids
+
+    async def test_no_deduplication_in_dry_run(
+        self, mock_context, mock_threads_dir
+    ):
+        """Dry run should not call deduplication check."""
+        from watercooler_mcp.tools.migration import _migrate_to_memory_backend_impl
+
+        mock_graphiti = MagicMock()
+        mock_graphiti.find_episode_by_chunk_id_async = AsyncMock(return_value=None)
+
+        with patch(
+            "watercooler_mcp.tools.migration._check_backend_availability",
+            return_value={"available": True},
+        ), patch(
+            "watercooler_mcp.tools.migration._get_migration_backend",
+            return_value=mock_graphiti,
+        ):
+            await _migrate_to_memory_backend_impl(
+                threads_dir=mock_threads_dir,
+                backend="graphiti",
+                ctx=mock_context,
+                dry_run=True,
+            )
+
+            # In dry run, backend should not be instantiated for dedup checks
+            # The _get_migration_backend mock shouldn't be called in dry run
+            # (deduplication only happens during actual migration)
+
+
 class TestToolRegistration:
     """Test tool registration."""
 

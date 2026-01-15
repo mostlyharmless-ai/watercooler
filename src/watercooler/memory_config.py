@@ -20,33 +20,76 @@ from typing import Optional
 from .config_facade import config
 
 
+def _redact_key(key: str) -> str:
+    """Redact API key for safe logging/repr.
+
+    Shows first 8 chars followed by '...' for keys longer than 8 chars,
+    otherwise shows '***' for short keys.
+    """
+    if not key:
+        return "<not set>"
+    if len(key) > 8:
+        return key[:8] + "..."
+    return "***"
+
+
 @dataclass(frozen=True)
 class ResolvedLLMConfig:
-    """Resolved LLM configuration after applying all overrides."""
+    """Resolved LLM configuration after applying all overrides.
+
+    Note: __repr__ redacts api_key for safe logging.
+    """
 
     api_key: str
     api_base: str
     model: str
 
+    def __repr__(self) -> str:
+        """Return string representation with redacted API key."""
+        return (
+            f"ResolvedLLMConfig(api_key='{_redact_key(self.api_key)}', "
+            f"api_base='{self.api_base}', model='{self.model}')"
+        )
+
 
 @dataclass(frozen=True)
 class ResolvedEmbeddingConfig:
-    """Resolved embedding configuration after applying all overrides."""
+    """Resolved embedding configuration after applying all overrides.
+
+    Note: __repr__ redacts api_key for safe logging.
+    """
 
     api_key: str
     api_base: str
     model: str
     dim: int
 
+    def __repr__(self) -> str:
+        """Return string representation with redacted API key."""
+        return (
+            f"ResolvedEmbeddingConfig(api_key='{_redact_key(self.api_key)}', "
+            f"api_base='{self.api_base}', model='{self.model}', dim={self.dim})"
+        )
+
 
 @dataclass(frozen=True)
 class ResolvedDatabaseConfig:
-    """Resolved database configuration after applying all overrides."""
+    """Resolved database configuration after applying all overrides.
+
+    Note: __repr__ redacts password for safe logging.
+    """
 
     host: str
     port: int
     username: str
     password: str
+
+    def __repr__(self) -> str:
+        """Return string representation with redacted password."""
+        return (
+            f"ResolvedDatabaseConfig(host='{self.host}', port={self.port}, "
+            f"username='{self.username}', password='{_redact_key(self.password)}')"
+        )
 
 
 def is_memory_enabled() -> bool:
@@ -97,11 +140,12 @@ def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
     # Resolve api_key with deprecated OPENAI_API_KEY fallback
     api_key = os.getenv("LLM_API_KEY")
     if not api_key:
-        # Deprecated fallback
+        # Deprecated fallback - scheduled for removal in v0.5.0
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
             warnings.warn(
-                "OPENAI_API_KEY is deprecated. Use LLM_API_KEY instead.",
+                "OPENAI_API_KEY is deprecated and will be removed in v0.5.0. "
+                "Use LLM_API_KEY instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -149,11 +193,12 @@ def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConf
     # Resolve api_key with deprecated OPENAI_API_KEY fallback
     api_key = os.getenv("EMBEDDING_API_KEY")
     if not api_key:
-        # Deprecated fallback (same as LLM for OpenAI)
+        # Deprecated fallback (same as LLM for OpenAI) - scheduled for removal in v0.5.0
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
             warnings.warn(
-                "OPENAI_API_KEY is deprecated for embeddings. Use EMBEDDING_API_KEY instead.",
+                "OPENAI_API_KEY is deprecated for embeddings and will be removed in v0.5.0. "
+                "Use EMBEDDING_API_KEY instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )

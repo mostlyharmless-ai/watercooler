@@ -31,7 +31,25 @@ logger = logging.getLogger(__name__)
 # Valid backend names for migration
 VALID_BACKENDS = frozenset({"graphiti", "leanrag"})
 
-# Default chunking parameters (align with MemoryGraph/LeanRAG)
+# =============================================================================
+# Chunking Configuration
+# =============================================================================
+#
+# These defaults are tuned for Graphiti's episode processing pipeline:
+#
+# DEFAULT_CHUNK_MAX_TOKENS = 768
+#   - Balances context retention with manageable LLM processing
+#   - ~2-3 paragraphs of typical prose
+#   - Large enough for meaningful entity extraction per chunk
+#   - Small enough to avoid Graphiti's context window constraints
+#   - Aligns with typical RAG chunk sizes (512-1024 range)
+#
+# DEFAULT_CHUNK_OVERLAP = 64
+#   - ~8% overlap ratio (64/768)
+#   - Ensures entity/relationship continuity across chunk boundaries
+#   - Prevents "lost" entities that span chunk breaks
+#   - Low enough to avoid excessive redundancy
+#
 DEFAULT_CHUNK_MAX_TOKENS = 768
 DEFAULT_CHUNK_OVERLAP = 64
 

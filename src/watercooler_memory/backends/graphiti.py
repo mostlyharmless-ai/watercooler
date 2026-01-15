@@ -215,8 +215,59 @@ class GraphitiBackend(MemoryBackend):
         self._init_entry_episode_index()
         # Cache for graphiti client to avoid creating new connections per call
         # This is critical for MCP migration which makes many sequential calls
+        # Client lifecycle: created on first use, reused until close() or __del__
         self._cached_graphiti_client: Any = None
         self._indices_built: bool = False
+
+    def close(self) -> None:
+        """Close the backend and release resources.
+
+        Closes the cached FalkorDB connection if present. Safe to call multiple
+        times. After close(), the backend can still be used - a new connection
+        will be created on next operation.
+
+        Example:
+            backend = GraphitiBackend(config)
+            try:
+                # ... use backend ...
+            finally:
+                backend.close()
+
+            # Or use as context manager:
+            with GraphitiBackend(config) as backend:
+                # ... use backend ...
+        """
+        if self._cached_graphiti_client is not None:
+            try:
+                # FalkorDB client has a close() method on the driver
+                driver = getattr(self._cached_graphiti_client, "driver", None)
+                if driver is not None and hasattr(driver, "close"):
+                    driver.close()
+            except Exception:
+                pass  # Ignore cleanup errors
+            finally:
+                self._cached_graphiti_client = None
+                self._indices_built = False
+
+    def __enter__(self) -> "GraphitiBackend":
+        """Enter context manager - returns self."""
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit context manager - closes connection."""
+        self.close()
+
+    def __del__(self) -> None:
+        """Destructor - attempts to close connection on garbage collection.
+
+        Note: __del__ is not guaranteed to run in all cases (e.g., circular
+        references, interpreter shutdown). For reliable cleanup, use close()
+        explicitly or use the backend as a context manager.
+        """
+        try:
+            self.close()
+        except Exception:
+            pass  # Ignore errors during garbage collection
 
     def _validate_config(self) -> None:
         """Validate configuration and Graphiti availability."""
