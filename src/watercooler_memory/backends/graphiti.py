@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import subprocess
 import tempfile
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Sequence
+
+logger = logging.getLogger(__name__)
 
 from . import (
     BackendError,
@@ -29,6 +32,32 @@ from . import (
 from ..entry_episode_index import EntryEpisodeIndex, IndexConfig
 
 
+def _derive_database_name(code_path: Path | str | None) -> str:
+    """Derive database name from project directory.
+
+    Converts project directory name to a valid FalkorDB database name:
+    - Replaces hyphens with underscores (FalkorDB doesn't like hyphens)
+    - Converts to lowercase
+    - Falls back to 'watercooler' if no code_path provided
+
+    Args:
+        code_path: Path to the project directory
+
+    Returns:
+        Sanitized database name (e.g., 'watercooler_cloud')
+    """
+    if code_path is None:
+        return "watercooler"
+
+    path = Path(code_path) if isinstance(code_path, str) else code_path
+    name = path.resolve().name  # Get directory name
+    # Sanitize: replace hyphens with underscores, lowercase
+    sanitized = name.replace("-", "_").lower()
+    # Remove any non-alphanumeric except underscores
+    sanitized = "".join(c if c.isalnum() or c == "_" else "_" for c in sanitized)
+    return sanitized or "watercooler"
+
+
 @dataclass
 class GraphitiConfig:
     """Configuration for Graphiti backend."""
@@ -41,6 +70,10 @@ class GraphitiConfig:
     falkordb_port: int = 6379
     falkordb_username: str | None = None  # FalkorDB doesn't require auth
     falkordb_password: str | None = None
+
+    # Unified database name (one database per project)
+    # All threads share this database, partitioned by group_id
+    database: str | None = None  # Derived from code_path if not set
 
     # LLM configuration (flexible provider - supports OpenAI, local, DeepSeek, etc.)
     llm_api_base: str | None = None      # e.g., "http://localhost:8000/v1" for local
@@ -84,6 +117,50 @@ class GraphitiConfig:
             self.entry_episode_index_path = (
                 Path.home() / ".watercooler" / "graphiti" / "entry_episode_index.json"
             )
+
+    @classmethod
+    def from_unified(cls) -> "GraphitiConfig":
+        """Create GraphitiConfig from unified watercooler configuration.
+
+        Uses the unified config system with proper priority chain:
+        1. Environment variables (highest)
+        2. Backend-specific TOML overrides ([memory.graphiti])
+        3. Shared TOML settings ([memory.llm], [memory.embedding], [memory.database])
+        4. Built-in defaults (lowest)
+
+        Returns:
+            GraphitiConfig instance with all settings resolved
+
+        Example:
+            >>> config = GraphitiConfig.from_unified()
+            >>> backend = GraphitiBackend(config)
+        """
+        from watercooler.memory_config import (
+            resolve_llm_config,
+            resolve_embedding_config,
+            resolve_database_config,
+            get_graphiti_reranker,
+            get_graphiti_track_entry_episodes,
+        )
+
+        llm = resolve_llm_config("graphiti")
+        embedding = resolve_embedding_config("graphiti")
+        db = resolve_database_config()
+
+        return cls(
+            llm_api_key=llm.api_key,
+            llm_api_base=llm.api_base if llm.api_base != "https://api.openai.com/v1" else None,
+            llm_model=llm.model,
+            embedding_api_key=embedding.api_key,
+            embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
+            embedding_model=embedding.model,
+            falkordb_host=db.host,
+            falkordb_port=db.port,
+            falkordb_username=db.username if db.username else None,
+            falkordb_password=db.password if db.password else None,
+            reranker=get_graphiti_reranker(),
+            track_entry_episodes=get_graphiti_track_entry_episodes(),
+        )
 
 
 class GraphitiBackend(MemoryBackend):
@@ -136,6 +213,61 @@ class GraphitiBackend(MemoryBackend):
         self.config = config or GraphitiConfig()
         self._validate_config()
         self._init_entry_episode_index()
+        # Cache for graphiti client to avoid creating new connections per call
+        # This is critical for MCP migration which makes many sequential calls
+        # Client lifecycle: created on first use, reused until close() or __del__
+        self._cached_graphiti_client: Any = None
+        self._indices_built: bool = False
+
+    def close(self) -> None:
+        """Close the backend and release resources.
+
+        Closes the cached FalkorDB connection if present. Safe to call multiple
+        times. After close(), the backend can still be used - a new connection
+        will be created on next operation.
+
+        Example:
+            backend = GraphitiBackend(config)
+            try:
+                # ... use backend ...
+            finally:
+                backend.close()
+
+            # Or use as context manager:
+            with GraphitiBackend(config) as backend:
+                # ... use backend ...
+        """
+        if self._cached_graphiti_client is not None:
+            try:
+                # FalkorDB client has a close() method on the driver
+                driver = getattr(self._cached_graphiti_client, "driver", None)
+                if driver is not None and hasattr(driver, "close"):
+                    driver.close()
+            except Exception:
+                pass  # Ignore cleanup errors
+            finally:
+                self._cached_graphiti_client = None
+                self._indices_built = False
+
+    def __enter__(self) -> "GraphitiBackend":
+        """Enter context manager - returns self."""
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit context manager - closes connection."""
+        self.close()
+
+    def __del__(self) -> None:
+        """Destructor - attempts to close connection on garbage collection.
+
+        Note: __del__ is not guaranteed to run in all cases (e.g., circular
+        references, interpreter shutdown). For reliable cleanup, use close()
+        explicitly or use the backend as a context manager.
+        """
+        try:
+            self.close()
+        except Exception:
+            pass  # Ignore errors during garbage collection
 
     def _validate_config(self) -> None:
         """Validate configuration and Graphiti availability."""
@@ -246,6 +378,7 @@ class GraphitiBackend(MemoryBackend):
         source_description: str,
         reference_time: datetime,
         group_id: str,
+        previous_episode_uuids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Add an episode directly to Graphiti without the prepare/index workflow.
 
@@ -259,6 +392,10 @@ class GraphitiBackend(MemoryBackend):
             source_description: Description of the source
             reference_time: Timestamp for the episode (datetime object)
             group_id: Group/thread identifier for partitioning
+            previous_episode_uuids: Optional list of episode UUIDs that this episode
+                follows. Used to establish explicit temporal ordering when multiple
+                episodes share the same reference_time (e.g., chunks of the same entry).
+                When None, Graphiti uses default context retrieval.
 
         Returns:
             Dict with episode_uuid, entities_extracted, and facts_extracted
@@ -268,7 +405,8 @@ class GraphitiBackend(MemoryBackend):
             TransientError: If database connection fails
         """
         try:
-            graphiti = self._create_graphiti_client()
+            # Use cached client with indices already built to avoid per-call overhead
+            graphiti = await self._get_graphiti_client_with_indices()
         except (ConnectionError, TimeoutError, OSError) as e:
             raise TransientError(f"Database connection failed: {e}") from e
         except ConfigError:
@@ -278,12 +416,17 @@ class GraphitiBackend(MemoryBackend):
             raise BackendError(f"Failed to create Graphiti client: {e}") from e
 
         try:
+            # Sanitize episode_body to prevent RediSearch operator errors during
+            # entity deduplication (same as _map_entries_to_episodes does for index())
+            sanitized_body = self._sanitize_redisearch_operators(episode_body)
+
             result = await graphiti.add_episode(
                 name=name,
-                episode_body=episode_body,
+                episode_body=sanitized_body,
                 source_description=source_description,
                 reference_time=reference_time,
                 group_id=group_id,
+                previous_episode_uuids=previous_episode_uuids,
             )
 
             # Extract episode UUID from result - fail if missing
@@ -432,8 +575,12 @@ class GraphitiBackend(MemoryBackend):
 
         return result.strip()
 
-    def _create_graphiti_client(self) -> Any:
+    def _create_graphiti_client(self, use_cache: bool = True) -> Any:
         """Create and configure Graphiti client with FalkorDB, LLM, and embedder.
+
+        Args:
+            use_cache: If True, return cached client if available. Set to False
+                to force creation of a new client (useful for testing).
 
         Returns:
             Configured Graphiti instance ready for operations.
@@ -441,6 +588,10 @@ class GraphitiBackend(MemoryBackend):
         Raises:
             ConfigError: If required dependencies are not installed.
         """
+        # Return cached client if available and caching enabled
+        if use_cache and self._cached_graphiti_client is not None:
+            return self._cached_graphiti_client
+
         try:
             from graphiti_core import Graphiti
             from graphiti_core.driver.falkordb_driver import FalkorDriver
@@ -454,13 +605,28 @@ class GraphitiBackend(MemoryBackend):
                 "Run: pip install -e 'external/graphiti[falkordb]'"
             ) from e
 
-        # Create FalkorDB driver
-        falkor_driver = FalkorDriver(
-            host=self.config.falkordb_host,
-            port=self.config.falkordb_port,
-            username=self.config.falkordb_username,
-            password=self.config.falkordb_password,
+        # Create FalkorDB driver with unified database name
+        # All threads share one database, partitioned by group_id property
+        database_name = self.config.database or "watercooler"
+
+        # Monkey patch to prevent FalkorDriver.__init__ from scheduling a background
+        # task via loop.create_task(). This background task causes race conditions
+        # with MCP stdio transport. We explicitly await build_indices_and_constraints()
+        # in operations that need it (add_episode_direct, find_episode_by_chunk_id_async).
+        original_get_running_loop = asyncio.get_running_loop
+        asyncio.get_running_loop = lambda: (_ for _ in ()).throw(
+            RuntimeError("patched to prevent background task")
         )
+        try:
+            falkor_driver = FalkorDriver(
+                host=self.config.falkordb_host,
+                port=self.config.falkordb_port,
+                username=self.config.falkordb_username,
+                password=self.config.falkordb_password,
+                database=database_name,
+            )
+        finally:
+            asyncio.get_running_loop = original_get_running_loop
 
         # Configure LLM client (supports OpenAI, local servers, DeepSeek, etc.)
         llm_config = LLMConfig(
@@ -478,11 +644,40 @@ class GraphitiBackend(MemoryBackend):
         )
         embedder = OpenAIEmbedder(config=embedder_config)
 
-        return Graphiti(
+        client = Graphiti(
             graph_driver=falkor_driver,
             llm_client=llm_client,
             embedder=embedder,
         )
+
+        # Cache the client for reuse
+        if use_cache:
+            self._cached_graphiti_client = client
+            self._indices_built = False  # Reset indices flag for new client
+
+        return client
+
+    async def _get_graphiti_client_with_indices(self) -> Any:
+        """Get cached graphiti client and ensure indices are built.
+
+        This is the preferred method for getting a graphiti client in async
+        contexts. It reuses the cached client and only builds indices once.
+
+        Returns:
+            Graphiti client with indices built.
+
+        Raises:
+            TransientError: If database connection fails.
+            ConfigError: If dependencies are not installed.
+        """
+        graphiti = self._create_graphiti_client(use_cache=True)
+
+        # Build indices once per client instance
+        if not self._indices_built:
+            await graphiti.build_indices_and_constraints()
+            self._indices_built = True
+
+        return graphiti
 
     def _get_search_config(self) -> Any:
         """Get SearchConfig based on configured reranker algorithm.
@@ -955,54 +1150,27 @@ class GraphitiBackend(MemoryBackend):
                     limit = query_item.get("limit", 10)
 
                     # Extract optional topic for group_id filtering
+                    # With unified database, group_ids filter within single DB (no separate databases)
                     topic = query_item.get("topic")
                     if topic:
                         # Sanitize topic to group_id format
                         group_ids = [self._sanitize_thread_id(topic)]
                     else:
-                        # No topic specified - search across all available graphs
-                        # List all graphs from FalkorDB
-                        try:
-                            import redis
-                            r = redis.Redis(
-                                host=self.config.falkordb_host,
-                                port=self.config.falkordb_port,
-                                password=self.config.falkordb_password,
-                            )
-                            graph_list = r.execute_command('GRAPH.LIST')
-                            # Filter out default_db and decode bytes to strings
-                            group_ids = [
-                                g.decode() if isinstance(g, bytes) else g
-                                for g in graph_list
-                                if (g.decode() if isinstance(g, bytes) else g) != 'default_db'
-                            ]
-                        except Exception as e:
-                            # If we can't list graphs, fall back to None (searches default_db)
-                            group_ids = None
+                        # No topic specified - search across all threads in unified database
+                        # Pass None to search all group_ids within the single project database
+                        group_ids = None
 
                     try:
                         # Get search config with configured reranker
                         search_config = self._get_search_config()
-                        
-                        # Handle single group_id case: @handle_multiple_group_ids decorator
-                        # only activates for len(group_ids) > 1, so we need to manually
-                        # clone the driver for single group_id queries
-                        if group_ids and len(group_ids) == 1:
-                            # Clone driver to point at the specific database
-                            driver = graphiti.clients.driver.clone(database=group_ids[0])
-                            search_results = await graphiti.search_(
-                                query=query_text,
-                                config=search_config,
-                                group_ids=group_ids,
-                                driver=driver,
-                            )
-                        else:
-                            # Multiple group_ids or None - let decorator handle it
-                            search_results = await graphiti.search_(
-                                query=query_text,
-                                config=search_config,
-                                group_ids=group_ids,
-                            )
+
+                        # Unified database: no driver cloning needed
+                        # group_ids filters by property within the single project database
+                        search_results = await graphiti.search_(
+                            query=query_text,
+                            config=search_config,
+                            group_ids=group_ids,
+                        )
 
                         # Map Graphiti SearchResults to canonical format
                         # search_results.edges contains EntityEdge models
@@ -1234,13 +1402,10 @@ class GraphitiBackend(MemoryBackend):
             raise TransientError(f"Database connection failed: {e}") from e
 
         async def search_nodes_async():
-            # Get effective group_ids with GRAPH.LIST fallback
-            effective_group_ids = self._get_effective_group_ids(group_ids)
-            
-            # Sanitize group_ids
+            # Sanitize group_ids for filtering within unified database
             sanitized_group_ids = None
-            if effective_group_ids:
-                sanitized_group_ids = [self._sanitize_thread_id(gid) for gid in effective_group_ids]
+            if group_ids:
+                sanitized_group_ids = [self._sanitize_thread_id(gid) for gid in group_ids]
 
             # Use NODE_HYBRID_SEARCH_RRF (official Graphiti MCP server approach)
             from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
@@ -1249,25 +1414,14 @@ class GraphitiBackend(MemoryBackend):
             # Always create SearchFilters (match official implementation)
             search_filters = SearchFilters(node_labels=entity_types)
 
-            # Handle single group_id case: clone driver to point at specific database
-            # (matches query() method pattern - @handle_multiple_group_ids only works for >1)
-            if sanitized_group_ids and len(sanitized_group_ids) == 1:
-                driver = graphiti.clients.driver.clone(database=sanitized_group_ids[0])
-                search_results = await graphiti.search_(
-                    query=query,
-                    config=NODE_HYBRID_SEARCH_RRF,
-                    group_ids=sanitized_group_ids,
-                    search_filter=search_filters,
-                    driver=driver,
-                )
-            else:
-                # Multiple group_ids or None - let decorator handle it
-                search_results = await graphiti.search_(
-                    query=query,
-                    config=NODE_HYBRID_SEARCH_RRF,
-                    group_ids=sanitized_group_ids,
-                    search_filter=search_filters,
-                )
+            # Unified database: no driver cloning needed
+            # group_ids filters by property within the single project database
+            search_results = await graphiti.search_(
+                query=query,
+                config=NODE_HYBRID_SEARCH_RRF,
+                group_ids=sanitized_group_ids,
+                search_filter=search_filters,
+            )
             
             # Extract nodes from results (official approach)
             limit = min(max_results, self.MAX_SEARCH_RESULTS)
@@ -1344,14 +1498,9 @@ class GraphitiBackend(MemoryBackend):
         async def get_node_async():
             from graphiti_core.nodes import EntityNode
 
-            # Clone driver to use specific database if group_id provided
-            driver = graphiti.driver
-            if group_id:
-                sanitized_group_id = self._sanitize_thread_id(group_id)
-                driver = graphiti.driver.clone(database=sanitized_group_id)
-
-            # Get node by UUID
-            node = await EntityNode.get_by_uuid(driver, node_id)
+            # Unified database: no driver cloning needed
+            # Node lookup by UUID works across all group_ids in the single project database
+            node = await EntityNode.get_by_uuid(graphiti.driver, node_id)
             if not node:
                 return None
 
@@ -1553,14 +1702,9 @@ class GraphitiBackend(MemoryBackend):
         async def get_edge_async():
             from graphiti_core.edges import EntityEdge
 
-            # Clone driver to use specific database if group_id provided
-            driver = graphiti.driver
-            if group_id:
-                sanitized_group_id = self._sanitize_thread_id(group_id)
-                driver = graphiti.driver.clone(database=sanitized_group_id)
-
-            # Get edge by UUID
-            edge = await EntityEdge.get_by_uuid(driver, uuid)
+            # Unified database: no driver cloning needed
+            # Edge lookup by UUID works across all group_ids in the single project database
+            edge = await EntityEdge.get_by_uuid(graphiti.driver, uuid)
             if not edge:
                 # Return None for not-found cases (protocol compliant)
                 return None
@@ -1617,37 +1761,23 @@ class GraphitiBackend(MemoryBackend):
             raise TransientError(f"Database connection failed: {e}") from e
 
         async def search_facts_async():
-            # Get effective group_ids with GRAPH.LIST fallback
-            effective_group_ids = self._get_effective_group_ids(group_ids)
-            
-            # Sanitize group_ids
+            # Sanitize group_ids for filtering within unified database
             sanitized_group_ids = None
-            if effective_group_ids:
-                sanitized_group_ids = [self._sanitize_thread_id(gid) for gid in effective_group_ids]
+            if group_ids:
+                sanitized_group_ids = [self._sanitize_thread_id(gid) for gid in group_ids]
 
             # Use search_() API for facts with reranker scores (match query_memory pattern)
             limit = min(max_facts, self.MAX_SEARCH_RESULTS)
             search_config = self._get_search_config()
 
-            # Handle single group_id case: clone driver to point at specific database
-            # (matches query() method pattern - @handle_multiple_group_ids only works for >1)
-            if sanitized_group_ids and len(sanitized_group_ids) == 1:
-                driver = graphiti.clients.driver.clone(database=sanitized_group_ids[0])
-                search_results = await graphiti.search_(
-                    query=query,
-                    config=search_config,
-                    group_ids=sanitized_group_ids,
-                    center_node_uuid=center_node_uuid,
-                    driver=driver,
-                )
-            else:
-                # Multiple group_ids or None - let decorator handle it
-                search_results = await graphiti.search_(
-                    query=query,
-                    config=search_config,
-                    group_ids=sanitized_group_ids,
-                    center_node_uuid=center_node_uuid,
-                )
+            # Unified database: no driver cloning needed
+            # group_ids filters by property within the single project database
+            search_results = await graphiti.search_(
+                query=query,
+                config=search_config,
+                group_ids=sanitized_group_ids,
+                center_node_uuid=center_node_uuid,
+            )
 
             # Extract edges with scores
             edges = search_results.edges[:limit] if search_results.edges else []
@@ -1718,35 +1848,22 @@ class GraphitiBackend(MemoryBackend):
             raise TransientError(f"Database connection failed: {e}") from e
 
         async def search_episodes_async():
-            # Get effective group_ids with GRAPH.LIST fallback
-            effective_group_ids = self._get_effective_group_ids(group_ids)
-            
-            # Sanitize group_ids
+            # Sanitize group_ids for filtering within unified database
             sanitized_group_ids = None
-            if effective_group_ids:
-                sanitized_group_ids = [self._sanitize_thread_id(gid) for gid in effective_group_ids]
+            if group_ids:
+                sanitized_group_ids = [self._sanitize_thread_id(gid) for gid in group_ids]
 
             # Search episodes via COMBINED config (retrieves episodes + edges + nodes)
             limit = min(max_episodes, self.MAX_SEARCH_RESULTS)
             search_config = self._get_search_config()
 
-            # Handle single group_id case: clone driver to point at specific database
-            # (matches query() method pattern - @handle_multiple_group_ids only works for >1)
-            if sanitized_group_ids and len(sanitized_group_ids) == 1:
-                driver = graphiti.clients.driver.clone(database=sanitized_group_ids[0])
-                search_results = await graphiti.search_(
-                    query=query,
-                    config=search_config,
-                    group_ids=sanitized_group_ids,
-                    driver=driver,
-                )
-            else:
-                # Multiple group_ids or None - let decorator handle it
-                search_results = await graphiti.search_(
-                    query=query,
-                    config=search_config,
-                    group_ids=sanitized_group_ids,
-                )
+            # Unified database: no driver cloning needed
+            # group_ids filters by property within the single project database
+            search_results = await graphiti.search_(
+                query=query,
+                config=search_config,
+                group_ids=sanitized_group_ids,
+            )
 
             # Extract episodes from search results
             episodes = search_results.episodes[:limit] if search_results.episodes else []
@@ -1777,6 +1894,208 @@ class GraphitiBackend(MemoryBackend):
             return asyncio.run(search_episodes_async())
         except Exception as e:
             raise BackendError(f"Episode search failed for '{query}': {e}") from e
+
+    async def find_episode_by_chunk_id_async(
+        self,
+        chunk_id: str,
+        group_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Find an existing episode by chunk_id in source_description (async version).
+
+        Used for migration deduplication - checks if a chunk has already been
+        migrated to the graph by searching for episodes with matching chunk_id
+        in their source_description field.
+
+        This is the async version that should be used when calling from async contexts
+        (e.g., MCP tools, migration code running in event loop).
+
+        Args:
+            chunk_id: The chunk ID to search for (first 12 chars used in source_description)
+            group_id: Optional group ID to filter by
+
+        Returns:
+            Episode dict with uuid, name, etc. if found, None otherwise
+
+        Raises:
+            TransientError: If database connection fails
+        """
+        if not chunk_id or not chunk_id.strip():
+            return None
+
+        # Match the pattern used in migration: "chunk:{chunk_id[:12]}"
+        search_pattern = f"chunk:{chunk_id[:12]}"
+
+        try:
+            # Use cached client with indices already built to avoid per-call overhead
+            graphiti = await self._get_graphiti_client_with_indices()
+        except Exception as e:
+            raise TransientError(f"Database connection failed: {e}") from e
+
+        try:
+            # Query FalkorDB directly for episodes with matching source_description
+            driver = graphiti.clients.driver
+
+            # Sanitize group_id if provided
+            sanitized_group_id = None
+            if group_id:
+                sanitized_group_id = self._sanitize_thread_id(group_id)
+
+            # Build query with optional group_id filter
+            if sanitized_group_id:
+                query = """
+                MATCH (e:Episodic)
+                WHERE e.source_description CONTAINS $pattern
+                AND e.group_id = $group_id
+                RETURN e.uuid as uuid, e.name as name, e.source_description as source_description,
+                       e.content as content, e.group_id as group_id, e.created_at as created_at
+                LIMIT 1
+                """
+                result, _, _ = await driver.execute_query(
+                    query,
+                    pattern=search_pattern,
+                    group_id=sanitized_group_id,
+                )
+            else:
+                query = """
+                MATCH (e:Episodic)
+                WHERE e.source_description CONTAINS $pattern
+                RETURN e.uuid as uuid, e.name as name, e.source_description as source_description,
+                       e.content as content, e.group_id as group_id, e.created_at as created_at
+                LIMIT 1
+                """
+                result, _, _ = await driver.execute_query(
+                    query,
+                    pattern=search_pattern,
+                )
+
+            if result and len(result) > 0:
+                record = result[0]
+                return {
+                    "uuid": record["uuid"],
+                    "name": record["name"],
+                    "source_description": record["source_description"],
+                    "content": record.get("content", ""),
+                    "group_id": record.get("group_id", ""),
+                    "created_at": record.get("created_at", ""),
+                }
+            return None
+        except Exception as e:
+            # Log but don't fail - deduplication is best-effort
+            logger.warning(f"Episode lookup by chunk_id failed: {e}")
+            return None
+
+    def find_episode_by_chunk_id(
+        self,
+        chunk_id: str,
+        group_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Find an existing episode by chunk_id in source_description (sync version).
+
+        Used for migration deduplication - checks if a chunk has already been
+        migrated to the graph by searching for episodes with matching chunk_id
+        in their source_description field.
+
+        WARNING: This sync version uses asyncio.run() internally and will fail
+        if called from within an async context. Use find_episode_by_chunk_id_async()
+        when calling from async code (e.g., MCP tools).
+
+        Args:
+            chunk_id: The chunk ID to search for (first 12 chars used in source_description)
+            group_id: Optional group ID to filter by
+
+        Returns:
+            Episode dict with uuid, name, etc. if found, None otherwise
+
+        Raises:
+            TransientError: If database connection fails
+        """
+        try:
+            return asyncio.run(self.find_episode_by_chunk_id_async(chunk_id, group_id))
+        except RuntimeError as e:
+            if "cannot be called from a running event loop" in str(e):
+                raise RuntimeError(
+                    "find_episode_by_chunk_id() called from async context. "
+                    "Use find_episode_by_chunk_id_async() instead."
+                ) from e
+            raise
+
+    def clear_group_episodes(
+        self,
+        group_id: str,
+    ) -> dict[str, Any]:
+        """Clear all episodes for a specific group_id.
+
+        Used for cleanup/testing - removes all episodes belonging to a thread/group
+        from the graph. This is a destructive operation.
+
+        Note: This only removes Episodic nodes. Entity nodes and edges that were
+        created from these episodes may still remain (Graphiti doesn't automatically
+        cascade delete).
+
+        Args:
+            group_id: The group ID (thread topic) to clear episodes for
+
+        Returns:
+            Dict with removed count and any errors
+
+        Raises:
+            ConfigError: If group_id is empty
+            TransientError: If database connection fails
+            BackendError: If deletion fails
+        """
+        if not group_id or not group_id.strip():
+            raise ConfigError("group_id parameter is required and must be non-empty")
+
+        sanitized_group_id = self._sanitize_thread_id(group_id)
+
+        try:
+            graphiti = self._create_graphiti_client()
+        except Exception as e:
+            raise TransientError(f"Database connection failed: {e}") from e
+
+        async def clear_episodes_async():
+            driver = graphiti.clients.driver
+
+            # First, get count of episodes to delete
+            count_query = """
+            MATCH (e:Episodic {group_id: $group_id})
+            RETURN count(e) as count
+            """
+            count_result, _, _ = await driver.execute_query(
+                count_query,
+                group_id=sanitized_group_id,
+            )
+            episode_count = count_result[0]["count"] if count_result else 0
+
+            if episode_count == 0:
+                return {"removed": 0, "group_id": sanitized_group_id, "message": "No episodes found"}
+
+            # Delete all episodes for this group_id
+            # Also delete relationships to/from these episodes
+            delete_query = """
+            MATCH (e:Episodic {group_id: $group_id})
+            DETACH DELETE e
+            RETURN count(e) as deleted
+            """
+            delete_result, _, _ = await driver.execute_query(
+                delete_query,
+                group_id=sanitized_group_id,
+            )
+
+            deleted_count = delete_result[0]["deleted"] if delete_result else 0
+
+            logger.info(f"Cleared {deleted_count} episodes for group_id '{sanitized_group_id}'")
+
+            return {
+                "removed": deleted_count,
+                "group_id": sanitized_group_id,
+                "message": f"Removed {deleted_count} episodes",
+            }
+
+        try:
+            return asyncio.run(clear_episodes_async())
+        except Exception as e:
+            raise BackendError(f"Failed to clear episodes for group '{group_id}': {e}") from e
 
     def healthcheck(self) -> HealthStatus:
         """

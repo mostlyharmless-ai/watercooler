@@ -13,15 +13,23 @@ from watercooler_mcp import memory
 @pytest.fixture
 def mock_env_disabled(monkeypatch):
     """Mock environment with Graphiti disabled."""
+    from watercooler.config_facade import config
     monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
+    config.reset()  # Force reload with new env vars
+    yield
+    config.reset()  # Clean up
 
 
 @pytest.fixture
 def mock_env_enabled(monkeypatch):
     """Mock environment with Graphiti enabled and required API keys."""
+    from watercooler.config_facade import config
     monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
     monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
     monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
+    config.reset()  # Force reload with new env vars
+    yield
+    config.reset()  # Clean up
 
 
 class TestLoadGraphitiConfig:
@@ -34,21 +42,25 @@ class TestLoadGraphitiConfig:
 
     def test_load_config_missing_llm_api_key(self, monkeypatch):
         """Test config loading fails gracefully without LLM_API_KEY (and no fallback)."""
+        from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
         monkeypatch.delenv("LLM_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # Clear fallback too
-        config = memory.load_graphiti_config()
-        assert config is None
+        cfg.reset()  # Force reload with new env vars
+        result = memory.load_graphiti_config()
+        assert result is None
 
     def test_load_config_missing_embedding_api_key(self, monkeypatch):
         """Test config loading fails gracefully without EMBEDDING_API_KEY (and no fallback)."""
+        from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
         monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # Clear fallback too
-        config = memory.load_graphiti_config()
-        assert config is None
+        cfg.reset()  # Force reload with new env vars
+        result = memory.load_graphiti_config()
+        assert result is None
 
     def test_load_config_success(self, mock_env_enabled):
         """Test config loading with valid environment."""
@@ -72,26 +84,29 @@ class TestLoadGraphitiConfig:
         assert config.llm_model == "gpt-4"
         assert config.embedding_model == "bge-m3"
 
-    def test_load_config_openai_api_key_fallback(self, monkeypatch, caplog):
+    def test_load_config_openai_api_key_fallback(self, monkeypatch):
         """Test deprecated OPENAI_API_KEY fallback works with warning."""
-        import logging
-        caplog.set_level(logging.WARNING)
+        import warnings
 
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.delenv("LLM_API_KEY", raising=False)
         monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-legacy")
 
-        config = memory.load_graphiti_config()
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            config = memory.load_graphiti_config()
 
-        # Should work with fallback
-        assert config is not None
-        assert config.llm_api_key == "sk-openai-legacy"
-        assert config.embedding_api_key == "sk-openai-legacy"
+            # Should work with fallback
+            assert config is not None
+            assert config.llm_api_key == "sk-openai-legacy"
+            assert config.embedding_api_key == "sk-openai-legacy"
 
-        # Should log deprecation warning
-        log_text = caplog.text.lower()
-        assert "deprecated" in log_text or "openai_api_key" in log_text
+            # Should emit deprecation warning
+            deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+            assert len(deprecation_warnings) >= 1, "Expected at least one deprecation warning"
+            warning_messages = " ".join(str(x.message) for x in deprecation_warnings).lower()
+            assert "deprecated" in warning_messages
 
     def test_load_config_prefers_explicit_keys_over_fallback(self, monkeypatch):
         """Test that explicit LLM_API_KEY/EMBEDDING_API_KEY take precedence."""
@@ -580,8 +595,12 @@ class TestValidateMemoryPrerequisites:
 
     def test_validate_prerequisites_missing_api_key(self, monkeypatch):
         """Test validation fails gracefully without API key."""
+        from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+        cfg.reset()  # Force reload with new env vars
 
         backend, error = memory.validate_memory_prerequisites("test_operation")
 

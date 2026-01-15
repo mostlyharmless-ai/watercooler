@@ -312,28 +312,144 @@ auto_detect_services = true
 
 # =============================================================================
 # MEMORY BACKEND CONFIGURATION
+# Single source of truth for LLM and embedding settings across memory backends
+# =============================================================================
+[memory]
+
+# Enable memory backends globally
+# Env: WATERCOOLER_MEMORY_DISABLED (inverted: "1" = disabled)
+# enabled = true
+
+# Default memory backend: "graphiti", "leanrag", or "null"
+# Env: WATERCOOLER_MEMORY_BACKEND
+# backend = "graphiti"
+
+
+# -----------------------------------------------------------------------------
+# LLM Service Configuration (shared across backends)
+# Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+# -----------------------------------------------------------------------------
+[memory.llm]
+
+# LLM API key (REQUIRED - set via env var for security)
+# Env: LLM_API_KEY
+# api_key = ""
+
+# LLM API base URL
+# Env: LLM_API_BASE
+# Default: OpenAI (https://api.openai.com/v1)
+# For Ollama: "http://localhost:11434/v1"
+# api_base = "https://api.openai.com/v1"
+
+# LLM model name
+# Env: LLM_MODEL
+# model = "gpt-4o-mini"
+
+
+# -----------------------------------------------------------------------------
+# Embedding Service Configuration (shared across backends)
+# Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM
+# -----------------------------------------------------------------------------
+[memory.embedding]
+
+# Embedding API key (often not required for local servers)
+# Env: EMBEDDING_API_KEY
+# api_key = ""
+
+# Embedding API base URL
+# Env: EMBEDDING_API_BASE
+# Default: local llama.cpp (http://localhost:8080/v1)
+# api_base = "http://localhost:8080/v1"
+
+# Embedding model name
+# Env: EMBEDDING_MODEL
+# model = "bge-m3"
+
+# Embedding vector dimension
+# Env: EMBEDDING_DIM
+# dim = 1024
+
+
+# -----------------------------------------------------------------------------
+# Database Configuration (FalkorDB)
+# Env overrides: FALKORDB_HOST, FALKORDB_PORT, FALKORDB_PASSWORD
+# -----------------------------------------------------------------------------
+[memory.database]
+
+# FalkorDB host
+# Env: FALKORDB_HOST
+# host = "localhost"
+
+# FalkorDB port
+# Env: FALKORDB_PORT
+# port = 6379
+
+# FalkorDB password (optional)
+# Env: FALKORDB_PASSWORD
+# password = ""
+
+
+# -----------------------------------------------------------------------------
+# Graphiti-Specific Settings
+# These override shared settings above when using the Graphiti backend
+# -----------------------------------------------------------------------------
+[memory.graphiti]
+
+# Reranker algorithm for hybrid search
+# Options: rrf (default, fastest), mmr, cross_encoder, node_distance, episode_mentions
+# Env: WATERCOOLER_GRAPHITI_RERANKER
+# reranker = "rrf"
+
+# Track entry-episode mappings for provenance
+# track_entry_episodes = true
+
+# Override LLM settings for Graphiti only (empty = use shared)
+# llm_model = ""
+# llm_api_base = ""
+
+# Override embedding settings for Graphiti only (empty = use shared)
+# embedding_model = ""
+# embedding_api_base = ""
+
+
+# -----------------------------------------------------------------------------
+# LeanRAG-Specific Settings
+# These override shared settings above when using the LeanRAG backend
+# -----------------------------------------------------------------------------
+[memory.leanrag]
+
+# Max parallel workers for graph building
+# max_workers = 8
+
+# Override LLM settings for LeanRAG only (empty = use shared)
+# llm_model = ""
+# llm_api_base = ""
+
+# Override embedding settings for LeanRAG only (empty = use shared)
+# embedding_model = ""
+# embedding_api_base = ""
+
+
+# =============================================================================
+# MEMORY BACKEND QUICK START
 # =============================================================================
 #
-# Memory backends (Graphiti, LeanRAG) are configured via ENVIRONMENT VARIABLES,
-# not this config file. This is intentional - each memory backend has its own
-# config system, and env vars provide a consistent interface across all of them.
+# To enable Graphiti memory:
+#   1. Set WATERCOOLER_GRAPHITI_ENABLED=1
+#   2. Set LLM_API_KEY=<your-api-key>
+#   3. Set EMBEDDING_API_KEY=<your-api-key> (or use local server)
 #
-# See docs/ENVIRONMENT_VARS.md for complete documentation.
+# For local LLM/embedding servers:
+#   - Configure [memory.llm].api_base for Ollama: "http://localhost:11434/v1"
+#   - Configure [memory.embedding].api_base for llama.cpp: "http://localhost:8080/v1"
 #
-# Quick reference:
-#
-#   # Required for Graphiti
-#   WATERCOOLER_GRAPHITI_ENABLED=1
-#   LLM_API_KEY=<your-key>           # Required
-#   LLM_API_BASE=http://localhost:11434/v1  # Optional (defaults to OpenAI)
-#   LLM_MODEL=llama3.2:3b            # Optional
-#   EMBEDDING_API_KEY=<your-key>     # Required
-#   EMBEDDING_API_BASE=http://localhost:8080/v1  # Optional
-#   EMBEDDING_MODEL=bge-m3           # Optional
-#
-#   # Disable all memory backends (for CI or non-memory workflows)
+# To disable all memory backends (e.g., for CI):
 #   WATERCOOLER_MEMORY_DISABLED=1
 #
+# Priority chain (highest first):
+#   Environment variables > Backend-specific TOML > Shared TOML > Defaults
+#
+# See docs/ENVIRONMENT_VARS.md for complete documentation.
 # =============================================================================
 
 
@@ -374,11 +490,20 @@ auto_detect_services = true
 # validation.on_write            WATERCOOLER_VALIDATE_ON_WRITE
 # validation.fail_on_violation   WATERCOOLER_FAIL_ON_VIOLATION
 #
-# Memory backend configuration (env vars only, not in config.toml):
-# See docs/ENVIRONMENT_VARS.md for complete list including:
-#   LLM_API_KEY, LLM_API_BASE, LLM_MODEL
-#   EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL
-#   WATERCOOLER_GRAPHITI_ENABLED, WATERCOOLER_MEMORY_DISABLED
+# Memory backend configuration:
+# memory.enabled                 WATERCOOLER_MEMORY_DISABLED (inverted)
+# memory.backend                 WATERCOOLER_MEMORY_BACKEND
+# memory.llm.api_key             LLM_API_KEY
+# memory.llm.api_base            LLM_API_BASE
+# memory.llm.model               LLM_MODEL
+# memory.embedding.api_key       EMBEDDING_API_KEY
+# memory.embedding.api_base      EMBEDDING_API_BASE
+# memory.embedding.model         EMBEDDING_MODEL
+# memory.embedding.dim           EMBEDDING_DIM
+# memory.database.host           FALKORDB_HOST
+# memory.database.port           FALKORDB_PORT
+# memory.database.password       FALKORDB_PASSWORD
+# memory.graphiti.reranker       WATERCOOLER_GRAPHITI_RERANKER
 #
 # Priority (highest first): CLI args > Env vars > Project config > User config > Defaults
 # =============================================================================

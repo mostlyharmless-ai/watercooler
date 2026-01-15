@@ -80,6 +80,62 @@ class IndexEntry:
 
 
 @dataclass
+class ChunkEpisodeMapping:
+    """Mapping from a chunk to its Graphiti episode.
+
+    Used for tracking chunked entries where a single watercooler entry
+    is split into multiple episodes for better LLM processing.
+
+    Attributes:
+        chunk_id: SHA256 hash from ChunkNode (unique identifier)
+        episode_uuid: The Graphiti episode UUID for this chunk
+        entry_id: Parent watercooler entry ID (ULID)
+        thread_id: Thread this entry belongs to
+        chunk_index: 0-based position within the entry's chunks
+        total_chunks: Total number of chunks for the parent entry
+        indexed_at: ISO 8601 timestamp when indexed
+    """
+
+    chunk_id: str
+    episode_uuid: str
+    entry_id: str
+    thread_id: str
+    chunk_index: int
+    total_chunks: int
+    indexed_at: str = ""
+
+    def __post_init__(self):
+        """Set default indexed_at if not provided."""
+        if not self.indexed_at:
+            self.indexed_at = datetime.now(timezone.utc).isoformat()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "chunk_id": self.chunk_id,
+            "episode_uuid": self.episode_uuid,
+            "entry_id": self.entry_id,
+            "thread_id": self.thread_id,
+            "chunk_index": self.chunk_index,
+            "total_chunks": self.total_chunks,
+            "indexed_at": self.indexed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ChunkEpisodeMapping:
+        """Deserialize from dictionary."""
+        return cls(
+            chunk_id=d["chunk_id"],
+            episode_uuid=d["episode_uuid"],
+            entry_id=d["entry_id"],
+            thread_id=d["thread_id"],
+            chunk_index=d["chunk_index"],
+            total_chunks=d["total_chunks"],
+            indexed_at=d.get("indexed_at", ""),
+        )
+
+
+@dataclass
 class IndexConfig:
     """Configuration for EntryEpisodeIndex.
 
@@ -135,6 +191,12 @@ class EntryEpisodeIndex:
 
         # Thread index: thread_id -> set of entry_ids
         self._by_thread: dict[str, set[str]] = {}
+
+        # Chunk storage (for chunked entries)
+        # chunk_id -> ChunkEpisodeMapping
+        self._by_chunk: dict[str, ChunkEpisodeMapping] = {}
+        # entry_id -> list of chunk_ids (ordered by chunk_index)
+        self._chunks_by_entry: dict[str, list[str]] = {}
 
         if auto_load and self._config.index_path and self._config.index_path.exists():
             self.load()
@@ -258,6 +320,139 @@ class EntryEpisodeIndex:
         with self._lock:
             return episode_uuid in self._by_episode
 
+    # --- Chunk mapping methods ---
+
+    @property
+    def chunk_count(self) -> int:
+        """Number of chunks in the index."""
+        with self._lock:
+            return len(self._by_chunk)
+
+    def add_chunk_mapping(
+        self,
+        chunk_id: str,
+        episode_uuid: str,
+        entry_id: str,
+        thread_id: str,
+        chunk_index: int,
+        total_chunks: int,
+        indexed_at: Optional[str] = None,
+    ) -> ChunkEpisodeMapping:
+        """Add a chunk-to-episode mapping.
+
+        Used when an entry is chunked into multiple episodes.
+
+        Args:
+            chunk_id: SHA256 hash identifying the chunk
+            episode_uuid: Graphiti episode UUID for this chunk
+            entry_id: Parent watercooler entry ID
+            thread_id: Thread the entry belongs to
+            chunk_index: 0-based position in the entry's chunks
+            total_chunks: Total number of chunks for the entry
+            indexed_at: Optional timestamp (defaults to now)
+
+        Returns:
+            The created ChunkEpisodeMapping
+        """
+        with self._lock:
+            mapping = ChunkEpisodeMapping(
+                chunk_id=chunk_id,
+                episode_uuid=episode_uuid,
+                entry_id=entry_id,
+                thread_id=thread_id,
+                chunk_index=chunk_index,
+                total_chunks=total_chunks,
+                indexed_at=indexed_at or "",
+            )
+
+            self._by_chunk[chunk_id] = mapping
+
+            # Maintain ordered list of chunks per entry
+            if entry_id not in self._chunks_by_entry:
+                self._chunks_by_entry[entry_id] = []
+
+            chunks = self._chunks_by_entry[entry_id]
+            # Insert in order by chunk_index
+            if chunk_id not in chunks:
+                chunks.append(chunk_id)
+                # Sort by chunk_index
+                chunks.sort(key=lambda cid: self._by_chunk[cid].chunk_index)
+
+            return mapping
+
+    def get_chunks_for_entry(self, entry_id: str) -> list[ChunkEpisodeMapping]:
+        """Get all chunk mappings for an entry, ordered by chunk_index.
+
+        Args:
+            entry_id: The watercooler entry ID
+
+        Returns:
+            List of ChunkEpisodeMapping ordered by chunk_index
+        """
+        with self._lock:
+            chunk_ids = self._chunks_by_entry.get(entry_id, [])
+            return [self._by_chunk[cid] for cid in chunk_ids if cid in self._by_chunk]
+
+    def get_episode_for_chunk(self, chunk_id: str) -> Optional[str]:
+        """Get the episode UUID for a chunk.
+
+        Args:
+            chunk_id: The chunk ID (SHA256 hash)
+
+        Returns:
+            The episode UUID, or None if not found
+        """
+        with self._lock:
+            mapping = self._by_chunk.get(chunk_id)
+            return mapping.episode_uuid if mapping else None
+
+    def get_chunk_mapping(self, chunk_id: str) -> Optional[ChunkEpisodeMapping]:
+        """Get the full ChunkEpisodeMapping for a chunk ID.
+
+        Args:
+            chunk_id: The chunk ID (SHA256 hash)
+
+        Returns:
+            The ChunkEpisodeMapping, or None if not found
+        """
+        with self._lock:
+            return self._by_chunk.get(chunk_id)
+
+    def has_chunk(self, chunk_id: str) -> bool:
+        """Check if a chunk ID exists in the index."""
+        with self._lock:
+            return chunk_id in self._by_chunk
+
+    def get_episode_uuids_for_entry(self, entry_id: str) -> list[str]:
+        """Get all episode UUIDs for an entry's chunks, ordered by chunk_index.
+
+        Useful for building the previous_episode_uuids chain.
+
+        Args:
+            entry_id: The watercooler entry ID
+
+        Returns:
+            List of episode UUIDs in chunk order
+        """
+        with self._lock:
+            chunks = self.get_chunks_for_entry(entry_id)
+            return [c.episode_uuid for c in chunks]
+
+    def remove_chunks_for_entry(self, entry_id: str) -> int:
+        """Remove all chunk mappings for an entry.
+
+        Args:
+            entry_id: The entry ID whose chunks to remove
+
+        Returns:
+            Number of chunks removed
+        """
+        with self._lock:
+            chunk_ids = self._chunks_by_entry.pop(entry_id, [])
+            for chunk_id in chunk_ids:
+                self._by_chunk.pop(chunk_id, None)
+            return len(chunk_ids)
+
     def remove_by_entry(self, entry_id: str) -> bool:
         """Remove a mapping by entry ID.
 
@@ -310,17 +505,22 @@ class EntryEpisodeIndex:
             self._by_entry.clear()
             self._by_episode.clear()
             self._by_thread.clear()
+            self._by_chunk.clear()
+            self._chunks_by_entry.clear()
 
     def get_stats(self) -> dict[str, Any]:
         """Get index statistics.
 
         Returns:
-            Dictionary with entry_count, thread_count, and threads list
+            Dictionary with entry_count, thread_count, chunk_count,
+            chunked_entries_count, and threads list
         """
         with self._lock:
             return {
                 "entry_count": len(self._by_entry),
                 "thread_count": len(self._by_thread),
+                "chunk_count": len(self._by_chunk),
+                "chunked_entries_count": len(self._chunks_by_entry),
                 "threads": list(self._by_thread.keys()),
             }
 
@@ -329,13 +529,16 @@ class EntryEpisodeIndex:
 
         Creates parent directories if needed. Uses atomic write
         (write to temp file, then rename) to prevent corruption.
+
+        Version 2 format includes chunk mappings for chunked entries.
         """
         with self._lock:
-            # Prepare data
+            # Prepare data - v2 includes chunks
             data = {
-                "version": 1,
+                "version": 2,
                 "backend": self._config.backend,
                 "entries": [e.to_dict() for e in self._by_entry.values()],
+                "chunks": [c.to_dict() for c in self._by_chunk.values()],
             }
 
             # Ensure parent directory exists
@@ -364,6 +567,8 @@ class EntryEpisodeIndex:
     def load(self) -> None:
         """Load index from disk.
 
+        Handles both v1 (entries only) and v2 (entries + chunks) formats.
+
         Raises:
             json.JSONDecodeError: If file contains invalid JSON
             FileNotFoundError: If file doesn't exist
@@ -376,10 +581,12 @@ class EntryEpisodeIndex:
             with open(index_path) as f:
                 data = json.load(f)
 
-            # Clear current state
+            # Clear current state (all indices including chunks)
             self._by_entry.clear()
             self._by_episode.clear()
             self._by_thread.clear()
+            self._by_chunk.clear()
+            self._chunks_by_entry.clear()
 
             # Load entries
             for entry_dict in data.get("entries", []):
@@ -390,3 +597,18 @@ class EntryEpisodeIndex:
                 if entry.thread_id not in self._by_thread:
                     self._by_thread[entry.thread_id] = set()
                 self._by_thread[entry.thread_id].add(entry.entry_id)
+
+            # Load chunks (v2 format - backward compatible with v1)
+            for chunk_dict in data.get("chunks", []):
+                mapping = ChunkEpisodeMapping.from_dict(chunk_dict)
+                self._by_chunk[mapping.chunk_id] = mapping
+
+                # Maintain ordered list by entry
+                if mapping.entry_id not in self._chunks_by_entry:
+                    self._chunks_by_entry[mapping.entry_id] = []
+                if mapping.chunk_id not in self._chunks_by_entry[mapping.entry_id]:
+                    self._chunks_by_entry[mapping.entry_id].append(mapping.chunk_id)
+
+            # Sort chunks by index after loading
+            for entry_id, chunk_ids in self._chunks_by_entry.items():
+                chunk_ids.sort(key=lambda cid: self._by_chunk[cid].chunk_index)

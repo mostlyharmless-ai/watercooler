@@ -366,6 +366,12 @@ class Config:
         self._full_config = None
         self._credentials = None
         self._paths = None
+        # Also clear the config_loader cache to ensure env vars are re-read
+        try:
+            from .config_loader import clear_config_cache
+            clear_config_cache()
+        except ImportError:
+            pass  # config_loader not available (shouldn't happen)
 
 
 # Global singleton instance

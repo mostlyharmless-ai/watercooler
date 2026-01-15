@@ -183,6 +183,23 @@ def _env_to_config_key(env_var: str) -> tuple[list[str], str]:
         # Validation
         "WATERCOOLER_VALIDATE_ON_WRITE": (["validation"], "on_write"),
         "WATERCOOLER_FAIL_ON_VIOLATION": (["validation"], "fail_on_violation"),
+        # Memory global
+        "WATERCOOLER_MEMORY_BACKEND": (["memory"], "backend"),
+        # Memory LLM
+        "LLM_API_KEY": (["memory", "llm"], "api_key"),
+        "LLM_API_BASE": (["memory", "llm"], "api_base"),
+        "LLM_MODEL": (["memory", "llm"], "model"),
+        # Memory embedding
+        "EMBEDDING_API_KEY": (["memory", "embedding"], "api_key"),
+        "EMBEDDING_API_BASE": (["memory", "embedding"], "api_base"),
+        "EMBEDDING_MODEL": (["memory", "embedding"], "model"),
+        "EMBEDDING_DIM": (["memory", "embedding"], "dim"),
+        # Memory database
+        "FALKORDB_HOST": (["memory", "database"], "host"),
+        "FALKORDB_PORT": (["memory", "database"], "port"),
+        "FALKORDB_PASSWORD": (["memory", "database"], "password"),
+        # Graphiti-specific
+        "WATERCOOLER_GRAPHITI_RERANKER": (["memory", "graphiti"], "reranker"),
     }
 
     return ENV_MAPPING.get(env_var, ([], env_var))
@@ -221,6 +238,19 @@ def _apply_env_overlay(config_dict: Dict[str, Any]) -> Dict[str, Any]:
         "WATERCOOLER_LOG_DISABLE_FILE",
         "WATERCOOLER_VALIDATE_ON_WRITE",
         "WATERCOOLER_FAIL_ON_VIOLATION",
+        # Memory settings
+        "WATERCOOLER_MEMORY_BACKEND",
+        "LLM_API_KEY",
+        "LLM_API_BASE",
+        "LLM_MODEL",
+        "EMBEDDING_API_KEY",
+        "EMBEDDING_API_BASE",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIM",
+        "FALKORDB_HOST",
+        "FALKORDB_PORT",
+        "FALKORDB_PASSWORD",
+        "WATERCOOLER_GRAPHITI_RERANKER",
     ]
 
     for env_var in env_vars:
@@ -241,6 +271,14 @@ def _apply_env_overlay(config_dict: Dict[str, Any]) -> Dict[str, Any]:
 
         # Set value (type conversion happens during Pydantic validation)
         current[key_name] = value
+
+    # Special case: WATERCOOLER_MEMORY_DISABLED has inverted logic
+    # disabled=1/true/yes → enabled=False
+    disabled_value = os.getenv("WATERCOOLER_MEMORY_DISABLED", "").lower()
+    if disabled_value in ("1", "true", "yes"):
+        if "memory" not in result:
+            result["memory"] = {}
+        result["memory"]["enabled"] = False
 
     return result
 

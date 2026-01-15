@@ -394,21 +394,49 @@ def get_memory_graph_config() -> Dict[str, Any]:
         return config_data.get("memory_graph", {})
 
 
-# Default server configurations for local development
-_SERVER_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    "llm": {
-        "api_base": "http://localhost:11434/v1",  # Ollama default
-        "model": "llama3.2:3b",
-        "timeout": 120.0,
-        "max_tokens": 256,
-    },
-    "embedding": {
-        "api_base": "http://localhost:8080/v1",  # llama.cpp default
-        "model": "bge-m3",
-        "timeout": 60.0,
-        "batch_size": 32,
-    },
-}
+def _get_server_defaults(server_type: str) -> Dict[str, Any]:
+    """Get default server config from unified config system.
+
+    This replaces hardcoded localhost defaults with values from the
+    unified memory_config module, ensuring env vars are respected.
+    """
+    try:
+        from .memory_config import resolve_llm_config, resolve_embedding_config
+
+        if server_type == "llm":
+            llm = resolve_llm_config()
+            return {
+                "api_base": llm.api_base,
+                "model": llm.model,
+                "timeout": 120.0,
+                "max_tokens": 256,
+            }
+        elif server_type == "embedding":
+            emb = resolve_embedding_config()
+            return {
+                "api_base": emb.api_base,
+                "model": emb.model,
+                "timeout": 60.0,
+                "batch_size": 32,
+            }
+    except ImportError:
+        pass
+
+    # Fallback to env vars if memory_config not available
+    if server_type == "llm":
+        return {
+            "api_base": os.getenv("LLM_API_BASE", "https://api.openai.com/v1"),
+            "model": os.getenv("LLM_MODEL", "gpt-4o-mini"),
+            "timeout": 120.0,
+            "max_tokens": 256,
+        }
+    else:  # embedding
+        return {
+            "api_base": os.getenv("EMBEDDING_API_BASE", "http://localhost:8080/v1"),
+            "model": os.getenv("EMBEDDING_MODEL", "bge-m3"),
+            "timeout": 60.0,
+            "batch_size": 32,
+        }
 
 
 def get_server_config(server_type: str) -> Dict[str, Any]:
@@ -442,11 +470,11 @@ def get_server_config(server_type: str) -> Dict[str, Any]:
         DeprecationWarning,
         stacklevel=2,
     )
-    if server_type not in _SERVER_DEFAULTS:
+    if server_type not in ("llm", "embedding"):
         raise ValueError(f"Unknown server type: {server_type}. Use 'llm' or 'embedding'.")
 
-    # Start with defaults
-    result = _SERVER_DEFAULTS[server_type].copy()
+    # Start with defaults from unified config
+    result = _get_server_defaults(server_type)
 
     # Load from config file
     config = _load_config()

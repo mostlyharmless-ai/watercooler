@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from .cache import EmbeddingCache
@@ -28,26 +28,71 @@ except ImportError:
     HTTPX_AVAILABLE = False
 
 
-# Default configuration (per docs/watercooler-planning/MEMORY_INTEGRATION_ROADMAP.md)
-# Standard env vars:
-#   EMBEDDING_API_BASE=http://localhost:8080/v1
-#   EMBEDDING_MODEL=bge-m3
-#   EMBEDDING_DIM=1024
-# Embedding server runs on port 8080 (separate from summarization on 8000)
-DEFAULT_API_BASE = "http://localhost:8080/v1"
-DEFAULT_MODEL = "bge-m3"
-DEFAULT_DIM = 1024  # BGE-M3 produces 1024-dimensional embeddings
+# Default configuration resolved via unified config
+# Standard env vars (highest priority):
+#   EMBEDDING_API_BASE - Embedding service endpoint
+#   EMBEDDING_MODEL - Model name
+#   EMBEDDING_DIM - Vector dimension
+#
+# Resolution is done via watercooler.memory_config which checks:
+#   1. Environment variables
+#   2. TOML config
+#   3. Built-in defaults (localhost:8080 for llama.cpp)
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_RETRIES = 3
 
+# Backward-compatible constants for tests and external consumers
+# These resolve to the built-in defaults (not env-aware at import time)
+DEFAULT_API_BASE = "http://localhost:8080/v1"
+DEFAULT_MODEL = "bge-m3"
+DEFAULT_DIM = 1024
+
+
+def _get_default_api_base() -> str:
+    """Get default embedding API base from unified config."""
+    try:
+        from watercooler.memory_config import resolve_embedding_config
+        return resolve_embedding_config().api_base
+    except ImportError:
+        # Fallback if watercooler not available
+        return os.environ.get("EMBEDDING_API_BASE", "http://localhost:8080/v1")
+
+
+def _get_default_model() -> str:
+    """Get default embedding model from unified config."""
+    try:
+        from watercooler.memory_config import resolve_embedding_config
+        return resolve_embedding_config().model
+    except ImportError:
+        return os.environ.get("EMBEDDING_MODEL", "bge-m3")
+
+
+def _get_default_dim() -> int:
+    """Get default embedding dimension from unified config."""
+    try:
+        from watercooler.memory_config import resolve_embedding_config
+        return resolve_embedding_config().dim
+    except ImportError:
+        dim_str = os.environ.get("EMBEDDING_DIM", "1024")
+        try:
+            return int(dim_str)
+        except ValueError:
+            return 1024
+
 
 @dataclass
 class EmbeddingConfig:
-    """Configuration for embedding generation."""
+    """Configuration for embedding generation.
 
-    api_base: str = DEFAULT_API_BASE
-    model: str = DEFAULT_MODEL
+    Settings are resolved via unified config with priority:
+    1. Environment variables (EMBEDDING_API_BASE, EMBEDDING_MODEL, etc.)
+    2. TOML config
+    3. Built-in defaults
+    """
+
+    api_base: str = field(default_factory=_get_default_api_base)
+    model: str = field(default_factory=_get_default_model)
     batch_size: int = DEFAULT_BATCH_SIZE
     timeout: float = DEFAULT_TIMEOUT
     max_retries: int = DEFAULT_MAX_RETRIES
@@ -64,43 +109,27 @@ class EmbeddingConfig:
 
     @classmethod
     def from_env(cls) -> EmbeddingConfig:
-        """Create config from environment variables and credentials file.
+        """Create config from unified config system.
 
-        Priority: Environment variables > ~/.watercooler/credentials.toml > Defaults
+        Priority: Environment variables > TOML config > Built-in defaults
 
-        Security Note:
-            API keys from environment variables may be visible in process listings
-            and shell history. For production use, prefer storing credentials in
-            ~/.watercooler/credentials.toml (mode 0600).
+        Uses watercooler.memory_config for resolution when available.
         """
-        # Try to load from credentials system
-        api_key = None
-        api_base = DEFAULT_API_BASE
-        key_source = None
+        # Use unified config for API base and model
+        api_base = _get_default_api_base()
+        model = _get_default_model()
 
+        # Get API key from unified config or env
+        api_key = None
         try:
-            from watercooler.credentials import get_embedding_api_base, get_embedding_api_key
-            api_base = get_embedding_api_base()
-            api_key = get_embedding_api_key()
-            if api_key:
-                key_source = "credentials"
+            from watercooler.memory_config import resolve_embedding_config
+            api_key = resolve_embedding_config().api_key or None
         except ImportError:
-            # Credentials module not available, fall back to env only
-            api_base = os.environ.get("EMBEDDING_API_BASE", DEFAULT_API_BASE)
             api_key = os.environ.get("EMBEDDING_API_KEY")
-            if api_key:
-                key_source = "environment"
-                warnings.warn(
-                    "EMBEDDING_API_KEY loaded from environment variable. "
-                    "For improved security, store API keys in "
-                    "~/.watercooler/credentials.toml (mode 0600).",
-                    UserWarning,
-                    stacklevel=2,
-                )
 
         return cls(
             api_base=api_base,
-            model=os.environ.get("EMBEDDING_MODEL", DEFAULT_MODEL),
+            model=model,
             batch_size=int(os.environ.get("EMBEDDING_BATCH_SIZE", DEFAULT_BATCH_SIZE)),
             timeout=float(os.environ.get("EMBEDDING_TIMEOUT", DEFAULT_TIMEOUT)),
             max_retries=int(os.environ.get("EMBEDDING_MAX_RETRIES", DEFAULT_MAX_RETRIES)),

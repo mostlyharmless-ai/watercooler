@@ -84,7 +84,9 @@ from .tools.sync import register_sync_tools
 from .tools.graph import register_graph_tools
 from .tools.branch_parity import register_branch_parity_tools
 from .tools.memory import register_memory_tools
-from .tools.migration import register_migration_tools
+# Migration tools removed due to MCP SDK 60-second timeout limitation.
+# Use scripts/index_graphiti.py for thread migration instead.
+# See: https://github.com/modelcontextprotocol/typescript-sdk/issues/245
 # Re-export tools for test compatibility
 from .tools import diagnostic as _diagnostic_tools
 from .tools import thread_query as _thread_query_tools
@@ -136,7 +138,7 @@ register_sync_tools(mcp)
 register_graph_tools(mcp)
 register_branch_parity_tools(mcp)
 register_memory_tools(mcp)
-register_migration_tools(mcp)
+# register_migration_tools removed - use scripts/index_graphiti.py instead
 
 # Initialize memory sync callbacks (Issue #83 - callback registry pattern)
 from .memory_sync import init_memory_sync_callbacks
