@@ -496,6 +496,122 @@ def _atomic_append_jsonl(path: Path, items: List[Dict[str, Any]]) -> None:
 # ============================================================================
 
 
+def sync_entry_structure_only(
+    threads_dir: Path,
+    topic: str,
+    entry_id: str,
+) -> bool:
+    """Create minimal graph node for entry without LLM/embedding generation.
+
+    This is called BEFORE the git commit to ensure graph files are included
+    in the same commit as the thread markdown file. It creates:
+    - Entry node (with empty summary, no embedding)
+    - Thread node (upsert)
+    - Contains edge (thread -> entry)
+    - Followed_by edge (prev_entry -> entry) if applicable
+
+    Unlike sync_entry_to_graph(), this function:
+    - NEVER calls LLM for summaries
+    - NEVER generates embeddings
+    - Is designed to be BLOCKING (errors should propagate)
+    - Creates minimal but valid graph structure
+
+    Args:
+        threads_dir: Threads directory
+        topic: Thread topic
+        entry_id: The entry ID to sync (required, not optional)
+
+    Returns:
+        True if sync succeeded, False otherwise
+    """
+    thread_path = threads_dir / f"{topic}.md"
+    if not thread_path.exists():
+        logger.warning(f"Thread file not found for structural sync: {thread_path}")
+        return False
+
+    try:
+        # Parse thread
+        parsed = parse_thread_file(
+            thread_path,
+            config=None,
+            generate_summaries=False,
+        )
+        if not parsed:
+            logger.warning(f"Failed to parse thread for structural sync: {topic}")
+            return False
+
+        # Find the entry
+        entry = next((e for e in parsed.entries if e.entry_id == entry_id), None)
+        if not entry:
+            logger.warning(f"Entry {entry_id} not found in thread {topic}")
+            return False
+
+        # Prepare graph output directory
+        graph_dir = threads_dir / "graph" / "baseline"
+        nodes_file = graph_dir / "nodes.jsonl"
+        edges_file = graph_dir / "edges.jsonl"
+
+        # Build entry node (no embedding, empty summary if not present)
+        entry_node = entry_to_node(entry, topic)
+        # Ensure summary field exists (even if empty)
+        if "summary" not in entry_node:
+            entry_node["summary"] = ""
+
+        # Build nodes (thread + entry)
+        nodes = [
+            thread_to_node(parsed),
+            entry_node,
+        ]
+
+        # Build edges for this entry
+        edges = []
+        thread_id = f"thread:{topic}"
+        entry_node_id = f"entry:{entry.entry_id}"
+
+        # Thread contains entry
+        edges.append({
+            "source": thread_id,
+            "target": entry_node_id,
+            "type": "contains",
+        })
+
+        # Find previous entry for followed_by edge
+        if entry.index > 0:
+            prev_entry: Optional[ParsedEntry] = None
+            prev_idx = entry.index - 1
+            # First try direct list access if entries are in order
+            if prev_idx < len(parsed.entries):
+                candidate = parsed.entries[prev_idx]
+                if candidate.index == prev_idx:
+                    prev_entry = candidate
+            # Fallback: search by index attribute
+            if prev_entry is None:
+                for e in parsed.entries:
+                    if e.index == prev_idx:
+                        prev_entry = e
+                        break
+            if prev_entry and prev_entry.entry_id:
+                edges.append({
+                    "source": f"entry:{prev_entry.entry_id}",
+                    "target": entry_node_id,
+                    "type": "followed_by",
+                })
+
+        # Atomic writes
+        _atomic_append_jsonl(nodes_file, nodes)
+        _atomic_append_jsonl(edges_file, edges)
+
+        # Update manifest
+        _update_manifest(graph_dir, topic, entry.entry_id)
+
+        logger.debug(f"Structural graph sync complete for {topic}/{entry_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Structural graph sync failed for {topic}/{entry_id}: {e}")
+        return False
+
+
 def sync_entry_to_graph(
     threads_dir: Path,
     topic: str,

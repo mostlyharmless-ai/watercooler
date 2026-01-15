@@ -155,18 +155,44 @@ def run_with_sync(
         )
         commit_message = commit_title if not footers else f"{commit_title}\n\n" + "\n".join(footers)
 
-        # Execute operation with git sync (pull → operation → commit → push)
+        # Wrap operation to include structural graph sync BEFORE commit
+        # This ensures graph files are in the SAME commit as the .md file
+        def operation_with_graph_sync():
+            result = operation()
+            # Structural graph sync - creates minimal node (no LLM/embedding)
+            # Must run AFTER .md write but BEFORE commit
+            if topic and entry_id and context.threads_dir:
+                try:
+                    from watercooler.baseline_graph.sync import sync_entry_structure_only
+
+                    sync_ok = sync_entry_structure_only(
+                        threads_dir=context.threads_dir,
+                        topic=topic,
+                        entry_id=entry_id,
+                    )
+                    if sync_ok:
+                        log_debug(f"[GRAPH] Structural sync complete for {topic}/{entry_id}")
+                    else:
+                        log_warning(f"[GRAPH] Structural sync returned False for {topic}/{entry_id}")
+                except Exception as graph_err:
+                    # Structural sync failure is logged but doesn't block the write
+                    log_warning(f"[GRAPH] Structural sync failed: {graph_err}")
+            return result
+
+        # Execute operation with git sync (pull → operation+graph → commit → push)
         result = sync.with_sync(
-            operation,
+            operation_with_graph_sync,
             commit_message,
             topic=topic,
             entry_id=entry_id,
             priority_flush=priority_flush,
         )
 
-        # Sync to baseline graph (non-blocking - failures don't stop the write)
+        # Optional enrichment: Add summaries/embeddings to graph node (non-blocking)
+        # The structural node was already created in operation_with_graph_sync above.
+        # This pass adds LLM summaries and embeddings if services are available.
         if topic and context.threads_dir:
-            log_warning(f"[GRAPH] Attempting graph sync for {topic}/{entry_id}")
+            log_debug(f"[GRAPH] Attempting enrichment sync for {topic}/{entry_id}")
             try:
                 from watercooler.baseline_graph.sync import sync_entry_to_graph
 
