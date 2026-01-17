@@ -635,14 +635,10 @@ def _set_status_impl(
     if context is None:
         raise ContextError("Unable to resolve code context for the provided code_path.", code_path=code_path)
 
-    if not agent_func or ":" not in agent_func:
-        raise IdentityError()
-    agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
-    if not agent_base or not agent_spec:
-        raise IdentityError("identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')")
-
     # =====================================================================
     # Hosted Mode Path (GitHub API)
+    # Note: Identity not required for hosted mode status updates since
+    # no entry is created - only thread metadata is updated.
     # =====================================================================
     if is_hosted_context(context):
         log_debug(f"set_status: using hosted mode for topic={topic}")
@@ -662,6 +658,15 @@ def _set_status_impl(
             f"✅ Status updated for '{topic}'\n"
             f"New status: {status}"
         )
+
+    # =====================================================================
+    # Local Mode Path - Identity required for commit messages
+    # =====================================================================
+    if not agent_func or ":" not in agent_func:
+        raise IdentityError()
+    agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
+    if not agent_base or not agent_spec:
+        raise IdentityError("identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')")
 
     # =====================================================================
     # Local Mode Path (Filesystem)
