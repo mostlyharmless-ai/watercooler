@@ -29,7 +29,7 @@ from typing import Optional
 from watercooler.thread_entries import parse_thread_entries, ThreadEntry
 
 from .context import get_http_context, HttpRequestContext
-from .github_api import GitHubClient, GitHubNotFoundError, GitHubAPIError
+from .github_api import GitHubClient, GitHubNotFoundError, GitHubAPIError, GitHubConflictError
 from .observability import log_debug, log_error
 
 # Graph file paths
@@ -372,6 +372,9 @@ def _write_graph_files(
 
     Returns:
         Tuple of (new_nodes_sha, new_edges_sha) or (None, None) on error.
+
+    Raises:
+        GitHubConflictError: If there's a SHA mismatch (caller should retry)
     """
     try:
         # Sort nodes: threads first (by topic), then entries (by thread_topic, index)
@@ -405,6 +408,10 @@ def _write_graph_files(
         )
 
         return new_nodes_sha, new_edges_sha
+
+    except GitHubConflictError:
+        # Let conflict errors propagate for retry handling
+        raise
 
     except GitHubAPIError as e:
         log_error(f"Failed to write graph files: {e}")
@@ -538,28 +545,29 @@ def _add_entry_node(
     return nodes, edges, next_index
 
 
-def _update_thread_in_graph(
-    client: GitHubClient,
+def _apply_graph_changes(
+    nodes: list[dict],
+    edges: list[dict],
     topic: str,
-    status: str | None = None,
-    ball: str | None = None,
-    title: str | None = None,
-    entry_id: str | None = None,
-    agent: str | None = None,
-    role: str | None = None,
-    entry_type: str | None = None,
-    entry_title: str | None = None,
-    body: str | None = None,
-    timestamp: str | None = None,
-    commit_suffix: str = "",
-) -> bool:
-    """Update thread and optionally add entry in graph files.
+    status: str | None,
+    ball: str | None,
+    title: str | None,
+    entry_id: str | None,
+    agent: str | None,
+    role: str | None,
+    entry_type: str | None,
+    entry_title: str | None,
+    body: str | None,
+    timestamp: str | None,
+) -> tuple[list[dict], list[dict]]:
+    """Apply graph changes (entry + thread node updates) to nodes/edges.
+
+    This is a pure function that doesn't do I/O - it just modifies the data.
+    Separated from I/O to enable retry logic.
 
     Returns:
-        True if graph was updated successfully, False otherwise.
+        Tuple of (modified_nodes, modified_edges)
     """
-    nodes, edges, nodes_sha, edges_sha = _read_graph_files(client)
-
     # Get current values from existing thread node
     thread_id = f"thread:{topic}"
     existing_thread = next((n for n in nodes if n.get("id") == thread_id), None)
@@ -578,11 +586,14 @@ def _update_thread_in_graph(
 
     # Add entry if provided
     if entry_id and agent and entry_title and body and timestamp:
-        nodes, edges, _ = _add_entry_node(
-            nodes, edges, topic, entry_id, agent, role or "implementer",
-            entry_type or "Note", entry_title, body, timestamp
-        )
-        entry_count += 1
+        # Check if entry already exists (for idempotency)
+        entry_node_id = f"entry:{entry_id}"
+        if not any(n.get("id") == entry_node_id for n in nodes):
+            nodes, edges, _ = _add_entry_node(
+                nodes, edges, topic, entry_id, agent, role or "implementer",
+                entry_type or "Note", entry_title, body, timestamp
+            )
+            entry_count += 1
 
     # Upsert thread node
     nodes = _upsert_thread_node(
@@ -590,13 +601,89 @@ def _update_thread_in_graph(
         title=final_title, entry_count=entry_count
     )
 
-    # Write graph files
-    commit_msg = f"[watercooler] {topic}: graph update{commit_suffix}"
-    new_nodes_sha, new_edges_sha = _write_graph_files(
-        client, nodes, edges, nodes_sha, edges_sha, commit_msg
-    )
+    return nodes, edges
 
-    return new_nodes_sha is not None
+
+def _update_thread_in_graph(
+    client: GitHubClient,
+    topic: str,
+    status: str | None = None,
+    ball: str | None = None,
+    title: str | None = None,
+    entry_id: str | None = None,
+    agent: str | None = None,
+    role: str | None = None,
+    entry_type: str | None = None,
+    entry_title: str | None = None,
+    body: str | None = None,
+    timestamp: str | None = None,
+    commit_suffix: str = "",
+    max_retries: int = 3,
+) -> bool:
+    """Update thread and optionally add entry in graph files.
+
+    Includes retry logic for handling concurrent write conflicts (SHA mismatch).
+
+    Args:
+        client: GitHub API client
+        topic: Thread topic
+        status: New status (optional)
+        ball: New ball owner (optional)
+        title: New title (optional)
+        entry_id: Entry ID to add (optional)
+        agent: Entry agent (required if entry_id provided)
+        role: Entry role (optional, defaults to "implementer")
+        entry_type: Entry type (optional, defaults to "Note")
+        entry_title: Entry title (required if entry_id provided)
+        body: Entry body (required if entry_id provided)
+        timestamp: Entry timestamp (required if entry_id provided)
+        commit_suffix: Suffix for commit message
+        max_retries: Maximum retry attempts for conflicts
+
+    Returns:
+        True if graph was updated successfully, False otherwise.
+    """
+    import time
+
+    for attempt in range(max_retries):
+        try:
+            # Read current state
+            nodes, edges, nodes_sha, edges_sha = _read_graph_files(client)
+
+            # Apply changes
+            nodes, edges = _apply_graph_changes(
+                nodes, edges, topic, status, ball, title,
+                entry_id, agent, role, entry_type, entry_title, body, timestamp
+            )
+
+            # Write graph files
+            commit_msg = f"[watercooler] {topic}: graph update{commit_suffix}"
+            new_nodes_sha, new_edges_sha = _write_graph_files(
+                client, nodes, edges, nodes_sha, edges_sha, commit_msg
+            )
+
+            if new_nodes_sha is not None:
+                return True
+
+            # Write failed but not due to conflict - don't retry
+            log_error(f"Graph update failed for {topic} (attempt {attempt + 1})")
+            return False
+
+        except GitHubConflictError as e:
+            if attempt < max_retries - 1:
+                # Retry with exponential backoff
+                wait_time = (2 ** attempt) * 0.1  # 0.1s, 0.2s, 0.4s
+                log_debug(f"Graph update conflict for {topic}, retrying in {wait_time}s (attempt {attempt + 1})")
+                time.sleep(wait_time)
+            else:
+                log_error(f"Graph update failed for {topic} after {max_retries} retries: {e}")
+                return False
+
+        except GitHubAPIError as e:
+            log_error(f"Graph update failed for {topic}: {e}")
+            return False
+
+    return False
 
 
 # ============================================================================
