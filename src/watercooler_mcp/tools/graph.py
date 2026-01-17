@@ -887,14 +887,19 @@ def _reconcile_graph_impl(
     or are explicitly specified. This is the primary tool for ingesting
     legacy markdown-only threads into the graph representation.
 
+    In hosted mode (Railway MCP), uses GitHub API to read markdown and write graph.
+    In local mode, uses filesystem operations with git sync.
+
     Args:
         code_path: Path to code repository (for resolving threads dir).
         topics: Comma-separated list of topics to reconcile. If empty,
-                reconciles all stale/error topics.
+                reconciles all stale/error topics (local) or all threads (hosted).
         generate_summaries: Whether to generate LLM summaries (slower).
             Defaults to config value from ~/.watercooler/config.toml.
+            Note: Not supported in hosted mode.
         generate_embeddings: Whether to generate embedding vectors (slower).
             Defaults to config value from ~/.watercooler/config.toml.
+            Note: Not supported in hosted mode.
 
     Returns:
         JSON report with reconciliation results per topic.
@@ -902,15 +907,39 @@ def _reconcile_graph_impl(
     try:
         from watercooler.baseline_graph.sync import reconcile_graph
         from watercooler_mcp.config import get_watercooler_config
+        from watercooler_mcp.hosted_ops import reconcile_graph_hosted
+        from watercooler_mcp.validation import is_hosted_context
 
         error, context = validation._require_context(code_path)
         if error:
             return error
-        if context is None or not context.threads_dir:
-            return "Error: Unable to resolve threads directory."
+        if context is None:
+            return "Error: Unable to resolve context."
 
+        # Parse topics list
+        topic_list = None
+        if topics:
+            topic_list = [t.strip() for t in topics.split(",") if t.strip()]
+
+        # =====================================================================
+        # Hosted Mode Path (GitHub API)
+        # =====================================================================
+        if is_hosted_context(context):
+            err, result = reconcile_graph_hosted(topics=topic_list)
+            if err:
+                return f"Error reconciling graph (hosted): {err}"
+
+            # Note about summaries/embeddings
+            if generate_summaries or generate_embeddings:
+                result["warning"] = "Summary/embedding generation not supported in hosted mode"
+
+            return json.dumps(result, indent=2)
+
+        # =====================================================================
+        # Local Mode Path (filesystem + git sync)
+        # =====================================================================
         threads_dir = context.threads_dir
-        if not threads_dir.exists():
+        if not threads_dir or not threads_dir.exists():
             return f"Threads directory not found: {threads_dir}"
 
         # Get config defaults for summary/embedding generation
@@ -920,11 +949,6 @@ def _reconcile_graph_impl(
         # Use config values if not explicitly provided
         do_summaries = generate_summaries if generate_summaries is not None else graph_config.generate_summaries
         do_embeddings = generate_embeddings if generate_embeddings is not None else graph_config.generate_embeddings
-
-        # Parse topics list
-        topic_list = None
-        if topics:
-            topic_list = [t.strip() for t in topics.split(",") if t.strip()]
 
         # Define the reconcile operation
         def _do_reconcile() -> dict:

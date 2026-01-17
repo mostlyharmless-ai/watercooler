@@ -1288,3 +1288,208 @@ def _update_status_in_header(content: str, new_status: str) -> str:
         count=1,
         flags=re.MULTILINE,
     )
+
+
+# ============================================================================
+# Hosted Reconciliation
+# ============================================================================
+
+
+def reconcile_thread_hosted(topic: str) -> tuple[str | None, dict]:
+    """Reconcile a single thread's graph data from its markdown file via GitHub API.
+
+    This is the hosted equivalent of reconcile_graph for a single topic. It:
+    1. Reads the markdown file from GitHub
+    2. Parses entries and metadata
+    3. Rebuilds graph nodes/edges
+    4. Writes graph files to GitHub
+
+    Args:
+        topic: Thread topic identifier
+
+    Returns:
+        Tuple of (error_message, result_dict). If error_message is not None,
+        result_dict will be empty.
+    """
+    error, client = _get_github_client()
+    if error or not client:
+        return (error or "Failed to create GitHub client", {})
+
+    file_path = f"{topic}.md"
+
+    try:
+        # 1. Read markdown file
+        try:
+            file_content = client.get_file(file_path)
+            content = file_content.content
+        except GitHubNotFoundError:
+            return (f"Thread '{topic}' not found", {})
+
+        # 2. Parse metadata and entries
+        title, status, ball, last_updated = _extract_thread_metadata(content, topic)
+        entries = parse_thread_entries(content)
+
+        # 3. Read current graph files
+        nodes, edges, nodes_sha, edges_sha = _read_graph_files(client)
+
+        # 4. Remove existing nodes/edges for this thread
+        thread_id = f"thread:{topic}"
+        nodes = [n for n in nodes if n.get("id") != thread_id and n.get("thread_topic") != topic]
+        edges = [e for e in edges if not (
+            e.get("source_id", "").startswith(f"thread:{topic}") or
+            e.get("source_id", "").startswith(f"entry:") and any(
+                n.get("id") == e.get("source_id") and n.get("thread_topic") == topic
+                for n in nodes
+            ) or
+            e.get("target_id", "").startswith(f"thread:{topic}") or
+            e.get("target_id", "").startswith(f"entry:") and any(
+                n.get("id") == e.get("target_id") and n.get("thread_topic") == topic
+                for n in nodes
+            )
+        )]
+
+        # 5. Build new thread node
+        thread_node = {
+            "id": thread_id,
+            "type": "thread",
+            "topic": topic,
+            "title": title,
+            "status": status.upper(),
+            "ball": ball,
+            "last_updated": last_updated or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "entry_count": len(entries),
+            "summary": "",
+        }
+        nodes.append(thread_node)
+
+        # 6. Build entry nodes and edges
+        prev_entry_id = None
+        for entry in entries:
+            entry_id = entry.entry_id or f"{topic}:{entry.index}"
+            entry_node_id = f"entry:{entry_id}"
+
+            entry_node = {
+                "id": entry_node_id,
+                "type": "entry",
+                "thread_topic": topic,
+                "entry_id": entry_id,
+                "index": entry.index,
+                "agent": entry.agent,
+                "role": entry.role,
+                "entry_type": entry.entry_type,
+                "title": entry.title,
+                "body": entry.body,
+                "timestamp": entry.timestamp or "",
+                "summary": "",
+            }
+            nodes.append(entry_node)
+
+            # CONTAINS edge (thread -> entry)
+            edges.append({
+                "id": f"contains:{thread_id}:{entry_node_id}",
+                "type": "CONTAINS",
+                "source_id": thread_id,
+                "target_id": entry_node_id,
+                "created": entry.timestamp or "",
+            })
+
+            # FOLLOWS edge (prev_entry -> entry)
+            if prev_entry_id:
+                edges.append({
+                    "id": f"follows:{prev_entry_id}:{entry_node_id}",
+                    "type": "FOLLOWS",
+                    "source_id": prev_entry_id,
+                    "target_id": entry_node_id,
+                    "created": entry.timestamp or "",
+                })
+
+            prev_entry_id = entry_node_id
+
+        # 7. Write graph files
+        commit_msg = f"[watercooler] reconcile: {topic}"
+        new_nodes_sha, new_edges_sha = _write_graph_files(
+            client, nodes, edges, nodes_sha, edges_sha, commit_msg
+        )
+
+        if new_nodes_sha is None:
+            return ("Failed to write graph files", {})
+
+        log_debug(f"reconcile_thread_hosted: reconciled {topic} ({len(entries)} entries)")
+
+        return (None, {
+            "topic": topic,
+            "entry_count": len(entries),
+            "status": status,
+            "ball": ball,
+            "last_updated": last_updated,
+            "nodes_sha": new_nodes_sha,
+            "edges_sha": new_edges_sha,
+        })
+
+    except GitHubAPIError as e:
+        log_error(f"reconcile_thread_hosted failed: {e}")
+        return (f"GitHub API error: {e}", {})
+
+
+def reconcile_graph_hosted(
+    topics: list[str] | None = None,
+) -> tuple[str | None, dict]:
+    """Reconcile graph data from markdown files via GitHub API.
+
+    This is the hosted equivalent of reconcile_graph. It:
+    1. Lists all markdown thread files (or uses provided topics)
+    2. For each thread, rebuilds graph data from markdown
+    3. Writes updated graph files to GitHub
+
+    Args:
+        topics: Optional list of topics to reconcile. If None, reconciles all threads.
+
+    Returns:
+        Tuple of (error_message, result_dict). If error_message is not None,
+        result_dict will be empty.
+    """
+    error, client = _get_github_client()
+    if error or not client:
+        return (error or "Failed to create GitHub client", {})
+
+    try:
+        # Get topics to reconcile
+        if topics is None:
+            # List all .md files in root
+            files = client.list_files("")
+            md_files = [f for f in files if f.name.endswith(".md") and f.type == "file"]
+            topics = []
+            for file_info in md_files:
+                topic = file_info.name[:-3]  # Remove .md extension
+                # Skip non-thread files
+                if topic.lower() not in ("readme", "contributing", "license", "changelog"):
+                    topics.append(topic)
+
+        # Reconcile each topic
+        results: dict[str, dict] = {}
+        errors: dict[str, str] = {}
+
+        for topic in topics:
+            err, result = reconcile_thread_hosted(topic)
+            if err:
+                errors[topic] = err
+            else:
+                results[topic] = result
+
+        successes = len(results)
+        failures = len(errors)
+
+        log_debug(f"reconcile_graph_hosted: {successes} succeeded, {failures} failed")
+
+        return (None, {
+            "total": len(topics),
+            "successes": successes,
+            "failures": failures,
+            "success_topics": list(results.keys()),
+            "failure_topics": list(errors.keys()),
+            "errors": errors,
+        })
+
+    except GitHubAPIError as e:
+        log_error(f"reconcile_graph_hosted failed: {e}")
+        return (f"GitHub API error: {e}", {})
