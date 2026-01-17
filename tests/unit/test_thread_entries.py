@@ -175,3 +175,73 @@ def test_parse_thread_entries_handles_tilde_fences() -> None:
     entries = parse_thread_entries(text)
     assert len(entries) == 1
     assert entries[0].agent == "RealAgent (user)"
+
+
+def test_parse_thread_entries_handles_iso8601_timestamp_variants() -> None:
+    """Parser should handle various ISO 8601 timestamp formats.
+
+    Regression test for timestamps with:
+    - Fractional seconds (.ffffff)
+    - Timezone offset (+00:00 instead of Z)
+    - Both fractional seconds and offset
+    """
+    text = dedent(
+        """\
+        # timestamps-thread — Thread
+        Status: OPEN
+        Ball: Agent
+        Topic: timestamps-thread
+        Created: 2025-01-01T00:00:00Z
+
+        ---
+        Entry: Agent1 (user) 2025-01-01T00:01:00Z
+        Role: planner
+        Type: Note
+        Title: Basic timestamp (Z suffix)
+
+        Entry with basic Z suffix
+        <!-- Entry-ID: 01ENTRY1000000000000000000 -->
+
+        ---
+        Entry: Agent2 (user) 2025-01-01T00:02:00.123456Z
+        Role: planner
+        Type: Note
+        Title: Fractional seconds with Z
+
+        Entry with fractional seconds
+        <!-- Entry-ID: 01ENTRY2000000000000000000 -->
+
+        ---
+        Entry: Agent3 (user) 2025-01-01T00:03:00+00:00
+        Role: planner
+        Type: Note
+        Title: Offset timezone
+
+        Entry with +00:00 offset
+        <!-- Entry-ID: 01ENTRY3000000000000000000 -->
+
+        ---
+        Entry: Agent4 (user) 2025-01-01T00:04:00.654321+00:00
+        Role: planner
+        Type: Note
+        Title: Fractional plus offset
+
+        Entry with both fractional seconds and offset
+        <!-- Entry-ID: 01ENTRY4000000000000000000 -->
+        """
+    )
+    entries = parse_thread_entries(text)
+
+    assert len(entries) == 4, f"Expected 4 entries, got {len(entries)}"
+
+    assert entries[0].timestamp == "2025-01-01T00:01:00Z"
+    assert entries[0].entry_id == "01ENTRY1000000000000000000"
+
+    assert entries[1].timestamp == "2025-01-01T00:02:00.123456Z"
+    assert entries[1].entry_id == "01ENTRY2000000000000000000"
+
+    assert entries[2].timestamp == "2025-01-01T00:03:00+00:00"
+    assert entries[2].entry_id == "01ENTRY3000000000000000000"
+
+    assert entries[3].timestamp == "2025-01-01T00:04:00.654321+00:00"
+    assert entries[3].entry_id == "01ENTRY4000000000000000000"

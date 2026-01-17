@@ -43,8 +43,13 @@ _TITLE_RE = re.compile(r"^#\s*(?P<val>.+)$", re.MULTILINE)
 
 # Entry: header line - the primary entry boundary marker
 # Format: "Entry: Agent Name (user) 2025-01-01T12:00:00Z"
+# Supports multiple ISO 8601 formats:
+#   - YYYY-MM-DDTHH:MM:SSZ (basic)
+#   - YYYY-MM-DDTHH:MM:SS.ffffffZ (with fractional seconds)
+#   - YYYY-MM-DDTHH:MM:SS+00:00 (with offset)
+#   - YYYY-MM-DDTHH:MM:SS.ffffff+00:00 (with both)
 _ENTRY_LINE_RE = re.compile(
-    r"^Entry:\s*(?P<agent>.+?)\s+(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s*$"
+    r"^Entry:\s*(?P<agent>.+?)\s+(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s*$"
 )
 
 # Entry-ID comment - unique identifier for deduplication
