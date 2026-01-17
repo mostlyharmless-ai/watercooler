@@ -78,7 +78,9 @@ def test_list_threads_creates_directory_if_missing(temp_project_dir, mock_contex
 
 def test_read_thread_creates_directory_if_missing(temp_project_dir, monkeypatch):
     """Test that read_thread() creates the .watercooler directory if it doesn't exist."""
+    import pytest
     from watercooler_mcp.server import read_thread
+    from watercooler_mcp.errors import ThreadNotFoundError
 
     # Set the watercooler directory to a non-existent path
     watercooler_dir = temp_project_dir / ".watercooler"
@@ -87,13 +89,14 @@ def test_read_thread_creates_directory_if_missing(temp_project_dir, monkeypatch)
     # Mock get_threads_dir to return our test directory
     monkeypatch.setenv("WATERCOOLER_DIR", str(watercooler_dir))
 
-    # Call read_thread with required code_path parameter
-    result = read_thread.fn("test-topic", code_path=str(temp_project_dir))
+    # Call read_thread with required code_path parameter - expect ThreadNotFoundError
+    with pytest.raises(ThreadNotFoundError) as exc_info:
+        read_thread.fn("test-topic", code_path=str(temp_project_dir))
 
-    # Verify directory was created
+    # Verify directory was created before the exception was raised
     assert watercooler_dir.exists()
     assert watercooler_dir.is_dir()
-    assert "not found" in result  # Thread doesn't exist, but directory was created
+    assert exc_info.value.topic == "test-topic"
 
 
 def test_reindex_creates_directory_if_missing(temp_project_dir, mock_context, monkeypatch):

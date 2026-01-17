@@ -93,13 +93,19 @@ def list_threads_hosted(
         Tuple of (error_message, threads). If error_message is not None,
         threads will be empty.
     """
+    import sys
+    print(f"[DEBUG] list_threads_hosted: entry, open_only={open_only}", file=sys.stderr)
+
     error, client = _get_github_client()
+    print(f"[DEBUG] list_threads_hosted: client error={error}, client={client}", file=sys.stderr)
     if error or not client:
         return (error or "Failed to create GitHub client", [])
 
     try:
         # List all .md files in root
+        print(f"[DEBUG] list_threads_hosted: calling list_files", file=sys.stderr)
         files = client.list_files("")
+        print(f"[DEBUG] list_threads_hosted: got {len(files)} files", file=sys.stderr)
         md_files = [f for f in files if f.name.endswith(".md") and f.type == "file"]
 
         threads: list[HostedThread] = []
@@ -144,8 +150,14 @@ def list_threads_hosted(
         return (None, threads)
 
     except GitHubAPIError as e:
+        import sys
+        print(f"[DEBUG] list_threads_hosted: GitHubAPIError: {e}", file=sys.stderr)
         log_error(f"list_threads_hosted failed: {e}")
         return (f"GitHub API error: {e}", [])
+    except Exception as e:
+        import sys
+        print(f"[DEBUG] list_threads_hosted: UNEXPECTED ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+        raise
 
 
 def read_thread_hosted(topic: str) -> tuple[str | None, str]:

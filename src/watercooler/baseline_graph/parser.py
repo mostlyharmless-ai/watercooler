@@ -9,8 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Iterator, Tuple
 
-from watercooler.metadata import thread_meta
-from watercooler.thread_entries import parse_thread_entries, ThreadEntry
+from watercooler.thread_entries import parse_thread_entries, parse_thread_header, ThreadEntry
 
 from .summarizer import (
     summarize_entry,
@@ -93,8 +92,8 @@ def parse_thread_file(
     config = config or create_summarizer_config()
     topic = thread_path.stem
 
-    # Get thread metadata
-    title, status, ball, last_updated = thread_meta(thread_path)
+    # Get thread metadata from markdown file
+    title, status, ball, last_updated = parse_thread_header(thread_path)
 
     # Parse entries
     content = thread_path.read_text(encoding="utf-8")

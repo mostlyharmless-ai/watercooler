@@ -17,8 +17,16 @@ from datetime import datetime, timezone
 from fastmcp import Context
 from ulid import ULID
 
-from watercooler import commands, fs
-from watercooler.metadata import thread_meta
+from watercooler import fs
+from watercooler.baseline_graph.writer import get_thread_from_graph
+from watercooler.commands_graph import (
+    say_graph_first,
+    ack_graph_first,
+    handoff_graph_first,
+    set_status_graph_first,
+    set_ball_graph_first,
+    append_entry_graph_first,
+)
 
 from ..config import get_agent_name, is_slack_enabled, is_slack_bot_enabled
 from ..errors import (
@@ -54,6 +62,23 @@ say = None
 ack = None
 handoff = None
 set_status = None
+
+
+def _get_thread_meta(threads_dir, topic):
+    """Get thread metadata from graph.
+
+    Returns:
+        Tuple of (title, status, ball, last_updated) or defaults if not found
+    """
+    thread = get_thread_from_graph(threads_dir, topic)
+    if thread:
+        return (
+            thread.get("title", topic),
+            thread.get("status", "OPEN"),
+            thread.get("ball", ""),
+            thread.get("last_updated", ""),
+        )
+    return (topic, "OPEN", "", "")
 
 
 def _say_impl(
@@ -105,13 +130,20 @@ def _say_impl(
             role="implementer", entry_type="Note", code_path="/path/to/repo",
             agent_func="Cursor:Composer 1:implementer")
     """
+    import sys
+    print(f"[DEBUG] _say_impl: topic={topic}, title={title}, agent_func={agent_func}", file=sys.stderr)
+
     error, context = validation._require_context(code_path)
+    print(f"[DEBUG] _say_impl: context error={error}, context={context}", file=sys.stderr)
     if error:
         raise ContextError(error, code_path=code_path)
     if context is None:
         raise ContextError("Unable to resolve code context for the provided code_path.", code_path=code_path)
 
+    print(f"[DEBUG] _say_impl: is_hosted_context={is_hosted_context(context)}", file=sys.stderr)
+
     if not agent_func or ":" not in agent_func:
+        print(f"[DEBUG] _say_impl: IdentityError - agent_func invalid", file=sys.stderr)
         raise IdentityError()
     agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
     if not agent_base or not agent_spec:
@@ -123,9 +155,11 @@ def _say_impl(
     # Hosted Mode Path (GitHub API)
     # =====================================================================
     if is_hosted_context(context):
+        print(f"[DEBUG] _say_impl: ENTERING hosted mode branch", file=sys.stderr)
         log_debug(f"say: using hosted mode for topic={topic}")
 
         entry_id = str(ULID())
+        print(f"[DEBUG] _say_impl: calling say_hosted with entry_id={entry_id}", file=sys.stderr)
         write_error, result = say_hosted(
             topic=topic,
             title=title,
@@ -136,6 +170,8 @@ def _say_impl(
             entry_id=entry_id,
             create_if_missing=create_if_missing,
         )
+
+        print(f"[DEBUG] _say_impl: say_hosted returned error={write_error}, result={result}", file=sys.stderr)
 
         if write_error:
             log_error(f"say hosted mode failed: {write_error}")
@@ -162,9 +198,9 @@ def _say_impl(
     # Generate unique Entry-ID for idempotency
     entry_id = str(ULID())
 
-    # Define the append operation
+    # Define the append operation (graph-first)
     def append_operation():
-        commands.say(
+        say_graph_first(
             topic,
             threads_dir=threads_dir,
             agent=agent,
@@ -186,8 +222,7 @@ def _say_impl(
     )
 
     # Get updated thread meta to show new ball owner
-    thread_path = fs.thread_path(topic, threads_dir)
-    _, status, ball, _ = thread_meta(thread_path)
+    _, status, ball, _ = _get_thread_meta(threads_dir, topic)
 
     # Send Slack notification (fire-and-forget, non-blocking)
     if is_slack_enabled():
@@ -326,13 +361,18 @@ def _ack_impl(
 
     threads_dir = context.threads_dir
 
+    # Generate Entry-ID
+    entry_id = str(ULID())
+
+    # Define ack operation (graph-first)
     def ack_operation():
-        commands.ack(
+        ack_graph_first(
             topic,
             threads_dir=threads_dir,
             agent=agent,
             title=title or None,
             body=body or None,
+            entry_id=entry_id,
         )
 
     run_with_sync(
@@ -340,12 +380,12 @@ def _ack_impl(
         f"{agent}: {title or 'Ack'} ({topic})",
         ack_operation,
         topic=topic,
+        entry_id=entry_id,
         agent_spec=agent_spec,
     )
 
     # Get updated thread meta
-    thread_path = fs.thread_path(topic, threads_dir)
-    _, status, ball, _ = thread_meta(thread_path)
+    _, status, ball, _ = _get_thread_meta(threads_dir, topic)
 
     ack_title = title or "Ack"
     return (
@@ -444,11 +484,15 @@ def _handoff_impl(
 
     threads_dir = context.threads_dir
 
+    # Generate Entry-ID (needed when note is provided)
+    entry_id = str(ULID())
+
     if target_agent:
+        # Define operation (graph-first)
         def op():
-            commands.set_ball(topic, threads_dir=threads_dir, ball=target_agent)
+            set_ball_graph_first(topic, threads_dir=threads_dir, ball=target_agent)
             if note:
-                commands.append_entry(
+                append_entry_graph_first(
                     topic,
                     threads_dir=threads_dir,
                     agent=agent,
@@ -457,6 +501,7 @@ def _handoff_impl(
                     entry_type="Note",
                     body=note,
                     ball=target_agent,
+                    entry_id=entry_id,
                 )
 
         run_with_sync(
@@ -464,6 +509,7 @@ def _handoff_impl(
             f"{agent}: Handoff to {target_agent} ({topic})",
             op,
             topic=topic,
+            entry_id=entry_id if note else None,
             agent_spec=agent_spec,
             priority_flush=True,
         )
@@ -498,12 +544,14 @@ def _handoff_impl(
             + (f"Note: {note}" if note else "")
         )
     else:
+        # Define operation (graph-first)
         def op():
-            commands.handoff(
+            handoff_graph_first(
                 topic,
                 threads_dir=threads_dir,
                 agent=agent,
                 note=note or None,
+                entry_id=entry_id,
             )
 
         run_with_sync(
@@ -511,13 +559,13 @@ def _handoff_impl(
             f"{agent}: Handoff ({topic})",
             op,
             topic=topic,
+            entry_id=entry_id,
             agent_spec=agent_spec,
             priority_flush=True,
         )
 
         # Get updated thread meta
-        thread_path = fs.thread_path(topic, threads_dir)
-        _, status, ball, _ = thread_meta(thread_path)
+        _, status, ball, _ = _get_thread_meta(threads_dir, topic)
 
         # Send Slack notification (fire-and-forget, non-blocking)
         if is_slack_enabled():
@@ -628,15 +676,15 @@ def _set_status_impl(
     threads_dir = context.threads_dir
 
     # Get old status before change (for notification)
-    thread_path = fs.thread_path(topic, threads_dir)
     old_status = None
     try:
-        _, old_status, _, _ = thread_meta(thread_path)
+        _, old_status, _, _ = _get_thread_meta(threads_dir, topic)
     except Exception:
         pass  # Thread may not exist yet
 
+    # Define operation (graph-first)
     def op():
-        commands.set_status(topic, threads_dir=threads_dir, status=status)
+        set_status_graph_first(topic, threads_dir=threads_dir, status=status)
 
     priority_flush = status.strip().upper() == "CLOSED"
 
@@ -671,8 +719,7 @@ def _set_status_impl(
                 changed_by=agent_base,
             )
             # Also update thread parent message with new status
-            thread_path = fs.thread_path(topic, threads_dir)
-            _, _, ball, _ = thread_meta(thread_path)
+            _, _, ball, _ = _get_thread_meta(threads_dir, topic)
             update_thread_parent(
                 repo=repo_name,
                 topic=topic,

@@ -9,14 +9,12 @@ except PackageNotFoundError:
 
 from .lock import AdvisoryLock  # noqa: F401
 from .fs import read, write, thread_path  # noqa: F401
-from .header import bump_header  # noqa: F401
 
 __all__ = [
     "AdvisoryLock",
     "read",
     "write",
     "thread_path",
-    "bump_header",
     "__version__",
 ]
 

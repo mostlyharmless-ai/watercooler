@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
-from .fs import write, thread_path, lock_path_for_topic, utcnow_iso, read_body
+from .fs import write, thread_path, lock_path_for_topic, utcnow_iso, read_body, is_closed
 from .lock import AdvisoryLock
-from .header import bump_header
-from .metadata import thread_meta, is_closed, last_entry_by
+from .baseline_graph.writer import get_thread_from_graph, get_entries_for_thread
+from .thread_entries import parse_thread_header
 from .agents import _counterpart_of, _canonical_agent, _default_agent_and_role
 from .path_resolver import load_template, resolve_templates_dir
 from .templates import _fill_template
@@ -17,6 +17,73 @@ except ImportError:
     Repo = None  # type: ignore
     InvalidGitRepositoryError = Exception  # type: ignore
     GitCommandError = Exception  # type: ignore
+
+
+def _thread_meta_from_graph(threads_dir: Path, topic: str) -> tuple[str, str, str, str]:
+    """Get thread metadata from graph, with markdown fallback.
+
+    Returns:
+        Tuple of (title, status, ball, last_updated) or defaults if not found
+    """
+    # Try graph first
+    thread = get_thread_from_graph(threads_dir, topic)
+    if thread:
+        return (
+            thread.get("title", topic),
+            thread.get("status", "OPEN"),
+            thread.get("ball", ""),
+            thread.get("last_updated", ""),
+        )
+    # Fall back to markdown parsing if graph data unavailable
+    tp = thread_path(topic, threads_dir)
+    if tp.exists():
+        return parse_thread_header(tp)
+    return (topic, "OPEN", "", "")
+
+
+def _last_entry_by_from_graph(threads_dir: Path, topic: str) -> str | None:
+    """Get the agent of the last entry from graph.
+
+    Returns:
+        Agent name of last entry, or None if no entries
+    """
+    entries = get_entries_for_thread(threads_dir, topic)
+    if entries:
+        return entries[-1].get("agent", None)
+    return None
+
+
+def _header_split(text: str) -> tuple[str, str]:
+    """Split markdown text into header and body sections."""
+    parts = text.split("\n\n", 1)
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[1]
+
+
+def _replace_header_line(block: str, key: str, value: str) -> str:
+    """Replace or add a header line with given key and value."""
+    lines = block.splitlines()
+    pref = f"{key}:"
+    replaced = False
+    for i, ln in enumerate(lines):
+        if ln.lower().startswith(pref.lower()):
+            lines[i] = f"{key}: {value}"
+            replaced = True
+            break
+    if not replaced:
+        lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def _bump_header(text: str, *, status: str | None = None, ball: str | None = None) -> str:
+    """Update status and/or ball in markdown header."""
+    header, body = _header_split(text)
+    if status is not None:
+        header = _replace_header_line(header, "Status", status)
+    if ball is not None:
+        header = _replace_header_line(header, "Ball", ball)
+    return header + "\n\n" + (body or "")
 
 
 def init_thread(
@@ -153,7 +220,7 @@ def append_entry(
             entry = f"\n\n---\n\n- Updated: {now}{who}\n\n{body}\n"
             if entry_id:
                 entry = entry.rstrip() + f"\n<!-- Entry-ID: {entry_id} -->\n"
-            s = bump_header(s, status=status, ball=ball)
+            s = _bump_header(s, status=status, ball=ball)
             write(tp, s + entry)
             return tp
 
@@ -179,7 +246,7 @@ def append_entry(
         final_ball = ball if ball is not None else _counterpart_of(canonical_agent, registry)
 
         # Update header
-        s = bump_header(s, status=status, ball=final_ball)
+        s = _bump_header(s, status=status, ball=final_ball)
 
         # Append entry (with optional idempotency marker)
         if entry_id:
@@ -197,7 +264,7 @@ def set_status(topic: str, *, threads_dir: Path, status: str) -> Path:
     with AdvisoryLock(lp, timeout=2, ttl=10, force_break=False):
         s = tp.read_text(encoding="utf-8")
         # Normalize status to uppercase for consistency
-        s = bump_header(s, status=status.upper())
+        s = _bump_header(s, status=status.upper())
         write(tp, s)
     return tp
 
@@ -209,7 +276,7 @@ def set_ball(topic: str, *, threads_dir: Path, ball: str) -> Path:
         if not tp.exists():
             init_thread(topic, threads_dir=threads_dir)
         s = tp.read_text(encoding="utf-8")
-        s = bump_header(s, ball=ball)
+        s = _bump_header(s, ball=ball)
         write(tp, s)
     return tp
 
@@ -220,12 +287,13 @@ def list_threads(*, threads_dir: Path, open_only: bool | None = None) -> list[tu
     if not threads_dir.exists():
         return out
     for p in sorted(threads_dir.glob("*.md")):
-        title, status, ball, updated = thread_meta(p)
+        topic = p.stem
+        title, status, ball, updated = _thread_meta_from_graph(threads_dir, topic)
         if open_only is True and is_closed(status):
             continue
         if open_only is False and not is_closed(status):
             continue
-        who = (last_entry_by(p) or "").strip().lower()
+        who = (_last_entry_by_from_graph(threads_dir, topic) or "").strip().lower()
         # NEW marker if last entry author differs from current ball owner
         is_new = bool(who and who != (ball or "").strip().lower()) and not is_closed(status)
         out.append((title, status, ball, updated, p, is_new))
@@ -333,9 +401,8 @@ def ack(
     # If no ball specified, preserve current ball (don't auto-flip)
     final_ball = ball
     if final_ball is None:
-        tp = thread_path(topic, threads_dir)
-        if tp.exists():
-            _, _, current_ball, _ = thread_meta(tp)
+        _, _, current_ball, _ = _thread_meta_from_graph(threads_dir, topic)
+        if current_ball:
             final_ball = current_ball  # Preserve current ball
 
     return append_entry(
@@ -386,7 +453,7 @@ def handoff(
         )
 
     # Determine current counterpart based on registry and existing ball
-    title, status, ball, updated = thread_meta(tp)
+    title, status, ball, updated = _thread_meta_from_graph(threads_dir, topic)
     target = _counterpart_of(ball, registry)
 
     # Default agent to Team
@@ -773,9 +840,10 @@ def merge_branch(branch: str, *, code_root: Path | None = None, force: bool = Fa
             open_threads = []
             for thread_file in context.threads_dir.glob("*.md"):
                 try:
-                    title, status, ball, updated = thread_meta(thread_file)
+                    topic = thread_file.stem
+                    title, status, ball, updated = _thread_meta_from_graph(context.threads_dir, topic)
                     if not is_closed(status):
-                        open_threads.append(thread_file.stem)
+                        open_threads.append(topic)
                 except Exception:
                     pass
 
@@ -896,9 +964,10 @@ def archive_branch(branch: str, *, code_root: Path | None = None, abandon: bool 
         open_threads = []
         for thread_file in context.threads_dir.glob("*.md"):
             try:
-                title, status, ball, updated = thread_meta(thread_file)
+                topic = thread_file.stem
+                title, status, ball, updated = _thread_meta_from_graph(context.threads_dir, topic)
                 if not is_closed(status):
-                    open_threads.append(thread_file.stem)
+                    open_threads.append(topic)
             except Exception:
                 pass
 

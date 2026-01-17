@@ -29,6 +29,12 @@ from .sync import (
 from .observability import log_debug, log_action, log_warning
 from .helpers import _should_auto_branch, _build_commit_footers
 
+# Check if graph-first mode is enabled
+def _is_graph_first_enabled() -> bool:
+    """Check if graph-first mode is enabled via env var."""
+    import os
+    return os.environ.get("WATERCOOLER_GRAPH_FIRST", "").lower() in ("1", "true", "yes")
+
 
 def _check_enrichment_services_available(graph_config) -> bool:
     """Check if LLM/embedding services are available for enrichment.
@@ -225,8 +231,17 @@ def run_with_sync(
         # This ensures graph files are in the SAME commit as the .md file
         # If enrichment services are available, include summaries/embeddings
         # Otherwise, create minimal structural node (backfill later)
+        #
+        # NOTE: In graph-first mode, this sync is SKIPPED because the command
+        # already wrote to the graph first (via commands_graph.py), then projected
+        # to MD. The graph files are already up-to-date.
         def operation_with_graph_sync():
             result = operation()
+
+            # Skip graph sync in graph-first mode - graph was already written by command
+            if _is_graph_first_enabled():
+                log_debug(f"[GRAPH] Graph-first mode: skipping post-op sync for {topic}/{entry_id}")
+                return result
 
             if topic and entry_id and context.threads_dir:
                 try:

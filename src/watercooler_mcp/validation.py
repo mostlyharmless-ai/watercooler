@@ -152,15 +152,23 @@ def _require_context(code_path: str) -> tuple[str | None, ThreadContext | None]:
     """
     log_debug(f"_require_context: entry with code_path={code_path!r}")
 
+    # DEBUG: Print to stdout for Railway logs
+    import sys
+    print(f"[DEBUG] _require_context: code_path={code_path!r}", file=sys.stderr)
+    print(f"[DEBUG] is_hosted_mode()={is_hosted_mode()}", file=sys.stderr)
+
     # Check for hosted HTTP mode first
     # In hosted mode, we use HTTP context instead of filesystem paths
     if is_hosted_mode():
         http_ctx = get_http_context()
+        print(f"[DEBUG] http_ctx={http_ctx}", file=sys.stderr)
         if http_ctx and http_ctx.repo:
             log_debug(f"_require_context: hosted mode detected, using HTTP context")
+            print(f"[DEBUG] Using hosted mode with repo={http_ctx.repo}", file=sys.stderr)
             return _require_context_hosted(http_ctx)
         else:
             log_debug("_require_context: hosted mode but no HTTP context available")
+            print(f"[DEBUG] Hosted mode but no HTTP context!", file=sys.stderr)
             return (
                 "Hosted mode active but HTTP context not available. "
                 "Ensure X-User-ID and X-Repo headers are provided.",

@@ -20,6 +20,31 @@ from ..sync.primitives import is_dirty, get_branch_name
 from ..observability import log_debug
 from .. import validation  # Import module for runtime access (enables test patching)
 
+from pathlib import Path
+
+
+def _get_thread_status_with_fallback(threads_dir: Path, topic: str) -> str:
+    """Get thread status from graph with markdown fallback.
+
+    Returns status string (e.g., "OPEN", "CLOSED") - defaults to "OPEN" if not found.
+    """
+    from watercooler.baseline_graph.writer import get_thread_from_graph
+    from watercooler.thread_entries import parse_thread_header
+    from watercooler.fs import thread_path
+
+    # Try graph first
+    thread = get_thread_from_graph(threads_dir, topic)
+    if thread:
+        return thread.get("status", "OPEN")
+
+    # Fall back to markdown parsing
+    tp = thread_path(topic, threads_dir)
+    if tp.exists():
+        _, status, _, _ = parse_thread_header(tp)
+        return status.upper()
+
+    return "OPEN"
+
 
 # Module-level references to registered tools (populated by register_branch_parity_tools)
 validate_branch_pairing_tool = None
@@ -212,10 +237,11 @@ def _sync_branch_state_impl(
                 open_threads = []
                 for thread_file in threads_dir.glob("*.md"):
                     try:
-                        from watercooler.metadata import thread_meta, is_closed
-                        title, status, ball, updated = thread_meta(thread_file)
+                        from watercooler.fs import is_closed
+                        topic = thread_file.stem
+                        status = _get_thread_status_with_fallback(threads_dir, topic)
                         if not is_closed(status):
-                            open_threads.append(thread_file.stem)
+                            open_threads.append(topic)
                     except Exception:
                         pass
 
@@ -257,13 +283,14 @@ def _sync_branch_state_impl(
             # Check for OPEN threads before merge
             if not force:
                 threads_repo.git.checkout(target_branch)
-                from watercooler.metadata import thread_meta, is_closed
+                from watercooler.fs import is_closed
                 open_threads = []
                 for thread_file in context.threads_dir.glob("*.md"):
                     try:
-                        title, status, ball, updated = thread_meta(thread_file)
+                        topic = thread_file.stem
+                        status = _get_thread_status_with_fallback(context.threads_dir, topic)
                         if not is_closed(status):
-                            open_threads.append(thread_file.stem)
+                            open_threads.append(topic)
                     except Exception:
                         pass
 
@@ -464,11 +491,12 @@ def _sync_branch_state_impl(
             thread_topics = []
             for thread_file in context.threads_dir.glob("*.md"):
                 try:
-                    from watercooler.metadata import thread_meta, is_closed
-                    title, status, ball, updated = thread_meta(thread_file)
-                    thread_topics.append(thread_file.stem)
+                    from watercooler.fs import is_closed
+                    topic = thread_file.stem
+                    thread_topics.append(topic)
+                    status = _get_thread_status_with_fallback(context.threads_dir, topic)
                     if not is_closed(status):
-                        open_threads.append(thread_file.stem)
+                        open_threads.append(topic)
                 except Exception as e:
                     log_debug(f"[ADOPT] Failed to parse thread metadata for {thread_file.name}: {e}")
                     thread_topics.append(thread_file.stem)
@@ -679,9 +707,10 @@ def _audit_branch_pairing_impl(
                     threads_repo.git.checkout(branch)
                     for thread_file in context.threads_dir.glob("*.md"):
                         try:
-                            from watercooler.metadata import thread_meta, is_closed
-                            title, status, ball, updated = thread_meta(thread_file)
-                            stranded_threads.append(thread_file.stem)
+                            from watercooler.fs import is_closed
+                            topic = thread_file.stem
+                            stranded_threads.append(topic)
+                            status = _get_thread_status_with_fallback(context.threads_dir, topic)
                             if not is_closed(status):
                                 open_threads_count += 1
                         except Exception as e:

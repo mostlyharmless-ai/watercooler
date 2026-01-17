@@ -36,7 +36,8 @@ from ..helpers import (
     _get_startup_warnings,
     _format_warnings_for_response,
     # Thread parsing
-    _extract_thread_metadata,
+    _extract_thread_metadata,  # DEPRECATED: for hosted mode only
+    _get_thread_metadata_graph_first,  # Preferred: graph-first with MD fallback
     _resolve_format,
     # Entry loading
     _entry_header_payload,
@@ -124,10 +125,16 @@ def _list_threads_impl(
             )
         log_debug(f"list_threads start code_path={code_path!r} open_only={open_only}")
 
+        # DEBUG
+        import sys
+        print(f"[DEBUG] list_threads: context={context}", file=sys.stderr)
+        print(f"[DEBUG] list_threads: is_hosted_context={is_hosted_context(context)}", file=sys.stderr)
+
         # =====================================================================
         # Hosted Mode Path (GitHub API)
         # =====================================================================
         if is_hosted_context(context):
+            print(f"[DEBUG] list_threads: ENTERING hosted mode branch", file=sys.stderr)
             log_debug("list_threads: using hosted mode (GitHub API)")
             agent = get_agent_name(ctx.client_id)
 
@@ -448,9 +455,9 @@ def _read_thread_impl(
         if load_error:
             return load_error
 
-        # Extract metadata from content
+        # Extract metadata from graph (preferred) with MD fallback
         header_block = content.split("---", 1)[0].strip() if "---" in content else ""
-        title, status, ball, last = _extract_thread_metadata(content, topic)
+        title, status, ball, last = _get_thread_metadata_graph_first(threads_dir, topic, content)
 
         payload = {
             "topic": topic,

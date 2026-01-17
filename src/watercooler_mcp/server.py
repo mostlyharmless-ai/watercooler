@@ -50,7 +50,6 @@ from .helpers import (
     _validate_and_sync_branches,
     # Thread parsing
     _normalize_status,
-    _extract_thread_metadata,
     _resolve_format,
     # Entry loading
     _load_thread_entries,

@@ -444,6 +444,10 @@ def _normalize_status(s: str) -> str:
 def _extract_thread_metadata(content: str, topic: str) -> tuple[str, str, str, str]:
     """Extract thread metadata from content string without re-reading the file.
 
+    DEPRECATED: For local mode, prefer _get_thread_metadata_graph_first() which
+    reads from the canonical graph. This MD-parsing version is still needed for
+    hosted mode where we only have GitHub API content.
+
     Args:
         content: Full thread markdown content
         topic: Thread topic (used as fallback for title)
@@ -465,6 +469,53 @@ def _extract_thread_metadata(content: str, topic: str) -> tuple[str, str, str, s
     last = hits[-1].group("ts").strip() if hits else fs.utcnow_iso()
 
     return title, status, ball, last
+
+
+def _get_thread_metadata_graph_first(
+    threads_dir: Path, topic: str, content: str | None = None
+) -> tuple[str, str, str, str]:
+    """Get thread metadata from graph with MD fallback.
+
+    Graph-first: reads from canonical graph JSONL. Falls back to MD parsing
+    if graph data is not available.
+
+    Args:
+        threads_dir: Threads directory
+        topic: Thread topic
+        content: Optional MD content (avoids re-reading file if already loaded)
+
+    Returns:
+        Tuple of (title, status, ball, last_entry_timestamp)
+    """
+    # Try graph first
+    if _use_graph_for_reads(threads_dir):
+        try:
+            result = read_thread_from_graph(threads_dir, topic)
+            if result:
+                graph_thread, graph_entries = result
+                last_ts = (
+                    graph_entries[-1].timestamp
+                    if graph_entries
+                    else graph_thread.last_updated
+                )
+                return (
+                    graph_thread.title,
+                    graph_thread.status,
+                    graph_thread.ball,
+                    last_ts,
+                )
+        except Exception as e:
+            log_debug(f"[GRAPH] Failed to get metadata from graph: {e}")
+
+    # Fallback to MD parsing
+    if content is None:
+        thread_path = threads_dir / f"{topic}.md"
+        if thread_path.exists():
+            content = fs.read_body(thread_path)
+        else:
+            return topic, "open", "unknown", fs.utcnow_iso()
+
+    return _extract_thread_metadata(content, topic)
 
 
 def _resolve_format(

@@ -60,6 +60,32 @@ from .sync import (
     BackfillResult,
 )
 
+from .writer import (
+    ThreadData,
+    EntryData,
+    upsert_thread_node,
+    upsert_entry_node,
+    update_thread_metadata,
+    delete_entry_node,
+    get_thread_from_graph,
+    get_entry_from_graph,
+    get_entries_for_thread,
+    get_last_entry_id,
+    get_next_entry_index,
+    init_thread_in_graph,
+)
+
+from .projector import (
+    project_entry_to_markdown,
+    project_thread_to_markdown,
+    project_thread_header_only,
+    write_thread_markdown,
+    project_and_write_thread,
+    append_entry_and_project,
+    update_header_and_write,
+    create_thread_file,
+)
+
 from .search import (
     SearchQuery,
     SearchResult,
@@ -114,6 +140,28 @@ __all__ = [
     "reconcile_graph",
     "backfill_missing",
     "BackfillResult",
+    # Writer (graph-first mutations)
+    "ThreadData",
+    "EntryData",
+    "upsert_thread_node",
+    "upsert_entry_node",
+    "update_thread_metadata",
+    "delete_entry_node",
+    "get_thread_from_graph",
+    "get_entry_from_graph",
+    "get_entries_for_thread",
+    "get_last_entry_id",
+    "get_next_entry_index",
+    "init_thread_in_graph",
+    # Projector (graph to MD)
+    "project_entry_to_markdown",
+    "project_thread_to_markdown",
+    "project_thread_header_only",
+    "write_thread_markdown",
+    "project_and_write_thread",
+    "append_entry_and_project",
+    "update_header_and_write",
+    "create_thread_file",
     # Search
     "SearchQuery",
     "SearchResult",
