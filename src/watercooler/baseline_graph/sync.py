@@ -1009,8 +1009,31 @@ def _update_manifest(graph_dir: Path, topic: str, entry_id: Optional[str]) -> No
 
 
 @dataclass
+class ParityMismatch:
+    """Record of a mismatch between graph node and parsed markdown."""
+
+    topic: str
+    field: str  # "entry_count" or "last_updated"
+    graph_value: Any  # Value in graph node
+    actual_value: Any  # Value from parsing markdown
+    difference: Optional[int] = None  # For entry_count: actual - graph
+
+
+@dataclass
 class GraphHealthReport:
-    """Health report for graph sync status."""
+    """Health report for graph sync status.
+
+    Attributes:
+        healthy: True if no errors, pending, or stale threads
+        total_threads: Total number of thread markdown files
+        synced_threads: Threads with 'ok' sync status
+        error_threads: Threads with sync errors
+        pending_threads: Threads with pending sync
+        stale_threads: Threads not in sync state
+        error_details: Error messages by topic
+        parity_verified: Whether parity verification was performed
+        parity_mismatches: List of entry_count/last_updated mismatches
+    """
 
     healthy: bool = True
     total_threads: int = 0
@@ -1019,13 +1042,25 @@ class GraphHealthReport:
     pending_threads: int = 0
     stale_threads: List[str] = field(default_factory=list)
     error_details: Dict[str, str] = field(default_factory=dict)
+    # Parity verification fields
+    parity_verified: bool = False
+    parity_mismatches: List[ParityMismatch] = field(default_factory=list)
 
 
-def check_graph_health(threads_dir: Path) -> GraphHealthReport:
+def check_graph_health(
+    threads_dir: Path,
+    verify_parity: bool = False,
+) -> GraphHealthReport:
     """Check graph sync health for all threads.
 
+    Args:
+        threads_dir: Path to the threads directory
+        verify_parity: If True, parse each thread's markdown and compare
+            entry_count and last_updated against graph node values.
+            This is slower but catches data accuracy issues.
+
     Returns:
-        GraphHealthReport with status of all threads
+        GraphHealthReport with status of all threads and optional parity info
     """
     report = GraphHealthReport()
 
@@ -1073,7 +1108,112 @@ def check_graph_health(threads_dir: Path) -> GraphHealthReport:
         and len(report.stale_threads) == 0
     )
 
+    # Parity verification (optional, slower)
+    if verify_parity:
+        report.parity_verified = True
+        report.parity_mismatches = _verify_graph_parity(threads_dir, thread_files)
+        # Parity mismatches affect health
+        if report.parity_mismatches:
+            report.healthy = False
+
     return report
+
+
+def _verify_graph_parity(
+    threads_dir: Path,
+    thread_files: List[Path],
+) -> List[ParityMismatch]:
+    """Verify graph node data matches parsed markdown.
+
+    Compares entry_count and last_updated for each thread node
+    against values computed from parsing the markdown file.
+
+    Args:
+        threads_dir: Path to threads directory
+        thread_files: List of thread markdown files
+
+    Returns:
+        List of ParityMismatch records for any discrepancies
+    """
+    mismatches: List[ParityMismatch] = []
+
+    # Load graph nodes
+    graph_dir = threads_dir / "graph" / "baseline"
+    nodes_file = graph_dir / "nodes.jsonl"
+
+    if not nodes_file.exists():
+        logger.debug("No nodes.jsonl found, skipping parity check")
+        return mismatches
+
+    # Build lookup of thread nodes by topic
+    graph_nodes: Dict[str, Dict[str, Any]] = {}
+    try:
+        with open(nodes_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                node = json.loads(line)
+                if node.get("type") == "thread":
+                    # Extract topic from node ID (format: "topic:slug")
+                    node_id = node.get("id", "")
+                    if node_id.startswith("topic:"):
+                        topic = node_id[6:]  # Remove "topic:" prefix
+                        graph_nodes[topic] = node
+    except Exception as e:
+        logger.error(f"Error reading nodes.jsonl for parity check: {e}")
+        return mismatches
+
+    # Compare each thread
+    for thread_file in thread_files:
+        topic = thread_file.stem
+        graph_node = graph_nodes.get(topic)
+
+        if not graph_node:
+            # No graph node for this thread - not a parity issue, just missing
+            continue
+
+        try:
+            # Parse the thread file
+            parsed = parse_thread_file(thread_file)
+
+            # Compare entry_count
+            graph_count = graph_node.get("entry_count", 0)
+            actual_count = parsed.entry_count
+
+            if graph_count != actual_count:
+                mismatches.append(ParityMismatch(
+                    topic=topic,
+                    field="entry_count",
+                    graph_value=graph_count,
+                    actual_value=actual_count,
+                    difference=actual_count - graph_count,
+                ))
+
+            # Compare last_updated
+            graph_updated = graph_node.get("last_updated", "")
+            actual_updated = parsed.last_updated
+
+            # Normalize timestamps for comparison (strip microseconds if needed)
+            if graph_updated and actual_updated:
+                # Only compare if both exist - timestamps might differ in precision
+                # Consider them equal if the date/hour/minute/second match
+                graph_prefix = graph_updated[:19] if len(graph_updated) >= 19 else graph_updated
+                actual_prefix = actual_updated[:19] if len(actual_updated) >= 19 else actual_updated
+
+                if graph_prefix != actual_prefix:
+                    mismatches.append(ParityMismatch(
+                        topic=topic,
+                        field="last_updated",
+                        graph_value=graph_updated,
+                        actual_value=actual_updated,
+                    ))
+
+        except Exception as e:
+            logger.warning(f"Error parsing {topic} for parity check: {e}")
+            continue
+
+    return mismatches
 
 
 def reconcile_graph(

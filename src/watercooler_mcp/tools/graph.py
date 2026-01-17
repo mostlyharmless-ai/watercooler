@@ -805,6 +805,7 @@ def _find_similar_entries_impl(
 def _graph_health_impl(
     ctx: Context,
     code_path: str = "",
+    verify_parity: bool = False,
 ) -> str:
     """Check graph synchronization health and report any issues.
 
@@ -814,10 +815,18 @@ def _graph_health_impl(
     - Error threads (sync failed)
     - Pending threads (sync in progress)
 
+    Optionally verifies data parity between graph nodes and parsed markdown:
+    - entry_count: Does graph node count match actual entries in markdown?
+    - last_updated: Does graph timestamp match latest entry timestamp?
+
     Use this to diagnose graph sync issues before running reconcile.
 
     Args:
         code_path: Path to code repository (for resolving threads dir).
+        verify_parity: If True, parse each thread's markdown and compare
+            entry_count and last_updated against graph node values.
+            This is slower but catches data accuracy issues that sync
+            state alone doesn't detect.
 
     Returns:
         JSON health report with thread statuses and recommendations.
@@ -825,6 +834,7 @@ def _graph_health_impl(
     try:
         from watercooler.baseline_graph.sync import check_graph_health
         from watercooler.baseline_graph.reader import is_graph_available
+        from dataclasses import asdict
 
         error, context = validation._require_context(code_path)
         if error:
@@ -839,8 +849,8 @@ def _graph_health_impl(
         # Check if graph exists at all
         graph_available = is_graph_available(threads_dir)
 
-        # Get health report
-        health = check_graph_health(threads_dir)
+        # Get health report (with optional parity verification)
+        health = check_graph_health(threads_dir, verify_parity=verify_parity)
 
         output = {
             "graph_available": graph_available,
@@ -853,6 +863,13 @@ def _graph_health_impl(
             "error_details": health.error_details,
             "recommendations": [],
         }
+
+        # Add parity verification results if requested
+        if verify_parity:
+            output["parity_verified"] = health.parity_verified
+            output["parity_mismatches"] = [
+                asdict(m) for m in health.parity_mismatches
+            ]
 
         # Add recommendations
         if not graph_available:
@@ -867,6 +884,21 @@ def _graph_health_impl(
             output["recommendations"].append(
                 f"{health.error_threads} threads have sync errors. Check error_details and run reconcile."
             )
+        if health.parity_mismatches:
+            count_mismatches = sum(
+                1 for m in health.parity_mismatches if m.field == "entry_count"
+            )
+            ts_mismatches = sum(
+                1 for m in health.parity_mismatches if m.field == "last_updated"
+            )
+            if count_mismatches:
+                output["recommendations"].append(
+                    f"{count_mismatches} threads have entry_count mismatches. Run watercooler_reconcile_graph."
+                )
+            if ts_mismatches:
+                output["recommendations"].append(
+                    f"{ts_mismatches} threads have last_updated mismatches. Run watercooler_reconcile_graph."
+                )
 
         return json.dumps(output, indent=2)
 
