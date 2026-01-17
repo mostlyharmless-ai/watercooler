@@ -32,6 +32,10 @@ from .context import get_http_context, HttpRequestContext
 from .github_api import GitHubClient, GitHubNotFoundError, GitHubAPIError
 from .observability import log_debug, log_error
 
+# Graph file paths
+GRAPH_NODES_PATH = "graph/baseline/nodes.jsonl"
+GRAPH_EDGES_PATH = "graph/baseline/edges.jsonl"
+
 logger = logging.getLogger(__name__)
 
 
@@ -309,6 +313,293 @@ def get_thread_sha_hosted(topic: str) -> tuple[str | None, str]:
 
 
 # ============================================================================
+# Graph Operations (for graph-first hosted mode)
+# ============================================================================
+
+
+def _read_graph_files(
+    client: GitHubClient,
+) -> tuple[list[dict], list[dict], str | None, str | None]:
+    """Read graph nodes and edges from GitHub.
+
+    Returns:
+        Tuple of (nodes, edges, nodes_sha, edges_sha).
+        If files don't exist, returns empty lists and None SHAs.
+    """
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    nodes_sha: str | None = None
+    edges_sha: str | None = None
+
+    try:
+        nodes_file = client.get_file(GRAPH_NODES_PATH)
+        nodes_sha = nodes_file.sha
+        for line in nodes_file.content.split("\n"):
+            line = line.strip()
+            if line:
+                try:
+                    nodes.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    except GitHubNotFoundError:
+        log_debug("Graph nodes.jsonl not found, will create")
+
+    try:
+        edges_file = client.get_file(GRAPH_EDGES_PATH)
+        edges_sha = edges_file.sha
+        for line in edges_file.content.split("\n"):
+            line = line.strip()
+            if line:
+                try:
+                    edges.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    except GitHubNotFoundError:
+        log_debug("Graph edges.jsonl not found, will create")
+
+    return nodes, edges, nodes_sha, edges_sha
+
+
+def _write_graph_files(
+    client: GitHubClient,
+    nodes: list[dict],
+    edges: list[dict],
+    nodes_sha: str | None,
+    edges_sha: str | None,
+    commit_message: str,
+) -> tuple[str | None, str | None]:
+    """Write graph files to GitHub.
+
+    Returns:
+        Tuple of (new_nodes_sha, new_edges_sha) or (None, None) on error.
+    """
+    try:
+        # Sort nodes: threads first (by topic), then entries (by thread_topic, index)
+        def node_sort_key(n: dict) -> tuple:
+            if n.get("type") == "thread":
+                return (0, n.get("topic", ""), 0)
+            else:
+                return (1, n.get("thread_topic", ""), n.get("index", 0))
+
+        sorted_nodes = sorted(nodes, key=node_sort_key)
+
+        # Sort edges by source_id
+        sorted_edges = sorted(edges, key=lambda e: (e.get("source_id", ""), e.get("target_id", "")))
+
+        # Write nodes
+        nodes_content = "\n".join(json.dumps(n, separators=(",", ":")) for n in sorted_nodes) + "\n"
+        new_nodes_sha = client.put_file(
+            path=GRAPH_NODES_PATH,
+            content=nodes_content,
+            message=commit_message,
+            sha=nodes_sha,
+        )
+
+        # Write edges
+        edges_content = "\n".join(json.dumps(e, separators=(",", ":")) for e in sorted_edges) + "\n"
+        new_edges_sha = client.put_file(
+            path=GRAPH_EDGES_PATH,
+            content=edges_content,
+            message=commit_message,
+            sha=edges_sha,
+        )
+
+        return new_nodes_sha, new_edges_sha
+
+    except GitHubAPIError as e:
+        log_error(f"Failed to write graph files: {e}")
+        return None, None
+
+
+def _upsert_thread_node(
+    nodes: list[dict],
+    topic: str,
+    status: str,
+    ball: str,
+    title: str | None = None,
+    created: str | None = None,
+    entry_count: int | None = None,
+) -> list[dict]:
+    """Create or update a thread node in the nodes list.
+
+    Returns:
+        Updated nodes list.
+    """
+    thread_id = f"thread:{topic}"
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Find existing thread node
+    existing_idx = None
+    for i, node in enumerate(nodes):
+        if node.get("id") == thread_id:
+            existing_idx = i
+            break
+
+    if existing_idx is not None:
+        # Update existing
+        node = nodes[existing_idx]
+        node["status"] = status.upper()
+        node["ball"] = ball
+        node["last_updated"] = now
+        if title:
+            node["title"] = title
+        if entry_count is not None:
+            node["entry_count"] = entry_count
+    else:
+        # Create new
+        new_node = {
+            "id": thread_id,
+            "type": "thread",
+            "topic": topic,
+            "title": title or topic,
+            "status": status.upper(),
+            "ball": ball,
+            "created": created or now,
+            "last_updated": now,
+            "entry_count": entry_count or 0,
+        }
+        nodes.append(new_node)
+
+    return nodes
+
+
+def _add_entry_node(
+    nodes: list[dict],
+    edges: list[dict],
+    topic: str,
+    entry_id: str,
+    agent: str,
+    role: str,
+    entry_type: str,
+    title: str,
+    body: str,
+    timestamp: str,
+) -> tuple[list[dict], list[dict], int]:
+    """Add an entry node and update edges.
+
+    Returns:
+        Tuple of (updated_nodes, updated_edges, entry_index).
+    """
+    thread_id = f"thread:{topic}"
+    entry_node_id = f"entry:{entry_id}"
+
+    # Find existing entry count for this thread
+    entry_indices = [
+        n.get("index", 0)
+        for n in nodes
+        if n.get("type") == "entry" and n.get("thread_topic") == topic
+    ]
+    next_index = max(entry_indices, default=-1) + 1
+
+    # Create entry node
+    entry_node = {
+        "id": entry_node_id,
+        "type": "entry",
+        "thread_topic": topic,
+        "entry_id": entry_id,
+        "index": next_index,
+        "agent": agent,
+        "role": role,
+        "entry_type": entry_type,
+        "title": title,
+        "body": body,
+        "timestamp": timestamp,
+    }
+    nodes.append(entry_node)
+
+    # Add CONTAINS edge (thread -> entry)
+    edges.append({
+        "id": f"contains:{thread_id}:{entry_node_id}",
+        "type": "CONTAINS",
+        "source_id": thread_id,
+        "target_id": entry_node_id,
+        "created": timestamp,
+    })
+
+    # Add FOLLOWS edge if not first entry
+    if next_index > 0:
+        # Find previous entry
+        prev_entries = [
+            n for n in nodes
+            if n.get("type") == "entry"
+            and n.get("thread_topic") == topic
+            and n.get("index") == next_index - 1
+        ]
+        if prev_entries:
+            prev_entry = prev_entries[0]
+            edges.append({
+                "id": f"follows:{prev_entry['id']}:{entry_node_id}",
+                "type": "FOLLOWS",
+                "source_id": prev_entry["id"],
+                "target_id": entry_node_id,
+                "created": timestamp,
+            })
+
+    return nodes, edges, next_index
+
+
+def _update_thread_in_graph(
+    client: GitHubClient,
+    topic: str,
+    status: str | None = None,
+    ball: str | None = None,
+    title: str | None = None,
+    entry_id: str | None = None,
+    agent: str | None = None,
+    role: str | None = None,
+    entry_type: str | None = None,
+    entry_title: str | None = None,
+    body: str | None = None,
+    timestamp: str | None = None,
+    commit_suffix: str = "",
+) -> bool:
+    """Update thread and optionally add entry in graph files.
+
+    Returns:
+        True if graph was updated successfully, False otherwise.
+    """
+    nodes, edges, nodes_sha, edges_sha = _read_graph_files(client)
+
+    # Get current values from existing thread node
+    thread_id = f"thread:{topic}"
+    existing_thread = next((n for n in nodes if n.get("id") == thread_id), None)
+
+    current_status = existing_thread.get("status", "OPEN") if existing_thread else "OPEN"
+    current_ball = existing_thread.get("ball", "") if existing_thread else ""
+    current_title = existing_thread.get("title", topic) if existing_thread else topic
+
+    # Use provided values or fall back to current
+    final_status = status if status is not None else current_status
+    final_ball = ball if ball is not None else current_ball
+    final_title = title if title is not None else current_title
+
+    # Count entries for this thread
+    entry_count = len([n for n in nodes if n.get("type") == "entry" and n.get("thread_topic") == topic])
+
+    # Add entry if provided
+    if entry_id and agent and entry_title and body and timestamp:
+        nodes, edges, _ = _add_entry_node(
+            nodes, edges, topic, entry_id, agent, role or "implementer",
+            entry_type or "Note", entry_title, body, timestamp
+        )
+        entry_count += 1
+
+    # Upsert thread node
+    nodes = _upsert_thread_node(
+        nodes, topic, final_status, final_ball,
+        title=final_title, entry_count=entry_count
+    )
+
+    # Write graph files
+    commit_msg = f"[watercooler] {topic}: graph update{commit_suffix}"
+    new_nodes_sha, new_edges_sha = _write_graph_files(
+        client, nodes, edges, nodes_sha, edges_sha, commit_msg
+    )
+
+    return new_nodes_sha is not None
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -491,6 +782,26 @@ def say_hosted(
 
         log_debug(f"say_hosted: wrote entry to {topic} (sha={new_sha[:8]})")
 
+        # Update graph files (graph-first: keep graph in sync with MD)
+        graph_updated = _update_thread_in_graph(
+            client,
+            topic=topic,
+            status=status,
+            ball=new_ball,
+            entry_id=entry_id,
+            agent=agent,
+            role=role,
+            entry_type=entry_type,
+            entry_title=title,
+            body=body,
+            timestamp=timestamp,
+            commit_suffix=f" (entry: {title})",
+        )
+        if graph_updated:
+            log_debug(f"say_hosted: updated graph for {topic}")
+        else:
+            log_debug(f"say_hosted: graph update failed for {topic} (non-fatal)")
+
         return (None, {
             "topic": topic,
             "entry_id": entry_id,
@@ -498,6 +809,7 @@ def say_hosted(
             "status": status,
             "ball": new_ball,
             "sha": new_sha,
+            "graph_updated": graph_updated,
         })
 
     except GitHubAPIError as e:
@@ -547,12 +859,26 @@ def set_status_hosted(
 
         log_debug(f"set_status_hosted: updated {topic} status to {status}")
 
+        # Update graph files (graph-first: keep graph in sync with MD)
+        graph_updated = _update_thread_in_graph(
+            client,
+            topic=topic,
+            status=status,
+            ball=ball,
+            commit_suffix=f" (status: {status})",
+        )
+        if graph_updated:
+            log_debug(f"set_status_hosted: updated graph for {topic}")
+        else:
+            log_debug(f"set_status_hosted: graph update failed for {topic} (non-fatal)")
+
         return (None, {
             "topic": topic,
             "old_status": old_status,
             "new_status": status,
             "ball": ball,
             "sha": new_sha,
+            "graph_updated": graph_updated,
         })
 
     except GitHubNotFoundError:
@@ -623,6 +949,26 @@ def ack_hosted(
 
         log_debug(f"ack_hosted: acknowledged {topic}")
 
+        # Update graph files (graph-first: keep graph in sync with MD)
+        graph_updated = _update_thread_in_graph(
+            client,
+            topic=topic,
+            status=status,
+            ball=ball,
+            entry_id=entry_id,
+            agent=agent,
+            role="pm",
+            entry_type="Note",
+            entry_title=title,
+            body=body,
+            timestamp=timestamp,
+            commit_suffix=f" (ack: {title})",
+        )
+        if graph_updated:
+            log_debug(f"ack_hosted: updated graph for {topic}")
+        else:
+            log_debug(f"ack_hosted: graph update failed for {topic} (non-fatal)")
+
         return (None, {
             "topic": topic,
             "entry_id": entry_id,
@@ -630,6 +976,7 @@ def ack_hosted(
             "status": status,
             "ball": ball,  # Ball unchanged
             "sha": new_sha,
+            "graph_updated": graph_updated,
         })
 
     except GitHubNotFoundError:
@@ -710,6 +1057,37 @@ def handoff_hosted(
 
         log_debug(f"handoff_hosted: handed off {topic} to {new_ball}")
 
+        # Update graph files (graph-first: keep graph in sync with MD)
+        # Handoff always updates ball, but only adds entry if note provided
+        if note:
+            graph_updated = _update_thread_in_graph(
+                client,
+                topic=topic,
+                status=status,
+                ball=new_ball,
+                entry_id=entry_id,
+                agent=agent,
+                role="pm",
+                entry_type="Note",
+                entry_title=f"Handoff to {new_ball}",
+                body=note,
+                timestamp=timestamp,
+                commit_suffix=f" (handoff to {new_ball})",
+            )
+        else:
+            # No entry, just update thread node's ball
+            graph_updated = _update_thread_in_graph(
+                client,
+                topic=topic,
+                status=status,
+                ball=new_ball,
+                commit_suffix=f" (handoff to {new_ball})",
+            )
+        if graph_updated:
+            log_debug(f"handoff_hosted: updated graph for {topic}")
+        else:
+            log_debug(f"handoff_hosted: graph update failed for {topic} (non-fatal)")
+
         return (None, {
             "topic": topic,
             "from_agent": agent,
@@ -719,6 +1097,7 @@ def handoff_hosted(
             "status": status,
             "ball": new_ball,
             "sha": new_sha,
+            "graph_updated": graph_updated,
         })
 
     except GitHubNotFoundError:
