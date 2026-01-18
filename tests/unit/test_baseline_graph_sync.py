@@ -15,7 +15,6 @@ from watercooler.baseline_graph.sync import (
     GraphHealthReport,
     GraphSyncState,
     ParityMismatch,
-    _atomic_append_jsonl,
     _atomic_write_json,
     _verify_graph_parity,
     check_graph_health,
@@ -28,6 +27,7 @@ from watercooler.baseline_graph.sync import (
     sync_entry_to_graph,
     sync_thread_to_graph,
 )
+from watercooler.baseline_graph import storage
 from watercooler.baseline_graph.parser import ParsedThread, ParsedEntry
 from watercooler.baseline_graph.summarizer import (
     SummarizerConfig,
@@ -116,12 +116,12 @@ def test_atomic_write_json_overwrites(tmp_path: Path):
     assert loaded == {"new": "data"}
 
 
-def test_atomic_append_jsonl_creates_file(tmp_path: Path):
-    """Test atomic JSONL append creates file correctly."""
+def test_atomic_write_jsonl_creates_file(tmp_path: Path):
+    """Test atomic JSONL write creates file correctly."""
     target = tmp_path / "test.jsonl"
     items = [{"id": "1", "value": "a"}, {"id": "2", "value": "b"}]
 
-    _atomic_append_jsonl(target, items)
+    storage.atomic_write_jsonl(target, items)
 
     assert target.exists()
     lines = target.read_text(encoding="utf-8").strip().split("\n")
@@ -130,33 +130,30 @@ def test_atomic_append_jsonl_creates_file(tmp_path: Path):
     assert json.loads(lines[1])["id"] == "2"
 
 
-def test_atomic_append_jsonl_deduplicates(tmp_path: Path):
-    """Test atomic JSONL append deduplicates by ID."""
+def test_atomic_write_jsonl_overwrites(tmp_path: Path):
+    """Test atomic JSONL write overwrites existing file."""
     target = tmp_path / "test.jsonl"
 
     # First write
-    _atomic_append_jsonl(target, [{"id": "1", "value": "a"}])
+    storage.atomic_write_jsonl(target, [{"id": "1", "value": "a"}])
 
-    # Second write with same ID (should update)
-    _atomic_append_jsonl(target, [{"id": "1", "value": "updated"}])
+    # Second write (should overwrite completely)
+    storage.atomic_write_jsonl(target, [{"id": "2", "value": "b"}])
 
     lines = target.read_text(encoding="utf-8").strip().split("\n")
     assert len(lines) == 1
-    assert json.loads(lines[0])["value"] == "updated"
+    assert json.loads(lines[0])["id"] == "2"
 
 
-def test_atomic_append_jsonl_merges_new(tmp_path: Path):
-    """Test atomic JSONL append merges new items."""
-    target = tmp_path / "test.jsonl"
+def test_atomic_write_jsonl_creates_parent_dirs(tmp_path: Path):
+    """Test atomic JSONL write creates parent directories."""
+    target = tmp_path / "nested" / "dirs" / "test.jsonl"
 
-    # First write
-    _atomic_append_jsonl(target, [{"id": "1", "value": "a"}])
+    storage.atomic_write_jsonl(target, [{"id": "1", "value": "a"}])
 
-    # Second write with new ID
-    _atomic_append_jsonl(target, [{"id": "2", "value": "b"}])
-
+    assert target.exists()
     lines = target.read_text(encoding="utf-8").strip().split("\n")
-    assert len(lines) == 2
+    assert len(lines) == 1
 
 
 # ============================================================================
@@ -200,37 +197,37 @@ def test_graph_sync_state_round_trip(threads_dir: Path, graph_dir: Path):
 
 
 def test_sync_entry_to_graph_creates_nodes(threads_dir: Path, sample_thread: Path):
-    """Test sync_entry_to_graph creates nodes and edges."""
+    """Test sync_entry_to_graph creates per-thread graph files."""
     success = sync_entry_to_graph(threads_dir, "test-topic")
 
     assert success
 
-    # Check nodes file
-    nodes_file = threads_dir / "graph" / "baseline" / "nodes.jsonl"
-    assert nodes_file.exists()
+    # Check per-thread format files
+    thread_dir = threads_dir / "graph" / "baseline" / "threads" / "test-topic"
+    meta_file = thread_dir / "meta.json"
+    entries_file = thread_dir / "entries.jsonl"
 
-    nodes = []
-    for line in nodes_file.read_text(encoding="utf-8").strip().split("\n"):
-        nodes.append(json.loads(line))
+    assert meta_file.exists()
+    assert entries_file.exists()
 
-    # Should have thread node + entry node (at minimum)
-    assert len(nodes) >= 2
+    # Check thread meta
+    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    assert meta.get("type") == "thread"
+    assert meta.get("topic") == "test-topic"
 
-    # Check for thread node
-    thread_nodes = [n for n in nodes if n.get("type") == "thread"]
-    assert len(thread_nodes) >= 1
-    assert thread_nodes[0]["topic"] == "test-topic"
-
-    # Check for entry node
-    entry_nodes = [n for n in nodes if n.get("type") == "entry"]
-    assert len(entry_nodes) >= 1
+    # Check entry nodes
+    entries = []
+    for line in entries_file.read_text(encoding="utf-8").strip().split("\n"):
+        entries.append(json.loads(line))
+    assert len(entries) >= 1
 
 
 def test_sync_entry_to_graph_creates_edges(threads_dir: Path, sample_thread: Path):
     """Test sync_entry_to_graph creates edges."""
     sync_entry_to_graph(threads_dir, "test-topic")
 
-    edges_file = threads_dir / "graph" / "baseline" / "edges.jsonl"
+    # Check per-thread edges file
+    edges_file = threads_dir / "graph" / "baseline" / "threads" / "test-topic" / "edges.jsonl"
     assert edges_file.exists()
 
     edges = []
@@ -282,14 +279,21 @@ def test_sync_thread_to_graph_full_sync(threads_dir: Path, sample_thread: Path):
 
     assert success
 
-    # Check nodes
-    nodes_file = threads_dir / "graph" / "baseline" / "nodes.jsonl"
-    nodes = []
-    for line in nodes_file.read_text(encoding="utf-8").strip().split("\n"):
-        nodes.append(json.loads(line))
+    # Check per-thread format files
+    thread_dir = threads_dir / "graph" / "baseline" / "threads" / "test-topic"
+    meta_file = thread_dir / "meta.json"
+    entries_file = thread_dir / "entries.jsonl"
 
-    # Should have 1 thread + 2 entries = 3 nodes
-    assert len(nodes) == 3
+    # Check thread meta exists
+    assert meta_file.exists()
+    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    assert meta.get("type") == "thread"
+
+    # Check entries - should have 2 entries
+    entries = []
+    for line in entries_file.read_text(encoding="utf-8").strip().split("\n"):
+        entries.append(json.loads(line))
+    assert len(entries) == 2
 
     # Check state
     state = get_graph_sync_state(threads_dir, "test-topic")
@@ -373,7 +377,7 @@ def test_reconcile_graph_specific_topics(threads_dir: Path, sample_thread: Path)
 
 
 def test_concurrent_sync_operations(threads_dir: Path, sample_thread: Path):
-    """Test concurrent sync operations don't corrupt JSONL."""
+    """Test concurrent sync operations don't corrupt per-thread files."""
     results = []
     errors = []
 
@@ -395,11 +399,15 @@ def test_concurrent_sync_operations(threads_dir: Path, sample_thread: Path):
     assert all(results), f"Some syncs failed: {errors}"
     assert len(errors) == 0
 
-    # Verify JSONL is valid
-    nodes_file = threads_dir / "graph" / "baseline" / "nodes.jsonl"
-    lines = nodes_file.read_text(encoding="utf-8").strip().split("\n")
+    # Verify per-thread JSONL is valid
+    entries_file = threads_dir / "graph" / "baseline" / "threads" / "test-topic" / "entries.jsonl"
+    lines = entries_file.read_text(encoding="utf-8").strip().split("\n")
     for line in lines:
         json.loads(line)  # Should not raise
+
+    # Verify meta.json is valid
+    meta_file = threads_dir / "graph" / "baseline" / "threads" / "test-topic" / "meta.json"
+    json.loads(meta_file.read_text(encoding="utf-8"))  # Should not raise
 
 
 def test_sync_failure_does_not_block(threads_dir: Path, sample_thread: Path):
@@ -435,9 +443,11 @@ def test_manifest_updated_on_sync(threads_dir: Path, sample_thread: Path):
     assert manifest_path.exists()
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert "schema_version" in manifest
     assert "last_updated" in manifest
-    assert "test-topic" in manifest.get("topics_synced", {})
+    assert "last_topic" in manifest
+    assert manifest.get("last_topic") == "test-topic"
+    # Per-thread format uses "topics" dict
+    assert "test-topic" in manifest.get("topics", {})
 
 
 def test_manifest_preserves_other_topics(threads_dir: Path, sample_thread: Path):
@@ -468,13 +478,13 @@ Body text.
     # Sync second topic
     sync_thread_to_graph(threads_dir, "other-topic")
 
-    # Both should be in manifest
+    # Both should be in manifest (per-thread format uses "topics" key)
     manifest_path = threads_dir / "graph" / "baseline" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    topics_synced = manifest.get("topics_synced", {})
-    assert "test-topic" in topics_synced
-    assert "other-topic" in topics_synced
+    topics = manifest.get("topics", {})
+    assert "test-topic" in topics
+    assert "other-topic" in topics
 
 
 # ============================================================================
@@ -1207,17 +1217,20 @@ Body 3.
 <!-- Entry-ID: 01TEST003 -->
 """)
 
-    # Create graph with WRONG entry_count (says 2, actually 3)
+    # Create per-thread graph with WRONG entry_count (says 2, actually 3)
     graph_dir = threads_dir / "graph" / "baseline"
-    graph_dir.mkdir(parents=True)
+    thread_graph_dir = graph_dir / "threads" / "count-mismatch"
+    thread_graph_dir.mkdir(parents=True)
 
-    nodes_file = graph_dir / "nodes.jsonl"
-    nodes = [
-        {"id": "topic:count-mismatch", "type": "thread", "entry_count": 2, "last_updated": "2025-01-01T00:03:00Z"},
-    ]
-    with open(nodes_file, "w") as f:
-        for node in nodes:
-            f.write(json.dumps(node) + "\n")
+    # Write meta.json with wrong entry count
+    meta_file = thread_graph_dir / "meta.json"
+    meta_file.write_text(json.dumps({
+        "id": "thread:count-mismatch",
+        "type": "thread",
+        "topic": "count-mismatch",
+        "entry_count": 2,  # WRONG: actually has 3 entries
+        "last_updated": "2025-01-01T00:03:00Z",
+    }))
 
     # Create sync state
     state_file = graph_dir / "sync_state.json"
@@ -1259,17 +1272,20 @@ Body.
 <!-- Entry-ID: 01TEST001 -->
 """)
 
-    # Create graph with WRONG timestamp
+    # Create per-thread graph with WRONG timestamp
     graph_dir = threads_dir / "graph" / "baseline"
-    graph_dir.mkdir(parents=True)
+    thread_graph_dir = graph_dir / "threads" / "ts-mismatch"
+    thread_graph_dir.mkdir(parents=True)
 
-    nodes_file = graph_dir / "nodes.jsonl"
-    nodes = [
-        {"id": "topic:ts-mismatch", "type": "thread", "entry_count": 1, "last_updated": "2025-01-01T00:00:00Z"},
-    ]
-    with open(nodes_file, "w") as f:
-        for node in nodes:
-            f.write(json.dumps(node) + "\n")
+    # Write meta.json with wrong timestamp
+    meta_file = thread_graph_dir / "meta.json"
+    meta_file.write_text(json.dumps({
+        "id": "thread:ts-mismatch",
+        "type": "thread",
+        "topic": "ts-mismatch",
+        "entry_count": 1,
+        "last_updated": "2025-01-01T00:00:00Z",  # WRONG: should be 12:00:00
+    }))
 
     # Create sync state
     state_file = graph_dir / "sync_state.json"

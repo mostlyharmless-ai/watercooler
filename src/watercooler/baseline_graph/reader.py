@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from . import storage
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,59 +73,13 @@ class GraphEntry:
 
 
 # ============================================================================
-# Graph Availability
+# Graph Availability (delegated to storage)
 # ============================================================================
 
-
-def get_graph_dir(threads_dir: Path) -> Path:
-    """Get graph directory path."""
-    return threads_dir / "graph" / "baseline"
-
-
-def get_thread_graph_dir(graph_dir: Path, topic: str) -> Path:
-    """Get per-thread graph directory path.
-
-    Args:
-        graph_dir: Base graph directory (graph/baseline)
-        topic: Thread topic
-
-    Returns:
-        Path to graph/baseline/threads/<topic>/
-    """
-    return graph_dir / "threads" / topic
-
-
-def is_graph_available(threads_dir: Path) -> bool:
-    """Check if graph data exists and is usable.
-
-    Checks for per-thread format (graph/baseline/threads/ with at least one thread).
-
-    Args:
-        threads_dir: Threads directory
-
-    Returns:
-        True if graph files exist and are readable
-    """
-    graph_dir = get_graph_dir(threads_dir)
-    threads_base = graph_dir / "threads"
-
-    if not threads_base.exists():
-        return False
-
-    # Check for at least one thread with a valid meta.json
-    try:
-        for thread_dir in threads_base.iterdir():
-            if thread_dir.is_dir():
-                meta_file = thread_dir / "meta.json"
-                if meta_file.exists():
-                    # Quick check: can we parse the JSON?
-                    content = meta_file.read_text(encoding="utf-8")
-                    json.loads(content)
-                    return True
-    except Exception:
-        pass
-
-    return False
+# Re-export from storage for backward compatibility
+get_graph_dir = storage.get_graph_dir
+get_thread_graph_dir = storage.get_thread_graph_dir
+is_graph_available = storage.is_graph_available
 
 
 def get_graph_staleness(threads_dir: Path) -> Optional[float]:
@@ -157,110 +113,11 @@ def get_graph_staleness(threads_dir: Path) -> Optional[float]:
 
 
 # ============================================================================
-# Graph Loading
+# Graph Loading (delegated to storage)
 # ============================================================================
 
-
-def _load_nodes(graph_dir: Path) -> Iterator[Dict[str, Any]]:
-    """Load nodes from JSONL file."""
-    nodes_file = graph_dir / "nodes.jsonl"
-    if not nodes_file.exists():
-        return
-
-    with open(nodes_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                try:
-                    yield json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-
-def _load_edges(graph_dir: Path) -> Iterator[Dict[str, Any]]:
-    """Load edges from JSONL file."""
-    edges_file = graph_dir / "edges.jsonl"
-    if not edges_file.exists():
-        return
-
-    with open(edges_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                try:
-                    yield json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-
-# ============================================================================
-# Per-Thread Graph Loading
-# ============================================================================
-
-
-def _load_thread_meta(thread_graph_dir: Path) -> Optional[Dict[str, Any]]:
-    """Load thread metadata from per-thread meta.json.
-
-    Args:
-        thread_graph_dir: Path to thread's graph directory
-
-    Returns:
-        Thread node dict or None if not found
-    """
-    meta_file = thread_graph_dir / "meta.json"
-    if not meta_file.exists():
-        return None
-
-    try:
-        return json.loads(meta_file.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-
-def _load_thread_entries(thread_graph_dir: Path) -> Iterator[Dict[str, Any]]:
-    """Load entry nodes from per-thread entries.jsonl.
-
-    Args:
-        thread_graph_dir: Path to thread's graph directory
-
-    Yields:
-        Entry node dicts
-    """
-    entries_file = thread_graph_dir / "entries.jsonl"
-    if not entries_file.exists():
-        return
-
-    with open(entries_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                try:
-                    yield json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-
-def _list_thread_topics(graph_dir: Path) -> List[str]:
-    """List all thread topics in per-thread format.
-
-    Args:
-        graph_dir: Base graph directory
-
-    Returns:
-        List of thread topic names
-    """
-    threads_base = graph_dir / "threads"
-    if not threads_base.exists():
-        return []
-
-    topics = []
-    try:
-        for thread_dir in threads_base.iterdir():
-            if thread_dir.is_dir():
-                meta_file = thread_dir / "meta.json"
-                if meta_file.exists():
-                    topics.append(thread_dir.name)
-    except Exception:
-        pass
-
-    return topics
+# Per-thread loading via storage module
+_list_thread_topics = storage.list_thread_topics
 
 
 def _node_to_thread(node: Dict[str, Any]) -> GraphThread:
@@ -321,9 +178,8 @@ def list_threads_from_graph(
     threads = []
 
     # Iterate through per-thread directories
-    for topic in _list_thread_topics(graph_dir):
-        thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
-        meta = _load_thread_meta(thread_graph_dir)
+    for topic in storage.list_thread_topics(graph_dir):
+        meta = storage.load_thread_meta(graph_dir, topic)
         if not meta:
             continue
 
@@ -359,10 +215,9 @@ def read_thread_from_graph(
         Tuple of (thread, entries) or None if not found
     """
     graph_dir = get_graph_dir(threads_dir)
-    thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
 
     # Load thread meta
-    meta = _load_thread_meta(thread_graph_dir)
+    meta = storage.load_thread_meta(graph_dir, topic)
     if not meta:
         return None
 
@@ -370,7 +225,7 @@ def read_thread_from_graph(
 
     # Load entries
     entries: List[GraphEntry] = []
-    for node in _load_thread_entries(thread_graph_dir):
+    for node in storage.load_thread_entries(graph_dir, topic):
         entries.append(_node_to_entry(node))
 
     # Sort entries by index
@@ -402,9 +257,8 @@ def get_entry_from_graph(
         return None
 
     graph_dir = get_graph_dir(threads_dir)
-    thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
 
-    for node in _load_thread_entries(thread_graph_dir):
+    for node in storage.load_thread_entries(graph_dir, topic):
         if entry_id and node.get("entry_id") == entry_id:
             return _node_to_entry(node)
         if index is not None and node.get("index") == index:
@@ -433,10 +287,9 @@ def get_entries_range_from_graph(
         List of GraphEntry objects in index order
     """
     graph_dir = get_graph_dir(threads_dir)
-    thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
     entries = []
 
-    for node in _load_thread_entries(thread_graph_dir):
+    for node in storage.load_thread_entries(graph_dir, topic):
         idx = node.get("index", 0)
         if idx < start_index:
             continue

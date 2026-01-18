@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, List, Literal, Optional, Tuple
 
+from . import storage
 from .reader import get_graph_dir, GraphEntry, GraphThread, _node_to_entry, _node_to_thread
 
 logger = logging.getLogger(__name__)
@@ -123,18 +124,23 @@ class SearchResults:
 
 
 def _load_nodes(graph_dir: Path) -> Iterator[dict[str, Any]]:
-    """Load all nodes from the graph JSONL file."""
-    nodes_file = graph_dir / "nodes.jsonl"
-    if not nodes_file.exists():
+    """Load all nodes from per-thread graph format.
+
+    Iterates through all thread directories and yields thread meta and entries.
+    """
+    if not storage.is_per_thread_format(graph_dir):
         return
 
-    with open(nodes_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                try:
-                    yield json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+    # Iterate through each thread
+    for topic in storage.list_thread_topics(graph_dir):
+        # Yield thread meta (thread node)
+        meta = storage.load_thread_meta(graph_dir, topic)
+        if meta:
+            yield meta
+
+        # Yield entry nodes
+        for entry in storage.load_thread_entries(graph_dir, topic):
+            yield entry
 
 
 # ============================================================================
@@ -343,7 +349,7 @@ def search_graph(
     graph_dir = get_graph_dir(threads_dir)
     results = SearchResults(query=search_query)
 
-    if not (graph_dir / "nodes.jsonl").exists():
+    if not storage.is_per_thread_format(graph_dir):
         logger.debug("No graph available for search")
         return results
 
