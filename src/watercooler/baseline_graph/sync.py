@@ -1704,3 +1704,259 @@ def sync_to_memory_backend(
     except Exception as e:
         logger.warning(f"MEMORY: Sync failed for {topic}/{entry_id}: {e}")
         return False
+
+
+# ============================================================================
+# Graph Format Migration (Monolithic -> Per-Thread)
+# ============================================================================
+
+
+@dataclass
+class MigrationResult:
+    """Result of graph format migration."""
+
+    threads_migrated: int = 0
+    entries_migrated: int = 0
+    edges_migrated: int = 0
+    search_index_entries: int = 0
+    errors: List[str] = field(default_factory=list)
+    monolithic_deleted: bool = False
+
+
+def migrate_to_per_thread_format(
+    threads_dir: Path,
+    delete_monolithic: bool = True,
+    build_search_index: bool = True,
+) -> MigrationResult:
+    """Migrate graph from monolithic to per-thread format.
+
+    Converts:
+    - graph/baseline/nodes.jsonl + edges.jsonl
+    To:
+    - graph/baseline/threads/<topic>/meta.json
+    - graph/baseline/threads/<topic>/entries.jsonl
+    - graph/baseline/threads/<topic>/edges.jsonl
+    - graph/baseline/search-index.jsonl (if build_search_index=True)
+
+    Args:
+        threads_dir: Threads directory containing graph/baseline/
+        delete_monolithic: If True, delete monolithic files after successful migration
+        build_search_index: If True, build search-index.jsonl with embeddings
+
+    Returns:
+        MigrationResult with counts and any errors
+    """
+    from watercooler.baseline_graph.writer import (
+        get_graph_dir,
+        get_thread_graph_dir,
+        _atomic_write_json,
+        _atomic_write_jsonl,
+    )
+
+    result = MigrationResult()
+    graph_dir = get_graph_dir(threads_dir)
+    nodes_file = graph_dir / "nodes.jsonl"
+    edges_file = graph_dir / "edges.jsonl"
+
+    # Check if monolithic files exist
+    if not nodes_file.exists():
+        result.errors.append(f"Monolithic nodes.jsonl not found at {nodes_file}")
+        return result
+
+    # Load all nodes
+    nodes_by_id: Dict[str, Dict[str, Any]] = {}
+    thread_nodes: Dict[str, Dict[str, Any]] = {}  # topic -> thread node
+    entry_nodes_by_topic: Dict[str, List[Dict[str, Any]]] = {}  # topic -> entries
+
+    try:
+        with open(nodes_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                node = json.loads(line)
+                node_id = node.get("id", "")
+                nodes_by_id[node_id] = node
+
+                if node.get("type") == "thread":
+                    topic = node.get("topic", "")
+                    if topic:
+                        thread_nodes[topic] = node
+                elif node.get("type") == "entry":
+                    topic = node.get("thread_topic", "")
+                    if topic:
+                        if topic not in entry_nodes_by_topic:
+                            entry_nodes_by_topic[topic] = []
+                        entry_nodes_by_topic[topic].append(node)
+    except Exception as e:
+        result.errors.append(f"Failed to load nodes.jsonl: {e}")
+        return result
+
+    # Load all edges
+    edges_by_topic: Dict[str, List[Dict[str, Any]]] = {}  # topic -> edges
+
+    if edges_file.exists():
+        try:
+            with open(edges_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    edge = json.loads(line)
+                    # Determine topic from source or target
+                    source = edge.get("source", "")
+                    target = edge.get("target", "")
+
+                    # Extract topic from thread:topic or entry node
+                    topic = None
+                    if source.startswith("thread:"):
+                        topic = source.replace("thread:", "")
+                    elif target.startswith("thread:"):
+                        topic = target.replace("thread:", "")
+                    elif source.startswith("entry:"):
+                        # Look up entry node to get topic
+                        entry_node = nodes_by_id.get(source)
+                        if entry_node:
+                            topic = entry_node.get("thread_topic")
+                    elif target.startswith("entry:"):
+                        entry_node = nodes_by_id.get(target)
+                        if entry_node:
+                            topic = entry_node.get("thread_topic")
+
+                    if topic:
+                        if topic not in edges_by_topic:
+                            edges_by_topic[topic] = []
+                        edges_by_topic[topic].append(edge)
+                        result.edges_migrated += 1
+        except Exception as e:
+            result.errors.append(f"Failed to load edges.jsonl: {e}")
+            return result
+
+    # Collect all topics
+    all_topics = set(thread_nodes.keys()) | set(entry_nodes_by_topic.keys())
+
+    # Search index entries
+    search_index_entries: List[Dict[str, Any]] = []
+
+    # Migrate each topic
+    for topic in all_topics:
+        try:
+            thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
+            thread_graph_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write meta.json
+            thread_node = thread_nodes.get(topic)
+            if thread_node:
+                meta_file = thread_graph_dir / "meta.json"
+                _atomic_write_json(meta_file, thread_node)
+                result.threads_migrated += 1
+
+            # Write entries.jsonl
+            entries = entry_nodes_by_topic.get(topic, [])
+            if entries:
+                entries_file = thread_graph_dir / "entries.jsonl"
+                _atomic_write_jsonl(entries_file, entries)
+                result.entries_migrated += len(entries)
+
+                # Collect entries for search index
+                if build_search_index:
+                    for entry in entries:
+                        embedding = entry.get("embedding")
+                        if embedding:
+                            search_index_entries.append({
+                                "entry_id": entry.get("entry_id"),
+                                "thread_topic": topic,
+                                "embedding": embedding,
+                            })
+
+            # Write edges.jsonl
+            topic_edges = edges_by_topic.get(topic, [])
+            if topic_edges:
+                edges_path = thread_graph_dir / "edges.jsonl"
+                _atomic_write_jsonl(edges_path, topic_edges)
+
+            logger.debug(f"Migrated thread {topic}: {len(entries)} entries, {len(topic_edges)} edges")
+
+        except Exception as e:
+            result.errors.append(f"Failed to migrate topic {topic}: {e}")
+            continue
+
+    # Build search index
+    if build_search_index and search_index_entries:
+        try:
+            search_index_file = graph_dir / "search-index.jsonl"
+            _atomic_write_jsonl(search_index_file, search_index_entries)
+            result.search_index_entries = len(search_index_entries)
+            logger.info(f"Built search index with {len(search_index_entries)} entries")
+        except Exception as e:
+            result.errors.append(f"Failed to write search index: {e}")
+
+    # Delete monolithic files if requested and no errors
+    if delete_monolithic and not result.errors:
+        try:
+            if nodes_file.exists():
+                nodes_file.unlink()
+            if edges_file.exists():
+                edges_file.unlink()
+            result.monolithic_deleted = True
+            logger.info("Deleted monolithic nodes.jsonl and edges.jsonl")
+        except Exception as e:
+            result.errors.append(f"Failed to delete monolithic files: {e}")
+
+    logger.info(
+        f"Migration complete: {result.threads_migrated} threads, "
+        f"{result.entries_migrated} entries, {result.edges_migrated} edges"
+    )
+
+    return result
+
+
+def is_per_thread_format(threads_dir: Path) -> bool:
+    """Check if graph already uses per-thread format.
+
+    Args:
+        threads_dir: Threads directory
+
+    Returns:
+        True if per-thread format is in use
+    """
+    from watercooler.baseline_graph.writer import get_graph_dir
+
+    graph_dir = get_graph_dir(threads_dir)
+    threads_base = graph_dir / "threads"
+
+    if not threads_base.exists():
+        return False
+
+    # Check for at least one thread directory with meta.json
+    try:
+        for thread_dir in threads_base.iterdir():
+            if thread_dir.is_dir():
+                meta_file = thread_dir / "meta.json"
+                if meta_file.exists():
+                    return True
+    except Exception:
+        pass
+
+    return False
+
+
+def needs_migration(threads_dir: Path) -> bool:
+    """Check if graph needs migration from monolithic to per-thread.
+
+    Args:
+        threads_dir: Threads directory
+
+    Returns:
+        True if monolithic format exists and per-thread does not
+    """
+    from watercooler.baseline_graph.writer import get_graph_dir
+
+    graph_dir = get_graph_dir(threads_dir)
+    nodes_file = graph_dir / "nodes.jsonl"
+
+    # Has monolithic format and not yet migrated
+    has_monolithic = nodes_file.exists()
+    has_per_thread = is_per_thread_format(threads_dir)
+
+    return has_monolithic and not has_per_thread

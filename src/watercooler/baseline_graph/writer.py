@@ -76,11 +76,31 @@ def get_graph_dir(threads_dir: Path) -> Path:
     return threads_dir / "graph" / "baseline"
 
 
+def get_thread_graph_dir(graph_dir: Path, topic: str) -> Path:
+    """Get per-thread graph directory path.
+
+    Args:
+        graph_dir: Base graph directory (graph/baseline)
+        topic: Thread topic
+
+    Returns:
+        Path to graph/baseline/threads/<topic>/
+    """
+    return graph_dir / "threads" / topic
+
+
 def _ensure_graph_dir(threads_dir: Path) -> Path:
     """Ensure graph directory exists and return path."""
     graph_dir = get_graph_dir(threads_dir)
     graph_dir.mkdir(parents=True, exist_ok=True)
     return graph_dir
+
+
+def _ensure_thread_graph_dir(graph_dir: Path, topic: str) -> Path:
+    """Ensure per-thread graph directory exists and return path."""
+    thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
+    thread_graph_dir.mkdir(parents=True, exist_ok=True)
+    return thread_graph_dir
 
 
 def _load_nodes(graph_dir: Path) -> Dict[str, Dict[str, Any]]:
@@ -185,6 +205,238 @@ def _atomic_write_json(path: Path, data: Any) -> None:
 
 
 # ============================================================================
+# Per-Thread Graph Operations
+# ============================================================================
+
+
+def _load_thread_meta(thread_graph_dir: Path) -> Optional[Dict[str, Any]]:
+    """Load thread metadata from meta.json.
+
+    Args:
+        thread_graph_dir: Path to thread's graph directory
+
+    Returns:
+        Thread node dict or None if not found
+    """
+    meta_file = thread_graph_dir / "meta.json"
+    if not meta_file.exists():
+        return None
+
+    try:
+        return json.loads(meta_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"Failed to load thread meta from {meta_file}: {e}")
+        return None
+
+
+def _load_thread_entries(thread_graph_dir: Path) -> Dict[str, Dict[str, Any]]:
+    """Load entry nodes from per-thread entries.jsonl.
+
+    Args:
+        thread_graph_dir: Path to thread's graph directory
+
+    Returns:
+        Dict of entry nodes keyed by ID
+    """
+    entries_file = thread_graph_dir / "entries.jsonl"
+    entries: Dict[str, Dict[str, Any]] = {}
+
+    if not entries_file.exists():
+        return entries
+
+    try:
+        with open(entries_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    node = json.loads(line)
+                    node_id = node.get("id", "")
+                    if node_id:
+                        entries[node_id] = node
+    except Exception as e:
+        logger.warning(f"Failed to load entries from {entries_file}: {e}")
+
+    return entries
+
+
+def _load_thread_edges(thread_graph_dir: Path) -> Dict[str, Dict[str, Any]]:
+    """Load edges from per-thread edges.jsonl.
+
+    Args:
+        thread_graph_dir: Path to thread's graph directory
+
+    Returns:
+        Dict of edges keyed by source+target
+    """
+    edges_file = thread_graph_dir / "edges.jsonl"
+    edges: Dict[str, Dict[str, Any]] = {}
+
+    if not edges_file.exists():
+        return edges
+
+    try:
+        with open(edges_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    edge = json.loads(line)
+                    edge_id = edge.get("source", "") + edge.get("target", "")
+                    if edge_id:
+                        edges[edge_id] = edge
+    except Exception as e:
+        logger.warning(f"Failed to load edges from {edges_file}: {e}")
+
+    return edges
+
+
+def _write_thread_meta(thread_graph_dir: Path, meta: Dict[str, Any]) -> None:
+    """Write thread metadata to meta.json atomically."""
+    meta_file = thread_graph_dir / "meta.json"
+    _atomic_write_json(meta_file, meta)
+
+
+def _write_thread_entries(
+    thread_graph_dir: Path,
+    entries: Dict[str, Dict[str, Any]],
+) -> None:
+    """Write entry nodes to per-thread entries.jsonl atomically."""
+    entries_file = thread_graph_dir / "entries.jsonl"
+    _atomic_write_jsonl(entries_file, list(entries.values()))
+
+
+def _write_thread_edges(
+    thread_graph_dir: Path,
+    edges: Dict[str, Dict[str, Any]],
+) -> None:
+    """Write edges to per-thread edges.jsonl atomically."""
+    edges_file = thread_graph_dir / "edges.jsonl"
+    _atomic_write_jsonl(edges_file, list(edges.values()))
+
+
+def _write_thread_graph(
+    thread_graph_dir: Path,
+    meta: Dict[str, Any],
+    entries: Dict[str, Dict[str, Any]],
+    edges: Dict[str, Dict[str, Any]],
+) -> None:
+    """Write all per-thread graph files atomically.
+
+    Writes meta.json, entries.jsonl, and edges.jsonl for a single thread.
+
+    Args:
+        thread_graph_dir: Path to thread's graph directory
+        meta: Thread node dict
+        entries: Dict of entry nodes keyed by ID
+        edges: Dict of edges keyed by source+target
+    """
+    thread_graph_dir.mkdir(parents=True, exist_ok=True)
+    _write_thread_meta(thread_graph_dir, meta)
+    _write_thread_entries(thread_graph_dir, entries)
+    _write_thread_edges(thread_graph_dir, edges)
+
+
+def _is_per_thread_format(graph_dir: Path) -> bool:
+    """Check if graph uses per-thread format.
+
+    Returns True if the threads/ directory exists with at least one thread.
+    """
+    threads_dir = graph_dir / "threads"
+    if not threads_dir.exists():
+        return False
+    # Check for at least one thread directory
+    try:
+        return any(d.is_dir() for d in threads_dir.iterdir())
+    except Exception:
+        return False
+
+
+# ============================================================================
+# Search Index Operations
+# ============================================================================
+
+
+def _update_search_index(
+    graph_dir: Path,
+    data: EntryData,
+    entry_node: Dict[str, Any],
+) -> None:
+    """Update the search index with a new/updated entry.
+
+    The search index contains entry_id, thread_topic, and embedding for
+    fast full-corpus vector search without loading all per-thread files.
+
+    Args:
+        graph_dir: Base graph directory
+        data: Entry data
+        entry_node: Built entry node dict (contains embedding if present)
+    """
+    # Only index entries with embeddings
+    embedding = entry_node.get("embedding")
+    if not embedding:
+        return
+
+    search_index_file = graph_dir / "search-index.jsonl"
+
+    # Load existing index entries (excluding this entry if it exists)
+    index_entries: List[Dict[str, Any]] = []
+    entry_key = data.entry_id
+
+    if search_index_file.exists():
+        try:
+            with open(search_index_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        entry = json.loads(line)
+                        # Skip if this is the same entry (will re-add below)
+                        if entry.get("entry_id") != entry_key:
+                            index_entries.append(entry)
+        except Exception as e:
+            logger.warning(f"Failed to load search index: {e}")
+
+    # Add/update entry in index
+    index_entries.append({
+        "entry_id": data.entry_id,
+        "thread_topic": data.thread_topic,
+        "embedding": embedding,
+    })
+
+    # Write atomically
+    _atomic_write_jsonl(search_index_file, index_entries)
+
+
+def _remove_from_search_index(graph_dir: Path, entry_id: str) -> None:
+    """Remove an entry from the search index.
+
+    Args:
+        graph_dir: Base graph directory
+        entry_id: Entry ID to remove
+    """
+    search_index_file = graph_dir / "search-index.jsonl"
+
+    if not search_index_file.exists():
+        return
+
+    # Load and filter out the entry
+    index_entries: List[Dict[str, Any]] = []
+
+    try:
+        with open(search_index_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    entry = json.loads(line)
+                    if entry.get("entry_id") != entry_id:
+                        index_entries.append(entry)
+    except Exception as e:
+        logger.warning(f"Failed to load search index for removal: {e}")
+        return
+
+    # Write atomically
+    _atomic_write_jsonl(search_index_file, index_entries)
+
+
+# ============================================================================
 # Node Builders
 # ============================================================================
 
@@ -247,6 +499,8 @@ def upsert_thread_node(
 ) -> bool:
     """Create or update a thread node in the graph.
 
+    Uses per-thread format: writes to graph/baseline/threads/<topic>/meta.json
+
     Args:
         threads_dir: Threads directory
         data: Thread data to write
@@ -256,13 +510,14 @@ def upsert_thread_node(
     """
     try:
         graph_dir = _ensure_graph_dir(threads_dir)
-        nodes = _load_nodes(graph_dir)
+        thread_graph_dir = _ensure_thread_graph_dir(graph_dir, data.topic)
 
-        thread_id = f"thread:{data.topic}"
         now = _now_iso()
 
+        # Load existing thread meta to preserve fields
+        existing = _load_thread_meta(thread_graph_dir)
+
         # Preserve existing entry_count if not explicitly set
-        existing = nodes.get(thread_id)
         if existing and data.entry_count == 0:
             data.entry_count = existing.get("entry_count", 0)
 
@@ -270,8 +525,12 @@ def upsert_thread_node(
         if existing and not data.summary:
             data.summary = existing.get("summary", "")
 
-        nodes[thread_id] = _build_thread_node(data, last_updated=now)
-        _write_nodes(graph_dir, nodes)
+        # Build and write thread meta
+        meta = _build_thread_node(data, last_updated=now)
+        _write_thread_meta(thread_graph_dir, meta)
+
+        # Update manifest
+        _update_manifest(graph_dir, data.topic, None)
 
         logger.debug(f"Upserted thread node: {data.topic}")
         return True
@@ -288,10 +547,12 @@ def upsert_entry_node(
 ) -> bool:
     """Create or update an entry node with edges.
 
+    Uses per-thread format: writes to graph/baseline/threads/<topic>/
+
     Creates:
-    - Entry node
-    - Updates thread node (entry_count, last_updated)
-    - Contains edge (thread -> entry)
+    - Entry node in entries.jsonl
+    - Updates thread node in meta.json (entry_count, last_updated)
+    - Contains edge (thread -> entry) in edges.jsonl
     - Followed_by edge (prev_entry -> entry) if prev_entry_id provided
 
     Args:
@@ -304,8 +565,12 @@ def upsert_entry_node(
     """
     try:
         graph_dir = _ensure_graph_dir(threads_dir)
-        nodes = _load_nodes(graph_dir)
-        edges = _load_edges(graph_dir)
+        thread_graph_dir = _ensure_thread_graph_dir(graph_dir, data.thread_topic)
+
+        # Load per-thread data
+        meta = _load_thread_meta(thread_graph_dir)
+        entries = _load_thread_entries(thread_graph_dir)
+        edges = _load_thread_edges(thread_graph_dir)
 
         thread_id = f"thread:{data.thread_topic}"
         entry_id = f"entry:{data.entry_id}"
@@ -322,24 +587,23 @@ def upsert_entry_node(
         commit_refs = _extract_commit_refs(data.body)
 
         # Create entry node
-        nodes[entry_id] = _build_entry_node(
+        entries[entry_id] = _build_entry_node(
             data,
             file_refs=file_refs,
             pr_refs=pr_refs,
             commit_refs=commit_refs,
         )
 
-        # Update thread node if exists, or create minimal one
-        if thread_id in nodes:
-            thread_node = nodes[thread_id]
-            thread_node["entry_count"] = max(
-                thread_node.get("entry_count", 0),
+        # Update thread meta if exists, or create minimal one
+        if meta:
+            meta["entry_count"] = max(
+                meta.get("entry_count", 0),
                 data.index + 1,
             )
-            thread_node["last_updated"] = now
+            meta["last_updated"] = now
         else:
-            # Create minimal thread node (will be updated by project)
-            nodes[thread_id] = {
+            # Create minimal thread meta (will be updated by project)
+            meta = {
                 "id": thread_id,
                 "type": "thread",
                 "topic": data.thread_topic,
@@ -369,9 +633,11 @@ def upsert_entry_node(
                 "type": "followed_by",
             }
 
-        # Write atomically
-        _write_nodes(graph_dir, nodes)
-        _write_edges(graph_dir, edges)
+        # Write all per-thread files atomically
+        _write_thread_graph(thread_graph_dir, meta, entries, edges)
+
+        # Update search index with new entry
+        _update_search_index(graph_dir, data, entries[entry_id])
 
         # Update manifest
         _update_manifest(graph_dir, data.thread_topic, data.entry_id)
@@ -395,6 +661,8 @@ def update_thread_metadata(
 ) -> bool:
     """Update metadata fields on an existing thread node.
 
+    Uses per-thread format: updates graph/baseline/threads/<topic>/meta.json
+
     Only updates fields that are explicitly provided (not None).
 
     Args:
@@ -410,28 +678,27 @@ def update_thread_metadata(
     """
     try:
         graph_dir = _ensure_graph_dir(threads_dir)
-        nodes = _load_nodes(graph_dir)
+        thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
 
-        thread_id = f"thread:{topic}"
-        if thread_id not in nodes:
+        meta = _load_thread_meta(thread_graph_dir)
+        if not meta:
             logger.warning(f"Thread node not found for metadata update: {topic}")
             return False
 
-        thread_node = nodes[thread_id]
         now = _now_iso()
 
         if status is not None:
-            thread_node["status"] = status.upper()
+            meta["status"] = status.upper()
         if ball is not None:
-            thread_node["ball"] = ball
+            meta["ball"] = ball
         if title is not None:
-            thread_node["title"] = title
+            meta["title"] = title
         if summary is not None:
-            thread_node["summary"] = summary
+            meta["summary"] = summary
 
-        thread_node["last_updated"] = now
+        meta["last_updated"] = now
 
-        _write_nodes(graph_dir, nodes)
+        _write_thread_meta(thread_graph_dir, meta)
 
         logger.debug(f"Updated thread metadata: {topic}")
         return True
@@ -448,6 +715,8 @@ def delete_entry_node(
 ) -> bool:
     """Delete an entry node and its edges from the graph.
 
+    Uses per-thread format: updates graph/baseline/threads/<topic>/ files
+
     Note: Also updates the thread node entry_count.
 
     Args:
@@ -460,15 +729,18 @@ def delete_entry_node(
     """
     try:
         graph_dir = _ensure_graph_dir(threads_dir)
-        nodes = _load_nodes(graph_dir)
-        edges = _load_edges(graph_dir)
+        thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
+
+        # Load per-thread data
+        meta = _load_thread_meta(thread_graph_dir)
+        entries = _load_thread_entries(thread_graph_dir)
+        edges = _load_thread_edges(thread_graph_dir)
 
         entry_node_id = f"entry:{entry_id}"
-        thread_id = f"thread:{topic}"
 
         # Remove entry node
-        if entry_node_id in nodes:
-            del nodes[entry_node_id]
+        if entry_node_id in entries:
+            del entries[entry_node_id]
 
         # Remove edges involving this entry
         edges_to_remove = []
@@ -480,17 +752,16 @@ def delete_entry_node(
             del edges[edge_id]
 
         # Update thread entry_count
-        if thread_id in nodes:
-            # Count remaining entries for this thread
-            remaining = sum(
-                1 for n in nodes.values()
-                if n.get("type") == "entry" and n.get("thread_topic") == topic
-            )
-            nodes[thread_id]["entry_count"] = remaining
-            nodes[thread_id]["last_updated"] = _now_iso()
+        if meta:
+            meta["entry_count"] = len(entries)
+            meta["last_updated"] = _now_iso()
 
-        _write_nodes(graph_dir, nodes)
-        _write_edges(graph_dir, edges)
+        # Write per-thread files
+        if meta:
+            _write_thread_graph(thread_graph_dir, meta, entries, edges)
+
+        # Remove from search index
+        _remove_from_search_index(graph_dir, entry_id)
 
         logger.debug(f"Deleted entry node: {topic}/{entry_id}")
         return True
@@ -506,6 +777,8 @@ def get_thread_from_graph(
 ) -> Optional[Dict[str, Any]]:
     """Read thread node from graph.
 
+    Uses per-thread format: reads from graph/baseline/threads/<topic>/meta.json
+
     Args:
         threads_dir: Threads directory
         topic: Thread topic
@@ -514,28 +787,49 @@ def get_thread_from_graph(
         Thread node dict or None if not found
     """
     graph_dir = get_graph_dir(threads_dir)
-    nodes = _load_nodes(graph_dir)
-    thread_id = f"thread:{topic}"
-    return nodes.get(thread_id)
+    thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
+    return _load_thread_meta(thread_graph_dir)
 
 
 def get_entry_from_graph(
     threads_dir: Path,
     entry_id: str,
+    topic: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Read entry node from graph.
+
+    Uses per-thread format. If topic is not provided, searches all thread
+    directories (slower).
 
     Args:
         threads_dir: Threads directory
         entry_id: Entry ID
+        topic: Thread topic (optional, but recommended for performance)
 
     Returns:
         Entry node dict or None if not found
     """
     graph_dir = get_graph_dir(threads_dir)
-    nodes = _load_nodes(graph_dir)
     entry_node_id = f"entry:{entry_id}"
-    return nodes.get(entry_node_id)
+
+    if topic:
+        # Fast path: look directly in the thread's entries
+        thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
+        entries = _load_thread_entries(thread_graph_dir)
+        return entries.get(entry_node_id)
+
+    # Slow path: search all thread directories
+    threads_base = graph_dir / "threads"
+    if not threads_base.exists():
+        return None
+
+    for thread_dir in threads_base.iterdir():
+        if thread_dir.is_dir():
+            entries = _load_thread_entries(thread_dir)
+            if entry_node_id in entries:
+                return entries[entry_node_id]
+
+    return None
 
 
 def get_entries_for_thread(
@@ -543,6 +837,8 @@ def get_entries_for_thread(
     topic: str,
 ) -> List[Dict[str, Any]]:
     """Get all entry nodes for a thread, sorted by index.
+
+    Uses per-thread format: reads from graph/baseline/threads/<topic>/entries.jsonl
 
     Args:
         threads_dir: Threads directory
@@ -552,14 +848,12 @@ def get_entries_for_thread(
         List of entry node dicts sorted by index
     """
     graph_dir = get_graph_dir(threads_dir)
-    nodes = _load_nodes(graph_dir)
+    thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
+    entries = _load_thread_entries(thread_graph_dir)
 
-    entries = [
-        n for n in nodes.values()
-        if n.get("type") == "entry" and n.get("thread_topic") == topic
-    ]
-    entries.sort(key=lambda e: e.get("index", 0))
-    return entries
+    entries_list = list(entries.values())
+    entries_list.sort(key=lambda e: e.get("index", 0))
+    return entries_list
 
 
 def get_last_entry_id(
@@ -644,6 +938,8 @@ def init_thread_in_graph(
 ) -> bool:
     """Initialize a new thread in the graph.
 
+    Uses per-thread format: creates graph/baseline/threads/<topic>/meta.json
+
     Creates the thread node if it doesn't exist.
 
     Args:
@@ -657,10 +953,11 @@ def init_thread_in_graph(
         True if created or already exists
     """
     graph_dir = get_graph_dir(threads_dir)
-    nodes = _load_nodes(graph_dir)
+    thread_graph_dir = get_thread_graph_dir(graph_dir, topic)
 
-    thread_id = f"thread:{topic}"
-    if thread_id in nodes:
+    # Check if thread already exists in per-thread format
+    meta = _load_thread_meta(thread_graph_dir)
+    if meta:
         logger.debug(f"Thread already exists in graph: {topic}")
         return True
 
