@@ -158,6 +158,62 @@ class Checkpoint:
         return ep.last_completed_chunk_index + 1
 
 
+@dataclass
+class ChunkTimingStats:
+    """Track per-chunk timing with running averages."""
+    dedup_times: list[float] = field(default_factory=list)
+    index_times: list[float] = field(default_factory=list)
+    checkpoint_times: list[float] = field(default_factory=list)
+    total_times: list[float] = field(default_factory=list)
+    chunks_processed: int = 0
+    total_chunks: int = 0
+
+    def add_timing(self, dedup: float, index: float, checkpoint: float) -> None:
+        """Record timing for a single chunk."""
+        self.dedup_times.append(dedup)
+        self.index_times.append(index)
+        self.checkpoint_times.append(checkpoint)
+        self.total_times.append(dedup + index + checkpoint)
+        self.chunks_processed += 1
+
+    def running_avg(self, times: list[float], window: int = 5) -> float:
+        """Calculate running average over recent window."""
+        if not times:
+            return 0.0
+        recent = times[-window:] if len(times) >= window else times
+        return sum(recent) / len(recent)
+
+    def overall_avg(self) -> float:
+        """Calculate overall average chunk time."""
+        return sum(self.total_times) / len(self.total_times) if self.total_times else 0.0
+
+    def eta_seconds(self, remaining: int) -> float:
+        """Estimate time remaining based on overall average."""
+        avg = self.overall_avg()
+        return avg * remaining if avg > 0 else 0.0
+
+    def format_eta(self, remaining: int) -> str:
+        """Format ETA as human-readable string."""
+        eta = self.eta_seconds(remaining)
+        if eta >= 60:
+            return f"{eta / 60:.1f}m"
+        return f"{eta:.1f}s"
+
+    def summary_dict(self) -> dict:
+        """Return summary statistics for final report."""
+        if not self.total_times:
+            return {}
+        return {
+            "chunks_processed": self.chunks_processed,
+            "avg_total": self.overall_avg(),
+            "avg_dedup": sum(self.dedup_times) / len(self.dedup_times) if self.dedup_times else 0.0,
+            "avg_index": sum(self.index_times) / len(self.index_times) if self.index_times else 0.0,
+            "avg_checkpoint": sum(self.checkpoint_times) / len(self.checkpoint_times) if self.checkpoint_times else 0.0,
+            "min_total": min(self.total_times),
+            "max_total": max(self.total_times),
+        }
+
+
 def load_checkpoint(threads_dir: Path) -> Checkpoint:
     """Load checkpoint if exists."""
     checkpoint_file = threads_dir / ".migration_checkpoint.json"
@@ -287,7 +343,7 @@ async def index_entries_chunked(
     - Episode linking: Chunks within an entry linked via previous_episode_uuids
 
     Returns:
-        Dict with indexing statistics
+        Dict with indexing statistics including timing breakdown
     """
     stats = {
         "entries_processed": 0,
@@ -297,6 +353,12 @@ async def index_entries_chunked(
         "chunks_deduplicated": 0,
         "errors": [],
     }
+
+    # Initialize timing tracker
+    total_chunks_all = sum(len(e["chunks"]) for e in entries)
+    timing_stats = ChunkTimingStats(total_chunks=total_chunks_all)
+    global_chunk_idx = 0  # Track position across all entries
+    progress_interval = 5  # Report progress every N chunks
 
     for entry_idx, entry in enumerate(entries):
         entry_id = entry["id"]
@@ -369,12 +431,17 @@ async def index_entries_chunked(
         else:
             print()
 
+        entry_start_time = time.perf_counter()
+        entry_chunks_processed = 0
+
         for i, chunk in enumerate(chunks):
             # Skip already completed chunks
             if i < start_chunk_index:
+                global_chunk_idx += 1
                 continue
 
             try:
+                chunk_start = time.perf_counter()
                 # Build episode name with chunk suffix
                 if total_chunks > 1:
                     episode_name = f"{base_name} [{i + 1}/{total_chunks}]"
@@ -393,15 +460,17 @@ async def index_entries_chunked(
                     previous_uuids = [previous_episode_uuid]
 
                 # DEDUPLICATION: Check if this chunk already exists in the graph
+                dedup_start = time.perf_counter()
                 existing_episode = await backend.find_episode_by_chunk_id_async(
                     chunk_id=chunk.chunk_id,
                     group_id=database_name,
                 )
+                dedup_time = time.perf_counter() - dedup_start
 
+                index_start = time.perf_counter()
                 if existing_episode:
                     # Episode already exists - use existing UUID
                     episode_uuid = existing_episode["uuid"]
-                    print(f"    ↳ Chunk {i + 1}/{total_chunks}: deduplicated (exists as {episode_uuid[:8]}...)")
                     stats["chunks_deduplicated"] += 1
                 else:
                     # Add episode (unified graph: all threads share database_name as group_id)
@@ -415,6 +484,7 @@ async def index_entries_chunked(
                     )
                     episode_uuid = result.get("episode_uuid", "")
                     stats["chunks_indexed"] += 1
+                index_time = time.perf_counter() - index_start
 
                 # Update progress
                 previous_episode_uuid = episode_uuid
@@ -427,7 +497,27 @@ async def index_entries_chunked(
                 entry_progress.last_updated_at = datetime.now(timezone.utc).isoformat()
 
                 # Save checkpoint after each chunk
+                ckpt_start = time.perf_counter()
                 save_checkpoint(threads_dir, checkpoint)
+                ckpt_time = time.perf_counter() - ckpt_start
+
+                # Record timing
+                timing_stats.add_timing(dedup_time, index_time, ckpt_time)
+                global_chunk_idx += 1
+                entry_chunks_processed += 1
+
+                # Progress reporting every N chunks
+                if timing_stats.chunks_processed % progress_interval == 0:
+                    remaining = total_chunks_all - global_chunk_idx
+                    avg_total = timing_stats.running_avg(timing_stats.total_times)
+                    avg_dedup = timing_stats.running_avg(timing_stats.dedup_times)
+                    avg_index = timing_stats.running_avg(timing_stats.index_times)
+                    avg_ckpt = timing_stats.running_avg(timing_stats.checkpoint_times)
+                    eta = timing_stats.format_eta(remaining)
+                    print(f"    Progress: {global_chunk_idx}/{total_chunks_all} chunks | "
+                          f"Last {progress_interval} avg: {avg_total:.2f}s "
+                          f"(dedup: {avg_dedup:.2f}s, index: {avg_index:.2f}s, ckpt: {avg_ckpt:.2f}s) | "
+                          f"ETA: {eta}")
 
             except Exception as e:
                 print(f"    Error on chunk {i + 1}/{total_chunks}: {e}")
@@ -443,6 +533,14 @@ async def index_entries_chunked(
             save_checkpoint(threads_dir, checkpoint)
             stats["entries_processed"] += 1
 
+            # Entry-level timing summary
+            if entry_chunks_processed > 0:
+                entry_elapsed = time.perf_counter() - entry_start_time
+                entry_avg = entry_elapsed / entry_chunks_processed
+                print(f"  ✓ Entry {entry_id[:12]}...: {entry_chunks_processed} chunks in {entry_elapsed:.1f}s (avg {entry_avg:.2f}s/chunk)")
+
+    # Attach timing stats to return dict
+    stats["timing"] = timing_stats.summary_dict()
     return stats
 
 
@@ -657,12 +755,27 @@ Examples:
     entries_per_min = (entries_processed / index_time * 60) if index_time > 0 else 0
     dedup_pct = (chunks_deduped / (chunks_indexed + chunks_deduped) * 100) if (chunks_indexed + chunks_deduped) > 0 else 0
 
+    # Detailed chunk timing breakdown
+    timing_breakdown = stats.get("timing", {})
+
     print(f"\nSummary:")
     print(f"  Input:             {total_entries} entries, {total_chunks} chunks ({avg_chunks_per_entry:.1f} avg/entry)")
     print(f"  Indexed:           {chunks_indexed} chunks at {chunks_per_sec:.1f} chunks/sec")
     if chunks_deduped > 0:
         print(f"  Deduplicated:      {chunks_deduped} chunks ({dedup_pct:.1f}%)")
     print(f"  Throughput:        {entries_per_min:.1f} entries/min")
+
+    # Chunk timing breakdown (if available)
+    if timing_breakdown:
+        print(f"\nChunk Timing Breakdown:")
+        print(f"  Avg per chunk:     {timing_breakdown.get('avg_total', 0):.2f}s")
+        print(f"    └─ Dedup check:  {timing_breakdown.get('avg_dedup', 0):.3f}s")
+        print(f"    └─ Index (LLM):  {timing_breakdown.get('avg_index', 0):.2f}s")
+        print(f"    └─ Checkpoint:   {timing_breakdown.get('avg_checkpoint', 0):.3f}s")
+        min_time = timing_breakdown.get('min_total', 0)
+        max_time = timing_breakdown.get('max_total', 0)
+        if min_time > 0 and max_time > 0:
+            print(f"  Range:             {min_time:.2f}s - {max_time:.2f}s")
 
     print(f"\nWork directory: {work_dir}")
     print(f"Checkpoint: {threads_dir / '.migration_checkpoint.json'}")

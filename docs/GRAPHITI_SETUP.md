@@ -9,12 +9,17 @@ This guide covers setting up Graphiti as a memory backend for watercooler-cloud.
 ### 1. Start FalkorDB (Graph Database)
 
 ```bash
-# Start FalkorDB container (if not already running)
-docker run -d -p 6379:6379 -p 3000:3000 --name falkordb falkordb/falkordb:latest
+# Start FalkorDB container with increased query timeout (if not already running)
+docker run -d -p 6379:6379 -p 3000:3000 --name falkordb \
+  -v falkordb_data:/var/lib/falkordb/data \
+  -e FALKORDB_ARGS="TIMEOUT 120000" \
+  falkordb/falkordb:latest
 
 # Verify it's running
 docker exec falkordb redis-cli PING  # Should return: PONG
 ```
+
+> **Important:** The `FALKORDB_ARGS="TIMEOUT 120000"` sets the query timeout to 120 seconds. Without this, complex graph queries (especially fulltext search on large datasets) will timeout after just 1 second (the default).
 
 ### 2. Install Graphiti Dependencies
 
@@ -92,6 +97,7 @@ You should see the test episode returned with extracted entities and facts.
 
 | Symptom | Solution |
 |---------|----------|
+| `Query timed out` on search | Increase timeout: `docker exec falkordb redis-cli GRAPH.CONFIG SET TIMEOUT 120000` (see [Troubleshooting](#falkordb-query-timeout)) |
 | `No module named 'graphiti_core'` | Run `uv pip install -e "external/graphiti[falkordb]"` and restart MCP server |
 | `Database connection failed` | Ensure FalkorDB is running: `docker ps \| grep falkor` |
 | `no episode UUID` error | Update to latest code (fixed in PR #93) |
@@ -139,8 +145,13 @@ brew install falkordb
 
 Install via Docker:
 ```bash
-docker run -p 6379:6379 falkordb/falkordb:latest
+docker run -d -p 6379:6379 -p 3000:3000 --name falkordb \
+  -v falkordb_data:/var/lib/falkordb/data \
+  -e FALKORDB_ARGS="TIMEOUT 120000" \
+  falkordb/falkordb:latest
 ```
+
+> **Note:** The `TIMEOUT 120000` setting is critical—FalkorDB defaults to a 1-second query timeout which causes failures on complex graph queries.
 
 Start FalkorDB:
 ```bash
@@ -447,6 +458,36 @@ watercooler_query_memory(
 ---
 
 ## Troubleshooting
+
+### FalkorDB Query Timeout
+
+**Error:** `Query timed out` during fulltext search or complex graph queries
+
+**Cause:** FalkorDB defaults to a 1-second query timeout (`TIMEOUT 1000`), which is too short for complex queries like fulltext search on large datasets.
+
+**Fix (temporary):**
+```bash
+# Increase timeout to 120 seconds for current session
+docker exec falkordb redis-cli GRAPH.CONFIG SET TIMEOUT 120000
+
+# Verify
+docker exec falkordb redis-cli GRAPH.CONFIG GET TIMEOUT
+# Should show: TIMEOUT 120000
+```
+
+**Fix (permanent):** Recreate the container with the timeout setting:
+```bash
+# Stop and remove (volume preserves data)
+docker stop falkordb && docker rm falkordb
+
+# Restart with permanent timeout
+docker run -d -p 6379:6379 -p 3000:3000 --name falkordb \
+  -v falkordb_data:/var/lib/falkordb/data \
+  -e FALKORDB_ARGS="TIMEOUT 120000" \
+  falkordb/falkordb:latest
+```
+
+> **Note:** The timeout resets to default (1 second) on container restart unless you use `FALKORDB_ARGS`.
 
 ### FalkorDB Connection Failed
 
