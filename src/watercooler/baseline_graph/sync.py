@@ -1324,6 +1324,13 @@ def backfill_missing(
             # Write updated thread data if changed
             if thread_updated:
                 storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+
+                # Dual-write: Also update monolithic format for backward compatibility
+                monolithic_nodes = [meta] + list(entries.values())
+                monolithic_edges = list(edges.values())
+                storage.append_to_monolithic_nodes(graph_dir, monolithic_nodes)
+                storage.append_to_monolithic_edges(graph_dir, monolithic_edges)
+
                 logger.debug(f"Updated graph files for thread {topic}")
 
         except Exception as e:

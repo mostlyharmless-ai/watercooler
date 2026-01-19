@@ -278,6 +278,12 @@ def upsert_entry_node(
         # Write all per-thread files atomically
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
+        # Dual-write: Also append to monolithic format for backward compatibility
+        monolithic_nodes = [meta, entries[entry_id]]
+        monolithic_edges = list(edges.values())
+        storage.append_to_monolithic_nodes(graph_dir, monolithic_nodes)
+        storage.append_to_monolithic_edges(graph_dir, monolithic_edges)
+
         # Update search index with new entry (if has embedding)
         embedding = entries[entry_id].get("embedding")
         if embedding:

@@ -485,6 +485,10 @@ class BaselineGraphRunner:
         xref_count = 0
         search_index_entries: List[Dict[str, Any]] = []
 
+        # Collect all nodes and edges for monolithic dual-write
+        all_nodes: List[Dict[str, Any]] = []
+        all_edges: List[Dict[str, Any]] = []
+
         # Build topic lookup for cross-references
         topic_lookup = {t.topic: t for t in threads}
 
@@ -524,6 +528,11 @@ class BaselineGraphRunner:
             # Write per-thread files
             storage.write_thread_graph(graph_dir, topic, thread_node, entries_dict, edges_dict)
 
+            # Collect for monolithic dual-write
+            all_nodes.append(thread_node)
+            all_nodes.extend(entries_dict.values())
+            all_edges.extend(edges_dict.values())
+
         # Cross-reference edges (need all threads for lookup)
         # These are stored in each thread's edges file where the reference originates
         self._log_verbose("Detecting cross-references...")
@@ -559,7 +568,12 @@ class BaselineGraphRunner:
             for edge in xref_edges:
                 edge_key = edge.get("source", "") + edge.get("target", "")
                 existing_edges[edge_key] = edge
+                all_edges.append(edge)  # Collect for monolithic
             storage.write_thread_edges(graph_dir, topic, existing_edges)
+
+        # Dual-write: Write monolithic format for backward compatibility
+        storage.write_monolithic_graph(graph_dir, all_nodes, all_edges)
+        self._log_verbose(f"  Wrote monolithic format: {len(all_nodes)} nodes, {len(all_edges)} edges")
 
         # Write search index
         storage.atomic_write_jsonl(graph_dir / "search-index.jsonl", search_index_entries)
