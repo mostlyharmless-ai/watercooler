@@ -169,7 +169,13 @@ class ChunkTimingStats:
     total_chunks: int = 0
 
     def add_timing(self, dedup: float, index: float, checkpoint: float) -> None:
-        """Record timing for a single chunk."""
+        """Record timing for a single chunk.
+
+        Args:
+            dedup: Time spent on deduplication check (seconds)
+            index: Time spent on LLM indexing (seconds)
+            checkpoint: Time spent saving checkpoint (seconds)
+        """
         self.dedup_times.append(dedup)
         self.index_times.append(index)
         self.checkpoint_times.append(checkpoint)
@@ -177,30 +183,64 @@ class ChunkTimingStats:
         self.chunks_processed += 1
 
     def running_avg(self, times: list[float], window: int = 5) -> float:
-        """Calculate running average over recent window."""
+        """Calculate running average over recent window.
+
+        Args:
+            times: List of timing measurements
+            window: Number of recent measurements to average
+
+        Returns:
+            Average time over the window, or 0.0 if no times recorded
+        """
         if not times:
             return 0.0
         recent = times[-window:] if len(times) >= window else times
         return sum(recent) / len(recent)
 
     def overall_avg(self) -> float:
-        """Calculate overall average chunk time."""
+        """Calculate overall average chunk time.
+
+        Returns:
+            Mean of all total_times, or 0.0 if no chunks processed
+        """
         return sum(self.total_times) / len(self.total_times) if self.total_times else 0.0
 
     def eta_seconds(self, remaining: int) -> float:
-        """Estimate time remaining based on overall average."""
+        """Estimate time remaining based on overall average.
+
+        Args:
+            remaining: Number of chunks left to process
+
+        Returns:
+            Estimated seconds remaining, or 0.0 if no data
+        """
         avg = self.overall_avg()
         return avg * remaining if avg > 0 else 0.0
 
     def format_eta(self, remaining: int) -> str:
-        """Format ETA as human-readable string."""
+        """Format ETA as human-readable string.
+
+        Args:
+            remaining: Number of chunks left to process
+
+        Returns:
+            Formatted string like "2.5m" or "30.0s"
+        """
         eta = self.eta_seconds(remaining)
         if eta >= 60:
             return f"{eta / 60:.1f}m"
         return f"{eta:.1f}s"
 
-    def summary_dict(self) -> dict:
-        """Return summary statistics for final report."""
+    def summary_dict(self) -> dict[str, float | int]:
+        """Return summary statistics for final report.
+
+        Returns:
+            Dictionary with timing statistics including:
+            - chunks_processed: Total chunks timed
+            - avg_total/dedup/index/checkpoint: Mean times
+            - min_total/max_total: Range of chunk times
+            Empty dict if no chunks processed.
+        """
         if not self.total_times:
             return {}
         return {
@@ -372,6 +412,7 @@ async def index_entries_chunked(
         # Check if already complete (checkpoint)
         if resume and checkpoint.is_entry_complete(entry_id):
             stats["entries_skipped"] += 1
+            global_chunk_idx += len(chunks)  # Account for skipped chunks in progress
             continue
 
         # Parse timestamp
@@ -615,9 +656,14 @@ Examples:
         if not threads_dir.exists():
             print(f"Error: Threads directory not found: {threads_dir}", file=sys.stderr)
             return 1
-        thread_files = sorted([f.name for f in threads_dir.glob("*.md")])
+        # Skip common non-thread files that may be in the directory
+        non_thread_files = {'readme.md', 'changelog.md', 'index.md', 'license.md'}
+        thread_files = sorted([
+            f.name for f in threads_dir.glob("*.md")
+            if f.is_file() and f.name.lower() not in non_thread_files
+        ])
         if not thread_files:
-            print(f"Error: No .md files found in {threads_dir}", file=sys.stderr)
+            print(f"Error: No thread files found in {threads_dir}", file=sys.stderr)
             return 1
         print(f"Discovered {len(thread_files)} thread files")
     elif args.thread_list:

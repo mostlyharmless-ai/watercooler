@@ -183,7 +183,7 @@ async def get_driver(host: str, port: int, database: str):
     return driver
 
 
-async def find_duplicates(driver, group_id: str) -> list[dict]:
+async def find_duplicates(driver, group_id: str) -> list[dict[str, Any]]:
     """Find all duplicate entity sets in the group."""
     result = await driver.execute_query(FIND_DUPLICATES_QUERY, group_id=group_id)
     if not result:
@@ -321,7 +321,7 @@ async def merge_duplicates_in_group(
     return stats
 
 
-async def list_databases_with_duplicates(driver) -> list[dict]:
+async def list_databases_with_duplicates(driver) -> list[dict[str, Any]]:
     """List all databases that have duplicate entities."""
     result = await driver.execute_query(LIST_DATABASES_WITH_DUPLICATES_QUERY)
     if not result:
