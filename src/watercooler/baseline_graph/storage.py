@@ -486,6 +486,76 @@ def update_manifest(
 
 
 # ============================================================================
+# Monolithic Format Operations (Backward Compatibility)
+# ============================================================================
+
+
+def append_to_monolithic_nodes(
+    graph_dir: Path,
+    nodes: List[Dict[str, Any]],
+) -> None:
+    """Append nodes to monolithic nodes.jsonl for backward compatibility.
+
+    Used during transition period when both formats need to be written.
+
+    Args:
+        graph_dir: Base graph directory
+        nodes: List of node dicts to append
+    """
+    if not nodes:
+        return
+
+    nodes_file = graph_dir / "nodes.jsonl"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(nodes_file, "a", encoding="utf-8") as f:
+        for node in nodes:
+            f.write(json.dumps(node, separators=(",", ":")) + "\n")
+
+
+def append_to_monolithic_edges(
+    graph_dir: Path,
+    edges: List[Dict[str, Any]],
+) -> None:
+    """Append edges to monolithic edges.jsonl for backward compatibility.
+
+    Used during transition period when both formats need to be written.
+
+    Args:
+        graph_dir: Base graph directory
+        edges: List of edge dicts to append
+    """
+    if not edges:
+        return
+
+    edges_file = graph_dir / "edges.jsonl"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(edges_file, "a", encoding="utf-8") as f:
+        for edge in edges:
+            f.write(json.dumps(edge, separators=(",", ":")) + "\n")
+
+
+def write_monolithic_graph(
+    graph_dir: Path,
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+) -> None:
+    """Write complete monolithic graph files atomically.
+
+    Used for full graph rebuilds during migration.
+
+    Args:
+        graph_dir: Base graph directory
+        nodes: All node dicts
+        edges: All edge dicts
+    """
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_jsonl(graph_dir / "nodes.jsonl", nodes)
+    atomic_write_jsonl(graph_dir / "edges.jsonl", edges)
+
+
+# ============================================================================
 # Format Detection
 # ============================================================================
 

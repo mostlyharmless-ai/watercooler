@@ -542,6 +542,13 @@ def sync_entry_structure_only(
         # Write all per-thread files atomically
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
+        # Dual-write: Also append to monolithic format for backward compatibility
+        # This ensures both formats stay in sync during the transition period
+        monolithic_nodes = [meta, entry_node]
+        monolithic_edges = list(edges.values())
+        storage.append_to_monolithic_nodes(graph_dir, monolithic_nodes)
+        storage.append_to_monolithic_edges(graph_dir, monolithic_edges)
+
         # Update manifest
         storage.update_manifest(graph_dir, topic, entry.entry_id)
 
@@ -762,6 +769,13 @@ def sync_entry_to_graph(
         # Write all per-thread files atomically
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
+        # Dual-write: Also append to monolithic format for backward compatibility
+        # This ensures both formats stay in sync during the transition period
+        monolithic_nodes = [meta, entry_node]
+        monolithic_edges = list(edges.values())
+        storage.append_to_monolithic_nodes(graph_dir, monolithic_nodes)
+        storage.append_to_monolithic_edges(graph_dir, monolithic_edges)
+
         # Update search index if embedding was generated
         if entry_embedding:
             storage.upsert_search_index_entry(graph_dir, entry.entry_id, topic, entry_embedding)
@@ -899,6 +913,13 @@ def sync_thread_to_graph(
 
         # Write all per-thread files atomically
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+
+        # Dual-write: Also append to monolithic format for backward compatibility
+        # This ensures both formats stay in sync during the transition period
+        monolithic_nodes = [meta] + list(entries.values())
+        monolithic_edges = list(edges.values())
+        storage.append_to_monolithic_nodes(graph_dir, monolithic_nodes)
+        storage.append_to_monolithic_edges(graph_dir, monolithic_edges)
 
         # Update search index for entries with embeddings
         for entry_id, embedding in search_index_updates:
