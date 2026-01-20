@@ -7,6 +7,7 @@ Tools:
 - watercooler_search_memory_facts: Search facts
 - watercooler_get_episodes: Get episodes
 - watercooler_diagnose_memory: Diagnose memory backend
+- watercooler_smart_query: Multi-tier intelligent query with auto-escalation
 """
 
 import asyncio
@@ -35,6 +36,9 @@ leanrag_run_pipeline = None
 
 # Cleanup tools
 clear_graph_group = None
+
+# Multi-tier orchestration
+smart_query = None
 
 
 async def _query_memory_impl(
@@ -1277,8 +1281,10 @@ def _get_leanrag_backend(config=None):
 
         # Use provided config or defaults
         if config is None:
+            import os
+            leanrag_path = os.getenv("LEANRAG_PATH", "external/LeanRAG")
             config = LeanRAGConfig(
-                leanrag_path=Path("external/LeanRAG"),
+                leanrag_path=Path(leanrag_path),
             )
         elif isinstance(config, dict):
             config = LeanRAGConfig(**config)
@@ -1475,6 +1481,237 @@ async def _leanrag_run_pipeline_impl(
         )])
 
 
+async def _smart_query_impl(
+    query: str,
+    ctx: Context,
+    code_path: str = "",
+    threads_dir: str = "",
+    max_tiers: int = 2,
+    force_tier: Optional[str] = None,
+    group_ids: Optional[List[str]] = None,
+) -> ToolResult:
+    """Execute intelligent multi-tier memory query with automatic escalation.
+
+    Queries memory across three tiers with automatic escalation when lower tiers
+    don't provide sufficient results:
+
+    - **T1 (Baseline)**: JSONL graph with keyword/semantic search (cheapest, no LLM)
+    - **T2 (Graphiti)**: FalkorDB temporal graph with hybrid search (medium cost)
+    - **T3 (LeanRAG)**: Hierarchical clustering with multi-hop reasoning (expensive)
+
+    The orchestrator follows the principle: "Always choose the cheapest tier that
+    can satisfy the query intent." Escalation happens automatically when results
+    are insufficient (fewer than min_results or low confidence).
+
+    Prerequisites:
+        - T1: threads_dir must exist with .graph/nodes.jsonl
+        - T2: WATERCOOLER_GRAPHITI_ENABLED=1 + FalkorDB running
+        - T3: LEANRAG_PATH set + WATERCOOLER_TIER_T3_ENABLED=1
+
+    Environment Variables:
+        WATERCOOLER_TIER_T1_ENABLED: "1" to enable T1 (default: "1")
+        WATERCOOLER_TIER_T2_ENABLED: "1" to enable T2 (requires Graphiti)
+        WATERCOOLER_TIER_T3_ENABLED: "1" to enable T3 (expensive, opt-in)
+        WATERCOOLER_TIER_MAX_TIERS: Maximum tiers to query (default: "2")
+        WATERCOOLER_TIER_MIN_RESULTS: Min results for sufficiency (default: "3")
+
+    Args:
+        query: Search query (e.g., "What authentication method was implemented?")
+        code_path: Path to code repository (for T2/T3 database resolution)
+        threads_dir: Path to threads directory (for T1 baseline graph). If empty,
+            attempts to resolve from code_path.
+        max_tiers: Maximum number of tiers to query (default: 2, max: 3)
+        force_tier: Force query to specific tier ("T1", "T2", or "T3"). Disables
+            escalation when set.
+        group_ids: Optional list of project group_ids to filter results.
+
+    Returns:
+        JSON response with search results containing:
+        - query: Original query text
+        - result_count: Total evidence items found
+        - tiers_queried: List of tiers that were queried (e.g., ["T1", "T2"])
+        - primary_tier: The tier that provided best results
+        - escalation_reason: Why escalation occurred (if applicable)
+        - sufficient: Whether results met sufficiency criteria
+        - evidence: List of evidence items from all tiers
+        - message: Status message
+
+    Example:
+        smart_query(
+            query="What error handling patterns did we use?",
+            code_path=".",
+            max_tiers=2
+        )
+
+    Response Format:
+        {
+          "query": "What error handling patterns did we use?",
+          "result_count": 5,
+          "tiers_queried": ["T1", "T2"],
+          "primary_tier": "T2",
+          "escalation_reason": "Only 2 results (need 3)",
+          "sufficient": true,
+          "evidence": [
+            {
+              "tier": "T1",
+              "id": "01ABC...",
+              "content": "Implemented try-catch patterns...",
+              "score": 0.85,
+              "name": "Error Handling Discussion",
+              "provenance": {...},
+              "metadata": {...}
+            },
+            ...
+          ],
+          "message": "Found 5 results from T2"
+        }
+    """
+    try:
+        from pathlib import Path
+        from watercooler_memory.tier_strategy import (
+            TierOrchestrator,
+            load_tier_config,
+            Tier,
+        )
+
+        # Resolve paths
+        code_path_resolved = Path(code_path) if code_path else None
+        threads_dir_resolved = Path(threads_dir) if threads_dir else None
+
+        # If threads_dir not provided, use proper context resolution
+        # This handles the {repo-name}-threads sibling directory convention
+        if not threads_dir_resolved and code_path:
+            error, context = validation._require_context(code_path)
+            if context and context.threads_dir:
+                threads_dir_resolved = context.threads_dir
+                if not code_path_resolved:
+                    code_path_resolved = context.code_root
+                log_action(
+                    "memory.smart_query.resolved_context",
+                    threads_dir=str(threads_dir_resolved),
+                    code_root=str(code_path_resolved) if code_path_resolved else None,
+                )
+
+        # Load configuration
+        config = load_tier_config(
+            threads_dir=threads_dir_resolved,
+            code_path=code_path_resolved,
+        )
+
+        # Apply max_tiers parameter
+        if max_tiers:
+            config.max_tiers = min(max(1, max_tiers), 3)
+
+        # Create orchestrator
+        orchestrator = TierOrchestrator(config)
+
+        # Check for available tiers
+        available = orchestrator.available_tiers
+        if not available:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "query": query,
+                    "result_count": 0,
+                    "tiers_queried": [],
+                    "primary_tier": None,
+                    "sufficient": False,
+                    "evidence": [],
+                    "message": "No memory tiers available. Check configuration.",
+                    "available_tiers": [],
+                }, indent=2)
+            )])
+
+        # Convert force_tier string to Tier enum
+        force_tier_enum = None
+        if force_tier:
+            try:
+                force_tier_enum = Tier(force_tier.upper())
+                if force_tier_enum not in available:
+                    return ToolResult(content=[TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "query": query,
+                            "result_count": 0,
+                            "error": f"Tier {force_tier} not available",
+                            "available_tiers": [t.value for t in available],
+                            "message": f"Requested tier {force_tier} is not available",
+                        }, indent=2)
+                    )])
+            except ValueError:
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "query": query,
+                        "result_count": 0,
+                        "error": f"Invalid tier: {force_tier}",
+                        "valid_tiers": ["T1", "T2", "T3"],
+                        "message": f"Invalid tier '{force_tier}'. Valid options: T1, T2, T3",
+                    }, indent=2)
+                )])
+
+        # Execute query
+        log_action(
+            "memory.smart_query",
+            query=query,
+            max_tiers=config.max_tiers,
+            force_tier=force_tier,
+            available_tiers=[t.value for t in available],
+        )
+
+        try:
+            result = await asyncio.to_thread(
+                orchestrator.query,
+                query,
+                group_ids=group_ids,
+                force_tier=force_tier_enum,
+            )
+
+            # Build response
+            response = result.to_dict()
+            response["available_tiers"] = [t.value for t in available]
+
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps(response, indent=2)
+            )])
+
+        except Exception as e:
+            log_error(f"MEMORY: Smart query failed: {e}")
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "query": query,
+                    "result_count": 0,
+                    "error": "Query execution failed",
+                    "message": str(e),
+                }, indent=2)
+            )])
+
+    except ImportError as e:
+        log_error(f"MEMORY: tier_strategy module unavailable: {e}")
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps({
+                "query": query,
+                "result_count": 0,
+                "error": "Multi-tier strategy module unavailable",
+                "message": f"Import failed: {e}. Ensure watercooler_memory package is installed.",
+            }, indent=2)
+        )])
+    except Exception as e:
+        log_error(f"MEMORY: Unexpected error in smart_query: {e}")
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps({
+                "query": query,
+                "result_count": 0,
+                "error": "Internal error",
+                "message": str(e),
+            }, indent=2)
+        )])
+
+
 def register_memory_tools(mcp):
     """Register memory tools with the MCP server.
 
@@ -1484,6 +1721,7 @@ def register_memory_tools(mcp):
     global query_memory, search_nodes, get_entity_edge
     global search_memory_facts, get_episodes, diagnose_memory
     global graphiti_add_episode, leanrag_run_pipeline, clear_graph_group
+    global smart_query
 
     # Register tools and store references for testing
     query_memory = mcp.tool(name="watercooler_query_memory")(_query_memory_impl)
@@ -1499,3 +1737,6 @@ def register_memory_tools(mcp):
 
     # Cleanup tools
     clear_graph_group = mcp.tool(name="watercooler_clear_graph_group")(_clear_graph_group_impl)
+
+    # Multi-tier orchestration
+    smart_query = mcp.tool(name="watercooler_smart_query")(_smart_query_impl)

@@ -329,6 +329,154 @@ See [ADR 0001](adr/0001-memory-backend-contract.md) for complete contract specif
 
 ---
 
+## Multi-Tier Query Strategy
+
+The memory module includes an intelligent query orchestrator that routes queries across tiers and automatically escalates when needed. This implements the principle: **"Always choose the cheapest tier that can satisfy the intent."**
+
+### Tier Characteristics
+
+| Tier | Backend | Cost | Best For |
+|------|---------|------|----------|
+| **T1** | Baseline Graph (JSONL) | Lowest (no LLM) | Keyword search, time-based queries, simple lookups |
+| **T2** | Graphiti (FalkorDB) | Medium | Entity relationships, temporal queries, verified facts |
+| **T3** | LeanRAG (Hierarchical) | Highest | Synthesis, complex multi-hop reasoning, narratives |
+
+### Orchestration Flow
+
+```
+Query Intent Detection
+         ↓
+  Select Starting Tier (based on intent)
+         ↓
+  Query Tier → Evaluate Sufficiency
+         ↓
+  Sufficient? → Return Results
+         ↓ No
+  Escalate to Next Tier (if allowed)
+         ↓
+  Repeat until sufficient or max_tiers reached
+```
+
+### Query Intent Detection
+
+The orchestrator detects query intent to select the optimal starting tier:
+
+| Intent | Keywords | Starting Tier |
+|--------|----------|---------------|
+| `lookup` | (default) | T1 |
+| `temporal` | when, before, after, timeline | T2 |
+| `entity` | who, what is, find, class, function | T2 |
+| `relational` | related to, depends on, uses | T2 |
+| `summarize` | summarize, overview, explain | T2 |
+| `multi_hop` | how did, why did, trace, path from | T3 |
+
+### MCP Tool: `watercooler_smart_query`
+
+The `watercooler_smart_query` tool provides unified access to multi-tier querying:
+
+```python
+# Example usage
+smart_query(
+    query="What authentication patterns did we implement?",
+    code_path=".",
+    max_tiers=2,  # Query at most 2 tiers
+)
+```
+
+**Parameters:**
+- `query`: Search query string
+- `code_path`: Path to code repository (for T2/T3)
+- `threads_dir`: Path to threads directory (for T1)
+- `max_tiers`: Maximum tiers to query (default: 2)
+- `force_tier`: Force specific tier ("T1", "T2", "T3")
+- `group_ids`: Optional list of group IDs to filter
+
+**Response Format:**
+```json
+{
+  "query": "What authentication patterns did we implement?",
+  "result_count": 5,
+  "tiers_queried": ["T1", "T2"],
+  "primary_tier": "T2",
+  "escalation_reason": "Only 2 results (need 3)",
+  "sufficient": true,
+  "evidence": [
+    {
+      "tier": "T1",
+      "id": "entry-123",
+      "content": "OAuth2 with JWT tokens...",
+      "score": 0.85,
+      "provenance": {...}
+    }
+  ],
+  "message": "Found 5 results from T2"
+}
+```
+
+### Configuration
+
+Environment variables for tier control:
+
+```bash
+# Enable/disable tiers
+WATERCOOLER_TIER_T1_ENABLED=1    # Default: enabled
+WATERCOOLER_TIER_T2_ENABLED=1    # Requires WATERCOOLER_GRAPHITI_ENABLED=1
+WATERCOOLER_TIER_T3_ENABLED=0    # Expensive, explicit opt-in
+
+# Tuning
+WATERCOOLER_TIER_MAX_TIERS=2     # Max tiers per query (default: 2)
+WATERCOOLER_TIER_MIN_RESULTS=3   # Min results for sufficiency
+```
+
+### Sufficiency Evaluation
+
+Escalation occurs when:
+1. **Insufficient results**: Fewer than `min_results` (default: 3)
+2. **Low confidence**: Average score below `min_confidence` (default: 0.5)
+
+### Safety Rules
+
+The orchestrator enforces these safety principles:
+- **Never escalate to T3 "just to be helpful"** - T3 is expensive
+- **Never allow T3 to invent facts** - T3 synthesizes, doesn't create
+- **Surface uncertainty explicitly** - Don't hallucinate to fill gaps
+
+### Python API
+
+```python
+from watercooler_memory.tier_strategy import (
+    TierOrchestrator,
+    TierConfig,
+    load_tier_config,
+    smart_query,
+    Tier,
+)
+
+# Quick usage
+result = smart_query(
+    "What error handling patterns did we use?",
+    threads_dir=Path("./threads"),
+    code_path=Path("."),
+)
+
+# Or with explicit configuration
+config = load_tier_config(
+    threads_dir=Path("./threads"),
+    code_path=Path("."),
+)
+config.max_tiers = 2
+config.min_results = 5
+
+orchestrator = TierOrchestrator(config)
+result = orchestrator.query("authentication implementation")
+
+# Access results
+for evidence in result.top_results(5):
+    print(f"[{evidence.tier}] {evidence.content[:100]}")
+```
+
+---
+
 ## Querying Memory via MCP
 
 The Watercooler MCP server provides a `watercooler_query_memory` tool for querying thread history using Graphiti's temporal graph memory. This enables agents to ask natural language questions about project context, implementation details, and decisions.
