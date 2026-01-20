@@ -322,13 +322,15 @@ def evaluate_sufficiency(
     evidence: list[TierEvidence],
     min_results: int = DEFAULT_MIN_RESULTS,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    total_results: Optional[int] = None,
 ) -> tuple[bool, str]:
     """Evaluate whether current evidence is sufficient.
 
     Args:
-        evidence: List of evidence items
-        min_results: Minimum number of results required
+        evidence: List of evidence items to evaluate (typically from the current tier)
+        min_results: Minimum number of results required (uses total_results when provided)
         min_confidence: Minimum average confidence score
+        total_results: Optional total result count across tiers for the quantity check
 
     Returns:
         Tuple of (is_sufficient, reason)
@@ -336,10 +338,10 @@ def evaluate_sufficiency(
     if not evidence:
         return False, "No results found"
 
-    if len(evidence) < min_results:
-        return False, f"Only {len(evidence)} results (need {min_results})"
+    result_count = total_results if total_results is not None else len(evidence)
+    if result_count < min_results:
+        return False, f"Only {result_count} results (need {min_results})"
 
-    # Calculate average score
     avg_score = sum(e.score for e in evidence) / len(evidence)
     if avg_score < min_confidence:
         return False, f"Low confidence ({avg_score:.2f} < {min_confidence})"
@@ -755,14 +757,19 @@ class TierOrchestrator:
             result.total_cost += TIER_COSTS[tier]
 
             # Query the tier
+            before_count = result.result_count
             tier_evidence = self._query_tier(tier, query, group_ids)
             result.evidence.extend(tier_evidence)
+            new_count = result.result_count - before_count
+
+            evidence_for_eval = tier_evidence if tier_evidence else result.evidence
 
             # Check sufficiency
             is_sufficient, reason = evaluate_sufficiency(
-                result.evidence,
+                evidence_for_eval,
                 min_results=self.config.min_results,
                 min_confidence=self.config.min_confidence,
+                total_results=result.result_count,
             )
 
             if is_sufficient:
@@ -773,8 +780,20 @@ class TierOrchestrator:
 
             # Consider escalation
             if allow_escalation and tiers_tried < self.config.max_tiers:
-                next_tier = self._get_next_tier(tier)
-                if next_tier and next_tier not in result.tiers_queried:
+                next_tier = None
+
+                # Prefer cheaper fallback if the current tier produced nothing
+                if new_count == 0:
+                    for lower_tier in self._get_lower_tiers(tier):
+                        if lower_tier not in result.tiers_queried and lower_tier not in tiers_to_try:
+                            next_tier = lower_tier
+                            break
+
+                # Otherwise escalate upward
+                if next_tier is None:
+                    next_tier = self._get_next_tier(tier)
+
+                if next_tier and next_tier not in result.tiers_queried and next_tier not in tiers_to_try:
                     result.escalation_reason = reason
                     tiers_to_try.append(next_tier)
                     logger.info(f"Escalating from {tier.value} to {next_tier.value}: {reason}")
@@ -858,6 +877,19 @@ class TierOrchestrator:
         except (ValueError, IndexError):
             pass
         return None
+
+    def _get_lower_tiers(self, current: Tier) -> list[Tier]:
+        """Get cheaper tiers than the current one, nearest first."""
+        tier_order = [Tier.T1, Tier.T2, Tier.T3]
+        try:
+            idx = tier_order.index(current)
+            return [
+                tier
+                for tier in reversed(tier_order[:idx])
+                if tier in self._available_tiers
+            ]
+        except ValueError:
+            return []
 
 
 # ============================================================================

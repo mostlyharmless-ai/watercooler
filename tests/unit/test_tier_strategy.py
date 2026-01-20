@@ -233,6 +233,20 @@ class TestSufficiencyEvaluation:
         assert not is_sufficient
         assert "Only 2 results" in reason
 
+    def test_total_results_used_for_count(self) -> None:
+        """total_results should drive the quantity check even with subset evidence."""
+        evidence = [
+            TierEvidence(tier=Tier.T2, id="1", content="test", score=0.9),
+        ]
+        is_sufficient, reason = evaluate_sufficiency(
+            evidence,
+            min_results=3,
+            min_confidence=0.5,
+            total_results=3,
+        )
+        assert is_sufficient
+        assert "Sufficient" in reason
+
     def test_low_confidence_not_sufficient(self) -> None:
         """Low average confidence should not be sufficient."""
         evidence = [
@@ -465,6 +479,72 @@ class TestTierOrchestrator:
         orchestrator = TierOrchestrator(basic_config)
         result = orchestrator.query("test")
         assert len(result.tiers_queried) <= 1
+
+    def test_fallback_to_t1_when_t2_empty(self, mock_threads_dir, monkeypatch) -> None:
+        """Should fall back to cheaper tier if higher tier returns nothing."""
+        config = TierConfig(
+            t1_enabled=True,
+            t2_enabled=True,
+            t3_enabled=False,
+            threads_dir=mock_threads_dir,
+            code_path=mock_threads_dir.parent,
+        )
+        orchestrator = TierOrchestrator(config)
+        orchestrator._available_tiers = [Tier.T1, Tier.T2]
+
+        monkeypatch.setattr(
+            "watercooler_memory.tier_strategy._query_t2",
+            lambda *args, **kwargs: [],
+        )
+        t1_evidence = [
+            TierEvidence(tier=Tier.T1, id="t1", content="fallback", score=0.8),
+        ]
+        monkeypatch.setattr(
+            "watercooler_memory.tier_strategy._query_t1",
+            lambda *args, **kwargs: t1_evidence,
+        )
+
+        result = orchestrator.query("when was OAuth implemented?", intent=QueryIntent.TEMPORAL)
+        assert result.tiers_queried[0] == Tier.T2
+        assert Tier.T1 in result.tiers_queried
+        assert result.result_count == len(t1_evidence)
+
+    def test_sufficiency_uses_current_tier_confidence(self, mock_threads_dir, monkeypatch) -> None:
+        """Confidence should be judged on the current tier while counting total results."""
+        config = TierConfig(
+            t1_enabled=True,
+            t2_enabled=True,
+            t3_enabled=False,
+            threads_dir=mock_threads_dir,
+            code_path=mock_threads_dir.parent,
+            min_confidence=0.5,
+            min_results=3,
+        )
+        orchestrator = TierOrchestrator(config)
+        orchestrator._available_tiers = [Tier.T1, Tier.T2]
+
+        low_confidence = [
+            TierEvidence(tier=Tier.T1, id="1", content="low1", score=0.2),
+            TierEvidence(tier=Tier.T1, id="2", content="low2", score=0.3),
+        ]
+        high_confidence = [
+            TierEvidence(tier=Tier.T2, id="3", content="high1", score=0.9),
+            TierEvidence(tier=Tier.T2, id="4", content="high2", score=0.85),
+        ]
+
+        monkeypatch.setattr(
+            "watercooler_memory.tier_strategy._query_t1",
+            lambda *args, **kwargs: low_confidence,
+        )
+        monkeypatch.setattr(
+            "watercooler_memory.tier_strategy._query_t2",
+            lambda *args, **kwargs: high_confidence,
+        )
+
+        result = orchestrator.query("when was OAuth implemented?", intent=QueryIntent.LOOKUP)
+        assert result.sufficient is True
+        assert result.primary_tier == Tier.T2
+        assert result.result_count == len(low_confidence) + len(high_confidence)
 
 
 # ============================================================================
