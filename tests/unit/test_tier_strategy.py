@@ -269,6 +269,17 @@ class TestSufficiencyEvaluation:
         assert is_sufficient
         assert "Sufficient" in reason
 
+    def test_all_zero_scores_not_sufficient(self) -> None:
+        """All-zero scores should not be sufficient due to low confidence."""
+        evidence = [
+            TierEvidence(tier=Tier.T1, id="1", content="x", score=0.0),
+            TierEvidence(tier=Tier.T1, id="2", content="y", score=0.0),
+            TierEvidence(tier=Tier.T1, id="3", content="z", score=0.0),
+        ]
+        is_sufficient, reason = evaluate_sufficiency(evidence, min_confidence=0.5)
+        assert not is_sufficient
+        assert "Low confidence" in reason
+
 
 # ============================================================================
 # Test TierConfig

@@ -1093,6 +1093,36 @@ The sync is non-blocking - errors are logged but never fail the baseline sync.
 
 ---
 
+## Troubleshooting
+
+### No Tiers Available
+
+If `smart_query` returns "No memory tiers available":
+
+1. **Check T1 is enabled**: `WATERCOOLER_TIER_T1_ENABLED=1`
+2. **Verify graph files exist**: `threads/graph/baseline/nodes.jsonl` should be present
+3. **For T2**: Ensure `WATERCOOLER_GRAPHITI_ENABLED=1` and FalkorDB is running
+4. **For T3**: Confirm `LEANRAG_PATH` is set and points to valid LeanRAG installation
+
+### Context Resolution Errors
+
+If you see "Failed to resolve context" or similar errors:
+
+1. **Check code_path**: Ensure it points to a valid git repository
+2. **Verify threads directory**: The sibling `{repo-name}-threads` directory must exist
+3. **Check git status**: Run `git status` in the code_path to verify it's a valid repo
+4. **Permissions**: Ensure read access to both the code repo and threads directory
+
+### Low Confidence Results
+
+If queries return results but with low confidence:
+
+1. **Check embedding server**: Verify `EMBEDDING_API_BASE` is reachable
+2. **Rebuild baseline graph**: Run the indexer to refresh embeddings
+3. **Try force_tier**: Use `force_tier="T2"` to bypass T1 if T2 has better coverage
+
+---
+
 ## See Also
 
 - [Configuration Guide](CONFIGURATION.md) - Memory backend configuration

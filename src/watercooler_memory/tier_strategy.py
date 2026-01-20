@@ -286,6 +286,10 @@ def detect_intent(query: str) -> QueryIntent:
         return QueryIntent.MULTI_HOP
 
     # Temporal indicators -> T2
+    # Note: "history" appears in both summarize_keywords and temporal_keywords.
+    # Summarize is checked first, so prioritization is:
+    # - "evolution history" → SUMMARIZE (narrative)
+    # - "when in history" → TEMPORAL (timeline, if not matched by summarize first)
     temporal_keywords = [
         "when", "before", "after", "during", "timeline", "history",
         "yesterday", "last week", "recent", "first", "latest",
@@ -762,6 +766,8 @@ class TierOrchestrator:
             result.evidence.extend(tier_evidence)
             new_count = result.result_count - before_count
 
+            # Evaluate confidence on current tier's evidence only, but fall back to
+            # all evidence if current tier returned nothing (for cross-tier queries)
             evidence_for_eval = tier_evidence if tier_evidence else result.evidence
 
             # Check sufficiency
