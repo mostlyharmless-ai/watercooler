@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -30,7 +33,7 @@ from watercooler.thread_entries import parse_thread_entries, ThreadEntry
 
 from .context import get_http_context, HttpRequestContext
 from .github_api import GitHubClient, GitHubNotFoundError, GitHubAPIError, GitHubConflictError
-from .observability import log_debug, log_error
+from .observability import log_debug, log_error, log_warning
 
 # Graph file paths (monolithic format - deprecated, kept for backward compatibility)
 GRAPH_NODES_PATH = "graph/baseline/nodes.jsonl"
@@ -1104,6 +1107,115 @@ def _extract_thread_metadata(
 
 
 # ============================================================================
+# Slack Sync (via watercooler-site API)
+# ============================================================================
+
+
+def _is_slack_sync_enabled() -> bool:
+    """Check if Slack sync via watercooler-site is configured.
+
+    Requires both WATERCOOLER_TOKEN_API_URL and WATERCOOLER_INTERNAL_SECRET.
+    """
+    site_url = os.getenv("WATERCOOLER_TOKEN_API_URL", "")
+    secret = os.getenv("WATERCOOLER_INTERNAL_SECRET", "")
+    return bool(site_url) and bool(secret)
+
+
+def _sync_entry_to_slack_site(
+    repo_full_name: str,
+    topic: str,
+    branch: str,
+    entry_id: str,
+    agent: str,
+    role: str,
+    entry_type: str,
+    title: str,
+    body: str,
+    timestamp: str,
+) -> bool:
+    """Sync entry to Slack via watercooler-site sync-entry API.
+
+    This enables immediate Slack sync after hosted mode writes,
+    rather than waiting for the next dashboard polling cycle.
+
+    Args:
+        repo_full_name: GitHub repo (e.g., owner/repo-threads)
+        topic: Thread topic
+        branch: Git branch
+        entry_id: Entry ULID
+        agent: Agent name (e.g., "Claude (user)")
+        role: Agent role (e.g., "implementer")
+        entry_type: Entry type (e.g., "Note")
+        title: Entry title
+        body: Entry body
+        timestamp: Entry timestamp (ISO 8601)
+
+    Returns:
+        True if synced successfully, False otherwise.
+    """
+    if not _is_slack_sync_enabled():
+        log_debug("Slack sync not enabled (missing WATERCOOLER_TOKEN_API_URL or WATERCOOLER_INTERNAL_SECRET)")
+        return False
+
+    site_url = os.getenv("WATERCOOLER_TOKEN_API_URL", "").rstrip("/")
+    secret = os.getenv("WATERCOOLER_INTERNAL_SECRET", "")
+
+    url = f"{site_url}/api/slack/sync-entry"
+
+    payload = {
+        "repoFullName": repo_full_name,
+        "topic": topic,
+        "branch": branch,
+        "entry": {
+            "entryId": entry_id,
+            "agent": agent,
+            "role": role,
+            "entryType": entry_type,
+            "title": title,
+            "body": body,
+            "timestamp": timestamp,
+        },
+    }
+
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "X-Watercooler-Secret": secret,
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(request, timeout=10.0) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+        synced = result.get("synced", 0)
+        if synced > 0:
+            log_debug(f"Slack sync: entry {entry_id[:8]} synced to Slack")
+            return True
+        else:
+            # No Slack mapping for this thread - this is expected for threads not connected to Slack
+            log_debug(f"Slack sync: no mapping found for {topic} (expected if no Slack thread)")
+            return False
+
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode("utf-8") if e.fp else ""
+        log_warning(f"Slack sync API error {e.code}: {body_text}")
+        return False
+
+    except urllib.error.URLError as e:
+        log_warning(f"Slack sync connection error: {e.reason}")
+        return False
+
+    except Exception as e:
+        log_warning(f"Slack sync unexpected error: {e}")
+        return False
+
+
+# ============================================================================
 # Hosted Write Operations
 # ============================================================================
 
@@ -1249,6 +1361,24 @@ def say_hosted(
         else:
             log_debug(f"say_hosted: graph update failed for {topic} (non-fatal)")
 
+        # Sync entry to Slack (non-blocking, non-fatal)
+        slack_synced = False
+        if http_ctx.repo:
+            slack_synced = _sync_entry_to_slack_site(
+                repo_full_name=http_ctx.repo,
+                topic=topic,
+                branch=http_ctx.branch or "main",
+                entry_id=entry_id,
+                agent=agent,
+                role=role,
+                entry_type=entry_type,
+                title=title,
+                body=body,
+                timestamp=timestamp,
+            )
+            if slack_synced:
+                log_debug(f"say_hosted: synced entry to Slack for {topic}")
+
         return (None, {
             "topic": topic,
             "entry_id": entry_id,
@@ -1257,6 +1387,7 @@ def say_hosted(
             "ball": new_ball,
             "sha": new_sha,
             "graph_updated": graph_updated,
+            "slack_synced": slack_synced,
         })
 
     except GitHubAPIError as e:
