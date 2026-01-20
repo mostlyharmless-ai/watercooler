@@ -290,6 +290,38 @@ class TestLeanRAGRunPipelineTool:
             assert result_data.get("dry_run") is True
 
 
+class TestSmartQueryTool:
+    """Tests for watercooler_smart_query tool."""
+
+    @pytest.fixture
+    def mock_context(self):
+        """Create mock MCP context."""
+        return MagicMock()
+
+    async def test_smart_query_surfaces_context_errors(self, monkeypatch, mock_context):
+        """Context resolution errors should be surfaced instead of hidden."""
+        from watercooler_mcp.tools import memory as memory_tools
+
+        # Force _require_context to fail
+        monkeypatch.setattr(
+            "watercooler_mcp.tools.memory.validation._require_context",
+            lambda path: ("threads repo missing", None),
+        )
+
+        result = await memory_tools._smart_query_impl(
+            query="auth history",
+            ctx=mock_context,
+            code_path="/repo",
+            threads_dir="",
+        )
+
+        result_data = json.loads(result.content[0].text)
+        assert result_data["result_count"] == 0
+        assert result_data["error"] == "Context resolution failed"
+        assert "threads repo missing" in result_data["message"]
+        assert result_data.get("available_tiers") == []
+
+
 class TestToolRegistration:
     """Test tool registration."""
 

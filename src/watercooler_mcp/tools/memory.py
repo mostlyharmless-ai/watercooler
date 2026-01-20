@@ -1582,6 +1582,19 @@ async def _smart_query_impl(
         # This handles the {repo-name}-threads sibling directory convention
         if not threads_dir_resolved and code_path:
             error, context = validation._require_context(code_path)
+            if error:
+                log_error(f"MEMORY: smart_query context resolution failed: {error}")
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "query": query,
+                        "result_count": 0,
+                        "error": "Context resolution failed",
+                        "message": error,
+                        "available_tiers": [],
+                    }, indent=2)
+                )])
+
             if context and context.threads_dir:
                 threads_dir_resolved = context.threads_dir
                 if not code_path_resolved:
