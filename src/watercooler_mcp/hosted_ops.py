@@ -32,9 +32,25 @@ from .context import get_http_context, HttpRequestContext
 from .github_api import GitHubClient, GitHubNotFoundError, GitHubAPIError, GitHubConflictError
 from .observability import log_debug, log_error
 
-# Graph file paths
+# Graph file paths (monolithic format - deprecated, kept for backward compatibility)
 GRAPH_NODES_PATH = "graph/baseline/nodes.jsonl"
 GRAPH_EDGES_PATH = "graph/baseline/edges.jsonl"
+
+# Per-thread graph directory (canonical format)
+GRAPH_THREADS_DIR = "graph/baseline/threads"
+
+
+def _get_per_thread_paths(topic: str) -> tuple[str, str, str]:
+    """Get per-thread graph file paths.
+
+    Args:
+        topic: Thread topic identifier
+
+    Returns:
+        Tuple of (meta_path, entries_path, edges_path)
+    """
+    base = f"{GRAPH_THREADS_DIR}/{topic}"
+    return (f"{base}/meta.json", f"{base}/entries.jsonl", f"{base}/edges.jsonl")
 
 logger = logging.getLogger(__name__)
 
@@ -418,6 +434,266 @@ def _write_graph_files(
         return None, None
 
 
+# ============================================================================
+# Per-Thread Graph Operations (canonical format)
+# ============================================================================
+
+
+def _read_per_thread_graph(
+    client: GitHubClient,
+    topic: str,
+) -> tuple[dict | None, list[dict], list[dict], str | None, str | None, str | None]:
+    """Read per-thread graph files from GitHub.
+
+    Args:
+        client: GitHub API client
+        topic: Thread topic identifier
+
+    Returns:
+        Tuple of (meta, entries, edges, meta_sha, entries_sha, edges_sha).
+        If files don't exist, returns None/empty lists and None SHAs.
+    """
+    meta_path, entries_path, edges_path = _get_per_thread_paths(topic)
+
+    meta: dict | None = None
+    entries: list[dict] = []
+    edges: list[dict] = []
+    meta_sha: str | None = None
+    entries_sha: str | None = None
+    edges_sha: str | None = None
+
+    # Read meta.json
+    try:
+        meta_file = client.get_file(meta_path)
+        meta_sha = meta_file.sha
+        meta = json.loads(meta_file.content)
+    except GitHubNotFoundError:
+        log_debug(f"Per-thread meta.json not found for {topic}, will create")
+    except json.JSONDecodeError as e:
+        log_error(f"Failed to parse meta.json for {topic}: {e}")
+
+    # Read entries.jsonl
+    try:
+        entries_file = client.get_file(entries_path)
+        entries_sha = entries_file.sha
+        for line in entries_file.content.split("\n"):
+            line = line.strip()
+            if line:
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    except GitHubNotFoundError:
+        log_debug(f"Per-thread entries.jsonl not found for {topic}, will create")
+
+    # Read edges.jsonl
+    try:
+        edges_file = client.get_file(edges_path)
+        edges_sha = edges_file.sha
+        for line in edges_file.content.split("\n"):
+            line = line.strip()
+            if line:
+                try:
+                    edges.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    except GitHubNotFoundError:
+        log_debug(f"Per-thread edges.jsonl not found for {topic}, will create")
+
+    return meta, entries, edges, meta_sha, entries_sha, edges_sha
+
+
+def _write_per_thread_graph(
+    client: GitHubClient,
+    topic: str,
+    meta: dict,
+    entries: list[dict],
+    edges: list[dict],
+    meta_sha: str | None,
+    entries_sha: str | None,
+    edges_sha: str | None,
+    commit_message: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Write per-thread graph files to GitHub.
+
+    Args:
+        client: GitHub API client
+        topic: Thread topic identifier
+        meta: Thread metadata dict
+        entries: List of entry node dicts
+        edges: List of edge dicts
+        meta_sha: Current meta.json SHA (or None to create)
+        entries_sha: Current entries.jsonl SHA (or None to create)
+        edges_sha: Current edges.jsonl SHA (or None to create)
+        commit_message: Commit message
+
+    Returns:
+        Tuple of (new_meta_sha, new_entries_sha, new_edges_sha) or (None, None, None) on error.
+
+    Raises:
+        GitHubConflictError: If there's a SHA mismatch (caller should retry)
+    """
+    meta_path, entries_path, edges_path = _get_per_thread_paths(topic)
+
+    try:
+        # Write meta.json (single JSON object, pretty-printed for readability)
+        meta_content = json.dumps(meta, indent=2) + "\n"
+        new_meta_sha = client.put_file(
+            path=meta_path,
+            content=meta_content,
+            message=commit_message,
+            sha=meta_sha,
+        )
+
+        # Sort entries by index
+        sorted_entries = sorted(entries, key=lambda e: e.get("index", 0))
+
+        # Write entries.jsonl
+        entries_content = "\n".join(json.dumps(e, separators=(",", ":")) for e in sorted_entries) + "\n" if sorted_entries else ""
+        new_entries_sha = client.put_file(
+            path=entries_path,
+            content=entries_content,
+            message=commit_message,
+            sha=entries_sha,
+        )
+
+        # Sort edges by source_id, target_id
+        sorted_edges = sorted(edges, key=lambda e: (e.get("source_id", ""), e.get("target_id", "")))
+
+        # Write edges.jsonl
+        edges_content = "\n".join(json.dumps(e, separators=(",", ":")) for e in sorted_edges) + "\n" if sorted_edges else ""
+        new_edges_sha = client.put_file(
+            path=edges_path,
+            content=edges_content,
+            message=commit_message,
+            sha=edges_sha,
+        )
+
+        return new_meta_sha, new_entries_sha, new_edges_sha
+
+    except GitHubConflictError:
+        # Let conflict errors propagate for retry handling
+        raise
+
+    except GitHubAPIError as e:
+        log_error(f"Failed to write per-thread graph files for {topic}: {e}")
+        return None, None, None
+
+
+def _build_per_thread_graph_data(
+    topic: str,
+    status: str,
+    ball: str,
+    title: str,
+    existing_meta: dict | None,
+    existing_entries: list[dict],
+    existing_edges: list[dict],
+    entry_id: str | None = None,
+    agent: str | None = None,
+    role: str | None = None,
+    entry_type: str | None = None,
+    entry_title: str | None = None,
+    body: str | None = None,
+    timestamp: str | None = None,
+) -> tuple[dict, list[dict], list[dict]]:
+    """Build per-thread graph data structures.
+
+    This is a pure function that builds meta/entries/edges for per-thread format.
+
+    Args:
+        topic: Thread topic
+        status: Thread status
+        ball: Ball owner
+        title: Thread title
+        existing_meta: Existing meta dict (or None)
+        existing_entries: Existing entry nodes
+        existing_edges: Existing edges
+        entry_id: New entry ID (optional)
+        agent: Entry agent (required if entry_id provided)
+        role: Entry role
+        entry_type: Entry type
+        entry_title: Entry title (required if entry_id provided)
+        body: Entry body (required if entry_id provided)
+        timestamp: Entry timestamp (required if entry_id provided)
+
+    Returns:
+        Tuple of (meta, entries, edges)
+    """
+    thread_id = f"thread:{topic}"
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Build/update meta
+    entry_count = len(existing_entries)
+
+    # Add new entry if provided
+    entries = list(existing_entries)
+    edges = list(existing_edges)
+
+    if entry_id and agent and entry_title and body and timestamp:
+        entry_node_id = f"entry:{entry_id}"
+
+        # Check if entry already exists (idempotency)
+        if not any(e.get("id") == entry_node_id for e in entries):
+            # Determine next index
+            entry_indices = [e.get("index", 0) for e in entries]
+            next_index = max(entry_indices, default=-1) + 1
+
+            # Create entry node
+            entry_node = {
+                "id": entry_node_id,
+                "type": "entry",
+                "entry_id": entry_id,
+                "thread_topic": topic,
+                "index": next_index,
+                "agent": agent,
+                "role": role or "implementer",
+                "entry_type": entry_type or "Note",
+                "title": entry_title,
+                "body": body,
+                "timestamp": timestamp,
+            }
+            entries.append(entry_node)
+
+            # Add CONTAINS edge (thread -> entry)
+            edges.append({
+                "id": f"contains:{thread_id}:{entry_node_id}",
+                "type": "CONTAINS",
+                "source_id": thread_id,
+                "target_id": entry_node_id,
+                "created": timestamp,
+            })
+
+            # Add FOLLOWS edge if not first entry
+            if next_index > 0:
+                prev_entries = [e for e in entries if e.get("index") == next_index - 1]
+                if prev_entries:
+                    prev_entry = prev_entries[0]
+                    edges.append({
+                        "id": f"follows:{prev_entry['id']}:{entry_node_id}",
+                        "type": "FOLLOWS",
+                        "source_id": prev_entry["id"],
+                        "target_id": entry_node_id,
+                        "created": timestamp,
+                    })
+
+            entry_count += 1
+
+    # Build meta
+    meta = {
+        "id": thread_id,
+        "type": "thread",
+        "topic": topic,
+        "title": title,
+        "status": status.upper(),
+        "ball": ball,
+        "created": existing_meta.get("created", now) if existing_meta else now,
+        "last_updated": now,
+        "entry_count": entry_count,
+    }
+
+    return meta, entries, edges
+
+
 def _upsert_thread_node(
     nodes: list[dict],
     topic: str,
@@ -622,6 +898,13 @@ def _update_thread_in_graph(
 ) -> bool:
     """Update thread and optionally add entry in graph files.
 
+    Dual-write strategy:
+    1. PRIMARY: Per-thread format (graph/baseline/threads/<topic>/)
+    2. SECONDARY: Monolithic format (graph/baseline/nodes.jsonl, edges.jsonl)
+
+    Per-thread format is canonical. Monolithic is maintained for backward
+    compatibility during migration transition.
+
     Includes retry logic for handling concurrent write conflicts (SHA mismatch).
 
     Args:
@@ -645,45 +928,122 @@ def _update_thread_in_graph(
     """
     import time
 
+    per_thread_success = False
+    monolithic_success = False
+
+    # ==========================================================================
+    # PRIMARY: Per-thread format (canonical)
+    # ==========================================================================
     for attempt in range(max_retries):
         try:
-            # Read current state
+            # Read current per-thread state
+            existing_meta, existing_entries, existing_edges, meta_sha, entries_sha, edges_sha = \
+                _read_per_thread_graph(client, topic)
+
+            # Determine final values (use existing or defaults if not provided)
+            final_status = status if status is not None else (
+                existing_meta.get("status", "OPEN") if existing_meta else "OPEN"
+            )
+            final_ball = ball if ball is not None else (
+                existing_meta.get("ball", "") if existing_meta else ""
+            )
+            final_title = title if title is not None else (
+                existing_meta.get("title", topic) if existing_meta else topic
+            )
+
+            # Build updated per-thread data
+            meta, entries, edges = _build_per_thread_graph_data(
+                topic=topic,
+                status=final_status,
+                ball=final_ball,
+                title=final_title,
+                existing_meta=existing_meta,
+                existing_entries=existing_entries,
+                existing_edges=existing_edges,
+                entry_id=entry_id,
+                agent=agent,
+                role=role,
+                entry_type=entry_type,
+                entry_title=entry_title,
+                body=body,
+                timestamp=timestamp,
+            )
+
+            # Write per-thread graph files
+            commit_msg = f"[watercooler] {topic}: graph update{commit_suffix}"
+            new_meta_sha, new_entries_sha, new_edges_sha = _write_per_thread_graph(
+                client, topic, meta, entries, edges,
+                meta_sha, entries_sha, edges_sha, commit_msg
+            )
+
+            if new_meta_sha is not None:
+                per_thread_success = True
+                log_debug(f"Per-thread graph update succeeded for {topic}")
+                break
+
+            # Write failed but not due to conflict - don't retry
+            log_error(f"Per-thread graph update failed for {topic} (attempt {attempt + 1})")
+            break
+
+        except GitHubConflictError:
+            if attempt < max_retries - 1:
+                wait_time = (2 ** attempt) * 0.1
+                log_debug(f"Per-thread graph conflict for {topic}, retrying in {wait_time}s")
+                time.sleep(wait_time)
+            else:
+                log_error(f"Per-thread graph update failed for {topic} after {max_retries} retries")
+
+        except GitHubAPIError as e:
+            log_error(f"Per-thread graph update failed for {topic}: {e}")
+            break
+
+    # ==========================================================================
+    # SECONDARY: Monolithic format (backward compatibility)
+    # ==========================================================================
+    for attempt in range(max_retries):
+        try:
+            # Read current monolithic state
             nodes, edges, nodes_sha, edges_sha = _read_graph_files(client)
 
-            # Apply changes
+            # Apply changes to monolithic format
             nodes, edges = _apply_graph_changes(
                 nodes, edges, topic, status, ball, title,
                 entry_id, agent, role, entry_type, entry_title, body, timestamp
             )
 
-            # Write graph files
-            commit_msg = f"[watercooler] {topic}: graph update{commit_suffix}"
+            # Write monolithic graph files
+            commit_msg = f"[watercooler] {topic}: graph update{commit_suffix} (monolithic)"
             new_nodes_sha, new_edges_sha = _write_graph_files(
                 client, nodes, edges, nodes_sha, edges_sha, commit_msg
             )
 
             if new_nodes_sha is not None:
-                return True
+                monolithic_success = True
+                log_debug(f"Monolithic graph update succeeded for {topic}")
+                break
 
             # Write failed but not due to conflict - don't retry
-            log_error(f"Graph update failed for {topic} (attempt {attempt + 1})")
-            return False
+            log_error(f"Monolithic graph update failed for {topic} (attempt {attempt + 1})")
+            break
 
-        except GitHubConflictError as e:
+        except GitHubConflictError:
             if attempt < max_retries - 1:
-                # Retry with exponential backoff
-                wait_time = (2 ** attempt) * 0.1  # 0.1s, 0.2s, 0.4s
-                log_debug(f"Graph update conflict for {topic}, retrying in {wait_time}s (attempt {attempt + 1})")
+                wait_time = (2 ** attempt) * 0.1
+                log_debug(f"Monolithic graph conflict for {topic}, retrying in {wait_time}s")
                 time.sleep(wait_time)
             else:
-                log_error(f"Graph update failed for {topic} after {max_retries} retries: {e}")
-                return False
+                log_error(f"Monolithic graph update failed for {topic} after {max_retries} retries")
 
         except GitHubAPIError as e:
-            log_error(f"Graph update failed for {topic}: {e}")
-            return False
+            log_error(f"Monolithic graph update failed for {topic}: {e}")
+            break
 
-    return False
+    # Per-thread is canonical - return success if it succeeded
+    # Log warning if monolithic failed but per-thread succeeded
+    if per_thread_success and not monolithic_success:
+        log_debug(f"Warning: Per-thread succeeded but monolithic failed for {topic} (non-fatal)")
+
+    return per_thread_success
 
 
 # ============================================================================
@@ -1298,11 +1658,15 @@ def _update_status_in_header(content: str, new_status: str) -> str:
 def reconcile_thread_hosted(topic: str) -> tuple[str | None, dict]:
     """Reconcile a single thread's graph data from its markdown file via GitHub API.
 
+    Dual-write strategy:
+    1. PRIMARY: Per-thread format (graph/baseline/threads/<topic>/)
+    2. SECONDARY: Monolithic format (graph/baseline/nodes.jsonl, edges.jsonl)
+
     This is the hosted equivalent of reconcile_graph for a single topic. It:
     1. Reads the markdown file from GitHub
     2. Parses entries and metadata
     3. Rebuilds graph nodes/edges
-    4. Writes graph files to GitHub
+    4. Writes graph files to both formats
 
     Args:
         topic: Thread topic identifier
@@ -1316,6 +1680,7 @@ def reconcile_thread_hosted(topic: str) -> tuple[str | None, dict]:
         return (error or "Failed to create GitHub client", {})
 
     file_path = f"{topic}.md"
+    thread_id = f"thread:{topic}"
 
     try:
         # 1. Read markdown file
@@ -1327,52 +1692,37 @@ def reconcile_thread_hosted(topic: str) -> tuple[str | None, dict]:
 
         # 2. Parse metadata and entries
         title, status, ball, last_updated = _extract_thread_metadata(content, topic)
-        entries = parse_thread_entries(content)
+        parsed_entries = parse_thread_entries(content)
+        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # 3. Read current graph files
-        nodes, edges, nodes_sha, edges_sha = _read_graph_files(client)
-
-        # 4. Remove existing nodes/edges for this thread
-        thread_id = f"thread:{topic}"
-        nodes = [n for n in nodes if n.get("id") != thread_id and n.get("thread_topic") != topic]
-        edges = [e for e in edges if not (
-            e.get("source_id", "").startswith(f"thread:{topic}") or
-            e.get("source_id", "").startswith(f"entry:") and any(
-                n.get("id") == e.get("source_id") and n.get("thread_topic") == topic
-                for n in nodes
-            ) or
-            e.get("target_id", "").startswith(f"thread:{topic}") or
-            e.get("target_id", "").startswith(f"entry:") and any(
-                n.get("id") == e.get("target_id") and n.get("thread_topic") == topic
-                for n in nodes
-            )
-        )]
-
-        # 5. Build new thread node
-        thread_node = {
+        # ======================================================================
+        # Build per-thread format data
+        # ======================================================================
+        per_thread_meta = {
             "id": thread_id,
             "type": "thread",
             "topic": topic,
             "title": title,
             "status": status.upper(),
             "ball": ball,
-            "last_updated": last_updated or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "entry_count": len(entries),
-            "summary": "",
+            "created": last_updated or now,  # Use first entry timestamp ideally
+            "last_updated": last_updated or now,
+            "entry_count": len(parsed_entries),
         }
-        nodes.append(thread_node)
 
-        # 6. Build entry nodes and edges
-        prev_entry_id = None
-        for entry in entries:
+        per_thread_entries: list[dict] = []
+        per_thread_edges: list[dict] = []
+        prev_entry_node_id: str | None = None
+
+        for entry in parsed_entries:
             entry_id = entry.entry_id or f"{topic}:{entry.index}"
             entry_node_id = f"entry:{entry_id}"
 
             entry_node = {
                 "id": entry_node_id,
                 "type": "entry",
-                "thread_topic": topic,
                 "entry_id": entry_id,
+                "thread_topic": topic,
                 "index": entry.index,
                 "agent": entry.agent,
                 "role": entry.role,
@@ -1380,12 +1730,11 @@ def reconcile_thread_hosted(topic: str) -> tuple[str | None, dict]:
                 "title": entry.title,
                 "body": entry.body,
                 "timestamp": entry.timestamp or "",
-                "summary": "",
             }
-            nodes.append(entry_node)
+            per_thread_entries.append(entry_node)
 
-            # CONTAINS edge (thread -> entry)
-            edges.append({
+            # CONTAINS edge
+            per_thread_edges.append({
                 "id": f"contains:{thread_id}:{entry_node_id}",
                 "type": "CONTAINS",
                 "source_id": thread_id,
@@ -1393,37 +1742,105 @@ def reconcile_thread_hosted(topic: str) -> tuple[str | None, dict]:
                 "created": entry.timestamp or "",
             })
 
-            # FOLLOWS edge (prev_entry -> entry)
-            if prev_entry_id:
-                edges.append({
-                    "id": f"follows:{prev_entry_id}:{entry_node_id}",
+            # FOLLOWS edge
+            if prev_entry_node_id:
+                per_thread_edges.append({
+                    "id": f"follows:{prev_entry_node_id}:{entry_node_id}",
                     "type": "FOLLOWS",
-                    "source_id": prev_entry_id,
+                    "source_id": prev_entry_node_id,
                     "target_id": entry_node_id,
                     "created": entry.timestamp or "",
                 })
 
-            prev_entry_id = entry_node_id
+            prev_entry_node_id = entry_node_id
 
-        # 7. Write graph files
+        # ======================================================================
+        # PRIMARY: Write per-thread format
+        # ======================================================================
+        per_thread_success = False
+        _, _, _, meta_sha, entries_sha, edges_sha = _read_per_thread_graph(client, topic)
+
         commit_msg = f"[watercooler] reconcile: {topic}"
-        new_nodes_sha, new_edges_sha = _write_graph_files(
-            client, nodes, edges, nodes_sha, edges_sha, commit_msg
-        )
+        try:
+            new_meta_sha, new_entries_sha, new_edges_sha = _write_per_thread_graph(
+                client, topic, per_thread_meta, per_thread_entries, per_thread_edges,
+                meta_sha, entries_sha, edges_sha, commit_msg
+            )
+            if new_meta_sha is not None:
+                per_thread_success = True
+                log_debug(f"reconcile_thread_hosted: per-thread format written for {topic}")
+        except GitHubAPIError as e:
+            log_error(f"reconcile_thread_hosted: per-thread write failed for {topic}: {e}")
 
-        if new_nodes_sha is None:
-            return ("Failed to write graph files", {})
+        # ======================================================================
+        # SECONDARY: Write monolithic format (backward compatibility)
+        # ======================================================================
+        monolithic_success = False
 
-        log_debug(f"reconcile_thread_hosted: reconciled {topic} ({len(entries)} entries)")
+        # Read current monolithic graph files
+        nodes, edges, nodes_sha, edges_sha = _read_graph_files(client)
+
+        # Remove existing nodes/edges for this thread from monolithic
+        nodes = [n for n in nodes if n.get("id") != thread_id and n.get("thread_topic") != topic]
+        # Filter edges more carefully - remove edges related to this thread
+        old_entry_ids = {f"entry:{e.entry_id or f'{topic}:{e.index}'}" for e in parsed_entries}
+        edges = [e for e in edges if not (
+            e.get("source_id") == thread_id or
+            e.get("target_id") == thread_id or
+            e.get("source_id") in old_entry_ids or
+            e.get("target_id") in old_entry_ids
+        )]
+
+        # Build monolithic thread node (with summary field for compatibility)
+        thread_node = {
+            "id": thread_id,
+            "type": "thread",
+            "topic": topic,
+            "title": title,
+            "status": status.upper(),
+            "ball": ball,
+            "last_updated": last_updated or now,
+            "entry_count": len(parsed_entries),
+            "summary": "",
+        }
+        nodes.append(thread_node)
+
+        # Add entry nodes to monolithic (with summary field)
+        for entry_node in per_thread_entries:
+            monolithic_entry = dict(entry_node)
+            monolithic_entry["summary"] = ""
+            nodes.append(monolithic_entry)
+
+        # Add all edges to monolithic
+        edges.extend(per_thread_edges)
+
+        try:
+            new_nodes_sha, new_edges_sha = _write_graph_files(
+                client, nodes, edges, nodes_sha, edges_sha, f"{commit_msg} (monolithic)"
+            )
+            if new_nodes_sha is not None:
+                monolithic_success = True
+                log_debug(f"reconcile_thread_hosted: monolithic format written for {topic}")
+        except GitHubAPIError as e:
+            log_error(f"reconcile_thread_hosted: monolithic write failed for {topic}: {e}")
+
+        # Per-thread is canonical
+        if not per_thread_success:
+            return ("Failed to write per-thread graph files", {})
+
+        if not monolithic_success:
+            log_debug(f"Warning: Per-thread succeeded but monolithic failed for {topic} (non-fatal)")
+
+        log_debug(f"reconcile_thread_hosted: reconciled {topic} ({len(parsed_entries)} entries)")
 
         return (None, {
             "topic": topic,
-            "entry_count": len(entries),
+            "entry_count": len(parsed_entries),
             "status": status,
             "ball": ball,
             "last_updated": last_updated,
-            "nodes_sha": new_nodes_sha,
-            "edges_sha": new_edges_sha,
+            "per_thread_success": per_thread_success,
+            "monolithic_success": monolithic_success,
         })
 
     except GitHubAPIError as e:
