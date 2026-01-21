@@ -86,15 +86,43 @@ The **ball** indicates whose turn it is:
 
 ## Available Tools (MCP)
 
+### Thread Tools
 - `watercooler_list_threads` - See all threads, identify where you have the ball
 - `watercooler_read_thread` - Read full thread content
+- `watercooler_list_thread_entries` - List entries with pagination (use for large threads)
+- `watercooler_get_thread_entry` - Get a specific entry by index or ID
 - `watercooler_say` - Add entry and flip ball (most common)
 - `watercooler_ack` - Acknowledge without flipping ball
 - `watercooler_handoff` - Explicitly hand off to another agent
 - `watercooler_set_status` - Update thread status
+
+### Memory & Search Tools
+- `watercooler_search` - Search across threads/entries with filters
+  - Use `mode="entries"` for thread entries (default)
+  - Use `mode="entities"` for entity nodes (people, concepts)
+  - Use `mode="episodes"` for episodic content
+- `watercooler_smart_query` - Multi-tier intelligent query with auto-escalation
+  - Best for natural language questions about project history
+- `watercooler_find_similar` - Find entries similar to a given entry
+
+### Utility Tools
 - `watercooler_reindex` - Generate summary of all threads
 - `watercooler_health` - Check server status
 - `watercooler_whoami` - Check your agent identity
+
+## Context Recall (Best Practice)
+
+Before starting significant work, proactively search memory for relevant context:
+
+```python
+# Search for prior decisions about a topic
+watercooler_smart_query(query="What was decided about authentication?", code_path=".")
+
+# Find related entries across threads
+watercooler_search(query="OAuth", mode="entries", code_path=".")
+```
+
+This helps you avoid re-inventing solutions and stay aligned with prior decisions.
 
 ## Pro Tips
 

@@ -270,6 +270,38 @@ Standardize how Claude (this assistant) uses Watercooler tools so entries remain
 - Large threads can exceed the MCP stdio ceiling; always chunk requests (batch size of ~5–10 entries works well) before relaying content.
 - Preserve provenance by capturing the `entry_id` from JSON responses when referencing a specific entry in follow-up messages or commits.
 
+### Memory Search & Context Recall
+
+Watercooler provides memory tools for searching across threads and recalling project context:
+
+**Available Tools:**
+- `watercooler_smart_query`: Multi-tier intelligent query with auto-escalation. Use for natural language questions about project history, decisions, and implementation details.
+- `watercooler_search`: Unified search with mode parameter:
+  - `mode="entries"`: Search thread entries (default)
+  - `mode="entities"`: Search entity nodes (people, components, concepts)
+  - `mode="episodes"`: Search episodic content (events, discussions)
+- `watercooler_find_similar`: Find entries similar to a given entry by semantic similarity.
+
+**When to Use Memory Search:**
+- **Before starting new work**: Query memory for relevant context, prior decisions, and related discussions
+- **When context is unclear**: Search for past implementations or architectural decisions
+- **Cross-thread discovery**: Find related work across different threads/features
+- **Temporal queries**: Understand how something evolved over time
+
+**Proactive Recall Pattern:**
+Before beginning significant work, proactively search memory:
+```python
+watercooler_smart_query(
+    query="What decisions were made about [topic]?",
+    code_path="/path/to/repo"
+)
+```
+
+**Memory Search vs Thread Reading:**
+- Use `watercooler_list_thread_entries` / `watercooler_read_thread` when you know the specific thread
+- Use `watercooler_smart_query` for natural language questions across all threads
+- Use `watercooler_search` for keyword/semantic search with filters
+
 ### Role Alignment
 
 - Keep `spec` (session specialization) and Watercooler entry `Role` distinct but aligned:
@@ -519,3 +551,4 @@ When Claude uses Watercooler MCP tools:
 4. **Meaningful titles**: Use descriptive titles, not generic ones like "Update" or "Done"
 5. **Choose correct types**: Use `Decision` for decisions, `Plan` for plans, `PR` for PRs, `Closure` for closures
 6. **Manage ball appropriately**: Use `say` for normal back-and-forth, `ack` to keep ball, `handoff` for explicit coordination
+7. **Recall context proactively**: Before starting significant work, use `watercooler_smart_query` or `watercooler_search` to recall relevant prior decisions and context
