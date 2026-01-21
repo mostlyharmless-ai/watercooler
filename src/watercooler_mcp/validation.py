@@ -93,8 +93,9 @@ def _require_context_hosted(
     owner, repo_name = repo.split("/", 1)
     branch = http_ctx.effective_branch
 
-    # Get threads suffix from config (default: "-threads")
-    threads_suffix = config.paths.threads_suffix or "-threads"
+    # Threads suffix for deriving threads repo from code repo
+    # Hardcoded default - config.full().common.threads_suffix requires TOML loading
+    threads_suffix = "-threads"
 
     # Derive threads repo name from code repo name
     # e.g., "watercooler-site" -> "watercooler-site-threads"
