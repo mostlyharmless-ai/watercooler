@@ -537,10 +537,9 @@ graphiti-integration.md
 
 **5. Query via MCP:**
 ```python
-watercooler_query_memory(
+watercooler_smart_query(
     query="How was authentication implemented?",
-    code_path=".",
-    limit=10
+    code_path="."
 )
 ```
 
@@ -549,7 +548,7 @@ watercooler_query_memory(
 **Cross-thread queries** (search entire project):
 ```python
 # Find context across all threads
-watercooler_query_memory(
+watercooler_smart_query(
     query="What error handling patterns were used?",
     code_path="."
 )
@@ -557,10 +556,10 @@ watercooler_query_memory(
 
 **Single-thread queries** (focused search):
 ```python
-# Search within specific thread
-watercooler_query_memory(
+# Search within specific thread using watercooler_search
+watercooler_search(
     query="What tests were added?",
-    topic="auth-feature",
+    thread_topic="auth-feature",
     code_path="."
 )
 ```
@@ -568,16 +567,15 @@ watercooler_query_memory(
 **Temporal queries:**
 ```python
 # Discover evolution over time
-watercooler_query_memory(
+watercooler_smart_query(
     query="How did the API design change over time?",
-    code_path=".",
-    limit=20
+    code_path="."
 )
 ```
 
 ### Complete Documentation
 
-- **MCP Tool Reference**: [mcp-server.md#watercooler_query_memory](./mcp-server.md#watercooler_query_memory)
+- **MCP Tool Reference**: [mcp-server.md#memory-query-tools](./mcp-server.md#memory-query-tools)
 - **Environment Variables**: [ENVIRONMENT_VARS.md#graphiti-memory-variables](./ENVIRONMENT_VARS.md#graphiti-memory-variables)
 - **Graphiti Setup Guide**: [GRAPHITI_SETUP.md](./GRAPHITI_SETUP.md)
 
