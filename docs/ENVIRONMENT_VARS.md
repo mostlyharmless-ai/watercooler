@@ -760,7 +760,9 @@ export BASELINE_GRAPH_EXTRACTIVE_ONLY="true"
 
 ## Graphiti Memory Variables
 
-Variables for querying thread history via Graphiti temporal graph memory. These enable the `watercooler_query_memory` MCP tool.
+Variables for querying thread history via Graphiti temporal graph memory. These enable the `watercooler_smart_query` and `watercooler_search` MCP tools.
+
+> **Note:** `watercooler_query_memory` has been replaced by `watercooler_smart_query`. See [mcp-server.md#memory-query-tools](./mcp-server.md#memory-query-tools).
 
 ### WATERCOOLER_GRAPHITI_ENABLED
 
@@ -776,7 +778,7 @@ Variables for querying thread history via Graphiti temporal graph memory. These 
 
 **Details:**
 
-Enables the `watercooler_query_memory` tool for asking questions about thread history using Graphiti's temporal graph memory. When disabled, the tool returns an error message directing users to enable it.
+Enables the memory query tools (`watercooler_smart_query`, `watercooler_search`) for asking questions about thread history using Graphiti's temporal graph memory. When disabled, the tools return an error message directing users to enable it.
 
 **Prerequisites** (when enabled):
 - `OPENAI_API_KEY` environment variable set
@@ -837,7 +839,7 @@ export OPENAI_API_KEY="sk-..."
 **Related:**
 - See [GRAPHITI_SETUP.md](./GRAPHITI_SETUP.md) for complete setup guide
 - See [MEMORY.md](./MEMORY.md) for memory backend overview
-- See [mcp-server.md](./mcp-server.md#watercooler_query_memory) for tool reference
+- See [mcp-server.md](./mcp-server.md#memory-query-tools) for tool reference
 
 ---
 

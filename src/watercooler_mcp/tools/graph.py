@@ -10,6 +10,7 @@ Tools:
 - watercooler_access_stats: Access statistics
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -76,7 +77,7 @@ def infer_search_mode(mode: str, query: str, semantic: bool) -> str:
     return "entries"
 
 
-def route_search(
+async def route_search(
     ctx: Context,
     threads_dir: Path,
     query: str,
@@ -114,7 +115,7 @@ def route_search(
             # Route to Graphiti entity/episode search
             try:
                 if mode == "entities":
-                    return _search_graphiti_nodes_impl(
+                    return await _search_graphiti_nodes_impl(
                         ctx=ctx,
                         threads_dir=threads_dir,
                         query=query,
@@ -122,7 +123,7 @@ def route_search(
                         **kwargs,
                     )
                 else:  # episodes
-                    return _search_graphiti_episodes_impl(
+                    return await _search_graphiti_episodes_impl(
                         ctx=ctx,
                         threads_dir=threads_dir,
                         query=query,
@@ -139,7 +140,7 @@ def route_search(
     # Entries mode - route based on backend
     if backend == "graphiti":
         try:
-            return _search_graphiti_impl(
+            return await _search_graphiti_impl(
                 ctx=ctx,
                 threads_dir=threads_dir,
                 query=query,
@@ -290,7 +291,7 @@ def _search_baseline_impl(
     return json.dumps(output, indent=2)
 
 
-def _search_graphiti_impl(
+async def _search_graphiti_impl(
     ctx: Context,
     threads_dir: Path,
     query: str,
@@ -313,12 +314,8 @@ def _search_graphiti_impl(
         raise RuntimeError("Graphiti backend unavailable")
 
     # Use Graphiti's search_memory_facts for entry-level search
-    import asyncio
-
-    async def do_search():
-        return await backend.search_facts(query=query, max_facts=limit)
-
-    results = asyncio.get_event_loop().run_until_complete(do_search())
+    # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
+    results = await asyncio.to_thread(backend.search_facts, query=query, max_facts=limit)
 
     output: Dict[str, Any] = {
         "count": len(results),
@@ -339,7 +336,7 @@ def _search_graphiti_impl(
     return json.dumps(output, indent=2)
 
 
-def _search_graphiti_nodes_impl(
+async def _search_graphiti_nodes_impl(
     ctx: Context,
     threads_dir: Path,
     query: str,
@@ -358,12 +355,8 @@ def _search_graphiti_nodes_impl(
     if not backend:
         raise RuntimeError("Graphiti backend unavailable")
 
-    import asyncio
-
-    async def do_search():
-        return await backend.search_nodes(query=query, max_nodes=limit)
-
-    results = asyncio.get_event_loop().run_until_complete(do_search())
+    # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
+    results = await asyncio.to_thread(backend.search_nodes, query=query, max_nodes=limit)
 
     output: Dict[str, Any] = {
         "count": len(results),
@@ -384,7 +377,7 @@ def _search_graphiti_nodes_impl(
     return json.dumps(output, indent=2)
 
 
-def _search_graphiti_episodes_impl(
+async def _search_graphiti_episodes_impl(
     ctx: Context,
     threads_dir: Path,
     query: str,
@@ -403,12 +396,8 @@ def _search_graphiti_episodes_impl(
     if not backend:
         raise RuntimeError("Graphiti backend unavailable")
 
-    import asyncio
-
-    async def do_search():
-        return await backend.get_episodes(query=query, max_episodes=limit)
-
-    results = asyncio.get_event_loop().run_until_complete(do_search())
+    # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
+    results = await asyncio.to_thread(backend.get_episodes, query=query, max_episodes=limit)
 
     output: Dict[str, Any] = {
         "count": len(results),
@@ -626,7 +615,7 @@ def _baseline_graph_build_impl(
         return f"Error building baseline graph: {str(e)}"
 
 
-def _search_graph_impl(
+async def _search_graph_impl(
     ctx: Context,
     code_path: str = "",
     query: str = "",
@@ -648,9 +637,17 @@ def _search_graph_impl(
 ) -> str:
     """Unified search across threads and entries with tier-aware routing.
 
-    Supports keyword search, semantic search with embeddings, time-based
-    filtering, and metadata filters. Routes to appropriate backend based on
-    tier (free/paid) and mode (entries/entities/episodes).
+    This is the primary search tool for watercooler threads and memory. It supports
+    keyword search, semantic search with embeddings, time-based filtering, and
+    metadata filters. Routes to the appropriate backend based on configuration.
+
+    Mode Parameter (replaces removed tools):
+        - mode="entries" (default): Search thread entries. This is the standard
+          search mode for finding content in watercooler threads.
+        - mode="entities": Search entity nodes extracted by Graphiti. Replaces
+          the removed watercooler_search_nodes tool.
+        - mode="episodes": Search episodic content from Graphiti. Replaces the
+          removed watercooler_get_episodes tool.
 
     Args:
         code_path: Path to code repository (for resolving threads dir).
@@ -673,8 +670,10 @@ def _search_graph_impl(
         mode: Search mode - "auto", "entries", "entities", or "episodes".
             - auto: Infer from query (default is entries)
             - entries: Search thread entries (baseline graph or Graphiti facts)
-            - entities: Search entity nodes (requires Graphiti)
-            - episodes: Search episodes (requires Graphiti)
+            - entities: Search entity nodes (requires Graphiti backend). Use this
+              mode instead of the removed watercooler_search_nodes tool.
+            - episodes: Search episodes (requires Graphiti backend). Use this
+              mode instead of the removed watercooler_get_episodes tool.
         backend: Search backend - "auto", "baseline", "graphiti", or "leanrag".
             - auto: Use WATERCOOLER_MEMORY_BACKEND env var, fallback to baseline
             - baseline: Free tier - baseline graph only
@@ -683,6 +682,16 @@ def _search_graph_impl(
 
     Returns:
         JSON with search results including matched nodes and metadata.
+
+    Examples:
+        # Search thread entries (default mode)
+        watercooler_search(query="authentication", code_path=".")
+
+        # Search entity nodes (replaces watercooler_search_nodes)
+        watercooler_search(query="OAuth2", mode="entities", limit=10)
+
+        # Search episodes (replaces watercooler_get_episodes)
+        watercooler_search(query="implementation decisions", mode="episodes", limit=10)
     """
     try:
         error, context = validation._require_context(code_path)
@@ -700,7 +709,7 @@ def _search_graph_impl(
         resolved_mode = infer_search_mode(mode, query, semantic)
 
         # Route to appropriate search implementation
-        return route_search(
+        return await route_search(
             ctx=ctx,
             threads_dir=threads_dir,
             query=query,

@@ -296,9 +296,11 @@ When memory backend is enabled, the following MCP tools become available:
 |------|-------------|
 | `watercooler_graphiti_add_episode` | Add content directly to Graphiti temporal graph |
 | `watercooler_leanrag_run_pipeline` | Trigger LeanRAG clustering pipeline |
-| `watercooler_query_memory` | Query memory backend for facts/entities |
-| `watercooler_search_nodes` | Search for entity nodes |
-| `watercooler_search_memory_facts` | Search for facts/relationships |
+| `watercooler_smart_query` | Multi-tier intelligent query with auto-escalation |
+| `watercooler_search` | Unified search (`mode`: entries/entities/episodes) |
+| `watercooler_get_entity_edge` | Get specific entity/edge by UUID |
+
+> **Note:** `watercooler_query_memory`, `watercooler_search_nodes`, and `watercooler_search_memory_facts` have been replaced. See [mcp-server.md#memory-query-tools](./mcp-server.md#memory-query-tools).
 
 #### Example: Adding an Episode to Graphiti
 
