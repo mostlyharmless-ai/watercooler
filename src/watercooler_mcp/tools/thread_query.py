@@ -129,7 +129,7 @@ def _list_threads_impl(
 
         # Get thread list (graph-first with markdown fallback)
         scan_start = time.time()
-        threads = _list_threads_graph_first(threads_dir, open_only=open_only)
+        threads = _list_threads_graph_first(threads_dir, open_only=open_only, agent=agent)
         scan_elapsed = time.time() - scan_start
         log_debug(f"list_threads scanned {len(threads)} threads in {scan_elapsed:.2f}s")
 

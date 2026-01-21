@@ -455,7 +455,26 @@ Generate index summary of all threads.
 
 Tools for querying thread history using Graphiti temporal graph memory. These tools enable semantic search across project context to answer questions about implementation details, decisions, and temporal evolution.
 
-#### `watercooler_query_memory`
+> **⚠️ Tool Consolidation Notice (January 2026)**
+>
+> The following tools have been removed and consolidated into unified alternatives:
+>
+> | Removed Tool | Replacement |
+> |--------------|-------------|
+> | `watercooler_query_memory` | `watercooler_smart_query` |
+> | `watercooler_search_nodes` | `watercooler_search(mode="entities")` |
+> | `watercooler_search_memory_facts` | `watercooler_smart_query` |
+> | `watercooler_get_episodes` | `watercooler_search(mode="episodes")` |
+>
+> **Active tools:**
+> - `watercooler_smart_query` - Multi-tier intelligent query with auto-escalation
+> - `watercooler_search` - Unified search with `mode` parameter (`entries`, `entities`, `episodes`)
+> - `watercooler_get_entity_edge` - Get specific entity/edge by UUID
+> - `watercooler_diagnose_memory` - Diagnose memory backend status
+>
+> The documentation below is preserved for reference but describes removed tools.
+
+#### `watercooler_query_memory` *(Removed)*
 Query thread history using Graphiti temporal graph memory.
 
 **Purpose:** Ask natural language questions about thread history, implementation details, architectural decisions, and temporal evolution of the project.
@@ -628,9 +647,11 @@ services:
       - "6379:6379"
 ```
 
-#### `watercooler_search_nodes`
+#### `watercooler_search_nodes` *(Removed)*
 
 Search for entity nodes in the Graphiti knowledge graph using hybrid semantic search.
+
+> **Replacement:** Use `watercooler_search(mode="entities", query="...", limit=10)`
 
 **Purpose:** Discover entities (people, concepts, technologies, components) mentioned in threads and explore their relationships.
 
@@ -717,9 +738,11 @@ watercooler_get_entity_edge(
 }
 ```
 
-#### `watercooler_search_memory_facts`
+#### `watercooler_search_memory_facts` *(Removed)*
 
 Search for facts (relationships) with optional center-node traversal.
+
+> **Replacement:** Use `watercooler_smart_query(query="...")`
 
 **Purpose:** Discover specific relationships and facts about entities, optionally centered around a specific entity node.
 
@@ -777,9 +800,11 @@ watercooler_search_memory_facts(
 )
 ```
 
-#### `watercooler_get_episodes`
+#### `watercooler_get_episodes` *(Removed)*
 
 Search for episodic content using semantic search.
+
+> **Replacement:** Use `watercooler_search(mode="episodes", query="...", limit=10)`
 
 **Purpose:** Retrieve episodes (thread entry content) from Graphiti memory based on semantic relevance.
 

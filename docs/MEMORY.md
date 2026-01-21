@@ -479,7 +479,11 @@ for evidence in result.top_results(5):
 
 ## Querying Memory via MCP
 
-The Watercooler MCP server provides a `watercooler_query_memory` tool for querying thread history using Graphiti's temporal graph memory. This enables agents to ask natural language questions about project context, implementation details, and decisions.
+> **⚠️ Tool Consolidation Notice (January 2026)**
+>
+> `watercooler_query_memory` has been replaced by `watercooler_smart_query`, which provides multi-tier intelligent querying with auto-escalation. See [mcp-server.md](./mcp-server.md#memory-query-tools) for the full replacement mapping.
+
+The Watercooler MCP server provides memory query tools for querying thread history using Graphiti's temporal graph memory. This enables agents to ask natural language questions about project context, implementation details, and decisions.
 
 ### Quick Setup
 
@@ -1034,11 +1038,16 @@ The following MCP tools provide memory backend integration:
 
 | Tool | Description |
 |------|-------------|
-| `watercooler_search` | Unified search with tier-aware routing |
-| `watercooler_search_nodes` | Search Graphiti entity nodes |
-| `watercooler_search_memory_facts` | Search Graphiti facts/relationships |
-| `watercooler_query_memory` | Query memory backend for facts/entities |
-| `watercooler_get_episodes` | Search Graphiti episodes |
+| `watercooler_smart_query` | Multi-tier intelligent query with auto-escalation |
+| `watercooler_search` | Unified search with tier-aware routing (`mode`: entries/entities/episodes) |
+| `watercooler_get_entity_edge` | Get specific entity/edge by UUID |
+| `watercooler_diagnose_memory` | Diagnose memory backend status |
+
+> **Removed tools** (use replacements above):
+> - `watercooler_query_memory` → `watercooler_smart_query`
+> - `watercooler_search_nodes` → `watercooler_search(mode="entities")`
+> - `watercooler_search_memory_facts` → `watercooler_smart_query`
+> - `watercooler_get_episodes` → `watercooler_search(mode="episodes")`
 
 #### Migration
 

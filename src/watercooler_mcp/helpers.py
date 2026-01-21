@@ -789,13 +789,14 @@ def _list_threads_graph_first(
                     # This is a heuristic - the ball being elsewhere suggests
                     # another agent has contributed since the current agent last
                     # had the ball.
-                    if agent:
+                    if agent and gt.ball:
                         # Normalize comparison (case-insensitive, partial match)
-                        ball_lower = (gt.ball or "").lower()
+                        ball_lower = gt.ball.lower()
                         agent_lower = agent.lower()
                         # is_new if ball is not held by this agent
                         is_new = agent_lower not in ball_lower
                     else:
+                        # No agent provided or empty ball - can't determine is_new
                         is_new = False
                     result.append(
                         (

@@ -86,10 +86,12 @@ Use watercooler_graphiti_add_episode to add:
 
 **Query the memory:**
 ```
-Use watercooler_query_memory with:
+Use watercooler_smart_query with:
 - query: "Graphiti memory"
 - code_path: "."
 ```
+
+> **Note:** `watercooler_query_memory` has been replaced by `watercooler_smart_query`.
 
 You should see the test episode returned with extracted entities and facts.
 
@@ -379,7 +381,9 @@ for result in results:
 
 ## MCP Integration
 
-The Watercooler MCP server includes a `watercooler_query_memory` tool for querying Graphiti-indexed thread history. This enables agents to ask natural language questions about project context.
+The Watercooler MCP server includes `watercooler_smart_query` for querying Graphiti-indexed thread history. This enables agents to ask natural language questions about project context.
+
+> **Note:** `watercooler_query_memory` has been replaced by `watercooler_smart_query`, which provides multi-tier intelligent querying with auto-escalation.
 
 ### Quick Setup
 
@@ -416,17 +420,16 @@ python -m watercooler_memory.pipeline run \
 
 **3. Query via MCP:**
 ```python
-watercooler_query_memory(
+watercooler_smart_query(
     query="How was authentication implemented?",
-    code_path=".",
-    limit=10
+    code_path="."
 )
 ```
 
-**Database structure:** All threads are stored in a single FalkorDB database with logical partitioning via `group_id`. Queries can search across all threads (omit `topic`) or filter to a single thread (specify `topic`).
+**Database structure:** All threads are stored in a single FalkorDB database with logical partitioning via `group_id`. Queries can search across all threads or filter to a single thread.
 
 **Complete documentation:**
-- **MCP Tool Reference**: [mcp-server.md#watercooler_query_memory](./mcp-server.md#watercooler_query_memory)
+- **MCP Tool Reference**: [mcp-server.md#memory-query-tools](./mcp-server.md#memory-query-tools)
 - **Environment Variables**: [ENVIRONMENT_VARS.md#graphiti-memory-variables](./ENVIRONMENT_VARS.md#graphiti-memory-variables)
 - **MCP Querying Guide**: [MEMORY.md#querying-memory-via-mcp](./MEMORY.md#querying-memory-via-mcp)
 
