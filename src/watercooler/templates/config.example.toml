@@ -411,6 +411,23 @@ auto_detect_services = true
 # embedding_model = ""
 # embedding_api_base = ""
 
+# Chunking settings for entry sync
+# When enabled, long entries are split into chunks before indexing to Graphiti.
+# Each chunk becomes a separate episode linked via previous_episode_uuids.
+# This improves retrieval by avoiding "lost in the middle" issues with long text.
+#
+# Enable/disable chunking during sync
+# Env: WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC
+# chunk_on_sync = true
+#
+# Maximum tokens per chunk (768 balances comprehensiveness vs retrieval quality)
+# Env: WATERCOOLER_GRAPHITI_CHUNK_MAX_TOKENS
+# chunk_max_tokens = 768
+#
+# Token overlap between chunks for context continuity
+# Env: WATERCOOLER_GRAPHITI_CHUNK_OVERLAP
+# chunk_overlap = 64
+
 
 # -----------------------------------------------------------------------------
 # LeanRAG-Specific Settings
@@ -504,6 +521,9 @@ auto_detect_services = true
 # memory.database.port           FALKORDB_PORT
 # memory.database.password       FALKORDB_PASSWORD
 # memory.graphiti.reranker       WATERCOOLER_GRAPHITI_RERANKER
+# memory.graphiti.chunk_on_sync  WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC
+# memory.graphiti.chunk_max_tokens WATERCOOLER_GRAPHITI_CHUNK_MAX_TOKENS
+# memory.graphiti.chunk_overlap  WATERCOOLER_GRAPHITI_CHUNK_OVERLAP
 #
 # Priority (highest first): CLI args > Env vars > Project config > User config > Defaults
 # =============================================================================

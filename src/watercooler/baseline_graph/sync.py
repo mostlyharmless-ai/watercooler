@@ -1153,6 +1153,9 @@ def get_memory_backend_config() -> Optional[Dict[str, Any]]:
     - "graphiti": Sync to Graphiti temporal graph
     - "leanrag": Trigger LeanRAG clustering pipeline
 
+    Auto-detection: If WATERCOOLER_GRAPHITI_ENABLED=1 is set but
+    WATERCOOLER_MEMORY_BACKEND is not, defaults to "graphiti".
+
     Returns:
         Config dict with backend name, or None if disabled
     """
@@ -1162,6 +1165,14 @@ def get_memory_backend_config() -> Optional[Dict[str, Any]]:
         return None
 
     backend = os.environ.get("WATERCOOLER_MEMORY_BACKEND", "").lower().strip()
+
+    # Auto-detect: if WATERCOOLER_GRAPHITI_ENABLED=1 but no backend specified,
+    # default to graphiti for automatic entry sync
+    if not backend:
+        graphiti_enabled = os.environ.get("WATERCOOLER_GRAPHITI_ENABLED", "").lower()
+        if graphiti_enabled in ("1", "true", "yes"):
+            backend = "graphiti"
+            logger.debug("MEMORY: Auto-detected graphiti backend from WATERCOOLER_GRAPHITI_ENABLED=1")
 
     if not backend:
         return None
@@ -1186,11 +1197,23 @@ _sync_executor_shutdown_registered = False
 
 
 def _shutdown_sync_executor() -> None:
-    """Gracefully shutdown the sync executor on process exit."""
+    """Shutdown the sync executor on process exit.
+
+    Uses wait=False for true fire-and-forget behavior. During process
+    shutdown, waiting for background tasks causes issues because:
+    1. The callback might be blocked on async operations (e.g., Graphiti LLM calls)
+    2. Python's default executors are already shutting down
+    3. Trying to schedule work in graphiti_core fails with
+       "cannot schedule new futures after shutdown"
+
+    With wait=False, we abandon incomplete background work gracefully
+    rather than blocking and triggering cascading shutdown errors.
+    """
     global _sync_executor
     if _sync_executor is not None:
         try:
-            _sync_executor.shutdown(wait=True)
+            # Don't wait - let background tasks be abandoned on exit
+            _sync_executor.shutdown(wait=False)
         except Exception:
             # Ignore errors during shutdown (process is exiting anyway)
             pass
