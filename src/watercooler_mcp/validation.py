@@ -93,18 +93,25 @@ def _require_context_hosted(
     owner, repo_name = repo.split("/", 1)
     branch = http_ctx.effective_branch
 
+    # Get threads suffix from config (default: "-threads")
+    threads_suffix = config.paths.threads_suffix or "-threads"
+
+    # Derive threads repo name from code repo name
+    # e.g., "watercooler-site" -> "watercooler-site-threads"
+    threads_repo_name = f"{repo_name}{threads_suffix}"
+
     # Construct ThreadContext for hosted mode
     # - threads_dir uses a sentinel path to indicate hosted mode
     # - Tools should check is_hosted_context() before filesystem operations
     context = ThreadContext(
         code_root=None,  # No local filesystem in hosted mode
         threads_dir=HOSTED_MODE_SENTINEL,  # Sentinel indicating hosted mode
-        threads_repo_url=f"https://github.com/{owner}/{repo_name}",
-        code_repo=repo,  # The threads repo itself (in hosted mode, this IS the repo)
+        threads_repo_url=f"https://github.com/{owner}/{threads_repo_name}",
+        code_repo=repo,  # The CODE repo (from X-Repo header)
         code_branch=branch,
         code_commit=None,  # No local git commit info
         code_remote=f"https://github.com/{owner}/{repo_name}.git",
-        threads_slug=repo_name,
+        threads_slug=threads_repo_name,
         explicit_dir=True,  # We have explicit context from HTTP headers
     )
 
