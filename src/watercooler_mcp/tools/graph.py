@@ -648,9 +648,17 @@ def _search_graph_impl(
 ) -> str:
     """Unified search across threads and entries with tier-aware routing.
 
-    Supports keyword search, semantic search with embeddings, time-based
-    filtering, and metadata filters. Routes to appropriate backend based on
-    tier (free/paid) and mode (entries/entities/episodes).
+    This is the primary search tool for watercooler threads and memory. It supports
+    keyword search, semantic search with embeddings, time-based filtering, and
+    metadata filters. Routes to the appropriate backend based on configuration.
+
+    Mode Parameter (replaces removed tools):
+        - mode="entries" (default): Search thread entries. This is the standard
+          search mode for finding content in watercooler threads.
+        - mode="entities": Search entity nodes extracted by Graphiti. Replaces
+          the removed watercooler_search_nodes tool.
+        - mode="episodes": Search episodic content from Graphiti. Replaces the
+          removed watercooler_get_episodes tool.
 
     Args:
         code_path: Path to code repository (for resolving threads dir).
@@ -673,8 +681,10 @@ def _search_graph_impl(
         mode: Search mode - "auto", "entries", "entities", or "episodes".
             - auto: Infer from query (default is entries)
             - entries: Search thread entries (baseline graph or Graphiti facts)
-            - entities: Search entity nodes (requires Graphiti)
-            - episodes: Search episodes (requires Graphiti)
+            - entities: Search entity nodes (requires Graphiti backend). Use this
+              mode instead of the removed watercooler_search_nodes tool.
+            - episodes: Search episodes (requires Graphiti backend). Use this
+              mode instead of the removed watercooler_get_episodes tool.
         backend: Search backend - "auto", "baseline", "graphiti", or "leanrag".
             - auto: Use WATERCOOLER_MEMORY_BACKEND env var, fallback to baseline
             - baseline: Free tier - baseline graph only
@@ -683,6 +693,16 @@ def _search_graph_impl(
 
     Returns:
         JSON with search results including matched nodes and metadata.
+
+    Examples:
+        # Search thread entries (default mode)
+        watercooler_search(query="authentication", code_path=".")
+
+        # Search entity nodes (replaces watercooler_search_nodes)
+        watercooler_search(query="OAuth2", mode="entities", limit=10)
+
+        # Search episodes (replaces watercooler_get_episodes)
+        watercooler_search(query="implementation decisions", mode="episodes", limit=10)
     """
     try:
         error, context = validation._require_context(code_path)

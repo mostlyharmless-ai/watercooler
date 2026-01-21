@@ -168,11 +168,8 @@ validate_branch_pairing_tool = _branch_parity_tools.validate_branch_pairing_tool
 sync_branch_state = _branch_parity_tools.sync_branch_state_tool
 audit_branch_pairing = _branch_parity_tools.audit_branch_pairing_tool
 recover_branch_state = _branch_parity_tools.recover_branch_state_tool
-query_memory = _memory_tools.query_memory
-search_nodes = _memory_tools.search_nodes
+# Memory tools (some tools removed - see replacement mappings in tools/memory.py)
 get_entity_edge = _memory_tools.get_entity_edge
-search_memory_facts = _memory_tools.search_memory_facts
-get_episodes = _memory_tools.get_episodes
 diagnose_memory = _memory_tools.diagnose_memory
 
 

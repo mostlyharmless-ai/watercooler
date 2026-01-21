@@ -762,12 +762,15 @@ def _load_thread_entries_graph_first(
 def _list_threads_graph_first(
     threads_dir: Path,
     open_only: bool | None = None,
+    agent: str | None = None,
 ) -> list[tuple[str, str, str, str, Path, bool]]:
     """List threads, trying graph first with markdown fallback.
 
     Args:
         threads_dir: Threads directory
         open_only: Filter by status
+        agent: Current agent name (optional). If provided, used to compute is_new
+            flag based on whether the ball is held by someone else.
 
     Returns:
         List of thread tuples (title, status, ball, updated, path, is_new)
@@ -781,9 +784,19 @@ def _list_threads_graph_first(
                 result = []
                 for gt in graph_threads:
                     thread_path = threads_dir / f"{gt.topic}.md"
-                    # is_new would require checking against agent's last contribution
-                    # For now, set to False - the markdown fallback handles this
-                    is_new = False
+                    # Compute is_new: if agent is provided and ball is held by
+                    # someone else, there may be new content to review.
+                    # This is a heuristic - the ball being elsewhere suggests
+                    # another agent has contributed since the current agent last
+                    # had the ball.
+                    if agent:
+                        # Normalize comparison (case-insensitive, partial match)
+                        ball_lower = (gt.ball or "").lower()
+                        agent_lower = agent.lower()
+                        # is_new if ball is not held by this agent
+                        is_new = agent_lower not in ball_lower
+                    else:
+                        is_new = False
                     result.append(
                         (
                             gt.title,
