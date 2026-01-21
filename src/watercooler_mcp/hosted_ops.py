@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+from watercooler.config_facade import config
 from watercooler.thread_entries import parse_thread_entries, ThreadEntry
 
 from .context import get_http_context, HttpRequestContext
@@ -90,36 +91,28 @@ def _get_github_client() -> tuple[str | None, GitHubClient | None]:
 
     http_ctx = get_http_context()
 
-    # Diagnostic: Log HTTP context state
-    print(f"[DIAG] _get_github_client: http_ctx={'present' if http_ctx else 'None'}", file=sys.stderr, flush=True)
-    if http_ctx:
-        print(f"[DIAG] _get_github_client: repo={http_ctx.repo}, branch={http_ctx.branch}, effective_branch={http_ctx.effective_branch}, has_token={bool(http_ctx.github_token)}", file=sys.stderr, flush=True)
-
     if not http_ctx:
-        print(f"[DIAG] _get_github_client: ERROR - No HTTP context", file=sys.stderr, flush=True)
         return ("No HTTP context available for hosted mode", None)
 
     if not http_ctx.github_token:
-        print(f"[DIAG] _get_github_client: ERROR - No GitHub token", file=sys.stderr, flush=True)
         return ("No GitHub token available for hosted mode", None)
 
     if not http_ctx.repo:
-        print(f"[DIAG] _get_github_client: ERROR - No repository", file=sys.stderr, flush=True)
         return ("No repository specified in HTTP context", None)
 
-    # Convert code repo to threads repo by appending -threads suffix
+    # Convert code repo to threads repo by appending configured suffix
     # e.g., "owner/repo" -> "owner/repo-threads"
-    threads_suffix = "-threads"
+    try:
+        threads_suffix = config.full().threads_suffix
+    except Exception:
+        threads_suffix = "-threads"  # Fallback to default
     threads_repo = f"{http_ctx.repo}{threads_suffix}"
-
-    print(f"[DIAG] _get_github_client: code_repo={http_ctx.repo} -> threads_repo={threads_repo}, branch={http_ctx.effective_branch}", file=sys.stderr, flush=True)
 
     client = GitHubClient(
         token=http_ctx.github_token,
         repo=threads_repo,
         branch=http_ctx.effective_branch,
     )
-    print(f"[DIAG] _get_github_client: SUCCESS - client created for {threads_repo}@{http_ctx.effective_branch}", file=sys.stderr, flush=True)
     return (None, client)
 
 
@@ -135,19 +128,13 @@ def list_threads_hosted(
         Tuple of (error_message, threads). If error_message is not None,
         threads will be empty.
     """
-    import sys
-    print(f"[DEBUG] list_threads_hosted: entry, open_only={open_only}", file=sys.stderr)
-
     error, client = _get_github_client()
-    print(f"[DEBUG] list_threads_hosted: client error={error}, client={client}", file=sys.stderr)
     if error or not client:
         return (error or "Failed to create GitHub client", [])
 
     try:
         # List all .md files in root
-        print(f"[DEBUG] list_threads_hosted: calling list_files", file=sys.stderr)
         files = client.list_files("")
-        print(f"[DEBUG] list_threads_hosted: got {len(files)} files", file=sys.stderr)
         md_files = [f for f in files if f.name.endswith(".md") and f.type == "file"]
 
         threads: list[HostedThread] = []
@@ -192,13 +179,10 @@ def list_threads_hosted(
         return (None, threads)
 
     except GitHubAPIError as e:
-        import sys
-        print(f"[DEBUG] list_threads_hosted: GitHubAPIError: {e}", file=sys.stderr)
         log_error(f"list_threads_hosted failed: {e}")
         return (f"GitHub API error: {e}", [])
     except Exception as e:
-        import sys
-        print(f"[DEBUG] list_threads_hosted: UNEXPECTED ERROR: {type(e).__name__}: {e}", file=sys.stderr)
+        log_error(f"list_threads_hosted unexpected error: {type(e).__name__}: {e}")
         raise
 
 
@@ -1271,35 +1255,25 @@ def say_hosted(
         Tuple of (error_message, result_dict). If error_message is not None,
         result_dict will be empty.
     """
-    import sys
     from ulid import ULID
-
-    # Diagnostic: Log entry point with all parameters
-    print(f"[DIAG] say_hosted: ENTRY topic={topic}, title={title[:50]}..., agent={agent}, role={role}, entry_type={entry_type}, create_if_missing={create_if_missing}", file=sys.stderr, flush=True)
 
     error, client = _get_github_client()
     if error or not client:
-        print(f"[DIAG] say_hosted: ERROR - _get_github_client failed: {error}", file=sys.stderr, flush=True)
         return (error or "Failed to create GitHub client", {})
 
     http_ctx = get_http_context()
     if not http_ctx:
-        print(f"[DIAG] say_hosted: ERROR - No HTTP context after client creation", file=sys.stderr, flush=True)
         return ("No HTTP context available", {})
 
     entry_id = entry_id or str(ULID())
     timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    print(f"[DIAG] say_hosted: entry_id={entry_id}, timestamp={timestamp}", file=sys.stderr, flush=True)
 
     try:
         # First, check if thread exists in per-thread format (canonical)
-        print(f"[DIAG] say_hosted: checking per-thread format for topic={topic}", file=sys.stderr, flush=True)
         meta, existing_entries, existing_edges, meta_sha, entries_sha, edges_sha = _read_per_thread_graph(client, topic)
-        print(f"[DIAG] say_hosted: _read_per_thread_graph returned meta={'present' if meta else 'None'}, entries_count={len(existing_entries) if existing_entries else 0}", file=sys.stderr, flush=True)
 
         if meta is not None:
             # Thread exists in per-thread format - use it
-            print(f"[DIAG] say_hosted: FOUND thread in per-thread format: {topic}", file=sys.stderr, flush=True)
             log_debug(f"say_hosted: found thread in per-thread format: {topic}")
 
             # Get current status and ball from meta
@@ -1347,7 +1321,6 @@ def say_hosted(
             )
 
             if new_meta_sha:
-                print(f"[DIAG] say_hosted: SUCCESS (per-thread) topic={topic}, entry_id={entry_id}, sha={new_meta_sha[:8]}", file=sys.stderr, flush=True)
                 log_debug(f"say_hosted: wrote entry to per-thread format {topic} (meta_sha={new_meta_sha[:8]})")
 
                 # Sync entry to Slack (non-blocking, non-fatal)
@@ -1380,11 +1353,10 @@ def say_hosted(
                     "format": "per-thread",
                 })
             else:
-                print(f"[DIAG] say_hosted: ERROR - _write_per_thread_graph failed for {topic}", file=sys.stderr, flush=True)
+                log_error(f"say_hosted: _write_per_thread_graph failed for {topic}")
                 return (f"Failed to write entry to per-thread format for {topic}", {})
 
         # Fall back to legacy .md format
-        print(f"[DIAG] say_hosted: NOT FOUND in per-thread format, trying legacy .md: {topic}", file=sys.stderr, flush=True)
         log_debug(f"say_hosted: thread not in per-thread format, trying legacy .md: {topic}")
         file_path = f"{topic}.md"
         file_content = None
@@ -1393,11 +1365,8 @@ def say_hosted(
             file_content = client.get_file(file_path)
             existing_sha = file_content.sha
             current_content = file_content.content
-            print(f"[DIAG] say_hosted: FOUND legacy .md file: {file_path}", file=sys.stderr, flush=True)
         except GitHubNotFoundError:
-            print(f"[DIAG] say_hosted: NOT FOUND legacy .md file: {file_path}, create_if_missing={create_if_missing}", file=sys.stderr, flush=True)
             if not create_if_missing:
-                print(f"[DIAG] say_hosted: ERROR - Thread not found and create_if_missing=False", file=sys.stderr, flush=True)
                 return (f"Thread '{topic}' not found in per-thread format or legacy .md and create_if_missing=False", {})
             current_content = None
 
@@ -1501,7 +1470,7 @@ def say_hosted(
             if slack_synced:
                 log_debug(f"say_hosted: synced entry to Slack for {topic}")
 
-        print(f"[DIAG] say_hosted: SUCCESS (legacy .md) topic={topic}, entry_id={entry_id}, sha={new_sha[:8] if new_sha else 'None'}", file=sys.stderr, flush=True)
+        log_debug(f"say_hosted: SUCCESS (legacy .md) topic={topic}, entry_id={entry_id}")
         return (None, {
             "topic": topic,
             "entry_id": entry_id,
@@ -1514,11 +1483,9 @@ def say_hosted(
         })
 
     except GitHubAPIError as e:
-        print(f"[DIAG] say_hosted: EXCEPTION GitHubAPIError: {e}", file=sys.stderr, flush=True)
         log_error(f"say_hosted failed: {e}")
         return (f"GitHub API error: {e}", {})
     except Exception as e:
-        print(f"[DIAG] say_hosted: EXCEPTION {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         log_error(f"say_hosted failed with unexpected error: {e}")
         return (f"Unexpected error: {e}", {})
 
