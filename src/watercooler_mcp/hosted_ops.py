@@ -1262,12 +1262,99 @@ def say_hosted(
     if not http_ctx:
         return ("No HTTP context available", {})
 
-    file_path = f"{topic}.md"
     entry_id = entry_id or str(ULID())
     timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
-        # Try to read existing thread
+        # First, check if thread exists in per-thread format (canonical)
+        meta, existing_entries, existing_edges, meta_sha, entries_sha, edges_sha = _read_per_thread_graph(client, topic)
+
+        if meta is not None:
+            # Thread exists in per-thread format - use it
+            log_debug(f"say_hosted: found thread in per-thread format: {topic}")
+
+            # Get current status and ball from meta
+            status = meta.get("status", "OPEN")
+            old_ball = meta.get("ball", "Agent")
+
+            # Determine new ball owner (flip to "other" agent)
+            agent_lower = agent.lower()
+            old_ball_lower = (old_ball or "").lower()
+            if old_ball_lower == agent_lower or not old_ball:
+                new_ball = "Agent"  # Default counterpart
+            else:
+                new_ball = agent  # Give ball to current agent
+
+            # Build updated graph data with new entry
+            new_meta, new_entries, new_edges = _build_per_thread_graph_data(
+                topic=topic,
+                status=status,
+                ball=new_ball,
+                title=meta.get("title", topic),
+                existing_meta=meta,
+                existing_entries=existing_entries,
+                existing_edges=existing_edges,
+                entry_id=entry_id,
+                agent=agent,
+                role=role,
+                entry_type=entry_type,
+                entry_title=title,
+                body=body,
+                timestamp=timestamp,
+            )
+
+            # Write to per-thread format
+            commit_message = f"[watercooler] {topic}: {title}\n\nEntry-ID: {entry_id}"
+            new_meta_sha, new_entries_sha, new_edges_sha = _write_per_thread_graph(
+                client,
+                topic=topic,
+                meta=new_meta,
+                entries=new_entries,
+                edges=new_edges,
+                meta_sha=meta_sha,
+                entries_sha=entries_sha,
+                edges_sha=edges_sha,
+                commit_message=commit_message,
+            )
+
+            if new_meta_sha:
+                log_debug(f"say_hosted: wrote entry to per-thread format {topic} (meta_sha={new_meta_sha[:8]})")
+
+                # Sync entry to Slack (non-blocking, non-fatal)
+                slack_synced = False
+                if http_ctx.repo:
+                    slack_synced = _sync_entry_to_slack_site(
+                        repo_full_name=http_ctx.repo,
+                        topic=topic,
+                        branch=http_ctx.branch or "main",
+                        entry_id=entry_id,
+                        agent=agent,
+                        role=role,
+                        entry_type=entry_type,
+                        title=title,
+                        body=body,
+                        timestamp=timestamp,
+                    )
+                    if slack_synced:
+                        log_debug(f"say_hosted: synced entry to Slack for {topic}")
+
+                return (None, {
+                    "topic": topic,
+                    "entry_id": entry_id,
+                    "timestamp": timestamp,
+                    "status": status,
+                    "ball": new_ball,
+                    "sha": new_meta_sha,
+                    "graph_updated": True,
+                    "slack_synced": slack_synced,
+                    "format": "per-thread",
+                })
+            else:
+                return (f"Failed to write entry to per-thread format for {topic}", {})
+
+        # Fall back to legacy .md format
+        log_debug(f"say_hosted: thread not in per-thread format, trying legacy .md: {topic}")
+        file_path = f"{topic}.md"
         file_content = None
         existing_sha = None
         try:
@@ -1276,7 +1363,7 @@ def say_hosted(
             current_content = file_content.content
         except GitHubNotFoundError:
             if not create_if_missing:
-                return (f"Thread '{topic}' not found and create_if_missing=False", {})
+                return (f"Thread '{topic}' not found in per-thread format or legacy .md and create_if_missing=False", {})
             current_content = None
 
         if current_content:
