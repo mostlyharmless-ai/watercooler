@@ -10,6 +10,7 @@ Tools:
 - watercooler_access_stats: Access statistics
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -76,7 +77,7 @@ def infer_search_mode(mode: str, query: str, semantic: bool) -> str:
     return "entries"
 
 
-def route_search(
+async def route_search(
     ctx: Context,
     threads_dir: Path,
     query: str,
@@ -114,7 +115,7 @@ def route_search(
             # Route to Graphiti entity/episode search
             try:
                 if mode == "entities":
-                    return _search_graphiti_nodes_impl(
+                    return await _search_graphiti_nodes_impl(
                         ctx=ctx,
                         threads_dir=threads_dir,
                         query=query,
@@ -122,7 +123,7 @@ def route_search(
                         **kwargs,
                     )
                 else:  # episodes
-                    return _search_graphiti_episodes_impl(
+                    return await _search_graphiti_episodes_impl(
                         ctx=ctx,
                         threads_dir=threads_dir,
                         query=query,
@@ -139,7 +140,7 @@ def route_search(
     # Entries mode - route based on backend
     if backend == "graphiti":
         try:
-            return _search_graphiti_impl(
+            return await _search_graphiti_impl(
                 ctx=ctx,
                 threads_dir=threads_dir,
                 query=query,
@@ -290,7 +291,7 @@ def _search_baseline_impl(
     return json.dumps(output, indent=2)
 
 
-def _search_graphiti_impl(
+async def _search_graphiti_impl(
     ctx: Context,
     threads_dir: Path,
     query: str,
@@ -313,12 +314,8 @@ def _search_graphiti_impl(
         raise RuntimeError("Graphiti backend unavailable")
 
     # Use Graphiti's search_memory_facts for entry-level search
-    import asyncio
-
-    async def do_search():
-        return await backend.search_facts(query=query, max_facts=limit)
-
-    results = asyncio.get_event_loop().run_until_complete(do_search())
+    # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
+    results = await asyncio.to_thread(backend.search_facts, query=query, max_facts=limit)
 
     output: Dict[str, Any] = {
         "count": len(results),
@@ -339,7 +336,7 @@ def _search_graphiti_impl(
     return json.dumps(output, indent=2)
 
 
-def _search_graphiti_nodes_impl(
+async def _search_graphiti_nodes_impl(
     ctx: Context,
     threads_dir: Path,
     query: str,
@@ -358,12 +355,8 @@ def _search_graphiti_nodes_impl(
     if not backend:
         raise RuntimeError("Graphiti backend unavailable")
 
-    import asyncio
-
-    async def do_search():
-        return await backend.search_nodes(query=query, max_nodes=limit)
-
-    results = asyncio.get_event_loop().run_until_complete(do_search())
+    # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
+    results = await asyncio.to_thread(backend.search_nodes, query=query, max_nodes=limit)
 
     output: Dict[str, Any] = {
         "count": len(results),
@@ -384,7 +377,7 @@ def _search_graphiti_nodes_impl(
     return json.dumps(output, indent=2)
 
 
-def _search_graphiti_episodes_impl(
+async def _search_graphiti_episodes_impl(
     ctx: Context,
     threads_dir: Path,
     query: str,
@@ -403,12 +396,8 @@ def _search_graphiti_episodes_impl(
     if not backend:
         raise RuntimeError("Graphiti backend unavailable")
 
-    import asyncio
-
-    async def do_search():
-        return await backend.get_episodes(query=query, max_episodes=limit)
-
-    results = asyncio.get_event_loop().run_until_complete(do_search())
+    # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
+    results = await asyncio.to_thread(backend.get_episodes, query=query, max_episodes=limit)
 
     output: Dict[str, Any] = {
         "count": len(results),
@@ -626,7 +615,7 @@ def _baseline_graph_build_impl(
         return f"Error building baseline graph: {str(e)}"
 
 
-def _search_graph_impl(
+async def _search_graph_impl(
     ctx: Context,
     code_path: str = "",
     query: str = "",
@@ -720,7 +709,7 @@ def _search_graph_impl(
         resolved_mode = infer_search_mode(mode, query, semantic)
 
         # Route to appropriate search implementation
-        return route_search(
+        return await route_search(
             ctx=ctx,
             threads_dir=threads_dir,
             query=query,

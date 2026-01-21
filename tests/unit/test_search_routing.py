@@ -8,11 +8,12 @@ Per MEMORY_INTEGRATION_ROADMAP.md Milestone 6:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -142,7 +143,7 @@ class TestSearchRouting:
         (graph_dir / "edges.jsonl").write_text("")
         return threads_dir
 
-    def test_route_to_baseline_when_backend_baseline(self, mock_context, mock_threads_dir):
+    async def test_route_to_baseline_when_backend_baseline(self, mock_context, mock_threads_dir):
         """Route to baseline graph when backend=baseline."""
         from watercooler_mcp.tools.graph import route_search
 
@@ -151,7 +152,7 @@ class TestSearchRouting:
         ) as mock_baseline:
             mock_baseline.return_value = json.dumps({"results": [], "count": 0})
 
-            result = route_search(
+            result = await route_search(
                 ctx=mock_context,
                 threads_dir=mock_threads_dir,
                 query="test query",
@@ -162,16 +163,17 @@ class TestSearchRouting:
             mock_baseline.assert_called_once()
             assert "results" in result
 
-    def test_route_to_graphiti_when_backend_graphiti(self, mock_context, mock_threads_dir):
+    async def test_route_to_graphiti_when_backend_graphiti(self, mock_context, mock_threads_dir):
         """Route to Graphiti when backend=graphiti."""
         from watercooler_mcp.tools.graph import route_search
 
         with patch(
-            "watercooler_mcp.tools.graph._search_graphiti_impl"
+            "watercooler_mcp.tools.graph._search_graphiti_impl",
+            new_callable=AsyncMock
         ) as mock_graphiti:
             mock_graphiti.return_value = json.dumps({"results": [], "count": 0})
 
-            result = route_search(
+            result = await route_search(
                 ctx=mock_context,
                 threads_dir=mock_threads_dir,
                 query="test query",
@@ -182,14 +184,15 @@ class TestSearchRouting:
             mock_graphiti.assert_called_once()
             assert "results" in result
 
-    def test_fallback_to_baseline_when_graphiti_unavailable(
+    async def test_fallback_to_baseline_when_graphiti_unavailable(
         self, mock_context, mock_threads_dir
     ):
         """Fall back to baseline when Graphiti is unavailable."""
         from watercooler_mcp.tools.graph import route_search
 
         with patch(
-            "watercooler_mcp.tools.graph._search_graphiti_impl"
+            "watercooler_mcp.tools.graph._search_graphiti_impl",
+            new_callable=AsyncMock
         ) as mock_graphiti, patch(
             "watercooler_mcp.tools.graph._search_baseline_impl"
         ) as mock_baseline:
@@ -197,7 +200,7 @@ class TestSearchRouting:
             mock_graphiti.side_effect = RuntimeError("Graphiti not available")
             mock_baseline.return_value = json.dumps({"results": [], "count": 0})
 
-            result = route_search(
+            result = await route_search(
                 ctx=mock_context,
                 threads_dir=mock_threads_dir,
                 query="test query",
@@ -211,16 +214,17 @@ class TestSearchRouting:
             result_data = json.loads(result)
             assert result_data.get("fallback_used") is True
 
-    def test_entities_mode_routes_to_graphiti(self, mock_context, mock_threads_dir):
+    async def test_entities_mode_routes_to_graphiti(self, mock_context, mock_threads_dir):
         """Entities mode should route to Graphiti search_nodes."""
         from watercooler_mcp.tools.graph import route_search
 
         with patch(
-            "watercooler_mcp.tools.graph._search_graphiti_nodes_impl"
+            "watercooler_mcp.tools.graph._search_graphiti_nodes_impl",
+            new_callable=AsyncMock
         ) as mock_nodes:
             mock_nodes.return_value = json.dumps({"results": [], "count": 0})
 
-            result = route_search(
+            result = await route_search(
                 ctx=mock_context,
                 threads_dir=mock_threads_dir,
                 query="test query",
@@ -230,16 +234,17 @@ class TestSearchRouting:
 
             mock_nodes.assert_called_once()
 
-    def test_episodes_mode_routes_to_graphiti(self, mock_context, mock_threads_dir):
+    async def test_episodes_mode_routes_to_graphiti(self, mock_context, mock_threads_dir):
         """Episodes mode should route to Graphiti episodes search."""
         from watercooler_mcp.tools.graph import route_search
 
         with patch(
-            "watercooler_mcp.tools.graph._search_graphiti_episodes_impl"
+            "watercooler_mcp.tools.graph._search_graphiti_episodes_impl",
+            new_callable=AsyncMock
         ) as mock_episodes:
             mock_episodes.return_value = json.dumps({"results": [], "count": 0})
 
-            result = route_search(
+            result = await route_search(
                 ctx=mock_context,
                 threads_dir=mock_threads_dir,
                 query="test query",
