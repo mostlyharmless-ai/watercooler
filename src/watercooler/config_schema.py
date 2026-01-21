@@ -528,6 +528,24 @@ class GraphitiBackendConfig(BaseModel):
         description="Track entry-episode mappings in index",
     )
 
+    # Chunking settings for entry sync
+    chunk_on_sync: bool = Field(
+        default=True,
+        description="Enable chunking when syncing entries to Graphiti",
+    )
+    chunk_max_tokens: int = Field(
+        default=768,
+        ge=100,
+        le=4096,
+        description="Maximum tokens per chunk (768 balances comprehensiveness vs 'lost in the middle')",
+    )
+    chunk_overlap: int = Field(
+        default=64,
+        ge=0,
+        le=256,
+        description="Token overlap between chunks for context continuity",
+    )
+
 
 class LeanRAGBackendConfig(BaseModel):
     """LeanRAG-specific configuration overrides.

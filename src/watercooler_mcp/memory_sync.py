@@ -120,6 +120,176 @@ async def _call_graphiti_add_episode(
         return {"success": False, "error": str(e)}
 
 
+async def _call_graphiti_add_episode_chunked(
+    content: str,
+    topic: str,
+    entry_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    title: Optional[str] = None,
+    code_path: str = "",
+    max_tokens: int = 768,
+    overlap: int = 64,
+) -> Dict[str, Any]:
+    """Call graphiti_add_episode with chunking for large entries.
+
+    Splits the entry body into chunks and creates separate episodes for each,
+    linking them via previous_episode_uuids for temporal ordering.
+
+    Args:
+        content: Entry body text
+        topic: Thread topic (included in source_description for traceability)
+        entry_id: Entry ID for provenance tracking
+        timestamp: Entry timestamp (ISO 8601)
+        title: Entry title
+        code_path: Path to code repository (for database name derivation)
+        max_tokens: Maximum tokens per chunk
+        overlap: Token overlap between chunks
+
+    Returns:
+        Result dict with success status, episode_uuids list, and chunk_count
+    """
+    try:
+        from watercooler_memory.chunker import ChunkerConfig, chunk_text
+        from watercooler_mcp import memory as mem
+
+        config = mem.load_graphiti_config(code_path=code_path)
+        if config is None:
+            return {"success": False, "error": "Graphiti not enabled"}
+
+        backend = mem.get_graphiti_backend(config)
+        if backend is None or isinstance(backend, dict):
+            error_msg = "Graphiti backend unavailable"
+            if isinstance(backend, dict):
+                error_msg = backend.get("message", error_msg)
+            return {"success": False, "error": error_msg}
+
+        # Configure chunking
+        chunker_config = ChunkerConfig(
+            max_tokens=max_tokens,
+            overlap=overlap,
+        )
+
+        # Chunk the content
+        chunks = chunk_text(content, chunker_config)
+
+        # If single chunk or no chunking needed, fall back to simple sync
+        if len(chunks) <= 1:
+            return await _call_graphiti_add_episode(
+                content=content,
+                topic=topic,
+                entry_id=entry_id,
+                timestamp=timestamp,
+                title=title,
+                code_path=code_path,
+            )
+
+        # Use unified project group_id
+        unified_group_id = config.database
+
+        # Parse timestamp
+        if timestamp:
+            try:
+                ref_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError:
+                ref_time = datetime.now(tz.utc)
+        else:
+            ref_time = datetime.now(tz.utc)
+
+        total_chunks = len(chunks)
+        episode_uuids: list[str] = []
+        entities_extracted: list[str] = []
+        previous_episode_uuids: list[str] = []
+        failed_chunks: list[int] = []
+
+        for i, (chunk_text_content, token_count) in enumerate(chunks):
+            chunk_num = i + 1
+
+            # Create chunk-specific title
+            chunk_title = f"{title} [chunk {chunk_num}/{total_chunks}]" if title else f"Entry chunk {chunk_num}/{total_chunks}"
+
+            # Include chunk info in source_description
+            source_desc = f"thread:{topic} | entry:{entry_id} | chunk:{chunk_num}/{total_chunks}"
+
+            try:
+                # Add episode with link to previous chunks
+                result = await backend.add_episode_direct(
+                    name=chunk_title,
+                    episode_body=chunk_text_content,
+                    source_description=source_desc,
+                    reference_time=ref_time,
+                    group_id=unified_group_id,
+                    previous_episode_uuids=previous_episode_uuids.copy() if previous_episode_uuids else None,
+                )
+
+                episode_uuid = result.get("episode_uuid", "unknown")
+                if episode_uuid != "unknown":
+                    episode_uuids.append(episode_uuid)
+                    # Link next chunk to this one
+                    previous_episode_uuids = [episode_uuid]
+
+                    # Track chunk mapping if entry_id provided and index available
+                    if entry_id and backend.entry_episode_index is not None:
+                        # Generate a simple chunk_id based on entry_id and index
+                        import hashlib
+                        chunk_id = hashlib.sha256(
+                            f"{entry_id}:{i}:{chunk_text_content[:100]}".encode()
+                        ).hexdigest()[:16]
+
+                        backend.entry_episode_index.add_chunk_mapping(
+                            chunk_id=chunk_id,
+                            episode_uuid=episode_uuid,
+                            entry_id=entry_id,
+                            thread_id=topic,
+                            chunk_index=i,
+                            total_chunks=total_chunks,
+                        )
+
+                entities = result.get("entities_extracted", [])
+                if entities:
+                    entities_extracted.extend(entities)
+
+            except Exception as e:
+                logger.warning(
+                    f"MEMORY: Failed to sync chunk {chunk_num}/{total_chunks} "
+                    f"for {topic}/{entry_id}: {e}"
+                )
+                failed_chunks.append(chunk_num)
+                continue
+
+        # Save index after all chunks (if any were successful)
+        if episode_uuids and entry_id and backend.entry_episode_index is not None:
+            try:
+                backend.entry_episode_index.save()
+            except Exception as e:
+                logger.warning(f"MEMORY: Failed to save entry_episode_index: {e}")
+
+        # Consider success if at least one chunk was indexed
+        if episode_uuids:
+            logger.debug(
+                f"MEMORY: Synced entry {entry_id} as {len(episode_uuids)} "
+                f"linked episodes (chunks)"
+            )
+            return {
+                "success": True,
+                "episode_uuids": episode_uuids,
+                "chunk_count": len(episode_uuids),
+                "total_chunks": total_chunks,
+                "failed_chunks": failed_chunks,
+                "entities_extracted": entities_extracted,
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"All {total_chunks} chunks failed to sync",
+                "failed_chunks": failed_chunks,
+            }
+
+    except ImportError as e:
+        return {"success": False, "error": f"Chunking module unavailable: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def _graphiti_sync_callback(
     threads_dir: Path,
     topic: str,
@@ -164,6 +334,12 @@ def _graphiti_sync_callback(
         return True
 
     try:
+        # Import chunking config helpers
+        from watercooler.memory_config import (
+            get_graphiti_chunk_config,
+            get_graphiti_chunk_on_sync,
+        )
+
         # Derive code_path from threads_dir
         # threads_dir: /path/to/project-threads -> code_path: /path/to/project
         threads_dir_str = str(threads_dir)
@@ -177,18 +353,36 @@ def _graphiti_sync_callback(
             )
             code_path = threads_dir_str
 
+        # Check if chunking is enabled
+        chunk_on_sync = get_graphiti_chunk_on_sync()
+
         # Callbacks run in ThreadPoolExecutor workers which have no event loop,
         # so asyncio.run() is always safe here.
-        result = asyncio.run(
-            _call_graphiti_add_episode(
-                content=entry_body,
-                topic=topic,
-                entry_id=entry_id,
-                timestamp=timestamp,
-                title=entry_title,
-                code_path=code_path,
+        if chunk_on_sync:
+            max_tokens, overlap = get_graphiti_chunk_config()
+            result = asyncio.run(
+                _call_graphiti_add_episode_chunked(
+                    content=entry_body,
+                    topic=topic,
+                    entry_id=entry_id,
+                    timestamp=timestamp,
+                    title=entry_title,
+                    code_path=code_path,
+                    max_tokens=max_tokens,
+                    overlap=overlap,
+                )
             )
-        )
+        else:
+            result = asyncio.run(
+                _call_graphiti_add_episode(
+                    content=entry_body,
+                    topic=topic,
+                    entry_id=entry_id,
+                    timestamp=timestamp,
+                    title=entry_title,
+                    code_path=code_path,
+                )
+            )
 
         if not result.get("success", False):
             log.warning(
@@ -197,7 +391,15 @@ def _graphiti_sync_callback(
             )
             return False
 
-        log.debug(f"MEMORY: Synced {topic}/{entry_id} to Graphiti")
+        # Log chunk count if chunked
+        chunk_count = result.get("chunk_count")
+        if chunk_count and chunk_count > 1:
+            log.debug(
+                f"MEMORY: Synced {topic}/{entry_id} to Graphiti "
+                f"({chunk_count} chunks)"
+            )
+        else:
+            log.debug(f"MEMORY: Synced {topic}/{entry_id} to Graphiti")
         return True
 
     except Exception as e:

@@ -109,6 +109,32 @@ class TestMemoryDisabled:
         config = get_memory_backend_config()
         assert config is None
 
+    def test_get_memory_backend_config_auto_detects_graphiti(self, monkeypatch):
+        """Test that get_memory_backend_config auto-detects graphiti from GRAPHITI_ENABLED."""
+        from watercooler.baseline_graph.sync import get_memory_backend_config
+
+        # Clear explicit backend setting
+        monkeypatch.delenv("WATERCOOLER_MEMORY_BACKEND", raising=False)
+        monkeypatch.delenv("WATERCOOLER_MEMORY_DISABLED", raising=False)
+        # Set GRAPHITI_ENABLED
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
+
+        config = get_memory_backend_config()
+        assert config is not None
+        assert config["backend"] == "graphiti"
+
+    def test_get_memory_backend_config_explicit_overrides_auto(self, monkeypatch):
+        """Test that explicit MEMORY_BACKEND overrides auto-detection."""
+        from watercooler.baseline_graph.sync import get_memory_backend_config
+
+        monkeypatch.delenv("WATERCOOLER_MEMORY_DISABLED", raising=False)
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
+        monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "leanrag")
+
+        config = get_memory_backend_config()
+        assert config is not None
+        assert config["backend"] == "leanrag"
+
     def test_sync_returns_false_when_globally_disabled(self, monkeypatch):
         """Test that sync_to_memory_backend returns False when globally disabled."""
         from watercooler.baseline_graph.sync import sync_to_memory_backend
@@ -498,3 +524,269 @@ class TestLeanRAGQueue:
 
         entries = read_leanrag_queue(tmp_path)
         assert entries == []
+
+
+class TestChunkConfigHelpers:
+    """Tests for Graphiti chunk configuration helpers."""
+
+    def test_get_graphiti_chunk_on_sync_default(self, monkeypatch):
+        """Test default chunk_on_sync value (True)."""
+        from watercooler.memory_config import get_graphiti_chunk_on_sync
+
+        monkeypatch.delenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", raising=False)
+        assert get_graphiti_chunk_on_sync() is True
+
+    def test_get_graphiti_chunk_on_sync_env_true(self, monkeypatch):
+        """Test chunk_on_sync enabled via env var."""
+        from watercooler.memory_config import get_graphiti_chunk_on_sync
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "1")
+        assert get_graphiti_chunk_on_sync() is True
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "true")
+        assert get_graphiti_chunk_on_sync() is True
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "yes")
+        assert get_graphiti_chunk_on_sync() is True
+
+    def test_get_graphiti_chunk_on_sync_env_false(self, monkeypatch):
+        """Test chunk_on_sync disabled via env var."""
+        from watercooler.memory_config import get_graphiti_chunk_on_sync
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "0")
+        assert get_graphiti_chunk_on_sync() is False
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "false")
+        assert get_graphiti_chunk_on_sync() is False
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "no")
+        assert get_graphiti_chunk_on_sync() is False
+
+    def test_get_graphiti_chunk_config_defaults(self, monkeypatch):
+        """Test default chunk config values."""
+        from watercooler.memory_config import get_graphiti_chunk_config
+
+        monkeypatch.delenv("WATERCOOLER_GRAPHITI_CHUNK_MAX_TOKENS", raising=False)
+        monkeypatch.delenv("WATERCOOLER_GRAPHITI_CHUNK_OVERLAP", raising=False)
+
+        max_tokens, overlap = get_graphiti_chunk_config()
+        assert max_tokens == 768
+        assert overlap == 64
+
+    def test_get_graphiti_chunk_config_env_override(self, monkeypatch):
+        """Test chunk config with env var overrides."""
+        from watercooler.memory_config import get_graphiti_chunk_config
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_MAX_TOKENS", "512")
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_OVERLAP", "32")
+
+        max_tokens, overlap = get_graphiti_chunk_config()
+        assert max_tokens == 512
+        assert overlap == 32
+
+    def test_get_graphiti_chunk_config_bounds(self, monkeypatch):
+        """Test that chunk config values are bounded."""
+        from watercooler.memory_config import get_graphiti_chunk_config
+
+        # Test upper bounds
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_MAX_TOKENS", "10000")
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_OVERLAP", "500")
+
+        max_tokens, overlap = get_graphiti_chunk_config()
+        assert max_tokens == 4096  # max bound
+        assert overlap == 256  # max bound
+
+        # Test lower bounds
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_MAX_TOKENS", "10")
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_OVERLAP", "-10")
+
+        max_tokens, overlap = get_graphiti_chunk_config()
+        assert max_tokens == 100  # min bound
+        assert overlap == 0  # min bound
+
+    def test_get_graphiti_chunk_config_invalid_values(self, monkeypatch):
+        """Test that invalid env values fall back to defaults."""
+        from watercooler.memory_config import get_graphiti_chunk_config
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_MAX_TOKENS", "not_a_number")
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_OVERLAP", "also_not_a_number")
+
+        max_tokens, overlap = get_graphiti_chunk_config()
+        assert max_tokens == 768  # default
+        assert overlap == 64  # default
+
+
+class TestCallGraphitiAddEpisodeChunked:
+    """Tests for _call_graphiti_add_episode_chunked function."""
+
+    def test_returns_error_when_not_enabled(self):
+        """Test error when Graphiti is not enabled."""
+        import asyncio
+
+        from watercooler_mcp.memory_sync import _call_graphiti_add_episode_chunked
+
+        async def run_test():
+            with patch("watercooler_mcp.memory.load_graphiti_config") as mock_config:
+                mock_config.return_value = None
+
+                result = await _call_graphiti_add_episode_chunked(
+                    content="test content that is quite long",
+                    topic="test-topic",
+                )
+
+                return result
+
+        result = asyncio.run(run_test())
+        assert result["success"] is False
+        assert "not enabled" in result["error"]
+
+    def test_short_content_falls_back_to_simple(self):
+        """Test that short content uses simple sync (single chunk)."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from watercooler_mcp.memory_sync import _call_graphiti_add_episode_chunked
+
+        async def run_test():
+            # Mock the entire dependency chain
+            mock_config = MagicMock()
+            mock_config.database = "test_db"
+
+            mock_backend = MagicMock()
+            mock_result = {"episode_uuid": "test-uuid-123", "entities_extracted": []}
+            # Use AsyncMock for async method
+            mock_backend.add_episode_direct = AsyncMock(return_value=mock_result)
+            mock_backend.entry_episode_index = None
+
+            with patch("watercooler_mcp.memory.load_graphiti_config") as mock_load:
+                mock_load.return_value = mock_config
+
+                with patch("watercooler_mcp.memory.get_graphiti_backend") as mock_get:
+                    mock_get.return_value = mock_backend
+
+                    # Short content that fits in one chunk
+                    result = await _call_graphiti_add_episode_chunked(
+                        content="Short content",
+                        topic="test-topic",
+                        entry_id="e1",
+                        max_tokens=768,
+                        overlap=64,
+                    )
+
+                    return result
+
+        result = asyncio.run(run_test())
+        # Should fall back to simple sync for short content and succeed
+        assert result.get("success") is True
+
+    def test_handles_exception(self):
+        """Test handling of exceptions during chunked sync."""
+        import asyncio
+
+        from watercooler_mcp.memory_sync import _call_graphiti_add_episode_chunked
+
+        async def run_test():
+            with patch("watercooler_mcp.memory.load_graphiti_config") as mock_config:
+                mock_config.side_effect = Exception("Test error")
+
+                result = await _call_graphiti_add_episode_chunked(
+                    content="test content",
+                    topic="test-topic",
+                )
+
+                return result
+
+        result = asyncio.run(run_test())
+        assert result["success"] is False
+        assert "error" in result
+
+
+class TestGraphitiSyncCallbackChunking:
+    """Tests for chunking behavior in _graphiti_sync_callback."""
+
+    def test_callback_respects_chunk_on_sync_disabled(self, monkeypatch):
+        """Test that callback skips chunking when disabled."""
+        from watercooler_mcp.memory_sync import _graphiti_sync_callback
+
+        # Disable chunking
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "false")
+
+        log = MagicMock()
+
+        # Mock to verify which function is called
+        with patch(
+            "watercooler_mcp.memory_sync._call_graphiti_add_episode"
+        ) as mock_simple:
+            with patch(
+                "watercooler_mcp.memory_sync._call_graphiti_add_episode_chunked"
+            ) as mock_chunked:
+                # Make simple sync return success
+                async def simple_return(*args, **kwargs):
+                    return {"success": True, "episode_uuid": "test-uuid"}
+
+                mock_simple.return_value = simple_return()
+
+                # Run callback (it will fail at asyncio.run but we can check mocks)
+                try:
+                    _graphiti_sync_callback(
+                        threads_dir=Path("/tmp/test-threads"),
+                        topic="test",
+                        entry_id="e1",
+                        entry_body="Long body " * 1000,  # Long content
+                        entry_title="Test",
+                        timestamp="2025-01-01T00:00:00Z",
+                        agent="claude",
+                        role="implementer",
+                        entry_type="Note",
+                        backend_config={"backend": "graphiti"},
+                        log=log,
+                        dry_run=False,
+                    )
+                except Exception:
+                    pass  # Expected to fail in actual sync
+
+                # With chunking disabled, only simple should be used
+                # (chunked should not be called)
+                mock_chunked.assert_not_called()
+
+    def test_callback_uses_chunking_when_enabled(self, monkeypatch):
+        """Test that callback uses chunking when enabled."""
+        from watercooler_mcp.memory_sync import _graphiti_sync_callback
+
+        # Enable chunking
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "true")
+
+        log = MagicMock()
+
+        with patch(
+            "watercooler_mcp.memory_sync._call_graphiti_add_episode"
+        ) as mock_simple:
+            with patch(
+                "watercooler_mcp.memory_sync._call_graphiti_add_episode_chunked"
+            ) as mock_chunked:
+                # Make chunked sync return success
+                async def chunked_return(*args, **kwargs):
+                    return {"success": True, "episode_uuids": ["uuid1"], "chunk_count": 1}
+
+                mock_chunked.return_value = chunked_return()
+
+                try:
+                    _graphiti_sync_callback(
+                        threads_dir=Path("/tmp/test-threads"),
+                        topic="test",
+                        entry_id="e1",
+                        entry_body="Test body",
+                        entry_title="Test",
+                        timestamp="2025-01-01T00:00:00Z",
+                        agent="claude",
+                        role="implementer",
+                        entry_type="Note",
+                        backend_config={"backend": "graphiti"},
+                        log=log,
+                        dry_run=False,
+                    )
+                except Exception:
+                    pass
+
+                # With chunking enabled, chunked should be called
+                mock_simple.assert_not_called()

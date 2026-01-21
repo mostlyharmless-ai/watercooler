@@ -286,6 +286,64 @@ def get_graphiti_track_entry_episodes() -> bool:
     return config.full().memory.graphiti.track_entry_episodes
 
 
+def get_graphiti_chunk_on_sync() -> bool:
+    """Get whether to chunk entries when syncing to Graphiti.
+
+    Checks WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC env var first,
+    then falls back to config.memory.graphiti.chunk_on_sync.
+
+    Returns:
+        True if chunking is enabled during sync
+    """
+    env_value = os.getenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "").lower()
+    if env_value in ("1", "true", "yes"):
+        return True
+    if env_value in ("0", "false", "no"):
+        return False
+    return config.full().memory.graphiti.chunk_on_sync
+
+
+def get_graphiti_chunk_config() -> tuple[int, int]:
+    """Get chunking configuration for Graphiti sync.
+
+    Checks environment variables first:
+    - WATERCOOLER_GRAPHITI_CHUNK_MAX_TOKENS
+    - WATERCOOLER_GRAPHITI_CHUNK_OVERLAP
+
+    Then falls back to TOML config values.
+
+    Returns:
+        Tuple of (max_tokens, overlap)
+    """
+    cfg = config.full().memory.graphiti
+
+    # Resolve max_tokens
+    max_tokens_str = os.getenv("WATERCOOLER_GRAPHITI_CHUNK_MAX_TOKENS")
+    if max_tokens_str:
+        try:
+            max_tokens = int(max_tokens_str)
+            # Apply validation bounds
+            max_tokens = max(100, min(4096, max_tokens))
+        except ValueError:
+            max_tokens = cfg.chunk_max_tokens
+    else:
+        max_tokens = cfg.chunk_max_tokens
+
+    # Resolve overlap
+    overlap_str = os.getenv("WATERCOOLER_GRAPHITI_CHUNK_OVERLAP")
+    if overlap_str:
+        try:
+            overlap = int(overlap_str)
+            # Apply validation bounds
+            overlap = max(0, min(256, overlap))
+        except ValueError:
+            overlap = cfg.chunk_overlap
+    else:
+        overlap = cfg.chunk_overlap
+
+    return (max_tokens, overlap)
+
+
 def get_leanrag_max_workers() -> int:
     """Get the max workers setting for LeanRAG graph building.
 
