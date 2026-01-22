@@ -43,6 +43,26 @@ GRAPH_EDGES_PATH = "graph/baseline/edges.jsonl"
 # Per-thread graph directory (canonical format)
 GRAPH_THREADS_DIR = "graph/baseline/threads"
 
+# Default retry count for conflict handling (configurable via env)
+DEFAULT_MAX_RETRIES = int(os.getenv("WATERCOOLER_GRAPH_MAX_RETRIES", "3"))
+
+
+def _validate_topic(topic: str) -> None:
+    """Validate topic parameter to prevent path traversal attacks.
+
+    Args:
+        topic: Thread topic identifier
+
+    Raises:
+        ValueError: If topic contains invalid characters
+    """
+    if not topic:
+        raise ValueError("Topic cannot be empty")
+    if "/" in topic or "\\" in topic or ".." in topic:
+        raise ValueError(f"Invalid topic: {topic!r} - contains path traversal characters")
+    if topic.startswith("."):
+        raise ValueError(f"Invalid topic: {topic!r} - cannot start with '.'")
+
 
 def _get_per_thread_paths(topic: str) -> tuple[str, str, str]:
     """Get per-thread graph file paths.
@@ -196,6 +216,11 @@ def read_thread_hosted(topic: str) -> tuple[str | None, str]:
         Tuple of (error_message, content). If error_message is not None,
         content will be empty.
     """
+    try:
+        _validate_topic(topic)
+    except ValueError as e:
+        return (str(e), "")
+
     error, client = _get_github_client()
     if error or not client:
         return (error or "Failed to create GitHub client", "")
@@ -247,6 +272,11 @@ def thread_exists_hosted(topic: str) -> bool:
     Returns:
         True if thread exists, False otherwise.
     """
+    try:
+        _validate_topic(topic)
+    except ValueError:
+        return False
+
     error, client = _get_github_client()
     if error or not client:
         return False
@@ -277,6 +307,11 @@ def write_thread_hosted(
         Tuple of (error_message, new_sha). If error_message is not None,
         new_sha will be empty.
     """
+    try:
+        _validate_topic(topic)
+    except ValueError as e:
+        return (str(e), "")
+
     error, client = _get_github_client()
     if error or not client:
         return (error or "Failed to create GitHub client", "")
@@ -900,7 +935,7 @@ def _update_thread_in_graph(
     body: str | None = None,
     timestamp: str | None = None,
     commit_suffix: str = "",
-    max_retries: int = 3,
+    max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> bool:
     """Update thread and optionally add entry in graph files.
 
@@ -927,12 +962,15 @@ def _update_thread_in_graph(
         body: Entry body (required if entry_id provided)
         timestamp: Entry timestamp (required if entry_id provided)
         commit_suffix: Suffix for commit message
-        max_retries: Maximum retry attempts for conflicts
+        max_retries: Maximum retry attempts for conflicts (default from WATERCOOLER_GRAPH_MAX_RETRIES env)
 
     Returns:
         True if graph was updated successfully, False otherwise.
     """
     import time
+
+    # Validate topic to prevent path traversal
+    _validate_topic(topic)
 
     per_thread_success = False
     monolithic_success = False

@@ -35,16 +35,32 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.request
 import urllib.error
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# Cache for GitHub tokens (user_id -> GitHubTokenInfo)
-# Tokens are cached for the lifetime of the process
-_github_token_cache: Dict[str, "GitHubTokenInfo"] = {}
+# Token cache TTL in seconds (default 1 hour, configurable via env)
+TOKEN_CACHE_TTL = int(os.getenv("WATERCOOLER_TOKEN_CACHE_TTL", "3600"))
+
+
+@dataclass
+class CachedToken:
+    """Token with cache metadata for TTL-based eviction."""
+    token_info: "GitHubTokenInfo"
+    cached_at: float = field(default_factory=time.time)
+
+    def is_expired(self) -> bool:
+        """Check if the cached token has expired."""
+        return (time.time() - self.cached_at) > TOKEN_CACHE_TTL
+
+
+# Cache for GitHub tokens (user_id -> CachedToken)
+# Tokens are cached with TTL for automatic expiration
+_github_token_cache: Dict[str, CachedToken] = {}
 
 
 @dataclass
@@ -117,10 +133,16 @@ def get_github_token(
         logger.warning("get_github_token called with empty user_id")
         return None
 
-    # Check cache first
+    # Check cache first (with TTL)
     if use_cache and user_id in _github_token_cache:
-        logger.debug(f"Using cached GitHub token for user {user_id}")
-        return _github_token_cache[user_id]
+        cached = _github_token_cache[user_id]
+        if not cached.is_expired():
+            logger.debug(f"Using cached GitHub token for user {user_id}")
+            return cached.token_info
+        else:
+            # Token expired, remove from cache
+            logger.debug(f"Cached token expired for user {user_id}, refreshing")
+            del _github_token_cache[user_id]
 
     config = get_auth_config()
     api_url = config["token_api_url"]
@@ -162,8 +184,8 @@ def get_github_token(
                 scopes=data.get("scopes"),
                 expires_at=data.get("expiresAt"),
             )
-            # Cache the token
-            _github_token_cache[user_id] = token_info
+            # Cache the token with TTL
+            _github_token_cache[user_id] = CachedToken(token_info=token_info)
             logger.info(
                 f"Retrieved GitHub token for user {user_id} "
                 f"(github: {token_info.github_username or 'unknown'})"

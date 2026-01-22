@@ -97,8 +97,8 @@ def atomic_write_json(path: Path, data: Any) -> None:
     except Exception:
         try:
             os.unlink(tmp_path)
-        except OSError:
-            pass
+        except OSError as cleanup_err:
+            logger.warning(f"Failed to clean up temp file {tmp_path}: {cleanup_err}")
         raise
 
 
@@ -124,8 +124,8 @@ def atomic_write_jsonl(path: Path, items: List[Dict[str, Any]]) -> None:
     except Exception:
         try:
             os.unlink(tmp_path)
-        except OSError:
-            pass
+        except OSError as cleanup_err:
+            logger.warning(f"Failed to clean up temp file {tmp_path}: {cleanup_err}")
         raise
 
 

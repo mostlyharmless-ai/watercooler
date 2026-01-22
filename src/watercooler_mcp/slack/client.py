@@ -18,6 +18,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import get_slack_config
+
+# Suppress urllib3/http.client DEBUG logging to prevent token exposure in logs
+# These libraries may log full request headers at DEBUG level, including Authorization
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("http.client").setLevel(logging.WARNING)
 from .mapping import (
     SlackChannelMapping,
     SlackThreadMapping,
