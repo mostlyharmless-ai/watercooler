@@ -14,8 +14,9 @@ from watercooler.baseline_graph.sync import (
     EmbeddingConfig,
     GraphHealthReport,
     GraphSyncState,
-    _atomic_append_jsonl,
+    ParityMismatch,
     _atomic_write_json,
+    _verify_graph_parity,
     check_graph_health,
     generate_embedding,
     get_graph_sync_state,
@@ -26,6 +27,7 @@ from watercooler.baseline_graph.sync import (
     sync_entry_to_graph,
     sync_thread_to_graph,
 )
+from watercooler.baseline_graph import storage
 from watercooler.baseline_graph.parser import ParsedThread, ParsedEntry
 from watercooler.baseline_graph.summarizer import (
     SummarizerConfig,
@@ -114,12 +116,12 @@ def test_atomic_write_json_overwrites(tmp_path: Path):
     assert loaded == {"new": "data"}
 
 
-def test_atomic_append_jsonl_creates_file(tmp_path: Path):
-    """Test atomic JSONL append creates file correctly."""
+def test_atomic_write_jsonl_creates_file(tmp_path: Path):
+    """Test atomic JSONL write creates file correctly."""
     target = tmp_path / "test.jsonl"
     items = [{"id": "1", "value": "a"}, {"id": "2", "value": "b"}]
 
-    _atomic_append_jsonl(target, items)
+    storage.atomic_write_jsonl(target, items)
 
     assert target.exists()
     lines = target.read_text(encoding="utf-8").strip().split("\n")
@@ -128,33 +130,30 @@ def test_atomic_append_jsonl_creates_file(tmp_path: Path):
     assert json.loads(lines[1])["id"] == "2"
 
 
-def test_atomic_append_jsonl_deduplicates(tmp_path: Path):
-    """Test atomic JSONL append deduplicates by ID."""
+def test_atomic_write_jsonl_overwrites(tmp_path: Path):
+    """Test atomic JSONL write overwrites existing file."""
     target = tmp_path / "test.jsonl"
 
     # First write
-    _atomic_append_jsonl(target, [{"id": "1", "value": "a"}])
+    storage.atomic_write_jsonl(target, [{"id": "1", "value": "a"}])
 
-    # Second write with same ID (should update)
-    _atomic_append_jsonl(target, [{"id": "1", "value": "updated"}])
+    # Second write (should overwrite completely)
+    storage.atomic_write_jsonl(target, [{"id": "2", "value": "b"}])
 
     lines = target.read_text(encoding="utf-8").strip().split("\n")
     assert len(lines) == 1
-    assert json.loads(lines[0])["value"] == "updated"
+    assert json.loads(lines[0])["id"] == "2"
 
 
-def test_atomic_append_jsonl_merges_new(tmp_path: Path):
-    """Test atomic JSONL append merges new items."""
-    target = tmp_path / "test.jsonl"
+def test_atomic_write_jsonl_creates_parent_dirs(tmp_path: Path):
+    """Test atomic JSONL write creates parent directories."""
+    target = tmp_path / "nested" / "dirs" / "test.jsonl"
 
-    # First write
-    _atomic_append_jsonl(target, [{"id": "1", "value": "a"}])
+    storage.atomic_write_jsonl(target, [{"id": "1", "value": "a"}])
 
-    # Second write with new ID
-    _atomic_append_jsonl(target, [{"id": "2", "value": "b"}])
-
+    assert target.exists()
     lines = target.read_text(encoding="utf-8").strip().split("\n")
-    assert len(lines) == 2
+    assert len(lines) == 1
 
 
 # ============================================================================
@@ -198,37 +197,37 @@ def test_graph_sync_state_round_trip(threads_dir: Path, graph_dir: Path):
 
 
 def test_sync_entry_to_graph_creates_nodes(threads_dir: Path, sample_thread: Path):
-    """Test sync_entry_to_graph creates nodes and edges."""
+    """Test sync_entry_to_graph creates per-thread graph files."""
     success = sync_entry_to_graph(threads_dir, "test-topic")
 
     assert success
 
-    # Check nodes file
-    nodes_file = threads_dir / "graph" / "baseline" / "nodes.jsonl"
-    assert nodes_file.exists()
+    # Check per-thread format files
+    thread_dir = threads_dir / "graph" / "baseline" / "threads" / "test-topic"
+    meta_file = thread_dir / "meta.json"
+    entries_file = thread_dir / "entries.jsonl"
 
-    nodes = []
-    for line in nodes_file.read_text(encoding="utf-8").strip().split("\n"):
-        nodes.append(json.loads(line))
+    assert meta_file.exists()
+    assert entries_file.exists()
 
-    # Should have thread node + entry node (at minimum)
-    assert len(nodes) >= 2
+    # Check thread meta
+    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    assert meta.get("type") == "thread"
+    assert meta.get("topic") == "test-topic"
 
-    # Check for thread node
-    thread_nodes = [n for n in nodes if n.get("type") == "thread"]
-    assert len(thread_nodes) >= 1
-    assert thread_nodes[0]["topic"] == "test-topic"
-
-    # Check for entry node
-    entry_nodes = [n for n in nodes if n.get("type") == "entry"]
-    assert len(entry_nodes) >= 1
+    # Check entry nodes
+    entries = []
+    for line in entries_file.read_text(encoding="utf-8").strip().split("\n"):
+        entries.append(json.loads(line))
+    assert len(entries) >= 1
 
 
 def test_sync_entry_to_graph_creates_edges(threads_dir: Path, sample_thread: Path):
     """Test sync_entry_to_graph creates edges."""
     sync_entry_to_graph(threads_dir, "test-topic")
 
-    edges_file = threads_dir / "graph" / "baseline" / "edges.jsonl"
+    # Check per-thread edges file
+    edges_file = threads_dir / "graph" / "baseline" / "threads" / "test-topic" / "edges.jsonl"
     assert edges_file.exists()
 
     edges = []
@@ -280,14 +279,21 @@ def test_sync_thread_to_graph_full_sync(threads_dir: Path, sample_thread: Path):
 
     assert success
 
-    # Check nodes
-    nodes_file = threads_dir / "graph" / "baseline" / "nodes.jsonl"
-    nodes = []
-    for line in nodes_file.read_text(encoding="utf-8").strip().split("\n"):
-        nodes.append(json.loads(line))
+    # Check per-thread format files
+    thread_dir = threads_dir / "graph" / "baseline" / "threads" / "test-topic"
+    meta_file = thread_dir / "meta.json"
+    entries_file = thread_dir / "entries.jsonl"
 
-    # Should have 1 thread + 2 entries = 3 nodes
-    assert len(nodes) == 3
+    # Check thread meta exists
+    assert meta_file.exists()
+    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    assert meta.get("type") == "thread"
+
+    # Check entries - should have 2 entries
+    entries = []
+    for line in entries_file.read_text(encoding="utf-8").strip().split("\n"):
+        entries.append(json.loads(line))
+    assert len(entries) == 2
 
     # Check state
     state = get_graph_sync_state(threads_dir, "test-topic")
@@ -371,7 +377,7 @@ def test_reconcile_graph_specific_topics(threads_dir: Path, sample_thread: Path)
 
 
 def test_concurrent_sync_operations(threads_dir: Path, sample_thread: Path):
-    """Test concurrent sync operations don't corrupt JSONL."""
+    """Test concurrent sync operations don't corrupt per-thread files."""
     results = []
     errors = []
 
@@ -393,11 +399,15 @@ def test_concurrent_sync_operations(threads_dir: Path, sample_thread: Path):
     assert all(results), f"Some syncs failed: {errors}"
     assert len(errors) == 0
 
-    # Verify JSONL is valid
-    nodes_file = threads_dir / "graph" / "baseline" / "nodes.jsonl"
-    lines = nodes_file.read_text(encoding="utf-8").strip().split("\n")
+    # Verify per-thread JSONL is valid
+    entries_file = threads_dir / "graph" / "baseline" / "threads" / "test-topic" / "entries.jsonl"
+    lines = entries_file.read_text(encoding="utf-8").strip().split("\n")
     for line in lines:
         json.loads(line)  # Should not raise
+
+    # Verify meta.json is valid
+    meta_file = threads_dir / "graph" / "baseline" / "threads" / "test-topic" / "meta.json"
+    json.loads(meta_file.read_text(encoding="utf-8"))  # Should not raise
 
 
 def test_sync_failure_does_not_block(threads_dir: Path, sample_thread: Path):
@@ -433,9 +443,11 @@ def test_manifest_updated_on_sync(threads_dir: Path, sample_thread: Path):
     assert manifest_path.exists()
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert "schema_version" in manifest
     assert "last_updated" in manifest
-    assert "test-topic" in manifest.get("topics_synced", {})
+    assert "last_topic" in manifest
+    assert manifest.get("last_topic") == "test-topic"
+    # Per-thread format uses "topics" dict
+    assert "test-topic" in manifest.get("topics", {})
 
 
 def test_manifest_preserves_other_topics(threads_dir: Path, sample_thread: Path):
@@ -466,13 +478,13 @@ Body text.
     # Sync second topic
     sync_thread_to_graph(threads_dir, "other-topic")
 
-    # Both should be in manifest
+    # Both should be in manifest (per-thread format uses "topics" key)
     manifest_path = threads_dir / "graph" / "baseline" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    topics_synced = manifest.get("topics_synced", {})
-    assert "test-topic" in topics_synced
-    assert "other-topic" in topics_synced
+    topics = manifest.get("topics", {})
+    assert "test-topic" in topics
+    assert "other-topic" in topics
 
 
 # ============================================================================
@@ -1085,3 +1097,255 @@ def test_sync_entry_succeeds_when_memory_hook_fails(threads_dir: Path, sample_th
     # Baseline sync should still succeed
     success = sync_entry_to_graph(threads_dir, "test-topic")
     assert success  # Baseline sync succeeded despite memory hook failure
+
+
+# ============================================================================
+# Graph Parity Verification Tests
+# ============================================================================
+
+
+@pytest.fixture
+def thread_with_graph(threads_dir: Path) -> Path:
+    """Create a thread with a matching graph entry."""
+    # Create thread markdown
+    thread_file = threads_dir / "parity-test.md"
+    thread_file.write_text("""# parity-test — Thread
+Status: OPEN
+Ball: Agent (user)
+Topic: parity-test
+Created: 2025-01-01T00:00:00Z
+
+---
+Entry: Agent (user) 2025-01-01T00:01:00Z
+Role: planner
+Type: Note
+Title: First Entry
+
+Test entry body.
+<!-- Entry-ID: 01TEST001 -->
+
+---
+Entry: Agent (user) 2025-01-01T00:02:00Z
+Role: implementer
+Type: Note
+Title: Second Entry
+
+Another entry.
+<!-- Entry-ID: 01TEST002 -->
+""")
+
+    # Create graph with matching data
+    graph_dir = threads_dir / "graph" / "baseline"
+    graph_dir.mkdir(parents=True)
+
+    nodes_file = graph_dir / "nodes.jsonl"
+    nodes = [
+        {"id": "topic:parity-test", "type": "thread", "entry_count": 2, "last_updated": "2025-01-01T00:02:00Z"},
+        {"id": "entry:01TEST001", "type": "entry"},
+        {"id": "entry:01TEST002", "type": "entry"},
+    ]
+    with open(nodes_file, "w") as f:
+        for node in nodes:
+            f.write(json.dumps(node) + "\n")
+
+    # Create sync state (must match _get_state_file path)
+    state_file = threads_dir / "graph" / "baseline" / "sync_state.json"
+    state_file.write_text(json.dumps({
+        "topics": {
+            "parity-test": {"status": "ok"}
+        }
+    }))
+
+    return thread_file
+
+
+def test_check_graph_health_without_parity(thread_with_graph: Path, threads_dir: Path):
+    """Test check_graph_health without parity verification (fast mode)."""
+    report = check_graph_health(threads_dir, verify_parity=False)
+
+    assert report.healthy is True
+    assert report.total_threads == 1
+    assert report.synced_threads == 1
+    assert report.parity_verified is False
+    assert report.parity_mismatches == []
+
+
+def test_check_graph_health_with_parity_no_mismatches(thread_with_graph: Path, threads_dir: Path):
+    """Test check_graph_health with parity verification when data matches."""
+    report = check_graph_health(threads_dir, verify_parity=True)
+
+    assert report.healthy is True
+    assert report.parity_verified is True
+    assert report.parity_mismatches == []
+
+
+def test_check_graph_health_with_entry_count_mismatch(threads_dir: Path):
+    """Test check_graph_health detects entry_count mismatches."""
+    # Create thread with 3 entries
+    thread_file = threads_dir / "count-mismatch.md"
+    thread_file.write_text("""# count-mismatch — Thread
+Status: OPEN
+Ball: Agent (user)
+Topic: count-mismatch
+Created: 2025-01-01T00:00:00Z
+
+---
+Entry: Agent (user) 2025-01-01T00:01:00Z
+Role: planner
+Type: Note
+Title: Entry 1
+
+Body 1.
+<!-- Entry-ID: 01TEST001 -->
+
+---
+Entry: Agent (user) 2025-01-01T00:02:00Z
+Role: implementer
+Type: Note
+Title: Entry 2
+
+Body 2.
+<!-- Entry-ID: 01TEST002 -->
+
+---
+Entry: Agent (user) 2025-01-01T00:03:00Z
+Role: implementer
+Type: Note
+Title: Entry 3
+
+Body 3.
+<!-- Entry-ID: 01TEST003 -->
+""")
+
+    # Create per-thread graph with WRONG entry_count (says 2, actually 3)
+    graph_dir = threads_dir / "graph" / "baseline"
+    thread_graph_dir = graph_dir / "threads" / "count-mismatch"
+    thread_graph_dir.mkdir(parents=True)
+
+    # Write meta.json with wrong entry count
+    meta_file = thread_graph_dir / "meta.json"
+    meta_file.write_text(json.dumps({
+        "id": "thread:count-mismatch",
+        "type": "thread",
+        "topic": "count-mismatch",
+        "entry_count": 2,  # WRONG: actually has 3 entries
+        "last_updated": "2025-01-01T00:03:00Z",
+    }))
+
+    # Create sync state
+    state_file = graph_dir / "sync_state.json"
+    state_file.write_text(json.dumps({
+        "topics": {"count-mismatch": {"status": "ok"}}
+    }))
+
+    report = check_graph_health(threads_dir, verify_parity=True)
+
+    assert report.healthy is False  # Parity mismatch makes it unhealthy
+    assert report.parity_verified is True
+    assert len(report.parity_mismatches) == 1
+
+    mismatch = report.parity_mismatches[0]
+    assert mismatch.topic == "count-mismatch"
+    assert mismatch.field == "entry_count"
+    assert mismatch.graph_value == 2
+    assert mismatch.actual_value == 3
+    assert mismatch.difference == 1  # actual - graph
+
+
+def test_check_graph_health_with_timestamp_mismatch(threads_dir: Path):
+    """Test check_graph_health detects last_updated mismatches."""
+    # Create thread
+    thread_file = threads_dir / "ts-mismatch.md"
+    thread_file.write_text("""# ts-mismatch — Thread
+Status: OPEN
+Ball: Agent (user)
+Topic: ts-mismatch
+Created: 2025-01-01T00:00:00Z
+
+---
+Entry: Agent (user) 2025-01-01T12:00:00Z
+Role: planner
+Type: Note
+Title: Entry
+
+Body.
+<!-- Entry-ID: 01TEST001 -->
+""")
+
+    # Create per-thread graph with WRONG timestamp
+    graph_dir = threads_dir / "graph" / "baseline"
+    thread_graph_dir = graph_dir / "threads" / "ts-mismatch"
+    thread_graph_dir.mkdir(parents=True)
+
+    # Write meta.json with wrong timestamp
+    meta_file = thread_graph_dir / "meta.json"
+    meta_file.write_text(json.dumps({
+        "id": "thread:ts-mismatch",
+        "type": "thread",
+        "topic": "ts-mismatch",
+        "entry_count": 1,
+        "last_updated": "2025-01-01T00:00:00Z",  # WRONG: should be 12:00:00
+    }))
+
+    # Create sync state
+    state_file = graph_dir / "sync_state.json"
+    state_file.write_text(json.dumps({
+        "topics": {"ts-mismatch": {"status": "ok"}}
+    }))
+
+    report = check_graph_health(threads_dir, verify_parity=True)
+
+    assert report.healthy is False
+    assert report.parity_verified is True
+    assert len(report.parity_mismatches) == 1
+
+    mismatch = report.parity_mismatches[0]
+    assert mismatch.topic == "ts-mismatch"
+    assert mismatch.field == "last_updated"
+    assert "00:00:00" in mismatch.graph_value
+    assert "12:00:00" in mismatch.actual_value
+
+
+def test_verify_graph_parity_no_graph(threads_dir: Path):
+    """Test _verify_graph_parity returns empty list when no graph exists."""
+    thread_file = threads_dir / "no-graph.md"
+    thread_file.write_text("# no-graph — Thread\nStatus: OPEN\n")
+
+    mismatches = _verify_graph_parity(threads_dir, [thread_file])
+    assert mismatches == []
+
+
+def test_verify_graph_parity_thread_not_in_graph(threads_dir: Path):
+    """Test _verify_graph_parity skips threads not in graph."""
+    thread_file = threads_dir / "not-in-graph.md"
+    thread_file.write_text("# not-in-graph — Thread\nStatus: OPEN\n")
+
+    # Create graph with different topic
+    graph_dir = threads_dir / "graph" / "baseline"
+    graph_dir.mkdir(parents=True)
+
+    nodes_file = graph_dir / "nodes.jsonl"
+    nodes = [{"id": "topic:other-topic", "type": "thread", "entry_count": 0}]
+    with open(nodes_file, "w") as f:
+        for node in nodes:
+            f.write(json.dumps(node) + "\n")
+
+    mismatches = _verify_graph_parity(threads_dir, [thread_file])
+    assert mismatches == []  # Not a mismatch, just not in graph
+
+
+def test_parity_mismatch_dataclass():
+    """Test ParityMismatch dataclass."""
+    mismatch = ParityMismatch(
+        topic="test-topic",
+        field="entry_count",
+        graph_value=5,
+        actual_value=10,
+        difference=5,
+    )
+
+    assert mismatch.topic == "test-topic"
+    assert mismatch.field == "entry_count"
+    assert mismatch.graph_value == 5
+    assert mismatch.actual_value == 10
+    assert mismatch.difference == 5

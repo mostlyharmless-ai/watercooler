@@ -49,6 +49,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
+from watercooler.baseline_graph import storage
 from watercooler.baseline_graph.export import (
     entry_to_node,
     generate_edges,
@@ -289,22 +290,11 @@ def get_previous_thread_state(
     Returns:
         Tuple of (entry_count, thread_summary) from existing graph
     """
-    graph_dir = threads_dir / "graph" / "baseline"
-    nodes_file = graph_dir / "nodes.jsonl"
+    graph_dir = storage.get_graph_dir(threads_dir)
+    meta = storage.load_thread_meta(graph_dir, topic)
 
-    if not nodes_file.exists():
-        return 0, None
-
-    try:
-        with open(nodes_file, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                node = json.loads(line)
-                if node.get("type") == "thread" and node.get("topic") == topic:
-                    return node.get("entry_count", 0), node.get("summary")
-    except Exception as e:
-        logger.debug(f"Failed to read previous thread state: {e}")
+    if meta:
+        return meta.get("entry_count", 0), meta.get("summary")
 
     return 0, None
 
@@ -458,6 +448,8 @@ def _atomic_write_json(path: Path, data: Any) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        # Set readable permissions before rename (mkstemp creates with 0600)
+        os.chmod(tmp_path, 0o644)
         os.replace(tmp_path, path)
     except Exception:
         # Clean up temp file on error
@@ -468,61 +460,128 @@ def _atomic_write_json(path: Path, data: Any) -> None:
         raise
 
 
-def _atomic_append_jsonl(path: Path, items: List[Dict[str, Any]]) -> None:
-    """Append items to JSONL file atomically.
-
-    This reads existing content, appends new items, and writes atomically.
-    For incremental sync, we need to handle deduplication.
-
-    Args:
-        path: Target JSONL path
-        items: Items to append (will be deduplicated by 'id' field)
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Load existing items
-    existing: Dict[str, Dict[str, Any]] = {}
-    if path.exists():
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        item = json.loads(line)
-                        item_id = item.get("id") or item.get("source", "") + item.get("target", "")
-                        if item_id:
-                            existing[item_id] = item
-        except Exception as e:
-            logger.warning(f"Failed to read existing JSONL {path}: {e}")
-
-    # Merge new items (upsert)
-    for item in items:
-        item_id = item.get("id") or item.get("source", "") + item.get("target", "")
-        if item_id:
-            existing[item_id] = item
-
-    # Write atomically
-    fd, tmp_path = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=".tmp_",
-        suffix=".jsonl",
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            for item in existing.values():
-                f.write(json.dumps(item) + "\n")
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
 # ============================================================================
 # Graph Sync Functions
 # ============================================================================
+
+
+def sync_entry_structure_only(
+    threads_dir: Path,
+    topic: str,
+    entry_id: str,
+) -> bool:
+    """Create minimal graph node for entry without LLM/embedding generation.
+
+    This is called BEFORE the git commit to ensure graph files are included
+    in the same commit as the thread markdown file. It creates:
+    - Entry node (with empty summary, no embedding)
+    - Thread node (upsert)
+    - Contains edge (thread -> entry)
+    - Followed_by edge (prev_entry -> entry) if applicable
+
+    Unlike sync_entry_to_graph(), this function:
+    - NEVER calls LLM for summaries
+    - NEVER generates embeddings
+    - Is designed to be BLOCKING (errors should propagate)
+    - Creates minimal but valid graph structure
+
+    Args:
+        threads_dir: Threads directory
+        topic: Thread topic
+        entry_id: The entry ID to sync (required, not optional)
+
+    Returns:
+        True if sync succeeded, False otherwise
+    """
+    thread_path = threads_dir / f"{topic}.md"
+    if not thread_path.exists():
+        logger.warning(f"Thread file not found for structural sync: {thread_path}")
+        return False
+
+    try:
+        # Parse thread
+        parsed = parse_thread_file(
+            thread_path,
+            config=None,
+            generate_summaries=False,
+        )
+        if not parsed:
+            logger.warning(f"Failed to parse thread for structural sync: {topic}")
+            return False
+
+        # Find the entry
+        entry = next((e for e in parsed.entries if e.entry_id == entry_id), None)
+        if not entry:
+            logger.warning(f"Entry {entry_id} not found in thread {topic}")
+            return False
+
+        # Get graph directory and load existing per-thread data
+        graph_dir = storage.ensure_graph_dir(threads_dir)
+
+        # Load existing data (or empty dicts if new thread)
+        meta = storage.load_thread_meta(graph_dir, topic) or {}
+        entries = storage.load_thread_entries_dict(graph_dir, topic)
+        edges = storage.load_thread_edges(graph_dir, topic)
+
+        thread_id = f"thread:{topic}"
+        entry_node_id = f"entry:{entry.entry_id}"
+
+        # Build entry node (no embedding, empty summary if not present)
+        entry_node = entry_to_node(entry, topic)
+        if "summary" not in entry_node:
+            entry_node["summary"] = ""
+
+        # Update entries dict
+        entries[entry_node_id] = entry_node
+
+        # Build/update thread meta
+        thread_node = thread_to_node(parsed)
+        meta.update(thread_node)
+
+        # Add contains edge
+        contains_edge_id = thread_id + entry_node_id
+        edges[contains_edge_id] = {
+            "source": thread_id,
+            "target": entry_node_id,
+            "type": "contains",
+        }
+
+        # Find previous entry for followed_by edge
+        if entry.index > 0:
+            prev_entry: Optional[ParsedEntry] = None
+            prev_idx = entry.index - 1
+            # First try direct list access if entries are in order
+            if prev_idx < len(parsed.entries):
+                candidate = parsed.entries[prev_idx]
+                if candidate.index == prev_idx:
+                    prev_entry = candidate
+            # Fallback: search by index attribute
+            if prev_entry is None:
+                for e in parsed.entries:
+                    if e.index == prev_idx:
+                        prev_entry = e
+                        break
+            if prev_entry and prev_entry.entry_id:
+                prev_entry_node_id = f"entry:{prev_entry.entry_id}"
+                followed_by_edge_id = prev_entry_node_id + entry_node_id
+                edges[followed_by_edge_id] = {
+                    "source": prev_entry_node_id,
+                    "target": entry_node_id,
+                    "type": "followed_by",
+                }
+
+        # Write all per-thread files atomically
+        storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+
+        # Update manifest
+        storage.update_manifest(graph_dir, topic, entry.entry_id)
+
+        logger.debug(f"Structural graph sync complete for {topic}/{entry_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Structural graph sync failed for {topic}/{entry_id}: {e}")
+        return False
 
 
 def sync_entry_to_graph(
@@ -674,33 +733,36 @@ def sync_entry_to_graph(
                 # Preserve existing thread summary
                 parsed.summary = prev_thread_summary
 
-        # Prepare graph output directory
-        graph_dir = threads_dir / "graph" / "baseline"
-        nodes_file = graph_dir / "nodes.jsonl"
-        edges_file = graph_dir / "edges.jsonl"
+        # Get graph directory and load existing per-thread data
+        graph_dir = storage.ensure_graph_dir(threads_dir)
+
+        # Load existing data (or empty dicts if new thread)
+        meta = storage.load_thread_meta(graph_dir, topic) or {}
+        entries = storage.load_thread_entries_dict(graph_dir, topic)
+        edges = storage.load_thread_edges(graph_dir, topic)
+
+        thread_id = f"thread:{topic}"
+        entry_node_id = f"entry:{entry.entry_id}"
 
         # Build entry node with embedding if available
         entry_node = entry_to_node(entry, topic)
         if entry_embedding:
             entry_node["embedding"] = entry_embedding
 
-        # Build nodes (thread + entry)
-        nodes = [
-            thread_to_node(parsed),
-            entry_node,
-        ]
+        # Update entries dict
+        entries[entry_node_id] = entry_node
 
-        # Build edges for this entry
-        edges = []
-        thread_id = f"thread:{topic}"
-        entry_node_id = f"entry:{entry.entry_id}"
+        # Build/update thread meta
+        thread_node = thread_to_node(parsed)
+        meta.update(thread_node)
 
-        # Thread contains entry
-        edges.append({
+        # Add contains edge
+        contains_edge_id = thread_id + entry_node_id
+        edges[contains_edge_id] = {
             "source": thread_id,
             "target": entry_node_id,
             "type": "contains",
-        })
+        }
 
         # Find previous entry for followed_by edge
         # Note: entry.index is the position in the thread (0-based)
@@ -720,18 +782,23 @@ def sync_entry_to_graph(
                         prev_entry = e
                         break
             if prev_entry and prev_entry.entry_id:
-                edges.append({
-                    "source": f"entry:{prev_entry.entry_id}",
+                prev_entry_node_id = f"entry:{prev_entry.entry_id}"
+                followed_by_edge_id = prev_entry_node_id + entry_node_id
+                edges[followed_by_edge_id] = {
+                    "source": prev_entry_node_id,
                     "target": entry_node_id,
                     "type": "followed_by",
-                })
+                }
 
-        # Atomic writes
-        _atomic_append_jsonl(nodes_file, nodes)
-        _atomic_append_jsonl(edges_file, edges)
+        # Write all per-thread files atomically
+        storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+
+        # Update search index if embedding was generated
+        if entry_embedding:
+            storage.upsert_search_index_entry(graph_dir, entry.entry_id, topic, entry_embedding)
 
         # Update manifest
-        _update_manifest(graph_dir, topic, entry.entry_id)
+        storage.update_manifest(graph_dir, topic, entry.entry_id)
 
         # Update sync state
         state = GraphSyncState(
@@ -828,15 +895,19 @@ def sync_thread_to_graph(
             )
             logger.debug(f"Generated summaries for {len(parsed.entries)} entries in {topic}")
 
-        # Prepare graph output directory
-        graph_dir = threads_dir / "graph" / "baseline"
-        nodes_file = graph_dir / "nodes.jsonl"
-        edges_file = graph_dir / "edges.jsonl"
+        # Get graph directory
+        graph_dir = storage.ensure_graph_dir(threads_dir)
 
-        # Build all nodes with optional embeddings
-        nodes = [thread_to_node(parsed)]
+        # Build thread meta
+        meta = thread_to_node(parsed)
+
+        # Build all entry nodes with optional embeddings
+        entries: Dict[str, Dict[str, Any]] = {}
+        search_index_updates: List[tuple[str, List[float]]] = []
+
         for entry in parsed.entries:
             entry_node = entry_to_node(entry, topic)
+            entry_node_id = f"entry:{entry.entry_id}"
 
             # Generate embedding if enabled
             if generate_embeddings:
@@ -844,22 +915,29 @@ def sync_thread_to_graph(
                 embedding = generate_embedding(embed_text)
                 if embedding:
                     entry_node["embedding"] = embedding
+                    search_index_updates.append((entry.entry_id, embedding))
 
-            nodes.append(entry_node)
+            entries[entry_node_id] = entry_node
 
         if generate_embeddings:
             logger.debug(f"Generated embeddings for entries in {topic}")
 
-        # Build all edges
-        edges = list(generate_edges(parsed))
+        # Build all edges as dict keyed by source+target
+        edges: Dict[str, Dict[str, Any]] = {}
+        for edge in generate_edges(parsed):
+            edge_id = edge.get("source", "") + edge.get("target", "")
+            edges[edge_id] = edge
 
-        # Atomic writes
-        _atomic_append_jsonl(nodes_file, nodes)
-        _atomic_append_jsonl(edges_file, edges)
+        # Write all per-thread files atomically
+        storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+
+        # Update search index for entries with embeddings
+        for entry_id, embedding in search_index_updates:
+            storage.upsert_search_index_entry(graph_dir, entry_id, topic, embedding)
 
         # Update manifest
         last_entry_id = parsed.entries[-1].entry_id if parsed.entries else None
-        _update_manifest(graph_dir, topic, last_entry_id)
+        storage.update_manifest(graph_dir, topic, last_entry_id)
 
         # Update sync state
         state = GraphSyncState(
@@ -880,50 +958,37 @@ def sync_thread_to_graph(
         return False
 
 
-def _update_manifest(graph_dir: Path, topic: str, entry_id: Optional[str]) -> None:
-    """Update the manifest file with sync metadata.
-
-    Args:
-        graph_dir: Graph output directory
-        topic: Thread topic that was synced
-        entry_id: Last synced entry ID
-    """
-    manifest_path = graph_dir / "manifest.json"
-
-    # Load existing manifest
-    manifest: Dict[str, Any] = {
-        "schema_version": "1.0",
-        "created_at": _now_iso(),
-        "last_updated": _now_iso(),
-        "topics_synced": {},
-    }
-    if manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
-    # Update
-    manifest["last_updated"] = _now_iso()
-    if "topics_synced" not in manifest:
-        manifest["topics_synced"] = {}
-    manifest["topics_synced"][topic] = {
-        "last_entry_id": entry_id,
-        "synced_at": _now_iso(),
-    }
-
-    # Atomic write
-    _atomic_write_json(manifest_path, manifest)
-
-
 # ============================================================================
 # Health Check & Reconciliation
 # ============================================================================
 
 
 @dataclass
+class ParityMismatch:
+    """Record of a mismatch between graph node and parsed markdown."""
+
+    topic: str
+    field: str  # "entry_count" or "last_updated"
+    graph_value: Any  # Value in graph node
+    actual_value: Any  # Value from parsing markdown
+    difference: Optional[int] = None  # For entry_count: actual - graph
+
+
+@dataclass
 class GraphHealthReport:
-    """Health report for graph sync status."""
+    """Health report for graph sync status.
+
+    Attributes:
+        healthy: True if no errors, pending, or stale threads
+        total_threads: Total number of thread markdown files
+        synced_threads: Threads with 'ok' sync status
+        error_threads: Threads with sync errors
+        pending_threads: Threads with pending sync
+        stale_threads: Threads not in sync state
+        error_details: Error messages by topic
+        parity_verified: Whether parity verification was performed
+        parity_mismatches: List of entry_count/last_updated mismatches
+    """
 
     healthy: bool = True
     total_threads: int = 0
@@ -932,13 +997,25 @@ class GraphHealthReport:
     pending_threads: int = 0
     stale_threads: List[str] = field(default_factory=list)
     error_details: Dict[str, str] = field(default_factory=dict)
+    # Parity verification fields
+    parity_verified: bool = False
+    parity_mismatches: List[ParityMismatch] = field(default_factory=list)
 
 
-def check_graph_health(threads_dir: Path) -> GraphHealthReport:
+def check_graph_health(
+    threads_dir: Path,
+    verify_parity: bool = False,
+) -> GraphHealthReport:
     """Check graph sync health for all threads.
 
+    Args:
+        threads_dir: Path to the threads directory
+        verify_parity: If True, parse each thread's markdown and compare
+            entry_count and last_updated against graph node values.
+            This is slower but catches data accuracy issues.
+
     Returns:
-        GraphHealthReport with status of all threads
+        GraphHealthReport with status of all threads and optional parity info
     """
     report = GraphHealthReport()
 
@@ -986,7 +1063,90 @@ def check_graph_health(threads_dir: Path) -> GraphHealthReport:
         and len(report.stale_threads) == 0
     )
 
+    # Parity verification (optional, slower)
+    if verify_parity:
+        report.parity_verified = True
+        report.parity_mismatches = _verify_graph_parity(threads_dir, thread_files)
+        # Parity mismatches affect health
+        if report.parity_mismatches:
+            report.healthy = False
+
     return report
+
+
+def _verify_graph_parity(
+    threads_dir: Path,
+    thread_files: List[Path],
+) -> List[ParityMismatch]:
+    """Verify graph node data matches parsed markdown.
+
+    Compares entry_count and last_updated for each thread node
+    against values computed from parsing the markdown file.
+
+    Args:
+        threads_dir: Path to threads directory
+        thread_files: List of thread markdown files
+
+    Returns:
+        List of ParityMismatch records for any discrepancies
+    """
+    mismatches: List[ParityMismatch] = []
+    graph_dir = storage.get_graph_dir(threads_dir)
+
+    if not storage.is_per_thread_format(graph_dir):
+        logger.debug("No per-thread graph format found, skipping parity check")
+        return mismatches
+
+    # Compare each thread
+    for thread_file in thread_files:
+        topic = thread_file.stem
+        graph_node = storage.load_thread_meta(graph_dir, topic)
+
+        if not graph_node:
+            # No graph node for this thread - not a parity issue, just missing
+            continue
+
+        try:
+            # Parse the thread file
+            parsed = parse_thread_file(thread_file)
+
+            # Compare entry_count
+            graph_count = graph_node.get("entry_count", 0)
+            actual_count = parsed.entry_count
+
+            if graph_count != actual_count:
+                mismatches.append(ParityMismatch(
+                    topic=topic,
+                    field="entry_count",
+                    graph_value=graph_count,
+                    actual_value=actual_count,
+                    difference=actual_count - graph_count,
+                ))
+
+            # Compare last_updated
+            graph_updated = graph_node.get("last_updated", "")
+            actual_updated = parsed.last_updated
+
+            # Normalize timestamps for comparison (strip microseconds if needed)
+            if graph_updated and actual_updated:
+                # Only compare if both exist - timestamps might differ in precision
+                # Consider them equal if the date/hour/minute/second match
+                graph_prefix = graph_updated[:19] if len(graph_updated) >= 19 else graph_updated
+                actual_prefix = actual_updated[:19] if len(actual_updated) >= 19 else actual_updated
+
+                if graph_prefix != actual_prefix:
+                    mismatches.append(ParityMismatch(
+                        topic=topic,
+                        field="last_updated",
+                        graph_value=graph_updated,
+                        actual_value=actual_updated,
+                    ))
+
+        except Exception as e:
+            logger.warning(f"Error parsing {topic} for parity check: {e}")
+            continue
+
+    return mismatches
 
 
 def reconcile_graph(
@@ -1022,6 +1182,171 @@ def reconcile_graph(
         results[topic] = success
 
     return results
+
+
+@dataclass
+class BackfillResult:
+    """Result of backfill operation."""
+
+    threads_processed: int = 0
+    threads_missing_summary: int = 0
+    threads_summary_generated: int = 0
+    entries_processed: int = 0
+    entries_missing_summary: int = 0
+    entries_summary_generated: int = 0
+    entries_missing_embedding: int = 0
+    entries_embedding_generated: int = 0
+    errors: List[str] = field(default_factory=list)
+
+
+def backfill_missing(
+    threads_dir: Path,
+    backfill_summaries: bool = True,
+    backfill_embeddings: bool = True,
+    batch_size: int = 10,
+) -> BackfillResult:
+    """Backfill missing summaries and embeddings in existing graph nodes.
+
+    Unlike reconcile_graph which syncs stale threads from markdown, this function
+    updates existing graph nodes that are missing summaries or embeddings.
+
+    Args:
+        threads_dir: Threads directory
+        backfill_summaries: Generate missing summaries (thread + entry)
+        backfill_embeddings: Generate missing entry embeddings
+        batch_size: Number of items to process before writing (for progress)
+
+    Returns:
+        BackfillResult with counts of processed/generated items
+    """
+    result = BackfillResult()
+    graph_dir = storage.get_graph_dir(threads_dir)
+
+    if not storage.is_per_thread_format(graph_dir):
+        result.errors.append(f"No per-thread graph format found at {graph_dir}")
+        return result
+
+    # Check service availability
+    llm_available = False
+    embedding_available = False
+
+    if backfill_summaries:
+        llm_available = is_llm_service_available()
+        if not llm_available:
+            logger.warning("LLM service not available, skipping summary backfill")
+
+    if backfill_embeddings:
+        embedding_available = is_embedding_available()
+        if not embedding_available:
+            logger.warning("Embedding service not available, skipping embedding backfill")
+
+    if not llm_available and not embedding_available:
+        result.errors.append("No services available for backfill")
+        return result
+
+    # Get summarizer config
+    config = create_summarizer_config()
+
+    # Process each thread
+    for topic in storage.list_thread_topics(graph_dir):
+        try:
+            meta = storage.load_thread_meta(graph_dir, topic)
+            entries = storage.load_thread_entries_dict(graph_dir, topic)
+            edges = storage.load_thread_edges(graph_dir, topic)
+
+            if not meta:
+                continue
+
+            result.threads_processed += 1
+            thread_updated = False
+
+            # Collect entry nodes for thread summary generation
+            entry_list = list(entries.values())
+            result.entries_processed += len(entry_list)
+
+            # Backfill thread summary
+            if backfill_summaries and llm_available:
+                if not meta.get("summary"):
+                    result.threads_missing_summary += 1
+                    if entry_list:
+                        # Format entries for summarization
+                        entries_data = [
+                            {
+                                "body": e.get("body", ""),
+                                "title": e.get("title", ""),
+                                "type": e.get("entry_type", "Note"),
+                            }
+                            for e in sorted(entry_list, key=lambda x: x.get("index", 0))
+                        ]
+                        summary = summarize_thread(
+                            entries_data,
+                            thread_title=meta.get("title", topic),
+                            config=config,
+                        )
+                        if summary:
+                            meta["summary"] = summary
+                            result.threads_summary_generated += 1
+                            thread_updated = True
+                            logger.debug(f"Generated summary for thread {topic}")
+
+            # Backfill entry summaries and embeddings
+            for entry_id, entry in entries.items():
+                entry_raw_id = entry.get("entry_id", entry_id)
+
+                # Summary backfill
+                if backfill_summaries and llm_available:
+                    if not entry.get("summary"):
+                        result.entries_missing_summary += 1
+                        try:
+                            summary = summarize_entry(
+                                entry_body=entry.get("body", ""),
+                                entry_title=entry.get("title", ""),
+                                entry_type=entry.get("entry_type", "Note"),
+                                config=config,
+                            )
+                            if summary:
+                                entry["summary"] = summary
+                                result.entries_summary_generated += 1
+                                thread_updated = True
+                        except Exception as e:
+                            result.errors.append(f"Entry {entry_raw_id} summary: {e}")
+
+                # Embedding backfill
+                if backfill_embeddings and embedding_available:
+                    if not entry.get("embedding"):
+                        result.entries_missing_embedding += 1
+                        try:
+                            text = entry.get("body", "")
+                            if entry.get("title"):
+                                text = f"{entry['title']}\n\n{text}"
+                            embedding = generate_embedding(text)
+                            if embedding:
+                                entry["embedding"] = embedding
+                                result.entries_embedding_generated += 1
+                                thread_updated = True
+                                # Also update search index
+                                storage.upsert_search_index_entry(
+                                    graph_dir, entry_raw_id, topic, embedding
+                                )
+                        except Exception as e:
+                            result.errors.append(f"Entry {entry_raw_id} embedding: {e}")
+
+            # Write updated thread data if changed
+            if thread_updated:
+                storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+                logger.debug(f"Updated graph files for thread {topic}")
+
+        except Exception as e:
+            result.errors.append(f"Thread {topic}: {e}")
+            continue
+
+    logger.info(
+        f"Backfill complete: {result.threads_summary_generated} thread summaries, "
+        f"{result.entries_summary_generated} entry summaries, "
+        f"{result.entries_embedding_generated} embeddings"
+    )
+
+    return result
 
 
 # ============================================================================
@@ -1315,3 +1640,247 @@ def sync_to_memory_backend(
     except Exception as e:
         logger.warning(f"MEMORY: Sync failed for {topic}/{entry_id}: {e}")
         return False
+
+
+# ============================================================================
+# Graph Format Migration (Monolithic -> Per-Thread)
+# ============================================================================
+
+
+@dataclass
+class MigrationResult:
+    """Result of graph format migration."""
+
+    threads_migrated: int = 0
+    entries_migrated: int = 0
+    edges_migrated: int = 0
+    search_index_entries: int = 0
+    errors: List[str] = field(default_factory=list)
+    monolithic_deleted: bool = False
+
+
+def migrate_to_per_thread_format(
+    threads_dir: Path,
+    delete_monolithic: bool = True,
+    build_search_index: bool = True,
+) -> MigrationResult:
+    """Migrate graph from monolithic to per-thread format.
+
+    Converts:
+    - graph/baseline/nodes.jsonl + edges.jsonl
+    To:
+    - graph/baseline/threads/<topic>/meta.json
+    - graph/baseline/threads/<topic>/entries.jsonl
+    - graph/baseline/threads/<topic>/edges.jsonl
+    - graph/baseline/search-index.jsonl (if build_search_index=True)
+
+    Args:
+        threads_dir: Threads directory containing graph/baseline/
+        delete_monolithic: If True, delete monolithic files after successful migration
+        build_search_index: If True, build search-index.jsonl with embeddings
+
+    Returns:
+        MigrationResult with counts and any errors
+    """
+    result = MigrationResult()
+    graph_dir = storage.get_graph_dir(threads_dir)
+    nodes_file = graph_dir / "nodes.jsonl"
+    edges_file = graph_dir / "edges.jsonl"
+
+    # Check if monolithic files exist
+    if not nodes_file.exists():
+        result.errors.append(f"Monolithic nodes.jsonl not found at {nodes_file}")
+        return result
+
+    # Load all nodes
+    nodes_by_id: Dict[str, Dict[str, Any]] = {}
+    thread_nodes: Dict[str, Dict[str, Any]] = {}  # topic -> thread node
+    entry_nodes_by_topic: Dict[str, List[Dict[str, Any]]] = {}  # topic -> entries
+
+    try:
+        with open(nodes_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                node = json.loads(line)
+                node_id = node.get("id", "")
+                nodes_by_id[node_id] = node
+
+                if node.get("type") == "thread":
+                    topic = node.get("topic", "")
+                    if topic:
+                        thread_nodes[topic] = node
+                elif node.get("type") == "entry":
+                    topic = node.get("thread_topic", "")
+                    if topic:
+                        if topic not in entry_nodes_by_topic:
+                            entry_nodes_by_topic[topic] = []
+                        entry_nodes_by_topic[topic].append(node)
+    except Exception as e:
+        result.errors.append(f"Failed to load nodes.jsonl: {e}")
+        return result
+
+    # Load all edges
+    edges_by_topic: Dict[str, List[Dict[str, Any]]] = {}  # topic -> edges
+
+    if edges_file.exists():
+        try:
+            with open(edges_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    edge = json.loads(line)
+                    # Determine topic from source or target
+                    source = edge.get("source", "")
+                    target = edge.get("target", "")
+
+                    # Extract topic from thread:topic or entry node
+                    topic = None
+                    if source.startswith("thread:"):
+                        topic = source.replace("thread:", "")
+                    elif target.startswith("thread:"):
+                        topic = target.replace("thread:", "")
+                    elif source.startswith("entry:"):
+                        # Look up entry node to get topic
+                        entry_node = nodes_by_id.get(source)
+                        if entry_node:
+                            topic = entry_node.get("thread_topic")
+                    elif target.startswith("entry:"):
+                        entry_node = nodes_by_id.get(target)
+                        if entry_node:
+                            topic = entry_node.get("thread_topic")
+
+                    if topic:
+                        if topic not in edges_by_topic:
+                            edges_by_topic[topic] = []
+                        edges_by_topic[topic].append(edge)
+                        result.edges_migrated += 1
+        except Exception as e:
+            result.errors.append(f"Failed to load edges.jsonl: {e}")
+            return result
+
+    # Collect all topics
+    all_topics = set(thread_nodes.keys()) | set(entry_nodes_by_topic.keys())
+
+    # Search index entries
+    search_index_entries: List[Dict[str, Any]] = []
+
+    # Migrate each topic
+    for topic in all_topics:
+        try:
+            storage.ensure_thread_graph_dir(graph_dir, topic)
+
+            # Prepare data for write
+            thread_node = thread_nodes.get(topic, {})
+            entries = entry_nodes_by_topic.get(topic, [])
+            topic_edges = edges_by_topic.get(topic, [])
+
+            # Convert entries list to dict keyed by node ID
+            entries_dict: Dict[str, Dict[str, Any]] = {}
+            for entry in entries:
+                entry_id = entry.get("id", f"entry:{entry.get('entry_id', '')}")
+                entries_dict[entry_id] = entry
+
+                # Collect entries for search index
+                if build_search_index:
+                    embedding = entry.get("embedding")
+                    if embedding:
+                        search_index_entries.append({
+                            "entry_id": entry.get("entry_id"),
+                            "thread_topic": topic,
+                            "embedding": embedding,
+                        })
+
+            # Convert edges list to dict keyed by source+target
+            edges_dict: Dict[str, Dict[str, Any]] = {}
+            for edge in topic_edges:
+                edge_id = edge.get("source", "") + edge.get("target", "")
+                edges_dict[edge_id] = edge
+
+            # Write all per-thread files atomically
+            if thread_node:
+                storage.write_thread_graph(graph_dir, topic, thread_node, entries_dict, edges_dict)
+                result.threads_migrated += 1
+            elif entries_dict:
+                # Entries without thread node - create minimal meta
+                minimal_meta = {
+                    "id": f"thread:{topic}",
+                    "type": "thread",
+                    "topic": topic,
+                    "title": topic.replace("-", " ").title(),
+                    "status": "OPEN",
+                    "ball": "codex",
+                    "entry_count": len(entries_dict),
+                }
+                storage.write_thread_graph(graph_dir, topic, minimal_meta, entries_dict, edges_dict)
+                result.threads_migrated += 1
+
+            result.entries_migrated += len(entries)
+
+            logger.debug(f"Migrated thread {topic}: {len(entries)} entries, {len(topic_edges)} edges")
+
+        except Exception as e:
+            result.errors.append(f"Failed to migrate topic {topic}: {e}")
+            continue
+
+    # Build search index
+    if build_search_index and search_index_entries:
+        try:
+            storage.atomic_write_jsonl(graph_dir / "search-index.jsonl", search_index_entries)
+            result.search_index_entries = len(search_index_entries)
+            logger.info(f"Built search index with {len(search_index_entries)} entries")
+        except Exception as e:
+            result.errors.append(f"Failed to write search index: {e}")
+
+    # Delete monolithic files if requested and no errors
+    if delete_monolithic and not result.errors:
+        try:
+            if nodes_file.exists():
+                nodes_file.unlink()
+            if edges_file.exists():
+                edges_file.unlink()
+            result.monolithic_deleted = True
+            logger.info("Deleted monolithic nodes.jsonl and edges.jsonl")
+        except Exception as e:
+            result.errors.append(f"Failed to delete monolithic files: {e}")
+
+    logger.info(
+        f"Migration complete: {result.threads_migrated} threads, "
+        f"{result.entries_migrated} entries, {result.edges_migrated} edges"
+    )
+
+    return result
+
+
+def is_per_thread_format(threads_dir: Path) -> bool:
+    """Check if graph already uses per-thread format.
+
+    Args:
+        threads_dir: Threads directory
+
+    Returns:
+        True if per-thread format is in use
+    """
+    graph_dir = storage.get_graph_dir(threads_dir)
+    return storage.is_per_thread_format(graph_dir)
+
+
+def needs_migration(threads_dir: Path) -> bool:
+    """Check if graph needs migration from monolithic to per-thread.
+
+    Args:
+        threads_dir: Threads directory
+
+    Returns:
+        True if monolithic format exists and per-thread does not
+    """
+    graph_dir = storage.get_graph_dir(threads_dir)
+    nodes_file = graph_dir / "nodes.jsonl"
+
+    # Has monolithic format and not yet migrated
+    has_monolithic = nodes_file.exists()
+    has_per_thread = is_per_thread_format(threads_dir)
+
+    return has_monolithic and not has_per_thread

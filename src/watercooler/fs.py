@@ -101,3 +101,22 @@ def read_body(maybe_path: str | Path | None) -> str:
     if p.exists() and p.is_file():
         return read(p)
     return maybe_path
+
+
+# =============================================================================
+# Thread Status Utilities
+# =============================================================================
+
+CLOSED_STATES = {"done", "closed", "merged", "resolved", "abandoned", "obsolete"}
+
+
+def is_closed(status: str) -> bool:
+    """Check if a thread status indicates closure.
+
+    Args:
+        status: The status string to check
+
+    Returns:
+        True if the status is a closed state
+    """
+    return status.strip().lower() in CLOSED_STATES

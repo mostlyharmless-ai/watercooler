@@ -1,6 +1,6 @@
 """Tests for baseline graph reader module.
 
-Tests the graph-first read operations with markdown fallback.
+Tests the graph-first read operations using per-thread format.
 """
 
 import json
@@ -19,7 +19,29 @@ from watercooler.baseline_graph.reader import (
     format_thread_markdown,
     format_entry_json,
     get_graph_dir,
+    get_thread_graph_dir,
 )
+
+
+def _create_per_thread_graph(graph_dir: Path, topic: str, thread_node: dict, entries: list = None):
+    """Helper to create per-thread graph files.
+
+    Args:
+        graph_dir: Base graph directory (graph/baseline)
+        topic: Thread topic
+        thread_node: Thread node dict to write to meta.json
+        entries: List of entry node dicts to write to entries.jsonl
+    """
+    thread_graph_dir = graph_dir / "threads" / topic
+    thread_graph_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write meta.json
+    (thread_graph_dir / "meta.json").write_text(json.dumps(thread_node, indent=2))
+
+    # Write entries.jsonl if provided
+    if entries:
+        lines = [json.dumps(e) for e in entries]
+        (thread_graph_dir / "entries.jsonl").write_text("\n".join(lines) + "\n")
 
 
 class TestGraphAvailability:
@@ -31,32 +53,32 @@ class TestGraphAvailability:
         threads_dir.mkdir()
         assert is_graph_available(threads_dir) is False
 
-    def test_is_graph_available_empty_nodes_file(self, tmp_path):
-        """Returns False when nodes.jsonl is empty."""
+    def test_is_graph_available_empty_threads_dir(self, tmp_path):
+        """Returns False when threads/ directory is empty."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
-        (graph_dir / "nodes.jsonl").touch()
+        threads_base = graph_dir / "threads"
+        threads_base.mkdir(parents=True)
         assert is_graph_available(threads_dir) is False
 
     def test_is_graph_available_valid_graph(self, tmp_path):
-        """Returns True when valid graph data exists."""
+        """Returns True when valid per-thread graph data exists."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
 
-        # Write a valid node
-        node = {"type": "thread", "topic": "test", "title": "Test Thread"}
-        (graph_dir / "nodes.jsonl").write_text(json.dumps(node) + "\n")
+        # Create per-thread format
+        thread_node = {"type": "thread", "topic": "test", "title": "Test Thread"}
+        _create_per_thread_graph(graph_dir, "test", thread_node)
 
         assert is_graph_available(threads_dir) is True
 
     def test_is_graph_available_invalid_json(self, tmp_path):
-        """Returns False when nodes.jsonl contains invalid JSON."""
+        """Returns False when meta.json contains invalid JSON."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
-        (graph_dir / "nodes.jsonl").write_text("not valid json\n")
+        thread_graph_dir = graph_dir / "threads" / "test"
+        thread_graph_dir.mkdir(parents=True)
+        (thread_graph_dir / "meta.json").write_text("not valid json\n")
 
         assert is_graph_available(threads_dir) is False
 
@@ -68,8 +90,8 @@ class TestListThreadsFromGraph:
         """Returns empty list when graph has no threads."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
-        (graph_dir / "nodes.jsonl").write_text("")
+        threads_base = graph_dir / "threads"
+        threads_base.mkdir(parents=True)
 
         result = list_threads_from_graph(threads_dir)
         assert result == []
@@ -78,9 +100,8 @@ class TestListThreadsFromGraph:
         """Returns single thread from graph."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
 
-        node = {
+        thread_node = {
             "type": "thread",
             "topic": "feature-auth",
             "title": "Auth Feature",
@@ -90,7 +111,7 @@ class TestListThreadsFromGraph:
             "summary": "Implementing auth",
             "entry_count": 3,
         }
-        (graph_dir / "nodes.jsonl").write_text(json.dumps(node) + "\n")
+        _create_per_thread_graph(graph_dir, "feature-auth", thread_node)
 
         result = list_threads_from_graph(threads_dir)
         assert len(result) == 1
@@ -103,13 +124,16 @@ class TestListThreadsFromGraph:
         """Filters threads by open_only parameter."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
 
-        nodes = [
-            {"type": "thread", "topic": "open-thread", "status": "OPEN", "title": "Open", "ball": "", "last_updated": "", "summary": "", "entry_count": 0},
-            {"type": "thread", "topic": "closed-thread", "status": "CLOSED", "title": "Closed", "ball": "", "last_updated": "", "summary": "", "entry_count": 0},
-        ]
-        (graph_dir / "nodes.jsonl").write_text("\n".join(json.dumps(n) for n in nodes) + "\n")
+        # Create two threads with different statuses
+        _create_per_thread_graph(graph_dir, "open-thread", {
+            "type": "thread", "topic": "open-thread", "status": "OPEN",
+            "title": "Open", "ball": "", "last_updated": "", "summary": "", "entry_count": 0
+        })
+        _create_per_thread_graph(graph_dir, "closed-thread", {
+            "type": "thread", "topic": "closed-thread", "status": "CLOSED",
+            "title": "Closed", "ball": "", "last_updated": "", "summary": "", "entry_count": 0
+        })
 
         # All threads
         all_result = list_threads_from_graph(threads_dir, open_only=None)
@@ -126,16 +150,18 @@ class TestListThreadsFromGraph:
         assert closed_result[0].topic == "closed-thread"
 
     def test_list_threads_ignores_entry_nodes(self, tmp_path):
-        """Only returns thread nodes, not entry nodes."""
+        """Returns thread from per-thread format (entries are separate)."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
 
-        nodes = [
-            {"type": "thread", "topic": "test", "title": "Test", "status": "OPEN", "ball": "", "last_updated": "", "summary": "", "entry_count": 1},
-            {"type": "entry", "thread_topic": "test", "entry_id": "123", "index": 0},
+        thread_node = {
+            "type": "thread", "topic": "test", "title": "Test",
+            "status": "OPEN", "ball": "", "last_updated": "", "summary": "", "entry_count": 1
+        }
+        entries = [
+            {"type": "entry", "thread_topic": "test", "entry_id": "123", "index": 0}
         ]
-        (graph_dir / "nodes.jsonl").write_text("\n".join(json.dumps(n) for n in nodes) + "\n")
+        _create_per_thread_graph(graph_dir, "test", thread_node, entries)
 
         result = list_threads_from_graph(threads_dir)
         assert len(result) == 1
@@ -149,8 +175,8 @@ class TestReadThreadFromGraph:
         """Returns None when thread not found."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
-        (graph_dir / "nodes.jsonl").write_text("")
+        threads_base = graph_dir / "threads"
+        threads_base.mkdir(parents=True)
 
         result = read_thread_from_graph(threads_dir, "nonexistent")
         assert result is None
@@ -159,49 +185,60 @@ class TestReadThreadFromGraph:
         """Returns thread with all entries."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
 
-        nodes = [
-            {"type": "thread", "topic": "test", "title": "Test Thread", "status": "OPEN", "ball": "claude", "last_updated": "2025-01-01T00:00:00Z", "summary": "Test", "entry_count": 2},
-            {"type": "entry", "thread_topic": "test", "entry_id": "entry1", "index": 0, "agent": "Claude", "role": "implementer", "entry_type": "Note", "title": "First Entry", "timestamp": "2025-01-01T00:00:00Z", "summary": "First"},
-            {"type": "entry", "thread_topic": "test", "entry_id": "entry2", "index": 1, "agent": "User", "role": "pm", "entry_type": "Decision", "title": "Second Entry", "timestamp": "2025-01-01T01:00:00Z", "summary": "Second"},
-            {"type": "entry", "thread_topic": "other", "entry_id": "entry3", "index": 0, "agent": "X", "role": "x", "entry_type": "Note", "title": "Other", "timestamp": "", "summary": ""},
+        thread_node = {
+            "type": "thread", "topic": "test", "title": "Test Thread",
+            "status": "OPEN", "ball": "claude", "last_updated": "2025-01-01T00:00:00Z",
+            "summary": "Test", "entry_count": 2
+        }
+        entries = [
+            {"type": "entry", "thread_topic": "test", "entry_id": "entry1", "index": 0,
+             "agent": "Claude", "role": "implementer", "entry_type": "Note",
+             "title": "First Entry", "timestamp": "2025-01-01T00:00:00Z", "summary": "First"},
+            {"type": "entry", "thread_topic": "test", "entry_id": "entry2", "index": 1,
+             "agent": "User", "role": "pm", "entry_type": "Decision",
+             "title": "Second Entry", "timestamp": "2025-01-01T01:00:00Z", "summary": "Second"},
         ]
-        (graph_dir / "nodes.jsonl").write_text("\n".join(json.dumps(n) for n in nodes) + "\n")
+        _create_per_thread_graph(graph_dir, "test", thread_node, entries)
 
         result = read_thread_from_graph(threads_dir, "test")
         assert result is not None
 
-        thread, entries = result
+        thread, read_entries = result
         assert thread.topic == "test"
         assert thread.title == "Test Thread"
-        assert len(entries) == 2
-        assert entries[0].entry_id == "entry1"
-        assert entries[0].index == 0
-        assert entries[1].entry_id == "entry2"
-        assert entries[1].index == 1
+        assert len(read_entries) == 2
+        assert read_entries[0].entry_id == "entry1"
+        assert read_entries[0].index == 0
+        assert read_entries[1].entry_id == "entry2"
+        assert read_entries[1].index == 1
 
     def test_read_thread_entries_sorted_by_index(self, tmp_path):
         """Entries are returned sorted by index."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
 
+        thread_node = {
+            "type": "thread", "topic": "test", "title": "Test",
+            "status": "OPEN", "ball": "", "last_updated": "", "summary": "", "entry_count": 3
+        }
         # Write entries out of order
-        nodes = [
-            {"type": "thread", "topic": "test", "title": "Test", "status": "OPEN", "ball": "", "last_updated": "", "summary": "", "entry_count": 3},
-            {"type": "entry", "thread_topic": "test", "entry_id": "e2", "index": 2, "agent": "", "role": "", "entry_type": "Note", "title": "Third", "timestamp": "", "summary": ""},
-            {"type": "entry", "thread_topic": "test", "entry_id": "e0", "index": 0, "agent": "", "role": "", "entry_type": "Note", "title": "First", "timestamp": "", "summary": ""},
-            {"type": "entry", "thread_topic": "test", "entry_id": "e1", "index": 1, "agent": "", "role": "", "entry_type": "Note", "title": "Second", "timestamp": "", "summary": ""},
+        entries = [
+            {"type": "entry", "thread_topic": "test", "entry_id": "e2", "index": 2,
+             "agent": "", "role": "", "entry_type": "Note", "title": "Third", "timestamp": "", "summary": ""},
+            {"type": "entry", "thread_topic": "test", "entry_id": "e0", "index": 0,
+             "agent": "", "role": "", "entry_type": "Note", "title": "First", "timestamp": "", "summary": ""},
+            {"type": "entry", "thread_topic": "test", "entry_id": "e1", "index": 1,
+             "agent": "", "role": "", "entry_type": "Note", "title": "Second", "timestamp": "", "summary": ""},
         ]
-        (graph_dir / "nodes.jsonl").write_text("\n".join(json.dumps(n) for n in nodes) + "\n")
+        _create_per_thread_graph(graph_dir, "test", thread_node, entries)
 
         result = read_thread_from_graph(threads_dir, "test")
         assert result is not None
-        _, entries = result
+        _, read_entries = result
 
-        assert [e.index for e in entries] == [0, 1, 2]
-        assert [e.title for e in entries] == ["First", "Second", "Third"]
+        assert [e.index for e in read_entries] == [0, 1, 2]
+        assert [e.title for e in read_entries] == ["First", "Second", "Third"]
 
 
 class TestGetEntryFromGraph:
@@ -211,13 +248,18 @@ class TestGetEntryFromGraph:
         """Gets entry by entry_id."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
 
-        nodes = [
-            {"type": "entry", "thread_topic": "test", "entry_id": "target", "index": 1, "agent": "Claude", "role": "implementer", "entry_type": "Note", "title": "Target", "timestamp": "2025-01-01T00:00:00Z", "summary": "Found it"},
-            {"type": "entry", "thread_topic": "test", "entry_id": "other", "index": 0, "agent": "User", "role": "pm", "entry_type": "Note", "title": "Other", "timestamp": "", "summary": ""},
+        thread_node = {"type": "thread", "topic": "test", "title": "Test",
+                       "status": "OPEN", "ball": "", "last_updated": "", "summary": "", "entry_count": 2}
+        entries = [
+            {"type": "entry", "thread_topic": "test", "entry_id": "target", "index": 1,
+             "agent": "Claude", "role": "implementer", "entry_type": "Note",
+             "title": "Target", "timestamp": "2025-01-01T00:00:00Z", "summary": "Found it"},
+            {"type": "entry", "thread_topic": "test", "entry_id": "other", "index": 0,
+             "agent": "User", "role": "pm", "entry_type": "Note",
+             "title": "Other", "timestamp": "", "summary": ""},
         ]
-        (graph_dir / "nodes.jsonl").write_text("\n".join(json.dumps(n) for n in nodes) + "\n")
+        _create_per_thread_graph(graph_dir, "test", thread_node, entries)
 
         result = get_entry_from_graph(threads_dir, "test", entry_id="target")
         assert result is not None
@@ -228,13 +270,16 @@ class TestGetEntryFromGraph:
         """Gets entry by index."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
 
-        nodes = [
-            {"type": "entry", "thread_topic": "test", "entry_id": "e0", "index": 0, "agent": "", "role": "", "entry_type": "Note", "title": "First", "timestamp": "", "summary": ""},
-            {"type": "entry", "thread_topic": "test", "entry_id": "e1", "index": 1, "agent": "", "role": "", "entry_type": "Note", "title": "Second", "timestamp": "", "summary": ""},
+        thread_node = {"type": "thread", "topic": "test", "title": "Test",
+                       "status": "OPEN", "ball": "", "last_updated": "", "summary": "", "entry_count": 2}
+        entries = [
+            {"type": "entry", "thread_topic": "test", "entry_id": "e0", "index": 0,
+             "agent": "", "role": "", "entry_type": "Note", "title": "First", "timestamp": "", "summary": ""},
+            {"type": "entry", "thread_topic": "test", "entry_id": "e1", "index": 1,
+             "agent": "", "role": "", "entry_type": "Note", "title": "Second", "timestamp": "", "summary": ""},
         ]
-        (graph_dir / "nodes.jsonl").write_text("\n".join(json.dumps(n) for n in nodes) + "\n")
+        _create_per_thread_graph(graph_dir, "test", thread_node, entries)
 
         result = get_entry_from_graph(threads_dir, "test", index=1)
         assert result is not None
@@ -245,8 +290,9 @@ class TestGetEntryFromGraph:
         """Returns None when entry not found."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
-        (graph_dir / "nodes.jsonl").write_text("")
+        thread_node = {"type": "thread", "topic": "test", "title": "Test",
+                       "status": "OPEN", "ball": "", "last_updated": "", "summary": "", "entry_count": 0}
+        _create_per_thread_graph(graph_dir, "test", thread_node, [])
 
         result = get_entry_from_graph(threads_dir, "test", entry_id="nonexistent")
         assert result is None
@@ -265,13 +311,15 @@ class TestGetEntriesRangeFromGraph:
         """Gets entries in specified range."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
 
-        nodes = [
-            {"type": "entry", "thread_topic": "test", "entry_id": f"e{i}", "index": i, "agent": "", "role": "", "entry_type": "Note", "title": f"Entry {i}", "timestamp": "", "summary": ""}
+        thread_node = {"type": "thread", "topic": "test", "title": "Test",
+                       "status": "OPEN", "ball": "", "last_updated": "", "summary": "", "entry_count": 5}
+        entries = [
+            {"type": "entry", "thread_topic": "test", "entry_id": f"e{i}", "index": i,
+             "agent": "", "role": "", "entry_type": "Note", "title": f"Entry {i}", "timestamp": "", "summary": ""}
             for i in range(5)
         ]
-        (graph_dir / "nodes.jsonl").write_text("\n".join(json.dumps(n) for n in nodes) + "\n")
+        _create_per_thread_graph(graph_dir, "test", thread_node, entries)
 
         result = get_entries_range_from_graph(threads_dir, "test", start_index=1, end_index=3)
         assert len(result) == 3
@@ -281,13 +329,15 @@ class TestGetEntriesRangeFromGraph:
         """Gets all entries from start when no end specified."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
 
-        nodes = [
-            {"type": "entry", "thread_topic": "test", "entry_id": f"e{i}", "index": i, "agent": "", "role": "", "entry_type": "Note", "title": f"Entry {i}", "timestamp": "", "summary": ""}
+        thread_node = {"type": "thread", "topic": "test", "title": "Test",
+                       "status": "OPEN", "ball": "", "last_updated": "", "summary": "", "entry_count": 5}
+        entries = [
+            {"type": "entry", "thread_topic": "test", "entry_id": f"e{i}", "index": i,
+             "agent": "", "role": "", "entry_type": "Note", "title": f"Entry {i}", "timestamp": "", "summary": ""}
             for i in range(5)
         ]
-        (graph_dir / "nodes.jsonl").write_text("\n".join(json.dumps(n) for n in nodes) + "\n")
+        _create_per_thread_graph(graph_dir, "test", thread_node, entries)
 
         result = get_entries_range_from_graph(threads_dir, "test", start_index=2)
         assert len(result) == 3
@@ -297,15 +347,19 @@ class TestGetEntriesRangeFromGraph:
         """Entries are returned sorted by index."""
         threads_dir = tmp_path / "threads"
         graph_dir = threads_dir / "graph" / "baseline"
-        graph_dir.mkdir(parents=True)
 
+        thread_node = {"type": "thread", "topic": "test", "title": "Test",
+                       "status": "OPEN", "ball": "", "last_updated": "", "summary": "", "entry_count": 3}
         # Write entries out of order
-        nodes = [
-            {"type": "entry", "thread_topic": "test", "entry_id": "e2", "index": 2, "agent": "", "role": "", "entry_type": "Note", "title": "", "timestamp": "", "summary": ""},
-            {"type": "entry", "thread_topic": "test", "entry_id": "e0", "index": 0, "agent": "", "role": "", "entry_type": "Note", "title": "", "timestamp": "", "summary": ""},
-            {"type": "entry", "thread_topic": "test", "entry_id": "e1", "index": 1, "agent": "", "role": "", "entry_type": "Note", "title": "", "timestamp": "", "summary": ""},
+        entries = [
+            {"type": "entry", "thread_topic": "test", "entry_id": "e2", "index": 2,
+             "agent": "", "role": "", "entry_type": "Note", "title": "", "timestamp": "", "summary": ""},
+            {"type": "entry", "thread_topic": "test", "entry_id": "e0", "index": 0,
+             "agent": "", "role": "", "entry_type": "Note", "title": "", "timestamp": "", "summary": ""},
+            {"type": "entry", "thread_topic": "test", "entry_id": "e1", "index": 1,
+             "agent": "", "role": "", "entry_type": "Note", "title": "", "timestamp": "", "summary": ""},
         ]
-        (graph_dir / "nodes.jsonl").write_text("\n".join(json.dumps(n) for n in nodes) + "\n")
+        _create_per_thread_graph(graph_dir, "test", thread_node, entries)
 
         result = get_entries_range_from_graph(threads_dir, "test")
         assert [e.index for e in result] == [0, 1, 2]

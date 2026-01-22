@@ -444,6 +444,10 @@ def _normalize_status(s: str) -> str:
 def _extract_thread_metadata(content: str, topic: str) -> tuple[str, str, str, str]:
     """Extract thread metadata from content string without re-reading the file.
 
+    DEPRECATED: For local mode, prefer _get_thread_metadata_graph_first() which
+    reads from the canonical graph. This MD-parsing version is still needed for
+    hosted mode where we only have GitHub API content.
+
     Args:
         content: Full thread markdown content
         topic: Thread topic (used as fallback for title)
@@ -465,6 +469,53 @@ def _extract_thread_metadata(content: str, topic: str) -> tuple[str, str, str, s
     last = hits[-1].group("ts").strip() if hits else fs.utcnow_iso()
 
     return title, status, ball, last
+
+
+def _get_thread_metadata_graph_first(
+    threads_dir: Path, topic: str, content: str | None = None
+) -> tuple[str, str, str, str]:
+    """Get thread metadata from graph with MD fallback.
+
+    Graph-first: reads from canonical graph JSONL. Falls back to MD parsing
+    if graph data is not available.
+
+    Args:
+        threads_dir: Threads directory
+        topic: Thread topic
+        content: Optional MD content (avoids re-reading file if already loaded)
+
+    Returns:
+        Tuple of (title, status, ball, last_entry_timestamp)
+    """
+    # Try graph first
+    if _use_graph_for_reads(threads_dir):
+        try:
+            result = read_thread_from_graph(threads_dir, topic)
+            if result:
+                graph_thread, graph_entries = result
+                last_ts = (
+                    graph_entries[-1].timestamp
+                    if graph_entries
+                    else graph_thread.last_updated
+                )
+                return (
+                    graph_thread.title,
+                    graph_thread.status,
+                    graph_thread.ball,
+                    last_ts,
+                )
+        except Exception as e:
+            log_debug(f"[GRAPH] Failed to get metadata from graph: {e}")
+
+    # Fallback to MD parsing
+    if content is None:
+        thread_path = threads_dir / f"{topic}.md"
+        if thread_path.exists():
+            content = fs.read_body(thread_path)
+        else:
+            return topic, "open", "unknown", fs.utcnow_iso()
+
+    return _extract_thread_metadata(content, topic)
 
 
 def _resolve_format(
@@ -655,11 +706,15 @@ def _load_thread_entries_graph_first(
     topic: str,
     context: ThreadContext,
 ) -> tuple[str | None, list[ThreadEntry]]:
-    """Load thread entries, trying graph first with markdown fallback.
+    """Load thread entries from canonical graph JSONL, with legacy markdown backfill.
 
-    This provides graph-accelerated reads while maintaining markdown as
-    source of truth. If the graph is unavailable or stale, falls back
-    to direct markdown parsing.
+    Canonical source of truth is the baseline graph JSONL (`graph/baseline/*`) in the
+    threads repo. Markdown is a derived, human-friendly projection.
+
+    This function prefers graph reads. If graph data is missing/stale (e.g., older
+    repos or incomplete backfills), it may temporarily fall back to markdown parsing
+    to keep UX usable, and optionally auto-repair the graph from markdown. That
+    fallback path is compatibility-only and should shrink over time.
 
     Args:
         topic: Thread topic
@@ -674,6 +729,8 @@ def _load_thread_entries_graph_first(
     if _use_graph_for_reads(threads_dir):
         try:
             result = read_thread_from_graph(threads_dir, topic)
+            if not result:
+                log_debug(f"[GRAPH] Topic '{topic}' not in graph, falling back to markdown")
             if result:
                 graph_thread, graph_entries = result
                 # Graph entries may not have full body - need to get from markdown
@@ -756,6 +813,7 @@ def _load_thread_entries_graph_first(
             )
 
     # Fallback to markdown parsing
+    log_debug(f"[GRAPH] Using markdown fallback for '{topic}' entries")
     return _load_thread_entries(topic, context)
 
 
@@ -764,7 +822,7 @@ def _list_threads_graph_first(
     open_only: bool | None = None,
     agent: str | None = None,
 ) -> list[tuple[str, str, str, str, Path, bool]]:
-    """List threads, trying graph first with markdown fallback.
+    """List threads from canonical graph JSONL, with legacy markdown backfill.
 
     Args:
         threads_dir: Threads directory
@@ -779,6 +837,8 @@ def _list_threads_graph_first(
     if _use_graph_for_reads(threads_dir):
         try:
             graph_threads = list_threads_from_graph(threads_dir, open_only)
+            if not graph_threads:
+                log_debug("[GRAPH] No threads in graph, falling back to markdown")
             if graph_threads:
                 # Convert to expected tuple format
                 result = []
@@ -816,6 +876,7 @@ def _list_threads_graph_first(
             )
 
     # Fallback to markdown
+    log_debug("[GRAPH] Using markdown fallback for list_threads")
     return commands.list_threads(threads_dir=threads_dir, open_only=open_only)
 
 

@@ -139,7 +139,7 @@ def _reindex_impl(ctx: Context) -> str:
             return f"No threads found in: {threads_dir}"
 
         # Categorize threads
-        from watercooler.metadata import is_closed
+        from watercooler.fs import is_closed
 
         agent_lower = agent.lower()
         actionable = []

@@ -29,9 +29,6 @@ from watercooler.baseline_graph import (
     get_thread_stats,
     export_thread_graph,
     export_all_threads,
-    load_nodes,
-    load_edges,
-    load_graph,
 )
 from watercooler.baseline_graph.export import (
     thread_to_node,
@@ -649,97 +646,6 @@ class TestExportAndLoad:
         assert edges == 1  # 1 contains edge
         assert (output_dir / "nodes.jsonl").exists()
         assert (output_dir / "edges.jsonl").exists()
-
-    def test_load_nodes(self, tmp_path):
-        """Test loading nodes from JSONL."""
-        nodes_file = tmp_path / "nodes.jsonl"
-        nodes_file.write_text(
-            '{"id": "node1", "type": "thread"}\n'
-            '{"id": "node2", "type": "entry"}\n'
-        )
-
-        nodes = list(load_nodes(nodes_file))
-        assert len(nodes) == 2
-        assert nodes[0]["id"] == "node1"
-        assert nodes[1]["id"] == "node2"
-
-    def test_load_nodes_skips_empty_lines(self, tmp_path):
-        """Test that empty lines are skipped."""
-        nodes_file = tmp_path / "nodes.jsonl"
-        nodes_file.write_text(
-            '{"id": "node1"}\n'
-            '\n'
-            '   \n'
-            '{"id": "node2"}\n'
-        )
-
-        nodes = list(load_nodes(nodes_file))
-        assert len(nodes) == 2
-
-    def test_load_edges(self, tmp_path):
-        """Test loading edges from JSONL."""
-        edges_file = tmp_path / "edges.jsonl"
-        edges_file.write_text(
-            '{"source": "a", "target": "b", "type": "contains"}\n'
-        )
-
-        edges = list(load_edges(edges_file))
-        assert len(edges) == 1
-        assert edges[0]["source"] == "a"
-
-    def test_load_graph(self, tmp_path):
-        """Test loading complete graph."""
-        nodes_file = tmp_path / "nodes.jsonl"
-        edges_file = tmp_path / "edges.jsonl"
-
-        nodes_file.write_text('{"id": "n1"}\n')
-        edges_file.write_text('{"source": "n1", "target": "n2"}\n')
-
-        nodes, edges = load_graph(tmp_path)
-        assert len(nodes) == 1
-        assert len(edges) == 1
-
-
-class TestJSONErrorHandling:
-    """Tests for JSON parsing error handling."""
-
-    def test_load_nodes_invalid_json(self, tmp_path):
-        """Test that invalid JSON raises error with line number."""
-        nodes_file = tmp_path / "nodes.jsonl"
-        nodes_file.write_text(
-            '{"id": "valid"}\n'
-            'invalid json line\n'
-            '{"id": "another"}\n'
-        )
-
-        with pytest.raises(json.JSONDecodeError) as exc_info:
-            list(load_nodes(nodes_file))
-
-        # Should include line number in error
-        assert "line 2" in str(exc_info.value)
-
-    def test_load_edges_invalid_json(self, tmp_path):
-        """Test that invalid JSON in edges raises error with line number."""
-        edges_file = tmp_path / "edges.jsonl"
-        edges_file.write_text(
-            '{"source": "a", "target": "b"}\n'
-            '{"broken: json}\n'
-        )
-
-        with pytest.raises(json.JSONDecodeError) as exc_info:
-            list(load_edges(edges_file))
-
-        assert "line 2" in str(exc_info.value)
-
-    def test_load_nodes_includes_filename(self, tmp_path):
-        """Test that error includes filename."""
-        nodes_file = tmp_path / "my_nodes.jsonl"
-        nodes_file.write_text('not json\n')
-
-        with pytest.raises(json.JSONDecodeError) as exc_info:
-            list(load_nodes(nodes_file))
-
-        assert "my_nodes.jsonl" in str(exc_info.value)
 
 
 class TestExportAllThreads:

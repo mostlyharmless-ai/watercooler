@@ -14,8 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from watercooler.metadata import thread_meta
-from watercooler.thread_entries import ThreadEntry, parse_thread_entries
+from watercooler.thread_entries import ThreadEntry, parse_thread_entries, parse_thread_header
 
 from .schema import (
     ThreadNode,
@@ -48,7 +47,7 @@ def parse_thread_to_nodes(
     thread_id = thread_path.stem
 
     # Use existing metadata parser
-    title, status, ball, last_update = thread_meta(thread_path)
+    title, status, ball, last_update = parse_thread_header(thread_path)
 
     # Use existing entry parser
     entries = parse_thread_entries(content)

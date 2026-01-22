@@ -254,3 +254,4 @@ pipeline_work/
 
 # Migration checkpoint files (runtime state, not version controlled)
 .migration_checkpoint.json
+.vercel

@@ -30,6 +30,20 @@
 | [`WATERCOOLER_MEMORY_DISABLED`](#watercooler_memory_disabled) | No | Not set | All Memory | Disable all memory backends |
 | [`WATERCOOLER_MEMORY_BACKEND`](#watercooler_memory_backend) | No | Not set | Memory Sync | Select memory backend (graphiti/leanrag) |
 
+### HTTP Transport Variables
+
+| Variable | Required | Default | Used By | Purpose |
+|----------|----------|---------|---------|---------|
+| [`WATERCOOLER_MCP_TRANSPORT`](#watercooler_mcp_transport) | No | `stdio` | MCP Server | Transport mode (`stdio` or `http`) |
+| [`WATERCOOLER_MCP_HOST`](#watercooler_mcp_host) | No | `0.0.0.0` | HTTP Server | HTTP bind host |
+| [`WATERCOOLER_MCP_PORT`](#watercooler_mcp_port) | No | `8080` | HTTP Server | HTTP bind port |
+| [`WATERCOOLER_AUTH_MODE`](#watercooler_auth_mode) | No | `local` | HTTP Server | Authentication mode (`local` or `hosted`) |
+| [`WATERCOOLER_TOKEN_API_URL`](#watercooler_token_api_url) | Hosted: Yes | - | HTTP Server | Token service endpoint URL |
+| [`WATERCOOLER_TOKEN_API_KEY`](#watercooler_token_api_key) | Hosted: Yes | - | HTTP Server | Token service API key |
+| [`WATERCOOLER_CACHE_BACKEND`](#watercooler_cache_backend) | No | `memory` | HTTP Server | Cache backend (`memory` or `database`) |
+| [`WATERCOOLER_CACHE_TTL`](#watercooler_cache_ttl) | No | `300` | HTTP Server | Default cache TTL in seconds |
+| [`WATERCOOLER_CORS_ORIGINS`](#watercooler_cors_origins) | No | `*` | HTTP Server | Allowed CORS origins |
+
 ---
 
 ## Core Variables
@@ -1036,6 +1050,225 @@ FalkorDB
 Summary
 =======
 All backends configured consistently ✓
+```
+
+---
+
+## HTTP Transport Variables (Hosted Mode)
+
+These variables configure the HTTP transport for hosted MCP deployment. The HTTP server enables running watercooler-cloud as a hosted service that web applications can call directly.
+
+### WATERCOOLER_MCP_TRANSPORT
+
+**Purpose:** Select transport mode for the MCP server.
+
+**Required:** No
+
+**Default:** `"stdio"`
+
+**Format:** String (`"stdio"` or `"http"`)
+
+**Used by:** MCP Server
+
+**Details:**
+
+- `stdio` - Standard input/output mode for local MCP clients (Claude Code, Cursor, etc.)
+- `http` - HTTP server mode for hosted deployments (watercooler-site, other web apps)
+
+**Configuration examples:**
+
+**Shell:**
+```bash
+WATERCOOLER_MCP_TRANSPORT=http python -m watercooler_mcp
+```
+
+---
+
+### WATERCOOLER_MCP_HOST
+
+**Purpose:** HTTP server bind host address.
+
+**Required:** No
+
+**Default:** `"0.0.0.0"` (all interfaces)
+
+**Format:** IP address or hostname string
+
+**Used by:** HTTP Server
+
+---
+
+### WATERCOOLER_MCP_PORT
+
+**Purpose:** HTTP server bind port.
+
+**Required:** No
+
+**Default:** `8080`
+
+**Format:** Integer port number
+
+**Used by:** HTTP Server
+
+---
+
+### WATERCOOLER_AUTH_MODE
+
+**Purpose:** Authentication mode for GitHub API access.
+
+**Required:** No
+
+**Default:** `"local"`
+
+**Format:** String (`"local"` or `"hosted"`)
+
+**Used by:** HTTP Server (auth module)
+
+**Details:**
+
+- `local` - Use local git credentials (SSH keys, credential helper, environment tokens)
+- `hosted` - Fetch GitHub OAuth tokens from the token service API
+
+**When to use `hosted`:**
+- Running as a multi-user service (watercooler-site dashboard, Slack integration)
+- Each request includes a `X-User-ID` header identifying the user
+- Tokens are fetched from the token service and cached for the request
+
+**Configuration examples:**
+
+**Shell:**
+```bash
+export WATERCOOLER_AUTH_MODE="hosted"
+export WATERCOOLER_TOKEN_API_URL="https://watercoolerdev.com"
+export WATERCOOLER_TOKEN_API_KEY="your-api-key"
+```
+
+---
+
+### WATERCOOLER_TOKEN_API_URL
+
+**Purpose:** Base URL of the token service that provides GitHub OAuth tokens.
+
+**Required:** Yes (in hosted mode)
+
+**Default:** Empty (token service disabled)
+
+**Format:** URL string (e.g., `"https://watercoolerdev.com"`)
+
+**Used by:** HTTP Server (auth module)
+
+**Details:**
+
+The MCP server calls `GET {url}/api/github/token?userId={user_id}` to fetch tokens.
+The token service must:
+1. Authenticate the request using the API key
+2. Look up the user's encrypted GitHub OAuth token
+3. Decrypt and return the token
+
+**Related:**
+- See [watercooler-site Token Service](#token-service-api) for API contract
+
+---
+
+### WATERCOOLER_TOKEN_API_KEY
+
+**Purpose:** API key for authenticating with the token service.
+
+**Required:** Yes (in hosted mode)
+
+**Default:** Empty
+
+**Format:** String
+
+**Used by:** HTTP Server (auth module)
+
+**Details:**
+
+Sent as `x-api-key` header when fetching tokens from the token service.
+Generate a secure random key and configure it in both the MCP server and token service.
+
+---
+
+### WATERCOOLER_CACHE_BACKEND
+
+**Purpose:** Select cache backend for reducing API calls.
+
+**Required:** No
+
+**Default:** `"memory"`
+
+**Format:** String (`"memory"` or `"database"`)
+
+**Used by:** HTTP Server (cache module)
+
+**Details:**
+
+- `memory` - In-memory cache (per-process, lost on restart). Suitable for:
+  - Local MCP (STDIO mode)
+  - Single-process deployments
+  - Development/testing
+
+- `database` - Remote cache via watercooler-site API. Suitable for:
+  - Serverless deployments (Vercel, AWS Lambda)
+  - Multi-process/multi-instance deployments
+  - Persistent caching across restarts
+
+**Configuration examples:**
+
+**Shell:**
+```bash
+export WATERCOOLER_CACHE_BACKEND="memory"
+export WATERCOOLER_CACHE_TTL="300"
+```
+
+---
+
+### WATERCOOLER_CACHE_TTL
+
+**Purpose:** Default time-to-live for cached entries.
+
+**Required:** No
+
+**Default:** `300` (5 minutes)
+
+**Format:** Integer (seconds)
+
+**Used by:** HTTP Server (cache module)
+
+**Details:**
+
+Controls how long cached data (thread content, graph nodes, API responses) is retained before expiring.
+
+- Lower values (60-120): More API calls, fresher data
+- Higher values (300-600): Fewer API calls, potential staleness
+
+---
+
+### WATERCOOLER_CORS_ORIGINS
+
+**Purpose:** Allowed origins for CORS requests.
+
+**Required:** No
+
+**Default:** `"*"` (all origins)
+
+**Format:** Comma-separated list of origins
+
+**Used by:** HTTP Server
+
+**Details:**
+
+Configure for production deployments to restrict which domains can call the API.
+
+**Configuration examples:**
+
+**Shell:**
+```bash
+# Allow specific origins
+export WATERCOOLER_CORS_ORIGINS="https://watercoolerdev.com,https://app.watercooler.dev"
+
+# Allow all (development)
+export WATERCOOLER_CORS_ORIGINS="*"
 ```
 
 ---

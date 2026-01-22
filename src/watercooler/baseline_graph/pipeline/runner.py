@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from .config import PipelineConfig
 from .state import PipelineState
+from .. import storage
 
 
 @dataclass
@@ -460,7 +461,14 @@ class BaselineGraphRunner:
         return generated
 
     def _export_graph(self, threads: List[Any]) -> tuple[int, int]:
-        """Export threads to JSONL graph format."""
+        """Export threads to per-thread JSONL graph format.
+
+        Writes per-thread format:
+            threads/<topic>/meta.json     - Thread node
+            threads/<topic>/entries.jsonl - Entry nodes
+            threads/<topic>/edges.jsonl   - Thread-local edges
+            search-index.jsonl            - Entry embeddings for cross-thread search
+        """
         from ..export import (
             thread_to_node,
             entry_to_node,
@@ -468,46 +476,107 @@ class BaselineGraphRunner:
             generate_cross_references,
         )
 
-        self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        graph_dir = storage.ensure_graph_dir(self.config.threads_dir)
 
-        nodes_path = self.config.output_dir / "nodes.jsonl"
-        edges_path = self.config.output_dir / "edges.jsonl"
-
-        self._log(f"Exporting graph to: {self.config.output_dir}")
+        self._log(f"Exporting graph to: {graph_dir}")
 
         node_count = 0
         edge_count = 0
         xref_count = 0
+        search_index_entries: List[Dict[str, Any]] = []
 
-        with open(nodes_path, "w") as nodes_file, open(edges_path, "w") as edges_file:
-            for thread in threads:
-                # Thread node
-                thread_node = thread_to_node(thread)
-                if hasattr(thread, 'embedding') and thread.embedding:
-                    thread_node["embedding"] = thread.embedding
-                nodes_file.write(json.dumps(thread_node) + "\n")
+        # Collect all nodes and edges for monolithic dual-write
+        all_nodes: List[Dict[str, Any]] = []
+        all_edges: List[Dict[str, Any]] = []
+
+        # Build topic lookup for cross-references
+        topic_lookup = {t.topic: t for t in threads}
+
+        for thread in threads:
+            topic = thread.topic
+
+            # Thread node (meta.json)
+            thread_node = thread_to_node(thread)
+            if hasattr(thread, 'embedding') and thread.embedding:
+                thread_node["embedding"] = thread.embedding
+            node_count += 1
+
+            # Entry nodes
+            entries_dict: Dict[str, Dict[str, Any]] = {}
+            for entry in thread.entries:
+                entry_node = entry_to_node(entry, thread.topic)
+                if hasattr(entry, 'summary') and entry.summary:
+                    entry_node["summary"] = entry.summary
+                if hasattr(entry, 'embedding') and entry.embedding:
+                    entry_node["embedding"] = entry.embedding
+                    # Add to search index (use raw entry_id ULID, not node ID)
+                    search_index_entries.append({
+                        "entry_id": entry.entry_id,
+                        "thread_topic": topic,
+                        "embedding": entry.embedding,
+                    })
+                entries_dict[entry_node["id"]] = entry_node
                 node_count += 1
 
-                # Entry nodes
+            # Edges (contains, followed_by)
+            edges_dict: Dict[str, Dict[str, Any]] = {}
+            for edge in generate_edges(thread):
+                edge_key = edge.get("source", "") + edge.get("target", "")
+                edges_dict[edge_key] = edge
+                edge_count += 1
+
+            # Write per-thread files
+            storage.write_thread_graph(graph_dir, topic, thread_node, entries_dict, edges_dict)
+
+            # Collect for monolithic dual-write
+            all_nodes.append(thread_node)
+            all_nodes.extend(entries_dict.values())
+            all_edges.extend(edges_dict.values())
+
+        # Cross-reference edges (need all threads for lookup)
+        # These are stored in each thread's edges file where the reference originates
+        self._log_verbose("Detecting cross-references...")
+        xref_by_topic: Dict[str, List[Dict[str, Any]]] = {}
+        for edge in generate_cross_references(threads):
+            xref_count += 1
+            # Determine source topic from edge source ID
+            # Edge source format is "entry:{ulid}" (set in export.py generate_cross_references)
+            source_id = edge.get("source", "")
+            source_topic = None
+
+            # Extract the raw entry_id from "entry:{ulid}" format
+            raw_entry_id = source_id[6:] if source_id.startswith("entry:") else source_id
+
+            for topic, thread in topic_lookup.items():
                 for entry in thread.entries:
-                    entry_node = entry_to_node(entry, thread.topic)
-                    if hasattr(entry, 'summary') and entry.summary:
-                        entry_node["summary"] = entry.summary
-                    if hasattr(entry, 'embedding') and entry.embedding:
-                        entry_node["embedding"] = entry.embedding
-                    nodes_file.write(json.dumps(entry_node) + "\n")
-                    node_count += 1
+                    entry_id = getattr(entry, 'entry_id', '')
+                    # Compare raw entry IDs (ULIDs)
+                    if entry_id == raw_entry_id:
+                        source_topic = topic
+                        break
+                if source_topic:
+                    break
 
-                # Edges (contains, followed_by)
-                for edge in generate_edges(thread):
-                    edges_file.write(json.dumps(edge) + "\n")
-                    edge_count += 1
+            if source_topic:
+                if source_topic not in xref_by_topic:
+                    xref_by_topic[source_topic] = []
+                xref_by_topic[source_topic].append(edge)
 
-            # Cross-reference edges (need all threads for lookup)
-            self._log_verbose("Detecting cross-references...")
-            for edge in generate_cross_references(threads):
-                edges_file.write(json.dumps(edge) + "\n")
-                xref_count += 1
+        # Append cross-references to thread edge files
+        for topic, xref_edges in xref_by_topic.items():
+            existing_edges = storage.load_thread_edges(graph_dir, topic)
+            for edge in xref_edges:
+                edge_key = edge.get("source", "") + edge.get("target", "")
+                existing_edges[edge_key] = edge
+                all_edges.append(edge)  # Collect for monolithic
+            storage.write_thread_edges(graph_dir, topic, existing_edges)
+
+        # Dual-write: Write monolithic format for backward compatibility
+        storage.write_monolithic_graph(graph_dir, all_nodes, all_edges)
+        self._log_verbose(f"  Wrote monolithic format: {len(all_nodes)} nodes, {len(all_edges)} edges")
+
+        # Write search index
+        storage.atomic_write_jsonl(graph_dir / "search-index.jsonl", search_index_entries)
 
         self._log(f"  Wrote {node_count} nodes, {edge_count} edges, {xref_count} cross-references")
 
@@ -515,7 +584,8 @@ class BaselineGraphRunner:
         from datetime import datetime, timezone
         total_edges = edge_count + xref_count
         manifest = {
-            "version": "1.0",
+            "version": "2.0",  # Per-thread format
+            "format": "per-thread",
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "source_dir": str(self.config.threads_dir),
             "threads_exported": len(threads),
@@ -523,14 +593,9 @@ class BaselineGraphRunner:
             "nodes_written": node_count,
             "edges_written": total_edges,
             "cross_references": xref_count,
-            "files": {
-                "nodes": "nodes.jsonl",
-                "edges": "edges.jsonl",
-            },
+            "topics": {t.topic: datetime.now(timezone.utc).isoformat() for t in threads},
         }
-        manifest_path = self.config.output_dir / "manifest.json"
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
+        storage.atomic_write_json(graph_dir / "manifest.json", manifest)
 
         return node_count, total_edges
 

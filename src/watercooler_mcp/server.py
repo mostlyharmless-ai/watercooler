@@ -50,7 +50,6 @@ from .helpers import (
     _validate_and_sync_branches,
     # Thread parsing
     _normalize_status,
-    _extract_thread_metadata,
     _resolve_format,
     # Entry loading
     _load_thread_entries,
@@ -123,7 +122,17 @@ if sys.platform == "win32":
 # Initialize FastMCP server with configurable transport
 # WATERCOOLER_MCP_TRANSPORT: "http" or "stdio" (default: "stdio" for backward compatibility)
 _TRANSPORT = config.env.get("WATERCOOLER_MCP_TRANSPORT", "stdio").lower()
-mcp = FastMCP(name="Watercooler Cloud")
+
+# For HTTP transport, use stateless mode with JSON responses (no SSE/sessions)
+# This enables simple JSON-RPC calls from clients like mcpClient.ts
+if _TRANSPORT == "http":
+    mcp = FastMCP(
+        name="Watercooler Cloud",
+        stateless_http=True,
+        json_response=True,
+    )
+else:
+    mcp = FastMCP(name="Watercooler Cloud")
 
 
 # Instrument FastMCP tool execution for observability

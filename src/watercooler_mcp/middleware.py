@@ -29,6 +29,78 @@ from .sync import (
 from .observability import log_debug, log_action, log_warning
 from .helpers import _should_auto_branch, _build_commit_footers
 
+# Check if graph-first mode is enabled
+def _is_graph_first_enabled() -> bool:
+    """Check if graph-first mode is enabled via env var."""
+    import os
+    return os.environ.get("WATERCOOLER_GRAPH_FIRST", "").lower() in ("1", "true", "yes")
+
+
+def _check_enrichment_services_available(graph_config) -> bool:
+    """Check if LLM/embedding services are available for enrichment.
+
+    Performs lightweight connection tests to determine if services can be reached.
+    Returns True only if ALL required services are available.
+
+    Args:
+        graph_config: GraphConfig with generate_summaries/generate_embeddings flags
+
+    Returns:
+        True if services are available, False otherwise
+    """
+    try:
+        import httpx
+    except ImportError:
+        log_debug("[GRAPH] httpx not available, skipping enrichment")
+        return False
+
+    # If neither is requested, no need to check services
+    if not graph_config.generate_summaries and not graph_config.generate_embeddings:
+        return False
+
+    try:
+        # Check LLM service if summaries requested
+        if graph_config.generate_summaries:
+            llm_base = getattr(graph_config, 'summarizer_api_base', None)
+            if not llm_base:
+                from watercooler.config_schema import SummarizerConfig
+                llm_base = SummarizerConfig.from_env().api_base
+            if llm_base:
+                try:
+                    with httpx.Client(timeout=2.0) as client:
+                        # Try to reach the models endpoint (lightweight check)
+                        url = f"{llm_base.rstrip('/')}/models"
+                        response = client.get(url)
+                        if response.status_code >= 500:
+                            log_debug(f"[GRAPH] LLM service unavailable at {llm_base}")
+                            return False
+                except (httpx.ConnectError, httpx.TimeoutException):
+                    log_debug(f"[GRAPH] Cannot connect to LLM at {llm_base}")
+                    return False
+
+        # Check embedding service if embeddings requested
+        if graph_config.generate_embeddings:
+            embed_base = getattr(graph_config, 'embedding_api_base', None)
+            if not embed_base:
+                from watercooler.baseline_graph.sync import EmbeddingConfig
+                embed_base = EmbeddingConfig.from_env().api_base
+            if embed_base:
+                try:
+                    with httpx.Client(timeout=2.0) as client:
+                        url = f"{embed_base.rstrip('/')}/models"
+                        response = client.get(url)
+                        if response.status_code >= 500:
+                            log_debug(f"[GRAPH] Embedding service unavailable at {embed_base}")
+                            return False
+                except (httpx.ConnectError, httpx.TimeoutException):
+                    log_debug(f"[GRAPH] Cannot connect to embedding service at {embed_base}")
+                    return False
+
+        return True
+    except Exception as e:
+        log_debug(f"[GRAPH] Service check failed: {e}")
+        return False
+
 
 # Store original FunctionTool.run for instrumentation
 _orig_run = None
@@ -155,52 +227,79 @@ def run_with_sync(
         )
         commit_message = commit_title if not footers else f"{commit_title}\n\n" + "\n".join(footers)
 
-        # Execute operation with git sync (pull → operation → commit → push)
+        # Wrap operation to include graph sync BEFORE commit
+        # This ensures graph files are in the SAME commit as the .md file
+        # If enrichment services are available, include summaries/embeddings
+        # Otherwise, create minimal structural node (backfill later)
+        #
+        # NOTE: In graph-first mode, this sync is SKIPPED because the command
+        # already wrote to the graph first (via commands_graph.py), then projected
+        # to MD. The graph files are already up-to-date.
+        def operation_with_graph_sync():
+            result = operation()
+
+            # Skip graph sync in graph-first mode - graph was already written by command
+            if _is_graph_first_enabled():
+                log_debug(f"[GRAPH] Graph-first mode: skipping post-op sync for {topic}/{entry_id}")
+                return result
+
+            if topic and entry_id and context.threads_dir:
+                try:
+                    # Check if enrichment services are available
+                    wc_config = get_watercooler_config()
+                    graph_config = wc_config.mcp.graph
+
+                    can_enrich = (
+                        graph_config.generate_summaries or graph_config.generate_embeddings
+                    ) and _check_enrichment_services_available(graph_config)
+
+                    if can_enrich:
+                        # Full sync with enrichment - services are available
+                        from watercooler.baseline_graph.sync import sync_entry_to_graph
+
+                        sync_ok = sync_entry_to_graph(
+                            threads_dir=context.threads_dir,
+                            topic=topic,
+                            entry_id=entry_id,
+                            generate_summaries=graph_config.generate_summaries,
+                            generate_embeddings=graph_config.generate_embeddings,
+                        )
+                        if sync_ok:
+                            log_debug(f"[GRAPH] Enriched sync complete for {topic}/{entry_id}")
+                        else:
+                            log_warning(f"[GRAPH] Enriched sync returned False for {topic}/{entry_id}")
+                    else:
+                        # Structural sync only - services unavailable or not configured
+                        from watercooler.baseline_graph.sync import sync_entry_structure_only
+
+                        sync_ok = sync_entry_structure_only(
+                            threads_dir=context.threads_dir,
+                            topic=topic,
+                            entry_id=entry_id,
+                        )
+                        if sync_ok:
+                            log_debug(f"[GRAPH] Structural sync complete for {topic}/{entry_id}")
+                        else:
+                            log_warning(f"[GRAPH] Structural sync returned False for {topic}/{entry_id}")
+                except Exception as graph_err:
+                    # Graph sync failure is logged but doesn't block the write
+                    log_warning(f"[GRAPH] Graph sync failed: {graph_err}")
+
+            return result
+
+        # Execute operation with git sync (pull → operation+graph → commit → push)
         result = sync.with_sync(
-            operation,
+            operation_with_graph_sync,
             commit_message,
             topic=topic,
             entry_id=entry_id,
             priority_flush=priority_flush,
         )
 
-        # Sync to baseline graph (non-blocking - failures don't stop the write)
-        if topic and context.threads_dir:
-            log_warning(f"[GRAPH] Attempting graph sync for {topic}/{entry_id}")
-            try:
-                from watercooler.baseline_graph.sync import sync_entry_to_graph
-
-                # Get graph config for summary/embedding generation
-                wc_config = get_watercooler_config()
-                graph_config = wc_config.mcp.graph
-                log_warning(f"[GRAPH] Config: summaries={graph_config.generate_summaries}, embeddings={graph_config.generate_embeddings}")
-
-                sync_result = sync_entry_to_graph(
-                    threads_dir=context.threads_dir,
-                    topic=topic,
-                    entry_id=entry_id,
-                    generate_summaries=graph_config.generate_summaries,
-                    generate_embeddings=graph_config.generate_embeddings,
-                )
-                log_warning(f"[GRAPH] Sync result for {topic}/{entry_id}: {sync_result}")
-
-                # Phase 2: Commit graph files to keep working tree clean
-                # This prevents uncommitted graph files from blocking future preflight pulls
-                if sync_result:
-                    graph_committed = sync.commit_graph_changes(topic, entry_id)
-                    if graph_committed:
-                        log_warning(f"[GRAPH] Graph files committed for {topic}/{entry_id}")
-                    else:
-                        log_warning(f"[GRAPH] Graph commit skipped or failed for {topic}/{entry_id}")
-            except Exception as graph_err:
-                # Graph sync failure should not block the write operation
-                log_warning(f"[GRAPH] Sync failed (non-blocking): {graph_err}")
-                try:
-                    from watercooler.baseline_graph.sync import record_graph_sync_error
-
-                    record_graph_sync_error(context.threads_dir, topic, entry_id, graph_err)
-                except Exception:
-                    pass  # Best effort error recording
+        # NOTE: Enrichment (summaries/embeddings) is now handled in operation_with_graph_sync
+        # above, within the same atomic commit. If services are unavailable, structural-only
+        # sync is performed. Use watercooler_backfill_graph to add enrichment later.
+        # This eliminates the race condition from the previous two-phase commit approach.
 
         # Update parity state file after successful write
         if context.code_root and context.threads_dir:

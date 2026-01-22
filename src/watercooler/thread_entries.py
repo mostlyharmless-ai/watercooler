@@ -30,14 +30,26 @@ Parser Strategy:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import re
 from typing import List, Optional, Tuple
 
+from .fs import utcnow_iso
+
+# Thread header parsing patterns
+_STAT_RE = re.compile(r"^Status:\s*(?P<val>.+)$", re.IGNORECASE | re.MULTILINE)
+_BALL_RE = re.compile(r"^Ball:\s*(?P<val>.+)$", re.IGNORECASE | re.MULTILINE)
+_TITLE_RE = re.compile(r"^#\s*(?P<val>.+)$", re.MULTILINE)
 
 # Entry: header line - the primary entry boundary marker
 # Format: "Entry: Agent Name (user) 2025-01-01T12:00:00Z"
+# Supports multiple ISO 8601 formats:
+#   - YYYY-MM-DDTHH:MM:SSZ (basic)
+#   - YYYY-MM-DDTHH:MM:SS.ffffffZ (with fractional seconds)
+#   - YYYY-MM-DDTHH:MM:SS+00:00 (with offset)
+#   - YYYY-MM-DDTHH:MM:SS.ffffff+00:00 (with both)
 _ENTRY_LINE_RE = re.compile(
-    r"^Entry:\s*(?P<agent>.+?)\s+(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s*$"
+    r"^Entry:\s*(?P<agent>.+?)\s+(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s*$"
 )
 
 # Entry-ID comment - unique identifier for deduplication
@@ -380,3 +392,40 @@ def parse_thread_entries(text: str) -> List[ThreadEntry]:
         ))
 
     return result
+
+
+def parse_thread_header(thread_path: Path) -> tuple[str, str, str, str]:
+    """Parse thread header metadata from markdown file.
+
+    This function extracts Status, Ball, Title, and last entry timestamp
+    from a thread markdown file. Used by graph parsers for migration
+    and reconciliation utilities.
+
+    Args:
+        thread_path: Path to the thread markdown file
+
+    Returns:
+        Tuple of (title, status, ball, last_entry_timestamp)
+    """
+    content = thread_path.read_text(encoding="utf-8") if thread_path.exists() else ""
+
+    # Extract title from first markdown heading
+    title_match = _TITLE_RE.search(content)
+    title = title_match.group("val").strip() if title_match else thread_path.stem
+
+    # Extract status (default to "open")
+    status_match = _STAT_RE.search(content)
+    status = status_match.group("val").strip().lower() if status_match else "open"
+
+    # Extract ball (default to "unknown")
+    ball_match = _BALL_RE.search(content)
+    ball = ball_match.group("val").strip() if ball_match else "unknown"
+
+    # Get last entry timestamp from parsed entries
+    entries = parse_thread_entries(content)
+    if entries and entries[-1].timestamp:
+        last_updated = entries[-1].timestamp
+    else:
+        last_updated = utcnow_iso()
+
+    return title, status, ball, last_updated

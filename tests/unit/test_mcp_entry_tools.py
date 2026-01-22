@@ -117,16 +117,18 @@ def test_get_thread_entry_by_id(patched_context):
 
 
 def test_get_thread_entry_index_id_mismatch(patched_context):
-    """Test that an error is returned when index and entry_id point to different entries."""
-    result = server.get_thread_entry.fn(
-        topic="entry-access-tools",
-        index=0,  # Points to first entry with ID 01KA0PK97G9Q6AB0B17896Y1EB
-        entry_id="01KA0PYSR7X43QQ61H1BCR3S2S",  # ID of second entry (index 1)
-        code_path=".",
-    )
-    text = _extract_text(result)
-    assert "Error" in text
-    assert "different entries" in text
+    """Test that an error is raised when index and entry_id point to different entries."""
+    import pytest
+    from watercooler_mcp.errors import ValidationError
+
+    with pytest.raises(ValidationError) as exc_info:
+        server.get_thread_entry.fn(
+            topic="entry-access-tools",
+            index=0,  # Points to first entry with ID 01KA0PK97G9Q6AB0B17896Y1EB
+            entry_id="01KA0PYSR7X43QQ61H1BCR3S2S",  # ID of second entry (index 1)
+            code_path=".",
+        )
+    assert "different entries" in str(exc_info.value)
 
 
 def test_get_thread_entry_range_inclusive(patched_context):
@@ -157,20 +159,26 @@ def test_entry_range_handles_open_end(patched_context):
 
 
 def test_invalid_index_returns_error(patched_context):
-    result = server.get_thread_entry.fn(topic="entry-access-tools", index=5, code_path=".")
-    error_text = result.content[0].text
-    assert "out of range" in error_text
+    import pytest
+    from watercooler_mcp.errors import IndexOutOfRangeError
+
+    with pytest.raises(IndexOutOfRangeError) as exc_info:
+        server.get_thread_entry.fn(topic="entry-access-tools", index=5, code_path=".")
+    assert "out of range" in str(exc_info.value).lower()
 
 
 def test_invalid_range_returns_error(patched_context):
-    result = server.get_thread_entry_range.fn(
-        topic="entry-access-tools",
-        start_index=5,
-        end_index=6,
-        code_path=".",
-    )
-    error_text = result.content[0].text
-    assert "out of range" in error_text or "must be" in error_text
+    import pytest
+    from watercooler_mcp.errors import IndexOutOfRangeError
+
+    with pytest.raises(IndexOutOfRangeError) as exc_info:
+        server.get_thread_entry_range.fn(
+            topic="entry-access-tools",
+            start_index=5,
+            end_index=6,
+            code_path=".",
+        )
+    assert "out of range" in str(exc_info.value).lower() or "must be" in str(exc_info.value).lower()
 
 
 def test_list_thread_entries_markdown(patched_context):
@@ -229,9 +237,13 @@ def test_read_thread_markdown_default(patched_context):
 
 
 def test_read_thread_invalid_format(patched_context):
-    output = server.read_thread.fn(
-        topic="entry-access-tools",
-        code_path=".",
-        format="xml",
-    )
-    assert "unsupported format" in output.lower()
+    import pytest
+    from watercooler_mcp.errors import ValidationError
+
+    with pytest.raises(ValidationError) as exc_info:
+        server.read_thread.fn(
+            topic="entry-access-tools",
+            code_path=".",
+            format="xml",
+        )
+    assert "unsupported format" in str(exc_info.value).lower()

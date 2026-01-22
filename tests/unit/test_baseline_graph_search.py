@@ -107,11 +107,38 @@ def sample_nodes():
 
 @pytest.fixture
 def populated_graph(threads_dir, graph_dir, sample_nodes):
-    """Create a graph with sample nodes."""
-    nodes_file = graph_dir / "nodes.jsonl"
-    with open(nodes_file, "w") as f:
-        for node in sample_nodes:
-            f.write(json.dumps(node) + "\n")
+    """Create a graph with sample nodes in per-thread format."""
+    # Organize nodes by thread topic
+    threads_data: dict = {}  # topic -> {"meta": {}, "entries": []}
+
+    for node in sample_nodes:
+        if node["type"] == "thread":
+            topic = node["topic"]
+            if topic not in threads_data:
+                threads_data[topic] = {"meta": {}, "entries": []}
+            threads_data[topic]["meta"] = node
+        elif node["type"] == "entry":
+            topic = node["thread_topic"]
+            if topic not in threads_data:
+                threads_data[topic] = {"meta": {}, "entries": []}
+            threads_data[topic]["entries"].append(node)
+
+    # Write per-thread format
+    for topic, data in threads_data.items():
+        thread_dir = graph_dir / "threads" / topic
+        thread_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write meta.json
+        meta_file = thread_dir / "meta.json"
+        meta_file.write_text(json.dumps(data["meta"]))
+
+        # Write entries.jsonl
+        if data["entries"]:
+            entries_file = thread_dir / "entries.jsonl"
+            with open(entries_file, "w") as f:
+                for entry in data["entries"]:
+                    f.write(json.dumps(entry) + "\n")
+
     return threads_dir
 
 
@@ -486,25 +513,32 @@ class TestEdgeCases:
     """Tests for edge cases and error handling."""
 
     def test_empty_graph(self, threads_dir, graph_dir):
-        """Test search on empty graph file."""
-        # Create empty nodes file
-        (graph_dir / "nodes.jsonl").touch()
-
+        """Test search on empty graph (no threads directory)."""
+        # Per-thread format check - no threads directory means no graph
         query = SearchQuery(query="test")
         results = search_graph(threads_dir, query)
         assert results.count == 0
 
     def test_malformed_json_lines(self, threads_dir, graph_dir):
         """Test search handles malformed JSON gracefully."""
-        nodes_file = graph_dir / "nodes.jsonl"
-        with open(nodes_file, "w") as f:
+        # Create per-thread format with valid meta but malformed entries
+        thread_dir = graph_dir / "threads" / "valid"
+        thread_dir.mkdir(parents=True)
+
+        # Write valid meta.json
+        meta_file = thread_dir / "meta.json"
+        meta_file.write_text('{"type": "thread", "topic": "valid"}')
+
+        # Write entries with some malformed lines
+        entries_file = thread_dir / "entries.jsonl"
+        with open(entries_file, "w") as f:
             f.write("not valid json\n")
-            f.write('{"type": "thread", "topic": "valid"}\n')
+            f.write('{"type": "entry", "entry_id": "01VALID", "thread_topic": "valid"}\n')
             f.write("another bad line\n")
 
-        query = SearchQuery(include_threads=True, include_entries=False)
+        query = SearchQuery(include_threads=False, include_entries=True)
         results = search_graph(threads_dir, query)
-        # Should find the one valid thread
+        # Should find the one valid entry
         assert results.count == 1
 
     def test_search_with_all_empty_filters(self, populated_graph):

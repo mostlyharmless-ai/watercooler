@@ -29,9 +29,6 @@ from .parser import (
 from .export import (
     export_thread_graph,
     export_all_threads,
-    load_nodes,
-    load_edges,
-    load_graph,
 )
 
 from .reader import (
@@ -56,6 +53,34 @@ from .sync import (
     record_graph_sync_error,
     check_graph_health,
     reconcile_graph,
+    backfill_missing,
+    BackfillResult,
+)
+
+from .writer import (
+    ThreadData,
+    EntryData,
+    upsert_thread_node,
+    upsert_entry_node,
+    update_thread_metadata,
+    delete_entry_node,
+    get_thread_from_graph,
+    get_entry_node_from_graph,
+    get_entries_for_thread,
+    get_last_entry_id,
+    get_next_entry_index,
+    init_thread_in_graph,
+)
+
+from .projector import (
+    project_entry_to_markdown,
+    project_thread_to_markdown,
+    project_thread_header_only,
+    write_thread_markdown,
+    project_and_write_thread,
+    append_entry_and_project,
+    update_header_and_write,
+    create_thread_file,
 )
 
 from .search import (
@@ -86,9 +111,6 @@ __all__ = [
     # Export
     "export_thread_graph",
     "export_all_threads",
-    "load_nodes",
-    "load_edges",
-    "load_graph",
     # Reader
     "GraphThread",
     "GraphEntry",
@@ -110,6 +132,30 @@ __all__ = [
     "record_graph_sync_error",
     "check_graph_health",
     "reconcile_graph",
+    "backfill_missing",
+    "BackfillResult",
+    # Writer (graph-first mutations)
+    "ThreadData",
+    "EntryData",
+    "upsert_thread_node",
+    "upsert_entry_node",
+    "update_thread_metadata",
+    "delete_entry_node",
+    "get_thread_from_graph",
+    "get_entry_node_from_graph",
+    "get_entries_for_thread",
+    "get_last_entry_id",
+    "get_next_entry_index",
+    "init_thread_in_graph",
+    # Projector (graph to MD)
+    "project_entry_to_markdown",
+    "project_thread_to_markdown",
+    "project_thread_header_only",
+    "write_thread_markdown",
+    "project_and_write_thread",
+    "append_entry_and_project",
+    "update_header_and_write",
+    "create_thread_file",
     # Search
     "SearchQuery",
     "SearchResult",
