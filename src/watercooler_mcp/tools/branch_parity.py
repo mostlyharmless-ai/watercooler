@@ -343,9 +343,10 @@ def _sync_branch_state_impl(
                 # Check if this is a merge conflict
                 if "CONFLICT" in error_str or threads_repo.is_dirty():
                     # Detect conflicts in thread files
+                    # Note: unmerged_blobs() returns dict with paths as keys
                     conflicted_files = []
-                    for item in threads_repo.index.unmerged_blobs():
-                        conflicted_files.append(item.path)
+                    for path in threads_repo.index.unmerged_blobs():
+                        conflicted_files.append(path)
 
                     if conflicted_files:
                         conflict_msg = (
