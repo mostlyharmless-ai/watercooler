@@ -125,16 +125,10 @@ def _list_threads_impl(
             )
         log_debug(f"list_threads start code_path={code_path!r} open_only={open_only}")
 
-        # DEBUG
-        import sys
-        print(f"[DEBUG] list_threads: context={context}", file=sys.stderr)
-        print(f"[DEBUG] list_threads: is_hosted_context={is_hosted_context(context)}", file=sys.stderr)
-
         # =====================================================================
         # Hosted Mode Path (GitHub API)
         # =====================================================================
         if is_hosted_context(context):
-            print(f"[DEBUG] list_threads: ENTERING hosted mode branch", file=sys.stderr)
             log_debug("list_threads: using hosted mode (GitHub API)")
             agent = get_agent_name(ctx.client_id)
 

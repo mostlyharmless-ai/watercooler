@@ -130,20 +130,13 @@ def _say_impl(
             role="implementer", entry_type="Note", code_path="/path/to/repo",
             agent_func="Cursor:Composer 1:implementer")
     """
-    import sys
-    print(f"[DEBUG] _say_impl: topic={topic}, title={title}, agent_func={agent_func}", file=sys.stderr)
-
     error, context = validation._require_context(code_path)
-    print(f"[DEBUG] _say_impl: context error={error}, context={context}", file=sys.stderr)
     if error:
         raise ContextError(error, code_path=code_path)
     if context is None:
         raise ContextError("Unable to resolve code context for the provided code_path.", code_path=code_path)
 
-    print(f"[DEBUG] _say_impl: is_hosted_context={is_hosted_context(context)}", file=sys.stderr)
-
     if not agent_func or ":" not in agent_func:
-        print(f"[DEBUG] _say_impl: IdentityError - agent_func invalid", file=sys.stderr)
         raise IdentityError()
     agent_base, agent_spec = [p.strip() for p in agent_func.split(":", 1)]
     if not agent_base or not agent_spec:
@@ -155,11 +148,9 @@ def _say_impl(
     # Hosted Mode Path (GitHub API)
     # =====================================================================
     if is_hosted_context(context):
-        print(f"[DEBUG] _say_impl: ENTERING hosted mode branch", file=sys.stderr)
         log_debug(f"say: using hosted mode for topic={topic}")
 
         entry_id = str(ULID())
-        print(f"[DEBUG] _say_impl: calling say_hosted with entry_id={entry_id}", file=sys.stderr)
         write_error, result = say_hosted(
             topic=topic,
             title=title,
@@ -170,8 +161,6 @@ def _say_impl(
             entry_id=entry_id,
             create_if_missing=create_if_missing,
         )
-
-        print(f"[DEBUG] _say_impl: say_hosted returned error={write_error}, result={result}", file=sys.stderr)
 
         if write_error:
             log_error(f"say hosted mode failed: {write_error}")
