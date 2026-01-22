@@ -30,8 +30,9 @@ from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# TTL for cached tokens (default 1 hour, configurable)
-SLACK_TOKEN_CACHE_TTL = int(os.getenv("WATERCOOLER_SLACK_TOKEN_CACHE_TTL", "3600"))
+# TTL for cached tokens - 5 minutes default to balance API calls vs security
+# Shorter TTL ensures token revocations propagate reasonably fast
+SLACK_TOKEN_CACHE_TTL = int(os.getenv("WATERCOOLER_SLACK_TOKEN_CACHE_TTL", "300"))
 
 
 @dataclass

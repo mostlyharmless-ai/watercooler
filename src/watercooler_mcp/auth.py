@@ -44,7 +44,9 @@ from typing import Optional, Dict, Any
 logger = logging.getLogger(__name__)
 
 # Token cache TTL in seconds (default 1 hour, configurable via env)
-TOKEN_CACHE_TTL = int(os.getenv("WATERCOOLER_TOKEN_CACHE_TTL", "3600"))
+# TTL for cached tokens - 5 minutes default to balance API calls vs security
+# Shorter TTL ensures token revocations propagate reasonably fast
+TOKEN_CACHE_TTL = int(os.getenv("WATERCOOLER_TOKEN_CACHE_TTL", "300"))
 
 
 @dataclass

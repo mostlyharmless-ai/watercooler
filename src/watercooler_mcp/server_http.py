@@ -121,12 +121,24 @@ def create_http_app():
     )
 
     # Configure CORS for browser-based clients
+    # Security: When allow_credentials=True, origins must be explicit (not "*")
+    cors_origins_env = os.getenv("WATERCOOLER_CORS_ORIGINS", "")
+    if cors_origins_env and cors_origins_env != "*":
+        # Explicit origins configured - safe to use credentials
+        cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+        allow_credentials = True
+    else:
+        # No explicit origins or wildcard - disable credentials for security
+        # This prevents CORS credential leakage vulnerabilities
+        cors_origins = ["*"]
+        allow_credentials = False
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=os.getenv("WATERCOOLER_CORS_ORIGINS", "*").split(","),
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=cors_origins,
+        allow_credentials=allow_credentials,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["X-User-ID", "X-Repo", "X-Branch", "Content-Type", "Authorization"],
     )
 
     @app.get("/health")
@@ -151,9 +163,26 @@ def create_http_app():
             "auth_mode": "hosted" if is_hosted_mode() else "local",
         }
 
+    # Request size limit (default 1MB)
+    MAX_REQUEST_SIZE = int(os.getenv("WATERCOOLER_MAX_REQUEST_SIZE", str(1024 * 1024)))
+    # Request timeout (default 30 seconds)
+    REQUEST_TIMEOUT = int(os.getenv("WATERCOOLER_REQUEST_TIMEOUT", "30"))
+
     @app.middleware("http")
     async def add_request_context(request: Request, call_next):
         """Middleware to extract and validate request context."""
+        import asyncio
+
+        # Check content length to prevent memory exhaustion
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > MAX_REQUEST_SIZE:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": f"Request too large. Maximum size is {MAX_REQUEST_SIZE} bytes."
+                },
+            )
+
         # Extract context from headers
         headers = dict(request.headers)
         query_params = dict(request.query_params)
@@ -189,8 +218,18 @@ def create_http_app():
                 github_token=token_info.token,
             ))
 
-        response = await call_next(request)
-        return response
+        # Apply request timeout to prevent hanging requests
+        try:
+            response = await asyncio.wait_for(
+                call_next(request),
+                timeout=REQUEST_TIMEOUT,
+            )
+            return response
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                status_code=504,
+                content={"error": f"Request timed out after {REQUEST_TIMEOUT} seconds"},
+            )
 
     # Mount the FastMCP app at /mcp
     # mcp_asgi was created earlier to get its lifespan
