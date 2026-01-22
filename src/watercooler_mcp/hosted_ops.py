@@ -618,6 +618,8 @@ def _write_per_thread_graph(
 
     except GitHubAPIError as e:
         log_error(f"Failed to write per-thread graph files for {topic}: {e}")
+        log_error(f"  -> repo={client.repo}, branch={client.branch}, meta_path={meta_path}")
+        log_error(f"  -> meta_sha={meta_sha}, entries_sha={entries_sha}, edges_sha={edges_sha}")
         return None, None, None
 
 
