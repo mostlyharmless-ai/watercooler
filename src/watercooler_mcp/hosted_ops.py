@@ -111,13 +111,16 @@ def _reconstruct_markdown_from_graph(meta: dict, entries: list[dict]) -> str:
     lines.append("---")
     lines.append("")
 
-    # Entries (sorted by index)
-    sorted_entries = sorted(entries, key=lambda e: e.get("index", 0))
+    # Entries (sorted by index with timestamp as tie-breaker for stable ordering)
+    sorted_entries = sorted(
+        entries,
+        key=lambda e: (e.get("index", 0), e.get("timestamp", ""))
+    )
     for entry in sorted_entries:
         # Entry header line
         agent = entry.get("agent", "Agent")
         role = entry.get("role", "")
-        entry_type = entry.get("type", "Note")
+        entry_type = entry.get("entry_type", "Note")  # entry_type, not type (type is "entry")
         entry_title = entry.get("title", "")
         timestamp = entry.get("timestamp", "")
 
@@ -144,6 +147,35 @@ def _reconstruct_markdown_from_graph(meta: dict, entries: list[dict]) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _validate_meta_fields(meta: dict, topic: str) -> None:
+    """Validate meta.json fields and log warnings for missing/corrupt data.
+
+    Args:
+        meta: Thread metadata dict
+        topic: Topic for error messages
+    """
+    required_fields = ["topic", "status"]
+    recommended_fields = ["title", "ball", "entry_count"]
+
+    for field in required_fields:
+        if field not in meta:
+            log_warning(f"meta.json for {topic} missing required field: {field}")
+
+    for field in recommended_fields:
+        if field not in meta:
+            log_debug(f"meta.json for {topic} missing recommended field: {field}")
+
+    # Validate status value
+    status = meta.get("status", "")
+    if status and status.upper() not in ("OPEN", "CLOSED", "IN_REVIEW", "BLOCKED"):
+        log_warning(f"meta.json for {topic} has unexpected status: {status}")
+
+    # Validate topic matches
+    meta_topic = meta.get("topic", "")
+    if meta_topic and meta_topic != topic:
+        log_warning(f"meta.json topic mismatch: expected {topic}, got {meta_topic}")
 
 
 logger = logging.getLogger(__name__)
@@ -307,6 +339,9 @@ def read_thread_hosted(topic: str) -> tuple[str | None, str]:
         # Read meta.json
         meta_content = client.get_file(meta_path)
         meta = json.loads(meta_content.content)
+
+        # Validate meta fields (logs warnings for issues)
+        _validate_meta_fields(meta, topic)
 
         # Read entries.jsonl
         entries: list[dict] = []
