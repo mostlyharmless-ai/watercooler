@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from watercooler.lock import AdvisoryLock
+
 logger = logging.getLogger(__name__)
 
 
@@ -463,26 +465,41 @@ def update_manifest(
 ) -> None:
     """Update manifest with last sync info.
 
+    Uses advisory locking to prevent race conditions in concurrent scenarios.
+
     Args:
         graph_dir: Base graph directory
         topic: Thread topic that was updated
         entry_id: Entry ID that was added/updated (optional)
     """
-    manifest = load_manifest(graph_dir)
+    lock_path = graph_dir / ".manifest.lock"
 
-    now = datetime.now(timezone.utc).isoformat()
-    manifest["last_updated"] = now
-    manifest["last_topic"] = topic
+    try:
+        # Use advisory lock for read-modify-write safety
+        # Short timeout (5s) with stale lock cleanup (30s)
+        with AdvisoryLock(lock_path, timeout=5, ttl=30):
+            manifest = load_manifest(graph_dir)
 
-    if entry_id:
-        manifest["last_entry_id"] = entry_id
+            now = datetime.now(timezone.utc).isoformat()
+            manifest["last_updated"] = now
+            manifest["last_topic"] = topic
 
-    # Track per-topic timestamps
-    if "topics" not in manifest:
-        manifest["topics"] = {}
-    manifest["topics"][topic] = now
+            if entry_id:
+                manifest["last_entry_id"] = entry_id
 
-    atomic_write_json(graph_dir / "manifest.json", manifest)
+            # Track per-topic timestamps
+            if "topics" not in manifest:
+                manifest["topics"] = {}
+            manifest["topics"][topic] = now
+
+            atomic_write_json(graph_dir / "manifest.json", manifest)
+
+    except TimeoutError:
+        # Lock timeout - log warning and proceed without update
+        # This is a trade-off: we prefer not blocking indefinitely
+        logger.warning(
+            f"Failed to acquire manifest lock for {topic}, skipping manifest update"
+        )
 
 
 # ============================================================================

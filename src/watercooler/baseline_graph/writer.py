@@ -279,10 +279,17 @@ def upsert_entry_node(
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
         # Dual-write: Also append to monolithic format for backward compatibility
-        monolithic_nodes = [meta, entries[entry_id]]
-        monolithic_edges = list(edges.values())
-        storage.append_to_monolithic_nodes(graph_dir, monolithic_nodes)
-        storage.append_to_monolithic_edges(graph_dir, monolithic_edges)
+        # Failures here should not fail the primary write (per-thread is canonical)
+        try:
+            monolithic_nodes = [meta, entries[entry_id]]
+            monolithic_edges = list(edges.values())
+            storage.append_to_monolithic_nodes(graph_dir, monolithic_nodes)
+            storage.append_to_monolithic_edges(graph_dir, monolithic_edges)
+        except Exception as dual_write_err:
+            logger.warning(
+                f"Dual-write to monolithic format failed for {topic}/{data.entry_id}: "
+                f"{dual_write_err}. Per-thread format is canonical; continuing."
+            )
 
         # Update search index with new entry (if has embedding)
         embedding = entries[entry_id].get("embedding")

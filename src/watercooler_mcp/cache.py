@@ -40,6 +40,7 @@ import time
 import urllib.request
 import urllib.error
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Generic, TypeVar
 
@@ -177,7 +178,7 @@ class CacheBackend(ABC):
 
 
 class MemoryCache(CacheBackend):
-    """Thread-safe in-memory cache with TTL support.
+    """Thread-safe in-memory cache with TTL and LRU eviction.
 
     This is the default backend, suitable for:
     - Local MCP (STDIO mode)
@@ -185,20 +186,39 @@ class MemoryCache(CacheBackend):
     - Development/testing
 
     For multi-process deployments (serverless), consider DatabaseCache.
+
+    Features:
+    - TTL-based expiration
+    - LRU eviction when max_entries is exceeded
+    - Thread-safe operations
     """
 
-    def __init__(self, default_ttl: Optional[float] = None):
+    # Default max entries (configurable via WATERCOOLER_CACHE_MAX_ENTRIES)
+    DEFAULT_MAX_ENTRIES = 10000
+
+    def __init__(
+        self,
+        default_ttl: Optional[float] = None,
+        max_entries: Optional[int] = None,
+    ):
         """Initialize memory cache.
 
         Args:
             default_ttl: Default TTL for entries without explicit TTL
+            max_entries: Maximum number of entries before LRU eviction
+                        (default: 10000, set via WATERCOOLER_CACHE_MAX_ENTRIES)
         """
-        self._cache: Dict[str, CacheEntry[Any]] = {}
+        # Use OrderedDict for LRU eviction (most recently used at end)
+        self._cache: "OrderedDict[str, CacheEntry[Any]]" = OrderedDict()
         self._lock = threading.RLock()
         self._default_ttl = default_ttl
+        self._max_entries = max_entries or int(
+            os.getenv("WATERCOOLER_CACHE_MAX_ENTRIES", str(self.DEFAULT_MAX_ENTRIES))
+        )
+        self._eviction_count = 0  # Track evictions for monitoring
 
     def get(self, key: str) -> Optional[Any]:
-        """Get value from cache."""
+        """Get value from cache (moves entry to end for LRU)."""
         with self._lock:
             entry = self._cache.get(key)
             if entry is None:
@@ -206,15 +226,27 @@ class MemoryCache(CacheBackend):
             if entry.is_expired():
                 del self._cache[key]
                 return None
+            # Move to end (most recently used)
+            self._cache.move_to_end(key)
             return entry.value
 
     def set(self, key: str, value: Any, ttl: Optional[float] = None) -> None:
-        """Set value in cache."""
+        """Set value in cache with LRU eviction if needed."""
         if ttl is None:
             ttl = self._default_ttl
         entry = CacheEntry(value=value, ttl=ttl)
         with self._lock:
-            self._cache[key] = entry
+            # If key exists, update and move to end
+            if key in self._cache:
+                self._cache[key] = entry
+                self._cache.move_to_end(key)
+            else:
+                # Evict oldest entries if at capacity
+                while len(self._cache) >= self._max_entries:
+                    oldest_key = next(iter(self._cache))
+                    del self._cache[oldest_key]
+                    self._eviction_count += 1
+                self._cache[key] = entry
 
     def delete(self, key: str) -> bool:
         """Delete value from cache."""
@@ -268,8 +300,11 @@ class MemoryCache(CacheBackend):
             return {
                 "backend": "memory",
                 "total_entries": total,
+                "max_entries": self._max_entries,
                 "expired_entries": expired,
                 "active_entries": total - expired,
+                "eviction_count": self._eviction_count,
+                "utilization": total / self._max_entries if self._max_entries > 0 else 0,
             }
 
 

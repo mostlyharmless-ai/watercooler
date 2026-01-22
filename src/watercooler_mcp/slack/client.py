@@ -93,6 +93,19 @@ class SlackClient:
         self._token = bot_token
         self._store = get_mapping_store()
 
+    def _sanitize_error(self, message: str) -> str:
+        """Remove tokens from error messages to prevent security leaks.
+
+        Args:
+            message: Error message that might contain sensitive data
+
+        Returns:
+            Sanitized message with tokens redacted
+        """
+        if self._token and self._token in message:
+            message = message.replace(self._token, "[REDACTED]")
+        return message
+
     def _request(
         self,
         method: str,
@@ -140,17 +153,19 @@ class SlackClient:
             return result
 
         except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8") if e.fp else ""
+            body = self._sanitize_error(e.read().decode("utf-8") if e.fp else "")
             logger.error(f"Slack API HTTP error: {e.code} - {body}")
             raise SlackAPIError(f"HTTP {e.code}: {body}")
 
         except urllib.error.URLError as e:
-            logger.error(f"Slack API URL error: {e.reason}")
-            raise SlackAPIError(f"Network error: {e.reason}")
+            reason = self._sanitize_error(str(e.reason))
+            logger.error(f"Slack API URL error: {reason}")
+            raise SlackAPIError(f"Network error: {reason}")
 
         except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON from Slack: {e}")
-            raise SlackAPIError(f"Invalid response: {e}")
+            error_msg = self._sanitize_error(str(e))
+            logger.error(f"Invalid JSON from Slack: {error_msg}")
+            raise SlackAPIError(f"Invalid response: {error_msg}")
 
     # Channel operations
 
@@ -513,36 +528,46 @@ class SlackClient:
         Returns:
             Number of messages successfully deleted
         """
+        import random
         import time
 
         deleted = 0
         total = len(message_timestamps)
+        max_retries = 3  # Maximum retry attempts for rate-limited requests
 
         for i in range(0, total, batch_size):
             batch = message_timestamps[i : i + batch_size]
 
             for ts in batch:
-                try:
-                    if self.delete_message(channel_id, ts):
-                        deleted += 1
-                except SlackAPIError as e:
-                    if e.error == "ratelimited":
-                        # Respect Slack's retry_after header
-                        retry_after = 1.0
-                        if e.response:
-                            retry_after = float(e.response.get("retry_after", 1))
-                        logger.warning(
-                            f"Rate limited, waiting {retry_after}s before retry"
-                        )
-                        time.sleep(retry_after)
-                        # Retry this message
-                        try:
-                            if self.delete_message(channel_id, ts):
-                                deleted += 1
-                        except SlackAPIError:
-                            logger.error(f"Failed to delete message {ts} after retry")
-                    else:
-                        logger.error(f"Failed to delete message {ts}: {e.error}")
+                # Retry loop with exponential backoff
+                for attempt in range(max_retries + 1):
+                    try:
+                        if self.delete_message(channel_id, ts):
+                            deleted += 1
+                        break  # Success, exit retry loop
+                    except SlackAPIError as e:
+                        if e.error == "ratelimited" and attempt < max_retries:
+                            # Respect Slack's retry_after header with exponential backoff
+                            base_delay = 1.0
+                            if e.response:
+                                base_delay = float(e.response.get("retry_after", 1))
+                            # Exponential backoff: base * 2^attempt + jitter
+                            backoff = base_delay * (2 ** attempt)
+                            jitter = random.uniform(0, 0.5 * backoff)
+                            wait_time = backoff + jitter
+                            logger.warning(
+                                f"Rate limited, waiting {wait_time:.1f}s before retry "
+                                f"(attempt {attempt + 1}/{max_retries})"
+                            )
+                            time.sleep(wait_time)
+                        elif e.error == "ratelimited":
+                            logger.error(
+                                f"Failed to delete message {ts} after {max_retries} retries"
+                            )
+                            break
+                        else:
+                            logger.error(f"Failed to delete message {ts}: {e.error}")
+                            break
 
             # Delay between batches to avoid rate limits
             if i + batch_size < total:
