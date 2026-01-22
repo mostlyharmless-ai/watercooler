@@ -22,15 +22,33 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.request
 import urllib.error
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# Cache for workspace tokens (workspace_id -> token)
-# Tokens are cached for the lifetime of the process to avoid repeated API calls
-_token_cache: Dict[str, str] = {}
+# TTL for cached tokens (default 1 hour, configurable)
+SLACK_TOKEN_CACHE_TTL = int(os.getenv("WATERCOOLER_SLACK_TOKEN_CACHE_TTL", "3600"))
+
+
+@dataclass
+class CachedSlackToken:
+    """Cached Slack token with expiration tracking."""
+
+    token: str
+    cached_at: float = field(default_factory=time.time)
+
+    def is_expired(self) -> bool:
+        """Check if the cached token has exceeded the TTL."""
+        return (time.time() - self.cached_at) > SLACK_TOKEN_CACHE_TTL
+
+
+# Cache for workspace tokens (workspace_id -> CachedSlackToken)
+# Tokens are cached with TTL to avoid unbounded memory growth
+_token_cache: Dict[str, CachedSlackToken] = {}
 
 
 def get_token_service_config() -> Dict[str, str]:
@@ -75,8 +93,14 @@ def get_workspace_token(workspace_id: str, use_cache: bool = True) -> Optional[s
 
     # Check cache first
     if use_cache and workspace_id in _token_cache:
-        logger.debug(f"Using cached token for workspace {workspace_id}")
-        return _token_cache[workspace_id]
+        cached = _token_cache[workspace_id]
+        if not cached.is_expired():
+            logger.debug(f"Using cached token for workspace {workspace_id}")
+            return cached.token
+        else:
+            # Remove expired token
+            logger.debug(f"Cached token expired for workspace {workspace_id}, refreshing")
+            del _token_cache[workspace_id]
 
     config = get_token_service_config()
     api_url = config["token_api_url"]
@@ -104,8 +128,8 @@ def get_workspace_token(workspace_id: str, use_cache: bool = True) -> Optional[s
 
         token = data.get("token")
         if token:
-            # Cache the token
-            _token_cache[workspace_id] = token
+            # Cache the token with TTL
+            _token_cache[workspace_id] = CachedSlackToken(token=token)
             logger.info(
                 f"Retrieved token for workspace {workspace_id} "
                 f"(team: {data.get('teamName', 'unknown')})"

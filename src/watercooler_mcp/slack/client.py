@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import urllib.request
 import urllib.error
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -679,7 +681,9 @@ class SlackClient:
 
 # Convenience function for one-off operations
 # Cache keyed by workspace_id (None for default/single workspace)
-_client_cache: Dict[Optional[str], SlackClient] = {}
+# Uses OrderedDict for LRU eviction with a max size
+_client_cache: "OrderedDict[Optional[str], SlackClient]" = OrderedDict()
+_CLIENT_CACHE_MAX_SIZE = int(os.getenv("WATERCOOLER_SLACK_CLIENT_CACHE_MAX", "100"))
 
 
 def get_slack_client(
@@ -702,9 +706,14 @@ def get_slack_client(
     if bot_token:
         return SlackClient(bot_token=bot_token, workspace_id=workspace_id)
 
-    # Check cache
+    # Check cache and update LRU order
     if workspace_id in _client_cache:
+        _client_cache.move_to_end(workspace_id)
         return _client_cache[workspace_id]
+
+    # Evict oldest clients if at capacity
+    while len(_client_cache) >= _CLIENT_CACHE_MAX_SIZE:
+        _client_cache.popitem(last=False)
 
     # Create and cache new client
     client = SlackClient(workspace_id=workspace_id)

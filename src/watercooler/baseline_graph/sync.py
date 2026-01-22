@@ -419,6 +419,8 @@ def _atomic_write_json(path: Path, data: Any) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        # Set readable permissions before rename (mkstemp creates with 0600)
+        os.chmod(tmp_path, 0o644)
         os.replace(tmp_path, path)
     except Exception:
         # Clean up temp file on error

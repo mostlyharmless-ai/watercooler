@@ -198,6 +198,8 @@ def _atomic_write_text(path: Path, content: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
+        # Set readable permissions before rename (mkstemp creates with 0600)
+        os.chmod(tmp_path, 0o644)
         os.replace(tmp_path, path)
     except Exception:
         try:
