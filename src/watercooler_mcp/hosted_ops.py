@@ -76,6 +76,76 @@ def _get_per_thread_paths(topic: str) -> tuple[str, str, str]:
     base = f"{GRAPH_THREADS_DIR}/{topic}"
     return (f"{base}/meta.json", f"{base}/entries.jsonl", f"{base}/edges.jsonl")
 
+
+def _reconstruct_markdown_from_graph(meta: dict, entries: list[dict]) -> str:
+    """Reconstruct markdown thread content from per-thread graph data.
+
+    Args:
+        meta: Thread metadata from meta.json
+        entries: List of entry objects from entries.jsonl
+
+    Returns:
+        Reconstructed markdown content matching the legacy format.
+    """
+    lines: list[str] = []
+
+    # Thread header
+    title = meta.get("title", meta.get("topic", "Untitled"))
+    lines.append(f"# {title}")
+    lines.append("")
+
+    # Metadata block
+    topic = meta.get("topic", "")
+    if topic:
+        lines.append(f"Topic: {topic}")
+    status = meta.get("status", "OPEN")
+    lines.append(f"Status: {status}")
+    ball = meta.get("ball", "")
+    if ball:
+        lines.append(f"Ball: {ball}")
+    priority = meta.get("priority", "")
+    if priority:
+        lines.append(f"Priority: {priority}")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # Entries (sorted by index)
+    sorted_entries = sorted(entries, key=lambda e: e.get("index", 0))
+    for entry in sorted_entries:
+        # Entry header line
+        agent = entry.get("agent", "Agent")
+        role = entry.get("role", "")
+        entry_type = entry.get("type", "Note")
+        entry_title = entry.get("title", "")
+        timestamp = entry.get("timestamp", "")
+
+        header_parts = [f"Entry: {agent}"]
+        if role:
+            header_parts.append(f"({role})")
+        if entry_type:
+            header_parts.append(f"[{entry_type}]")
+        if entry_title:
+            header_parts.append(f"- {entry_title}")
+        if timestamp:
+            header_parts.append(f"@ {timestamp}")
+
+        lines.append(" ".join(header_parts))
+        lines.append("")
+
+        # Entry body
+        body = entry.get("body", "")
+        if body:
+            lines.append(body)
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -135,7 +205,7 @@ def _get_github_client() -> tuple[str | None, GitHubClient | None]:
 def list_threads_hosted(
     open_only: bool | None = None,
 ) -> tuple[str | None, list[HostedThread]]:
-    """List threads from GitHub repository.
+    """List threads from GitHub repository (per-thread format).
 
     Args:
         open_only: Filter by status (True=open only, False=closed only, None=all)
@@ -149,33 +219,37 @@ def list_threads_hosted(
         return (error or "Failed to create GitHub client", [])
 
     try:
-        # List all .md files in root
-        files = client.list_files("")
-        md_files = [f for f in files if f.name.endswith(".md") and f.type == "file"]
+        # List directories in graph/baseline/threads/
+        try:
+            items = client.list_files(GRAPH_THREADS_DIR)
+        except GitHubNotFoundError:
+            # No threads directory yet
+            log_debug("list_threads_hosted: threads directory not found")
+            return (None, [])
+
+        thread_dirs = [f for f in items if f.type == "dir"]
 
         threads: list[HostedThread] = []
-        for file_info in md_files:
-            topic = file_info.name[:-3]  # Remove .md extension
-
-            # Skip non-thread markdown files
-            if topic.lower() in ("readme", "contributing", "license", "changelog"):
-                continue
+        for dir_info in thread_dirs:
+            topic = dir_info.name
 
             try:
-                # Read thread content to extract metadata
-                file_content = client.get_file(file_info.path)
-                content = file_content.content
-                title, status, ball, last_updated = _extract_thread_metadata(content, topic)
+                # Read meta.json for this thread
+                meta_path = f"{GRAPH_THREADS_DIR}/{topic}/meta.json"
+                meta_content = client.get_file(meta_path)
+                meta = json.loads(meta_content.content)
+
+                title = meta.get("title", topic)
+                status = meta.get("status", "OPEN")
+                ball = meta.get("ball", "")
+                last_updated = meta.get("last_updated", "")
+                entry_count = meta.get("entry_count", 0)
 
                 # Apply status filter
                 if open_only is True and status.upper() != "OPEN":
                     continue
                 if open_only is False and status.upper() == "OPEN":
                     continue
-
-                # Count entries
-                entries = parse_thread_entries(content)
-                entry_count = len(entries)
 
                 threads.append(HostedThread(
                     topic=topic,
@@ -186,9 +260,14 @@ def list_threads_hosted(
                     entry_count=entry_count,
                 ))
 
+            except GitHubNotFoundError:
+                log_debug(f"No meta.json for thread {topic}, skipping")
+                continue
             except GitHubAPIError as e:
                 log_debug(f"Error reading thread {topic}: {e}")
-                # Skip threads we can't read
+                continue
+            except json.JSONDecodeError as e:
+                log_debug(f"Invalid meta.json for thread {topic}: {e}")
                 continue
 
         log_debug(f"list_threads_hosted: found {len(threads)} threads")
@@ -203,14 +282,15 @@ def list_threads_hosted(
 
 
 def read_thread_hosted(topic: str) -> tuple[str | None, str]:
-    """Read thread content from GitHub repository.
+    """Read thread content from GitHub repository (per-thread format).
 
     Args:
         topic: Thread topic identifier
 
     Returns:
         Tuple of (error_message, content). If error_message is not None,
-        content will be empty.
+        content will be empty. Content is reconstructed markdown from
+        per-thread graph files.
     """
     try:
         _validate_topic(topic)
@@ -221,11 +301,28 @@ def read_thread_hosted(topic: str) -> tuple[str | None, str]:
     if error or not client:
         return (error or "Failed to create GitHub client", "")
 
+    meta_path, entries_path, _ = _get_per_thread_paths(topic)
+
     try:
-        file_path = f"{topic}.md"
-        file_content = client.get_file(file_path)
-        log_debug(f"read_thread_hosted: read {topic} ({len(file_content.content)} chars)")
-        return (None, file_content.content)
+        # Read meta.json
+        meta_content = client.get_file(meta_path)
+        meta = json.loads(meta_content.content)
+
+        # Read entries.jsonl
+        entries: list[dict] = []
+        try:
+            entries_content = client.get_file(entries_path)
+            for line in entries_content.content.strip().split("\n"):
+                if line.strip():
+                    entries.append(json.loads(line))
+        except GitHubNotFoundError:
+            # No entries yet - that's OK
+            pass
+
+        # Reconstruct markdown from per-thread data
+        content = _reconstruct_markdown_from_graph(meta, entries)
+        log_debug(f"read_thread_hosted: read {topic} ({len(content)} chars from per-thread format)")
+        return (None, content)
 
     except GitHubNotFoundError:
         return (f"Thread '{topic}' not found", "")
@@ -260,7 +357,7 @@ def load_thread_entries_hosted(topic: str) -> tuple[str | None, list[ThreadEntry
 
 
 def thread_exists_hosted(topic: str) -> bool:
-    """Check if a thread exists in GitHub repository.
+    """Check if a thread exists in GitHub repository (per-thread format).
 
     Args:
         topic: Thread topic identifier
@@ -277,7 +374,9 @@ def thread_exists_hosted(topic: str) -> bool:
     if error or not client:
         return False
 
-    return client.file_exists(f"{topic}.md")
+    # Check for per-thread format (meta.json)
+    meta_path, _, _ = _get_per_thread_paths(topic)
+    return client.file_exists(meta_path)
 
 
 # ============================================================================
