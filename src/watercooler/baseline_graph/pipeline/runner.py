@@ -509,9 +509,9 @@ class BaselineGraphRunner:
                     entry_node["summary"] = entry.summary
                 if hasattr(entry, 'embedding') and entry.embedding:
                     entry_node["embedding"] = entry.embedding
-                    # Add to search index
+                    # Add to search index (use raw entry_id ULID, not node ID)
                     search_index_entries.append({
-                        "entry_id": entry_node["id"],
+                        "entry_id": entry.entry_id,
                         "thread_topic": topic,
                         "embedding": entry.embedding,
                     })
