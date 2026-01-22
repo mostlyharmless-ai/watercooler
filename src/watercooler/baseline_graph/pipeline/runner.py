@@ -540,18 +540,18 @@ class BaselineGraphRunner:
         for edge in generate_cross_references(threads):
             xref_count += 1
             # Determine source topic from edge source ID
+            # Edge source format is "entry:{ulid}" (set in export.py generate_cross_references)
             source_id = edge.get("source", "")
-            # Entry IDs are formatted as "entry:<topic>:<ulid>" or similar
-            # Try to extract topic from source
             source_topic = None
+
+            # Extract the raw entry_id from "entry:{ulid}" format
+            raw_entry_id = source_id[6:] if source_id.startswith("entry:") else source_id
+
             for topic, thread in topic_lookup.items():
                 for entry in thread.entries:
-                    if hasattr(entry, 'entry_id') and entry.entry_id == source_id:
-                        source_topic = topic
-                        break
-                    # Also check node ID format
-                    entry_node_id = f"entry:{topic}:{getattr(entry, 'entry_id', '')}"
-                    if entry_node_id == source_id:
+                    entry_id = getattr(entry, 'entry_id', '')
+                    # Compare raw entry IDs (ULIDs)
+                    if entry_id == raw_entry_id:
                         source_topic = topic
                         break
                 if source_topic:

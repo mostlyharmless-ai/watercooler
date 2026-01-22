@@ -438,15 +438,17 @@ def get_thread_from_graph(
     return storage.load_thread_meta(graph_dir, topic)
 
 
-def get_entry_from_graph(
+def get_entry_node_from_graph(
     threads_dir: Path,
     entry_id: str,
     topic: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Read entry node from graph.
+    """Read entry node dict from graph (low-level).
 
     Uses per-thread format. If topic is not provided, searches all thread
     directories (slower).
+
+    Note: For higher-level access returning GraphEntry, use reader.get_entry_from_graph().
 
     Args:
         threads_dir: Threads directory

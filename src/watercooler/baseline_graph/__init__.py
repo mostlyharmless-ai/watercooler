@@ -65,7 +65,7 @@ from .writer import (
     update_thread_metadata,
     delete_entry_node,
     get_thread_from_graph,
-    get_entry_from_graph,
+    get_entry_node_from_graph,
     get_entries_for_thread,
     get_last_entry_id,
     get_next_entry_index,
@@ -111,9 +111,6 @@ __all__ = [
     # Export
     "export_thread_graph",
     "export_all_threads",
-    "load_nodes",
-    "load_edges",
-    "load_graph",
     # Reader
     "GraphThread",
     "GraphEntry",
@@ -145,7 +142,7 @@ __all__ = [
     "update_thread_metadata",
     "delete_entry_node",
     "get_thread_from_graph",
-    "get_entry_from_graph",
+    "get_entry_node_from_graph",
     "get_entries_for_thread",
     "get_last_entry_id",
     "get_next_entry_index",

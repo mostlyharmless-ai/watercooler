@@ -116,9 +116,6 @@ def get_graph_staleness(threads_dir: Path) -> Optional[float]:
 # Graph Loading (delegated to storage)
 # ============================================================================
 
-# Per-thread loading via storage module
-_list_thread_topics = storage.list_thread_topics
-
 
 def _node_to_thread(node: Dict[str, Any]) -> GraphThread:
     """Convert node dict to GraphThread."""

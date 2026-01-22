@@ -225,8 +225,8 @@ def append_entry_graph_first(
 
         # 6. Project to markdown
         # Get the entry node we just created for projection
-        from .baseline_graph.writer import get_entry_from_graph
-        entry_node = get_entry_from_graph(threads_dir, entry_id)
+        from .baseline_graph.writer import get_entry_node_from_graph
+        entry_node = get_entry_node_from_graph(threads_dir, entry_id)
 
         if entry_node:
             append_entry_and_project(threads_dir, topic, entry_node)

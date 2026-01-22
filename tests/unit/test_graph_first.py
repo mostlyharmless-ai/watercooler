@@ -16,7 +16,7 @@ from watercooler.baseline_graph.writer import (
     upsert_entry_node,
     update_thread_metadata,
     get_thread_from_graph,
-    get_entry_from_graph,
+    get_entry_node_from_graph,
     get_entries_for_thread,
     get_last_entry_id,
     get_next_entry_index,
@@ -97,7 +97,7 @@ class TestWriterModule:
         assert result is True
 
         # Verify entry exists
-        entry = get_entry_from_graph(threads_dir, entry_id)
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
         assert entry is not None
         assert entry["entry_id"] == entry_id
         assert entry["agent"] == "Claude"
@@ -318,7 +318,7 @@ class TestCommandsGraphModule:
         assert entry_id in content
 
         # Verify graph has entry
-        entry = get_entry_from_graph(threads_dir, entry_id)
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
         assert entry is not None
         assert entry["title"] == "Test Entry"
 
