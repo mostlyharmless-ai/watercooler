@@ -1432,11 +1432,14 @@ def say_hosted(
             new_ball = agent  # Give ball to current agent
 
         # Build updated graph data with new entry
+        # Thread title: use existing title if present, otherwise derive from topic
+        # (NOT the entry title - that's a separate field)
+        thread_title = meta.get("title", topic) if meta else topic
         new_meta, new_entries, new_edges = _build_per_thread_graph_data(
             topic=topic,
             status=status,
             ball=new_ball,
-            title=meta.get("title", topic) if meta else title,
+            title=thread_title,
             existing_meta=meta,
             existing_entries=existing_entries,
             existing_edges=existing_edges,
