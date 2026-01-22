@@ -44,7 +44,10 @@ class TestReconstructMarkdownFromGraph:
         assert "Status: OPEN" in result
         assert "Ball: Claude" in result
         assert "Priority: P1" in result
-        assert "Entry: Claude (implementer) [Note] - First entry @ 2026-01-22T10:00:00Z" in result
+        assert (
+            "Entry: Claude (implementer) [Note] - First entry @ 2026-01-22T10:00:00Z"
+            in result
+        )
         assert "This is the first entry body." in result
 
     def test_minimal_meta(self):
@@ -138,8 +141,18 @@ class TestReconstructMarkdownFromGraph:
         """Test entries with duplicate indices maintain stable order."""
         meta = {"topic": "same-index"}
         entries = [
-            {"index": 0, "agent": "A", "timestamp": "2026-01-22T10:00:00Z", "body": "First A"},
-            {"index": 0, "agent": "B", "timestamp": "2026-01-22T10:01:00Z", "body": "First B"},
+            {
+                "index": 0,
+                "agent": "A",
+                "timestamp": "2026-01-22T10:00:00Z",
+                "body": "First A",
+            },
+            {
+                "index": 0,
+                "agent": "B",
+                "timestamp": "2026-01-22T10:01:00Z",
+                "body": "First B",
+            },
         ]
 
         result = _reconstruct_markdown_from_graph(meta, entries)

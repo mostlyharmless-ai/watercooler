@@ -14,6 +14,7 @@ from dataclasses import dataclass
 @dataclass
 class MockFileContent:
     """Mock GitHub file content response."""
+
     content: str
     sha: str
 
@@ -28,16 +29,21 @@ class MockGitHubClient:
     def get_file(self, path: str) -> MockFileContent:
         if path not in self.files:
             from watercooler_mcp.github_api import GitHubNotFoundError
+
             raise GitHubNotFoundError(f"File not found: {path}")
         return self.files[path]
 
-    def put_file(self, path: str, content: str, message: str, sha: str | None = None) -> str:
-        self.put_calls.append({
-            "path": path,
-            "content": content,
-            "message": message,
-            "sha": sha,
-        })
+    def put_file(
+        self, path: str, content: str, message: str, sha: str | None = None
+    ) -> str:
+        self.put_calls.append(
+            {
+                "path": path,
+                "content": content,
+                "message": message,
+                "sha": sha,
+            }
+        )
         new_sha = f"sha-{len(self.put_calls)}"
         self.files[path] = MockFileContent(content=content, sha=new_sha)
         return new_sha
@@ -71,9 +77,18 @@ class TestNewThreadCreation:
 
         mock_client = MockGitHubClient()
 
-        with patch('watercooler_mcp.hosted_ops.get_http_context', return_value=mock_http_context):
-            with patch('watercooler_mcp.hosted_ops._get_github_client', return_value=(None, mock_client)):
-                with patch('watercooler_mcp.hosted_ops._sync_entry_to_slack_site', return_value=False):
+        with patch(
+            "watercooler_mcp.hosted_ops.get_http_context",
+            return_value=mock_http_context,
+        ):
+            with patch(
+                "watercooler_mcp.hosted_ops._get_github_client",
+                return_value=(None, mock_client),
+            ):
+                with patch(
+                    "watercooler_mcp.hosted_ops._sync_entry_to_slack_site",
+                    return_value=False,
+                ):
                     error, result = say_hosted(
                         topic="my-new-topic",
                         title="This is the entry title",  # Entry title, NOT thread title
@@ -93,9 +108,9 @@ class TestNewThreadCreation:
         meta_content = json.loads(meta_writes[-1]["content"])
 
         # Thread title should be the TOPIC, not the entry title
-        assert meta_content["title"] == "my-new-topic", (
-            f"Thread title should be 'my-new-topic', got '{meta_content['title']}'"
-        )
+        assert (
+            meta_content["title"] == "my-new-topic"
+        ), f"Thread title should be 'my-new-topic', got '{meta_content['title']}'"
         assert meta_content["topic"] == "my-new-topic"
 
     def test_new_thread_entry_has_correct_title(self, mock_http_context):
@@ -104,9 +119,18 @@ class TestNewThreadCreation:
 
         mock_client = MockGitHubClient()
 
-        with patch('watercooler_mcp.hosted_ops.get_http_context', return_value=mock_http_context):
-            with patch('watercooler_mcp.hosted_ops._get_github_client', return_value=(None, mock_client)):
-                with patch('watercooler_mcp.hosted_ops._sync_entry_to_slack_site', return_value=False):
+        with patch(
+            "watercooler_mcp.hosted_ops.get_http_context",
+            return_value=mock_http_context,
+        ):
+            with patch(
+                "watercooler_mcp.hosted_ops._get_github_client",
+                return_value=(None, mock_client),
+            ):
+                with patch(
+                    "watercooler_mcp.hosted_ops._sync_entry_to_slack_site",
+                    return_value=False,
+                ):
                     error, result = say_hosted(
                         topic="another-topic",
                         title="My Entry Title",
@@ -120,12 +144,18 @@ class TestNewThreadCreation:
         assert error is None
 
         # Find the entries.jsonl write
-        entries_writes = [c for c in mock_client.put_calls if "entries.jsonl" in c["path"]]
+        entries_writes = [
+            c for c in mock_client.put_calls if "entries.jsonl" in c["path"]
+        ]
         assert len(entries_writes) >= 1, "Expected entries.jsonl to be written"
 
         # Parse the JSONL content
         entries_content = entries_writes[-1]["content"]
-        entries = [json.loads(line) for line in entries_content.strip().split("\n") if line.strip()]
+        entries = [
+            json.loads(line)
+            for line in entries_content.strip().split("\n")
+            if line.strip()
+        ]
 
         assert len(entries) >= 1, "Expected at least one entry"
         entry = entries[-1]
@@ -152,26 +182,38 @@ class TestNewThreadCreation:
             "ball": "Agent",
             "entry_count": 1,
         }
-        mock_client.files["graph/baseline/threads/existing-topic/meta.json"] = MockFileContent(
-            content=json.dumps(existing_meta),
-            sha="existing-sha"
+        mock_client.files["graph/baseline/threads/existing-topic/meta.json"] = (
+            MockFileContent(content=json.dumps(existing_meta), sha="existing-sha")
         )
-        mock_client.files["graph/baseline/threads/existing-topic/entries.jsonl"] = MockFileContent(
-            content=json.dumps({
-                "id": "entry:old-entry-id",
-                "type": "entry",
-                "entry_id": "old-entry-id",
-                "thread_topic": "existing-topic",
-                "index": 0,
-                "agent": "OldAgent",
-                "body": "Old entry"
-            }),
-            sha="entries-sha"
+        mock_client.files["graph/baseline/threads/existing-topic/entries.jsonl"] = (
+            MockFileContent(
+                content=json.dumps(
+                    {
+                        "id": "entry:old-entry-id",
+                        "type": "entry",
+                        "entry_id": "old-entry-id",
+                        "thread_topic": "existing-topic",
+                        "index": 0,
+                        "agent": "OldAgent",
+                        "body": "Old entry",
+                    }
+                ),
+                sha="entries-sha",
+            )
         )
 
-        with patch('watercooler_mcp.hosted_ops.get_http_context', return_value=mock_http_context):
-            with patch('watercooler_mcp.hosted_ops._get_github_client', return_value=(None, mock_client)):
-                with patch('watercooler_mcp.hosted_ops._sync_entry_to_slack_site', return_value=False):
+        with patch(
+            "watercooler_mcp.hosted_ops.get_http_context",
+            return_value=mock_http_context,
+        ):
+            with patch(
+                "watercooler_mcp.hosted_ops._get_github_client",
+                return_value=(None, mock_client),
+            ):
+                with patch(
+                    "watercooler_mcp.hosted_ops._sync_entry_to_slack_site",
+                    return_value=False,
+                ):
                     error, result = say_hosted(
                         topic="existing-topic",
                         title="New Entry Title",  # New entry title
@@ -191,9 +233,9 @@ class TestNewThreadCreation:
         meta_content = json.loads(meta_writes[-1]["content"])
 
         # Thread title should be PRESERVED, not changed to new entry title
-        assert meta_content["title"] == "Original Thread Title", (
-            f"Thread title should be preserved as 'Original Thread Title', got '{meta_content['title']}'"
-        )
+        assert (
+            meta_content["title"] == "Original Thread Title"
+        ), f"Thread title should be preserved as 'Original Thread Title', got '{meta_content['title']}'"
 
 
 class TestThreadMetadataValidation:
@@ -205,9 +247,18 @@ class TestThreadMetadataValidation:
 
         mock_client = MockGitHubClient()
 
-        with patch('watercooler_mcp.hosted_ops.get_http_context', return_value=mock_http_context):
-            with patch('watercooler_mcp.hosted_ops._get_github_client', return_value=(None, mock_client)):
-                with patch('watercooler_mcp.hosted_ops._sync_entry_to_slack_site', return_value=False):
+        with patch(
+            "watercooler_mcp.hosted_ops.get_http_context",
+            return_value=mock_http_context,
+        ):
+            with patch(
+                "watercooler_mcp.hosted_ops._get_github_client",
+                return_value=(None, mock_client),
+            ):
+                with patch(
+                    "watercooler_mcp.hosted_ops._sync_entry_to_slack_site",
+                    return_value=False,
+                ):
                     # Create first entry
                     say_hosted(
                         topic="count-test",
@@ -221,4 +272,6 @@ class TestThreadMetadataValidation:
         meta_writes = [c for c in mock_client.put_calls if "meta.json" in c["path"]]
         meta_content = json.loads(meta_writes[-1]["content"])
 
-        assert meta_content.get("entry_count", 0) >= 1, "entry_count should be at least 1"
+        assert (
+            meta_content.get("entry_count", 0) >= 1
+        ), "entry_count should be at least 1"
