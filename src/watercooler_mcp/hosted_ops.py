@@ -120,13 +120,9 @@ def _get_github_client() -> tuple[str | None, GitHubClient | None]:
     if not http_ctx.repo:
         return ("No repository specified in HTTP context", None)
 
-    # Convert code repo to threads repo by appending configured suffix
-    # e.g., "owner/repo" -> "owner/repo-threads"
-    try:
-        threads_suffix = config.full().threads_suffix
-    except Exception:
-        threads_suffix = "-threads"  # Fallback to default
-    threads_repo = f"{http_ctx.repo}{threads_suffix}"
+    # Use repo directly - dashboard sends the threads repo name
+    # (e.g., "org/repo-threads", not "org/repo")
+    threads_repo = http_ctx.repo
 
     client = GitHubClient(
         token=http_ctx.github_token,
