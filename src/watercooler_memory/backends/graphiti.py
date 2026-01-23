@@ -8,7 +8,7 @@ import logging
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Sequence
@@ -30,6 +30,36 @@ from . import (
     TransientError,
 )
 from ..entry_episode_index import EntryEpisodeIndex, IndexConfig
+
+import os
+
+# Resolve package root from this file's location
+# graphiti.py is at: src/watercooler_memory/backends/graphiti.py
+# Package root is 4 levels up: watercooler-cloud/
+_PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_DEFAULT_GRAPHITI_PATH = _PACKAGE_ROOT / "external" / "graphiti"
+
+
+def _get_graphiti_path() -> Path:
+    """Get graphiti path from env or package default.
+
+    This resolves the graphiti submodule path in a way that works for both:
+    - Editable installs (pip install -e .)
+    - Regular installs (pip install watercooler-cloud)
+
+    The path is resolved relative to this package's installation location,
+    not the current working directory.
+
+    Environment Variables:
+        WATERCOOLER_GRAPHITI_PATH: Override the default graphiti path
+
+    Returns:
+        Path to the graphiti submodule directory
+    """
+    env_path = os.environ.get("WATERCOOLER_GRAPHITI_PATH")
+    if env_path:
+        return Path(env_path)
+    return _DEFAULT_GRAPHITI_PATH
 
 
 def _derive_database_name(code_path: Path | str | None) -> str:
@@ -62,8 +92,8 @@ def _derive_database_name(code_path: Path | str | None) -> str:
 class GraphitiConfig:
     """Configuration for Graphiti backend."""
 
-    # Graphiti submodule location
-    graphiti_path: Path = Path("external/graphiti")
+    # Graphiti submodule location (resolved from package installation, not cwd)
+    graphiti_path: Path = field(default_factory=_get_graphiti_path)
 
     # Database configuration (FalkorDB)
     falkordb_host: str = "localhost"

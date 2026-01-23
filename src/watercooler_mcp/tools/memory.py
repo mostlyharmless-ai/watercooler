@@ -175,11 +175,15 @@ async def _get_entity_edge_impl(
         )
 
 
-def _diagnose_memory_impl(ctx: Context) -> ToolResult:
+def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
     """Diagnose Graphiti memory backend installation and configuration.
 
     Returns diagnostic information about package paths, imports, and configuration.
     Useful for debugging backend initialization issues.
+
+    Args:
+        ctx: MCP context
+        code_path: Path to code repository (for resolving database name)
 
     Returns:
         JSON with diagnostic information including:
@@ -190,7 +194,7 @@ def _diagnose_memory_impl(ctx: Context) -> ToolResult:
         - Backend initialization status
 
     Example:
-        diagnose_memory()
+        diagnose_memory(code_path="/path/to/project")
     """
     try:
         # Import memory module (lazy-load)
@@ -235,7 +239,7 @@ def _diagnose_memory_impl(ctx: Context) -> ToolResult:
             diagnostics["graphiti_backend_import"] = f"✗ Failed: {e}"
 
         # Check config
-        config = mem.load_graphiti_config()
+        config = mem.load_graphiti_config(code_path=code_path if code_path else None)
         diagnostics["graphiti_enabled"] = config is not None
         if config:
             diagnostics["openai_key_set"] = bool(config.openai_api_key)
