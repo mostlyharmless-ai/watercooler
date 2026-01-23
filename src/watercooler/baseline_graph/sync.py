@@ -1,6 +1,7 @@
 """Graph sync module for enrichment and reconciliation.
 
 In the graph-first architecture, the graph is the source of truth:
+
 1. commands_graph.py writes entry/thread data to graph first
 2. projector.py creates markdown as a derived projection
 3. This module adds ENRICHMENT (summaries, embeddings) to graph entries
@@ -47,6 +48,7 @@ import logging
 import os
 import tempfile
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -636,7 +638,7 @@ def sync_entry_structure_only(
         return True
 
     except Exception as e:
-        logger.error(f"Structural graph sync failed for {topic}/{entry_id}: {e}")
+        logger.exception(f"Structural graph sync failed for {topic}/{entry_id}: {e}")
         return False
 
 
@@ -728,7 +730,7 @@ def enrich_graph_entry(
         # Update entry node in graph with enrichment data
         # Use locking to prevent race conditions during read-modify-write
         lp = lock_path_for_topic(topic, threads_dir)
-        with AdvisoryLock(lp, timeout=5, ttl=30, force_break=False):
+        with AdvisoryLock(lp, timeout=15, ttl=60, force_break=False):
             graph_dir = storage.ensure_graph_dir(threads_dir)
             entries = storage.load_thread_entries_dict(graph_dir, topic)
             entry_node_id = f"entry:{entry_id}"
@@ -759,7 +761,7 @@ def enrich_graph_entry(
         )
 
     except Exception as e:
-        logger.error(f"Enrichment failed for {topic}/{entry_id}: {e}")
+        logger.exception(f"Enrichment failed for {topic}/{entry_id}: {e}")
         return EnrichmentResult.error(str(e))
 
 
@@ -801,6 +803,13 @@ def sync_entry_to_graph(
     Returns:
         True if sync succeeded, False otherwise
     """
+    warnings.warn(
+        "sync_entry_to_graph() is deprecated. Use enrich_graph_entry() instead. "
+        "This function reads from markdown; in graph-first architecture, "
+        "enrich_graph_entry() reads from the graph (source of truth).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     thread_path = threads_dir / f"{topic}.md"
     if not thread_path.exists():
         logger.warning(f"Thread file not found for sync: {thread_path}")
