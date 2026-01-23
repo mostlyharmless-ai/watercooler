@@ -81,6 +81,9 @@ from watercooler.baseline_graph.summarizer import (
 
 logger = logging.getLogger(__name__)
 
+# Module-level flag to show deprecation warning only once per session
+_sync_entry_deprecation_warned = False
+
 
 # ============================================================================
 # Constants
@@ -730,7 +733,7 @@ def enrich_graph_entry(
         # Update entry node in graph with enrichment data
         # Use locking to prevent race conditions during read-modify-write
         lp = lock_path_for_topic(topic, threads_dir)
-        with AdvisoryLock(lp, timeout=15, ttl=60, force_break=False):
+        with AdvisoryLock(lp, timeout=30, ttl=120, force_break=False):
             graph_dir = storage.ensure_graph_dir(threads_dir)
             entries = storage.load_thread_entries_dict(graph_dir, topic)
             entry_node_id = f"entry:{entry_id}"
@@ -803,13 +806,16 @@ def sync_entry_to_graph(
     Returns:
         True if sync succeeded, False otherwise
     """
-    warnings.warn(
-        "sync_entry_to_graph() is deprecated. Use enrich_graph_entry() instead. "
-        "This function reads from markdown; in graph-first architecture, "
-        "enrich_graph_entry() reads from the graph (source of truth).",
-        DeprecationWarning,
-        stacklevel=2,
-    )
+    global _sync_entry_deprecation_warned
+    if not _sync_entry_deprecation_warned:
+        warnings.warn(
+            "sync_entry_to_graph() is deprecated. Use enrich_graph_entry() instead. "
+            "This function reads from markdown; in graph-first architecture, "
+            "enrich_graph_entry() reads from the graph (source of truth).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        _sync_entry_deprecation_warned = True
     thread_path = threads_dir / f"{topic}.md"
     if not thread_path.exists():
         logger.warning(f"Thread file not found for sync: {thread_path}")

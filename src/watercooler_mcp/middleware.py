@@ -35,28 +35,28 @@ from .helpers import _should_auto_branch, _build_commit_footers
 # runs after the structural write if services are available.
 
 
-def _check_enrichment_services_available(graph_config) -> bool:
-    """Check if ANY enrichment service is available.
+def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
+    """Check which enrichment services are available.
 
-    Returns True if at least one service (LLM or embedding) is reachable.
-    The enrich_graph_entry function handles individual service checks and
-    will generate what it can based on actual availability.
+    Returns a tuple of (llm_available, embed_available) indicating which
+    services are reachable. This allows the caller to decide whether to
+    attempt partial enrichment.
 
     Args:
         graph_config: GraphConfig with generate_summaries/generate_embeddings flags
 
     Returns:
-        True if at least one service is available for enrichment
+        Tuple of (llm_available, embed_available) booleans
     """
     try:
         import httpx
     except ImportError:
         log_debug("[GRAPH] httpx not available, skipping enrichment check")
-        return False
+        return (False, False)
 
     # If neither is requested, no need to check services
     if not graph_config.generate_summaries and not graph_config.generate_embeddings:
-        return False
+        return (False, False)
 
     llm_available = False
     embed_available = False
@@ -78,7 +78,7 @@ def _check_enrichment_services_available(graph_config) -> bool:
                             log_debug(f"[GRAPH] LLM service available at {llm_base}")
                         else:
                             log_debug(f"[GRAPH] LLM service returned {response.status_code} at {llm_base}")
-                except (httpx.ConnectError, httpx.TimeoutException):
+                except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError):
                     log_debug(f"[GRAPH] Cannot connect to LLM at {llm_base}")
 
         # Check embedding service if embeddings requested
@@ -97,18 +97,17 @@ def _check_enrichment_services_available(graph_config) -> bool:
                             log_debug(f"[GRAPH] Embedding service available at {embed_base}")
                         else:
                             log_debug(f"[GRAPH] Embedding service returned {response.status_code} at {embed_base}")
-                except (httpx.ConnectError, httpx.TimeoutException):
+                except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError):
                     log_debug(f"[GRAPH] Cannot connect to embedding service at {embed_base}")
 
-        # Return True if ANY service is available
-        return llm_available or embed_available
+        return (llm_available, embed_available)
     except (ImportError, AttributeError, ValueError, OSError) as e:
         # ImportError: config modules missing
         # AttributeError: config objects malformed
         # ValueError: config parsing failed
         # OSError: network/file issues
         log_debug(f"[GRAPH] Service check failed: {e}")
-        return False
+        return (False, False)
 
 
 # Store original FunctionTool.run for instrumentation
@@ -259,9 +258,13 @@ def run_with_sync(
                         log_debug(f"[GRAPH] Enrichment not configured, skipping for {topic}/{entry_id}")
                         return result
 
-                    services_available = _check_enrichment_services_available(graph_config)
+                    llm_available, embed_available = _check_enrichment_services_available(graph_config)
 
-                    if services_available:
+                    # Only attempt enrichment for services that are actually available
+                    do_summaries = graph_config.generate_summaries and llm_available
+                    do_embeddings = graph_config.generate_embeddings and embed_available
+
+                    if do_summaries or do_embeddings:
                         # Run enrichment - add summaries/embeddings to existing entry
                         from watercooler.baseline_graph.sync import enrich_graph_entry
 
@@ -269,8 +272,8 @@ def run_with_sync(
                             threads_dir=context.threads_dir,
                             topic=topic,
                             entry_id=entry_id,
-                            generate_summaries=graph_config.generate_summaries,
-                            generate_embeddings=graph_config.generate_embeddings,
+                            generate_summaries=do_summaries,
+                            generate_embeddings=do_embeddings,
                         )
                         if enrich_result.success:
                             if enrich_result.is_noop:
@@ -284,8 +287,14 @@ def run_with_sync(
                                 log_debug(f"[GRAPH] Enrichment complete for {topic}/{entry_id}: {', '.join(generated)}")
                         else:
                             log_warning(f"[GRAPH] Enrichment failed for {topic}/{entry_id}: {enrich_result.error_message}")
+
+                        # Log partial enrichment if some services were unavailable
+                        if graph_config.generate_summaries and not llm_available:
+                            log_debug(f"[GRAPH] LLM unavailable, skipping summary for {topic}/{entry_id}")
+                        if graph_config.generate_embeddings and not embed_available:
+                            log_debug(f"[GRAPH] Embedding service unavailable, skipping embedding for {topic}/{entry_id}")
                     else:
-                        # Services unavailable - log and continue without enrichment
+                        # No services available - log and continue without enrichment
                         # Entry is already saved (by graph-first write), just without
                         # summaries/embeddings. Use watercooler_backfill_graph later.
                         log_warning(
