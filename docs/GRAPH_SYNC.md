@@ -330,10 +330,11 @@ def resolve_jsonl_merge_conflict(path: Path) -> bool:
    model = "nomic-embed-text"
    ```
 
-**With `auto_detect_services = true`** (default), the system will:
-- Check service availability before each generation attempt
-- Gracefully skip generation if services are unavailable
-- Log a debug message instead of raising an error
+**Service availability is checked automatically** before each enrichment attempt:
+- LLM and embedding services are checked independently
+- Partial enrichment is supported (e.g., generate summary if LLM available, skip embedding if not)
+- Unavailable services result in a debug log message, not an error
+- Entries are saved without enrichment; use `watercooler_backfill_graph` to add later
 
 ### Access Counters Disabled
 

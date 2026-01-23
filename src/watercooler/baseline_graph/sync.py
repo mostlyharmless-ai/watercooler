@@ -718,7 +718,15 @@ def enrich_graph_entry(
             if is_embedding_available(embed_config):
                 # Use summary for embedding if available, otherwise truncated body
                 max_chars = embed_config.max_text_chars
-                embed_text = new_summary if new_summary else body[:max_chars]
+                if new_summary:
+                    embed_text = new_summary
+                else:
+                    embed_text = body[:max_chars]
+                    if len(body) > max_chars:
+                        logger.debug(
+                            f"Entry {entry_id} body truncated from {len(body)} to "
+                            f"{max_chars} chars for embedding"
+                        )
                 new_embedding = generate_embedding(embed_text)
                 if new_embedding:
                     logger.debug(f"Generated embedding for entry {entry_id}")
@@ -738,24 +746,30 @@ def enrich_graph_entry(
             entries = storage.load_thread_entries_dict(graph_dir, topic)
             entry_node_id = f"entry:{entry_id}"
 
-            if entry_node_id in entries:
-                if new_summary and new_summary != existing_summary:
-                    entries[entry_node_id]["summary"] = new_summary
-                if new_embedding:
-                    entries[entry_node_id]["embedding"] = new_embedding
+            if entry_node_id not in entries:
+                # Entry disappeared between initial read and lock acquisition
+                logger.warning(f"Entry {entry_id} disappeared during enrichment")
+                return EnrichmentResult.error(
+                    f"Entry {entry_id} not found after lock acquisition"
+                )
 
-                # Load existing meta and edges (we only update entries)
-                meta = storage.load_thread_meta(graph_dir, topic) or {}
-                edges = storage.load_thread_edges(graph_dir, topic)
+            if new_summary and new_summary != existing_summary:
+                entries[entry_node_id]["summary"] = new_summary
+            if new_embedding:
+                entries[entry_node_id]["embedding"] = new_embedding
 
-                # Write back atomically
-                storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+            # Load existing meta and edges (we only update entries)
+            meta = storage.load_thread_meta(graph_dir, topic) or {}
+            edges = storage.load_thread_edges(graph_dir, topic)
 
-                # Update search index if embedding was generated
-                if new_embedding:
-                    storage.upsert_search_index_entry(graph_dir, entry_id, topic, new_embedding)
+            # Write back atomically
+            storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-                logger.debug(f"Enrichment complete for {topic}/{entry_id}")
+            # Update search index if embedding was generated
+            if new_embedding:
+                storage.upsert_search_index_entry(graph_dir, entry_id, topic, new_embedding)
+
+            logger.debug(f"Enrichment complete for {topic}/{entry_id}")
 
         return EnrichmentResult(
             success=True,
