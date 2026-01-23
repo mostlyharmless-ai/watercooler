@@ -66,7 +66,7 @@ def _check_enrichment_services_available(graph_config) -> bool:
         if graph_config.generate_summaries:
             llm_base = getattr(graph_config, 'summarizer_api_base', None)
             if not llm_base:
-                from watercooler.config_schema import SummarizerConfig
+                from watercooler.baseline_graph.summarizer import SummarizerConfig
                 llm_base = SummarizerConfig.from_env().api_base
             if llm_base:
                 try:
