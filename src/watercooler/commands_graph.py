@@ -522,37 +522,7 @@ def set_ball_graph_first(
 
 
 # ============================================================================
-# Feature Flag for Gradual Migration
-# ============================================================================
-
-
-_USE_GRAPH_FIRST = True  # Graph-first is now the default
-
-
-def enable_graph_first():
-    """Enable graph-first mode for all commands."""
-    global _USE_GRAPH_FIRST
-    _USE_GRAPH_FIRST = True
-    logger.info("Graph-first mode enabled")
-
-
-def disable_graph_first():
-    """Disable graph-first mode (use MD-first legacy mode)."""
-    global _USE_GRAPH_FIRST
-    _USE_GRAPH_FIRST = False
-    logger.info("Graph-first mode disabled (legacy MD-first)")
-
-
-def is_graph_first_enabled() -> bool:
-    """Check if graph-first mode is enabled.
-
-    Graph-first is now the default. Set WATERCOOLER_GRAPH_FIRST=0
-    to fall back to legacy MD-first mode.
-    """
-    import os
-    # Check env var to allow opting out of graph-first
-    env_val = os.environ.get("WATERCOOLER_GRAPH_FIRST", "").lower()
-    if env_val in ("0", "false", "no"):
-        return False
-    # Default is now True
-    return _USE_GRAPH_FIRST
+# NOTE: Graph-first mode is now ALWAYS enabled. The WATERCOOLER_GRAPH_FIRST env var
+# and the enable/disable functions have been removed. All thread operations go through
+# the graph-first functions in this module. Enrichment (summaries/embeddings) is handled
+# by the middleware after the structural write completes.
