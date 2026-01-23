@@ -48,7 +48,9 @@ from .reader import (
 )
 
 from .sync import (
-    sync_entry_to_graph,
+    EnrichmentResult,
+    enrich_graph_entry,
+    sync_entry_to_graph,  # Deprecated, use enrich_graph_entry
     sync_thread_to_graph,
     record_graph_sync_error,
     check_graph_health,
@@ -126,8 +128,10 @@ __all__ = [
     "increment_access_count",
     "get_access_count",
     "get_most_accessed",
-    # Sync
-    "sync_entry_to_graph",
+    # Sync / Enrichment
+    "EnrichmentResult",
+    "enrich_graph_entry",
+    "sync_entry_to_graph",  # Deprecated
     "sync_thread_to_graph",
     "record_graph_sync_error",
     "check_graph_health",
