@@ -81,6 +81,52 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
+# Constants
+# ============================================================================
+
+# Default max characters for embedding text when no summary is available.
+# This should be tuned based on the embedding model's token limit.
+# Most models support 512-8192 tokens; 500 chars is ~100-150 tokens.
+DEFAULT_EMBEDDING_TEXT_MAX_CHARS = 500
+
+
+# ============================================================================
+# Enrichment Result Type
+# ============================================================================
+
+
+@dataclass
+class EnrichmentResult:
+    """Result of an enrichment operation.
+
+    Provides detailed status instead of just bool to distinguish:
+    - success: Enrichment completed and data was written
+    - noop: No enrichment needed (already exists or services unavailable)
+    - error: Enrichment failed
+    """
+
+    success: bool
+    summary_generated: bool = False
+    embedding_generated: bool = False
+    error_message: Optional[str] = None
+
+    @property
+    def is_noop(self) -> bool:
+        """True if operation succeeded but no enrichment was generated."""
+        return self.success and not self.summary_generated and not self.embedding_generated
+
+    @classmethod
+    def noop(cls) -> "EnrichmentResult":
+        """Create a no-op result (success, but nothing generated)."""
+        return cls(success=True)
+
+    @classmethod
+    def error(cls, message: str) -> "EnrichmentResult":
+        """Create an error result."""
+        return cls(success=False, error_message=message)
+
+
+# ============================================================================
 # Embedding Configuration & Generation
 # ============================================================================
 
@@ -111,6 +157,7 @@ class EmbeddingConfig:
     api_base: str = field(default_factory=_get_default_embedding_api_base)
     model: str = field(default_factory=_get_default_embedding_model)
     timeout: float = 30.0
+    max_text_chars: int = DEFAULT_EMBEDDING_TEXT_MAX_CHARS
 
     @classmethod
     def from_env(cls) -> "EmbeddingConfig":
@@ -599,7 +646,7 @@ def enrich_graph_entry(
     entry_id: str,
     generate_summaries: bool = False,
     generate_embeddings: bool = False,
-) -> bool:
+) -> EnrichmentResult:
     """Enrich an existing graph entry with summaries and embeddings.
 
     This function reads from the GRAPH (not markdown) and adds enrichment data.
@@ -607,6 +654,11 @@ def enrich_graph_entry(
     1. Entry is already written to graph by commands_graph.py
     2. This function adds optional LLM summaries and embeddings
     3. Markdown is a projection, not a source
+
+    Thread Safety:
+        Uses advisory file locking to prevent race conditions when multiple
+        processes enrich the same topic concurrently. The lock is held during
+        the read-modify-write cycle.
 
     Args:
         threads_dir: Threads directory
@@ -616,14 +668,17 @@ def enrich_graph_entry(
         generate_embeddings: Whether to generate embedding vector
 
     Returns:
-        True if enrichment succeeded, False otherwise
+        EnrichmentResult with success status and details about what was generated
     """
+    from watercooler.fs import lock_path_for_topic
+    from watercooler.lock import AdvisoryLock
+
     try:
         # Read entry from graph (source of truth)
         entry_node = get_entry_node_from_graph(threads_dir, entry_id, topic)
         if not entry_node:
             logger.warning(f"Entry not found in graph for enrichment: {topic}/{entry_id}")
-            return False
+            return EnrichmentResult.error(f"Entry not found: {topic}/{entry_id}")
 
         # Extract fields we need for enrichment
         body = entry_node.get("body", "")
@@ -631,7 +686,8 @@ def enrich_graph_entry(
         entry_type = entry_node.get("entry_type", "Note")
         existing_summary = entry_node.get("summary", "")
 
-        updated = False
+        summary_generated = False
+        embedding_generated = False
         new_summary = existing_summary
         new_embedding = None
 
@@ -647,56 +703,64 @@ def enrich_graph_entry(
                 )
                 if new_summary:
                     logger.debug(f"Generated summary for entry {entry_id}")
-                    updated = True
+                    summary_generated = True
             else:
                 logger.debug(f"LLM service unavailable, skipping summary for {entry_id}")
 
         # Generate embedding if enabled
+        embed_config = EmbeddingConfig.from_env()
         if generate_embeddings:
-            embed_config = EmbeddingConfig.from_env()
             if is_embedding_available(embed_config):
                 # Use summary for embedding if available, otherwise truncated body
-                embed_text = new_summary if new_summary else body[:500]
+                max_chars = embed_config.max_text_chars
+                embed_text = new_summary if new_summary else body[:max_chars]
                 new_embedding = generate_embedding(embed_text)
                 if new_embedding:
                     logger.debug(f"Generated embedding for entry {entry_id}")
-                    updated = True
+                    embedding_generated = True
             else:
                 logger.debug(f"Embedding service unavailable, skipping for {entry_id}")
 
-        if not updated:
+        if not summary_generated and not embedding_generated:
             logger.debug(f"No enrichment generated for {entry_id}")
-            return True  # Not an error, just nothing to do
+            return EnrichmentResult.noop()
 
         # Update entry node in graph with enrichment data
-        graph_dir = storage.ensure_graph_dir(threads_dir)
-        entries = storage.load_thread_entries_dict(graph_dir, topic)
-        entry_node_id = f"entry:{entry_id}"
+        # Use locking to prevent race conditions during read-modify-write
+        lp = lock_path_for_topic(topic, threads_dir)
+        with AdvisoryLock(lp, timeout=5, ttl=30, force_break=False):
+            graph_dir = storage.ensure_graph_dir(threads_dir)
+            entries = storage.load_thread_entries_dict(graph_dir, topic)
+            entry_node_id = f"entry:{entry_id}"
 
-        if entry_node_id in entries:
-            if new_summary and new_summary != existing_summary:
-                entries[entry_node_id]["summary"] = new_summary
-            if new_embedding:
-                entries[entry_node_id]["embedding"] = new_embedding
+            if entry_node_id in entries:
+                if new_summary and new_summary != existing_summary:
+                    entries[entry_node_id]["summary"] = new_summary
+                if new_embedding:
+                    entries[entry_node_id]["embedding"] = new_embedding
 
-            # Load existing meta and edges (we only update entries)
-            meta = storage.load_thread_meta(graph_dir, topic) or {}
-            edges = storage.load_thread_edges(graph_dir, topic)
+                # Load existing meta and edges (we only update entries)
+                meta = storage.load_thread_meta(graph_dir, topic) or {}
+                edges = storage.load_thread_edges(graph_dir, topic)
 
-            # Write back atomically
-            storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+                # Write back atomically
+                storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-            # Update search index if embedding was generated
-            if new_embedding:
-                storage.upsert_search_index_entry(graph_dir, entry_id, topic, new_embedding)
+                # Update search index if embedding was generated
+                if new_embedding:
+                    storage.upsert_search_index_entry(graph_dir, entry_id, topic, new_embedding)
 
-            logger.debug(f"Enrichment complete for {topic}/{entry_id}")
+                logger.debug(f"Enrichment complete for {topic}/{entry_id}")
 
-        return True
+        return EnrichmentResult(
+            success=True,
+            summary_generated=summary_generated,
+            embedding_generated=embedding_generated,
+        )
 
     except Exception as e:
         logger.error(f"Enrichment failed for {topic}/{entry_id}: {e}")
-        return False
+        return EnrichmentResult.error(str(e))
 
 
 def sync_entry_to_graph(

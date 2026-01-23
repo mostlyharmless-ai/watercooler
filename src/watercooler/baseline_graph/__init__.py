@@ -48,6 +48,7 @@ from .reader import (
 )
 
 from .sync import (
+    EnrichmentResult,
     enrich_graph_entry,
     sync_entry_to_graph,  # Deprecated, use enrich_graph_entry
     sync_thread_to_graph,
@@ -128,6 +129,7 @@ __all__ = [
     "get_access_count",
     "get_most_accessed",
     # Sync / Enrichment
+    "EnrichmentResult",
     "enrich_graph_entry",
     "sync_entry_to_graph",  # Deprecated
     "sync_thread_to_graph",

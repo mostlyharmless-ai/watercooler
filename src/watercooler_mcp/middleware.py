@@ -102,7 +102,11 @@ def _check_enrichment_services_available(graph_config) -> bool:
 
         # Return True if ANY service is available
         return llm_available or embed_available
-    except Exception as e:
+    except (ImportError, AttributeError, ValueError, OSError) as e:
+        # ImportError: config modules missing
+        # AttributeError: config objects malformed
+        # ValueError: config parsing failed
+        # OSError: network/file issues
         log_debug(f"[GRAPH] Service check failed: {e}")
         return False
 
@@ -261,17 +265,25 @@ def run_with_sync(
                         # Run enrichment - add summaries/embeddings to existing entry
                         from watercooler.baseline_graph.sync import enrich_graph_entry
 
-                        enrich_ok = enrich_graph_entry(
+                        enrich_result = enrich_graph_entry(
                             threads_dir=context.threads_dir,
                             topic=topic,
                             entry_id=entry_id,
                             generate_summaries=graph_config.generate_summaries,
                             generate_embeddings=graph_config.generate_embeddings,
                         )
-                        if enrich_ok:
-                            log_debug(f"[GRAPH] Enrichment complete for {topic}/{entry_id}")
+                        if enrich_result.success:
+                            if enrich_result.is_noop:
+                                log_debug(f"[GRAPH] No enrichment needed for {topic}/{entry_id}")
+                            else:
+                                generated = []
+                                if enrich_result.summary_generated:
+                                    generated.append("summary")
+                                if enrich_result.embedding_generated:
+                                    generated.append("embedding")
+                                log_debug(f"[GRAPH] Enrichment complete for {topic}/{entry_id}: {', '.join(generated)}")
                         else:
-                            log_warning(f"[GRAPH] Enrichment returned False for {topic}/{entry_id}")
+                            log_warning(f"[GRAPH] Enrichment failed for {topic}/{entry_id}: {enrich_result.error_message}")
                     else:
                         # Services unavailable - log and continue without enrichment
                         # Entry is already saved (by graph-first write), just without

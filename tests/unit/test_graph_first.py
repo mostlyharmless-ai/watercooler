@@ -416,9 +416,9 @@ class TestCommandsGraphModule:
 class TestEnrichGraphEntry:
     """Tests for enrich_graph_entry() - graph-first enrichment."""
 
-    def test_enrich_graph_entry_reads_from_graph(self, tmp_path):
-        """Test that enrich_graph_entry reads entry from graph, not markdown."""
-        from watercooler.baseline_graph.sync import enrich_graph_entry
+    def test_enrich_graph_entry_returns_noop_when_disabled(self, tmp_path):
+        """Test that enrich_graph_entry returns noop when enrichment disabled."""
+        from watercooler.baseline_graph.sync import enrich_graph_entry, EnrichmentResult
 
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
@@ -435,24 +435,23 @@ class TestEnrichGraphEntry:
             entry_id=entry_id,
         )
 
-        # Verify entry exists in graph
-        entry = get_entry_node_from_graph(threads_dir, entry_id)
-        assert entry is not None
-        assert entry["body"] == "This is test content for enrichment."
-
-        # Call enrich (without services, should still succeed)
+        # Call enrich with both disabled - should return noop
         result = enrich_graph_entry(
             threads_dir=threads_dir,
             topic="test-thread",
             entry_id=entry_id,
-            generate_summaries=False,  # Skip to avoid service deps
+            generate_summaries=False,
             generate_embeddings=False,
         )
-        assert result is True
+        assert isinstance(result, EnrichmentResult)
+        assert result.success is True
+        assert result.is_noop is True
+        assert result.summary_generated is False
+        assert result.embedding_generated is False
 
-    def test_enrich_graph_entry_missing_entry_returns_false(self, tmp_path):
-        """Test that enrich_graph_entry returns False for missing entry."""
-        from watercooler.baseline_graph.sync import enrich_graph_entry
+    def test_enrich_graph_entry_missing_entry_returns_error(self, tmp_path):
+        """Test that enrich_graph_entry returns error for missing entry."""
+        from watercooler.baseline_graph.sync import enrich_graph_entry, EnrichmentResult
 
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
@@ -464,7 +463,189 @@ class TestEnrichGraphEntry:
             generate_summaries=False,
             generate_embeddings=False,
         )
-        assert result is False
+        assert isinstance(result, EnrichmentResult)
+        assert result.success is False
+        assert result.error_message is not None
+        assert "not found" in result.error_message
+
+    def test_enrich_graph_entry_writes_summary_to_graph(self, tmp_path, monkeypatch):
+        """Test that generated summary is written back to graph."""
+        from watercooler.baseline_graph import sync as sync_module
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create entry
+        entry_id = str(ULID())
+        say_graph_first(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test Entry",
+            body="This is test content that needs summarization.",
+            entry_id=entry_id,
+        )
+
+        # Mock the LLM service
+        monkeypatch.setattr(sync_module, "is_llm_service_available", lambda _: True)
+        monkeypatch.setattr(
+            sync_module, "summarize_entry",
+            lambda *args, **kwargs: "Mocked summary of the test content."
+        )
+
+        # Run enrichment with summaries enabled
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=True,
+            generate_embeddings=False,
+        )
+
+        assert result.success is True
+        assert result.summary_generated is True
+
+        # Verify summary was written to graph
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
+        assert entry is not None
+        assert entry["summary"] == "Mocked summary of the test content."
+
+    def test_enrich_graph_entry_writes_embedding_to_graph(self, tmp_path, monkeypatch):
+        """Test that generated embedding is written back to graph."""
+        from watercooler.baseline_graph import sync as sync_module
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create entry
+        entry_id = str(ULID())
+        say_graph_first(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test Entry",
+            body="Test content for embedding.",
+            entry_id=entry_id,
+        )
+
+        # Mock the embedding service
+        mock_embedding = [0.1, 0.2, 0.3, 0.4, 0.5]
+        monkeypatch.setattr(sync_module, "is_embedding_available", lambda _: True)
+        monkeypatch.setattr(
+            sync_module, "generate_embedding",
+            lambda *args, **kwargs: mock_embedding
+        )
+
+        # Run enrichment with embeddings enabled
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=False,
+            generate_embeddings=True,
+        )
+
+        assert result.success is True
+        assert result.embedding_generated is True
+
+        # Verify embedding was written to graph
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
+        assert entry is not None
+        assert entry["embedding"] == mock_embedding
+
+    def test_enrich_graph_entry_services_unavailable(self, tmp_path, monkeypatch):
+        """Test enrichment returns noop when services are unavailable."""
+        from watercooler.baseline_graph import sync as sync_module
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        entry_id = str(ULID())
+        say_graph_first(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test",
+            body="Test content",
+            entry_id=entry_id,
+        )
+
+        # Mock services as unavailable
+        monkeypatch.setattr(sync_module, "is_llm_service_available", lambda _: False)
+        monkeypatch.setattr(sync_module, "is_embedding_available", lambda _: False)
+
+        # Request enrichment but services unavailable
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=True,
+            generate_embeddings=True,
+        )
+
+        # Should succeed as noop (services unavailable is not an error)
+        assert result.success is True
+        assert result.is_noop is True
+
+    def test_enrich_graph_entry_skips_existing_summary(self, tmp_path, monkeypatch):
+        """Test that enrichment skips if summary already exists."""
+        from watercooler.baseline_graph import sync as sync_module
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+        from watercooler.baseline_graph import storage
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        entry_id = str(ULID())
+        say_graph_first(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test",
+            body="Test content",
+            entry_id=entry_id,
+        )
+
+        # Manually set summary in graph
+        graph_dir = storage.ensure_graph_dir(threads_dir)
+        entries = storage.load_thread_entries_dict(graph_dir, "test-thread")
+        entries[f"entry:{entry_id}"]["summary"] = "Pre-existing summary"
+        meta = storage.load_thread_meta(graph_dir, "test-thread") or {}
+        edges = storage.load_thread_edges(graph_dir, "test-thread")
+        storage.write_thread_graph(graph_dir, "test-thread", meta, entries, edges)
+
+        # Track if summarize_entry is called
+        summarize_called = []
+        def mock_summarize(*args, **kwargs):
+            summarize_called.append(True)
+            return "New summary"
+
+        monkeypatch.setattr(sync_module, "summarize_entry", mock_summarize)
+        monkeypatch.setattr(sync_module, "is_llm_service_available", lambda _: True)
+
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=True,
+            generate_embeddings=False,
+        )
+
+        # Should be noop - existing summary preserved
+        assert result.success is True
+        assert result.summary_generated is False
+        assert len(summarize_called) == 0  # summarize_entry should not be called
+
+        # Verify original summary preserved
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
+        assert entry["summary"] == "Pre-existing summary"
 
 
 # NOTE: TestFeatureFlag class removed - graph-first mode is now always enabled

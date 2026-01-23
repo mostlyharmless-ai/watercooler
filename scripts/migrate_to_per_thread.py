@@ -26,9 +26,21 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
+from typing import Any, TypedDict
 
 # Add src to path for local dev
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+
+class ThreadsState(TypedDict):
+    """State of a threads directory."""
+
+    has_md_files: bool
+    md_count: int
+    has_monolithic: bool
+    has_per_thread: bool
+    per_thread_count: int
+    graph_dir: Path
 
 
 def find_threads_dir(path: Path) -> Path | None:
@@ -64,11 +76,14 @@ def find_threads_dir(path: Path) -> Path | None:
     return None
 
 
-def check_current_state(threads_dir: Path) -> dict:
+def check_current_state(threads_dir: Path) -> ThreadsState:
     """Check the current state of the threads directory.
 
+    Args:
+        threads_dir: Path to the threads directory
+
     Returns:
-        Dict with state info: has_md_files, has_monolithic, has_per_thread, md_count
+        ThreadsState with migration status info
     """
     graph_dir = threads_dir / "graph" / "baseline"
     nodes_file = graph_dir / "nodes.jsonl"
@@ -95,7 +110,7 @@ def check_current_state(threads_dir: Path) -> dict:
     }
 
 
-def build_monolithic_from_md(threads_dir: Path, extractive_only: bool = True) -> dict:
+def build_monolithic_from_md(threads_dir: Path, extractive_only: bool = True) -> dict[str, Any]:
     """Build monolithic graph from .md files.
 
     Args:
@@ -103,7 +118,7 @@ def build_monolithic_from_md(threads_dir: Path, extractive_only: bool = True) ->
         extractive_only: Use extractive summaries (no LLM required)
 
     Returns:
-        Export manifest with statistics
+        Export manifest with statistics (threads_exported, nodes_written, edges_written)
     """
     from watercooler.baseline_graph import export_all_threads, SummarizerConfig
 
