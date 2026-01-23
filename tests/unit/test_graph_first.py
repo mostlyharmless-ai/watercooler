@@ -36,7 +36,6 @@ from watercooler.commands_graph import (
     set_status_graph_first,
     set_ball_graph_first,
     init_thread_graph_first,
-    is_graph_first_enabled,
 )
 
 
@@ -414,26 +413,5 @@ class TestCommandsGraphModule:
         assert "Handoff to" in entries[0]["title"]
 
 
-class TestFeatureFlag:
-    """Tests for graph-first feature flag."""
-
-    def test_is_graph_first_enabled_by_default(self, monkeypatch):
-        """Test that graph-first is enabled by default."""
-        monkeypatch.delenv("WATERCOOLER_GRAPH_FIRST", raising=False)
-        assert is_graph_first_enabled() is True
-
-    def test_is_graph_first_can_be_disabled_by_env(self, monkeypatch):
-        """Test that graph-first can be disabled via env var for legacy mode."""
-        monkeypatch.setenv("WATERCOOLER_GRAPH_FIRST", "0")
-        assert is_graph_first_enabled() is False
-
-        monkeypatch.setenv("WATERCOOLER_GRAPH_FIRST", "false")
-        assert is_graph_first_enabled() is False
-
-    def test_is_graph_first_stays_enabled_with_truthy_env(self, monkeypatch):
-        """Test that explicit truthy env var keeps graph-first enabled."""
-        monkeypatch.setenv("WATERCOOLER_GRAPH_FIRST", "1")
-        assert is_graph_first_enabled() is True
-
-        monkeypatch.setenv("WATERCOOLER_GRAPH_FIRST", "true")
-        assert is_graph_first_enabled() is True
+# NOTE: TestFeatureFlag class removed - graph-first mode is now always enabled
+# and the WATERCOOLER_GRAPH_FIRST env var has been deprecated.

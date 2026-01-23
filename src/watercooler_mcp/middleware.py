@@ -29,34 +29,37 @@ from .sync import (
 from .observability import log_debug, log_action, log_warning
 from .helpers import _should_auto_branch, _build_commit_footers
 
-# Check if graph-first mode is enabled
-def _is_graph_first_enabled() -> bool:
-    """Check if graph-first mode is enabled via env var."""
-    import os
-    return os.environ.get("WATERCOOLER_GRAPH_FIRST", "").lower() in ("1", "true", "yes")
+# NOTE: Graph-first mode is now ALWAYS enabled. The WATERCOOLER_GRAPH_FIRST env var
+# is deprecated and ignored. All writes go through commands_graph.py which writes
+# structural data first, then projects to markdown. Enrichment (summaries/embeddings)
+# runs after the structural write if services are available.
 
 
 def _check_enrichment_services_available(graph_config) -> bool:
-    """Check if LLM/embedding services are available for enrichment.
+    """Check if ANY enrichment service is available.
 
-    Performs lightweight connection tests to determine if services can be reached.
-    Returns True only if ALL required services are available.
+    Returns True if at least one service (LLM or embedding) is reachable.
+    The sync_entry_to_graph function handles individual service checks and
+    will generate what it can based on actual availability.
 
     Args:
         graph_config: GraphConfig with generate_summaries/generate_embeddings flags
 
     Returns:
-        True if services are available, False otherwise
+        True if at least one service is available for enrichment
     """
     try:
         import httpx
     except ImportError:
-        log_debug("[GRAPH] httpx not available, skipping enrichment")
+        log_debug("[GRAPH] httpx not available, skipping enrichment check")
         return False
 
     # If neither is requested, no need to check services
     if not graph_config.generate_summaries and not graph_config.generate_embeddings:
         return False
+
+    llm_available = False
+    embed_available = False
 
     try:
         # Check LLM service if summaries requested
@@ -68,15 +71,13 @@ def _check_enrichment_services_available(graph_config) -> bool:
             if llm_base:
                 try:
                     with httpx.Client(timeout=2.0) as client:
-                        # Try to reach the models endpoint (lightweight check)
                         url = f"{llm_base.rstrip('/')}/models"
                         response = client.get(url)
-                        if response.status_code >= 500:
-                            log_debug(f"[GRAPH] LLM service unavailable at {llm_base}")
-                            return False
+                        if response.status_code < 500:
+                            llm_available = True
+                            log_debug(f"[GRAPH] LLM service available at {llm_base}")
                 except (httpx.ConnectError, httpx.TimeoutException):
                     log_debug(f"[GRAPH] Cannot connect to LLM at {llm_base}")
-                    return False
 
         # Check embedding service if embeddings requested
         if graph_config.generate_embeddings:
@@ -89,14 +90,14 @@ def _check_enrichment_services_available(graph_config) -> bool:
                     with httpx.Client(timeout=2.0) as client:
                         url = f"{embed_base.rstrip('/')}/models"
                         response = client.get(url)
-                        if response.status_code >= 500:
-                            log_debug(f"[GRAPH] Embedding service unavailable at {embed_base}")
-                            return False
+                        if response.status_code < 500:
+                            embed_available = True
+                            log_debug(f"[GRAPH] Embedding service available at {embed_base}")
                 except (httpx.ConnectError, httpx.TimeoutException):
                     log_debug(f"[GRAPH] Cannot connect to embedding service at {embed_base}")
-                    return False
 
-        return True
+        # Return True if ANY service is available
+        return llm_available or embed_available
     except Exception as e:
         log_debug(f"[GRAPH] Service check failed: {e}")
         return False
@@ -228,33 +229,32 @@ def run_with_sync(
         commit_message = commit_title if not footers else f"{commit_title}\n\n" + "\n".join(footers)
 
         # Wrap operation to include graph sync BEFORE commit
-        # This ensures graph files are in the SAME commit as the .md file
-        # If enrichment services are available, include summaries/embeddings
-        # Otherwise, create minimal structural node (backfill later)
-        #
-        # NOTE: In graph-first mode, this sync is SKIPPED because the command
-        # already wrote to the graph first (via commands_graph.py), then projected
-        # to MD. The graph files are already up-to-date.
+        # Graph-first mode: The command (via commands_graph.py) already wrote
+        # structural data to the graph, then projected to markdown. Now we run
+        # enrichment (summaries/embeddings) if services are available.
+        # If services aren't available, we log and continue - the entry is
+        # already saved, just without enrichment (can be backfilled later).
         def operation_with_graph_sync():
             result = operation()
 
-            # Skip graph sync in graph-first mode - graph was already written by command
-            if _is_graph_first_enabled():
-                log_debug(f"[GRAPH] Graph-first mode: skipping post-op sync for {topic}/{entry_id}")
-                return result
-
             if topic and entry_id and context.threads_dir:
                 try:
-                    # Check if enrichment services are available
+                    # Check if enrichment is configured and services are available
                     wc_config = get_watercooler_config()
                     graph_config = wc_config.mcp.graph
 
-                    can_enrich = (
+                    wants_enrichment = (
                         graph_config.generate_summaries or graph_config.generate_embeddings
-                    ) and _check_enrichment_services_available(graph_config)
+                    )
 
-                    if can_enrich:
-                        # Full sync with enrichment - services are available
+                    if not wants_enrichment:
+                        log_debug(f"[GRAPH] Enrichment not configured, skipping for {topic}/{entry_id}")
+                        return result
+
+                    services_available = _check_enrichment_services_available(graph_config)
+
+                    if services_available:
+                        # Run enrichment - add summaries/embeddings to existing entry
                         from watercooler.baseline_graph.sync import sync_entry_to_graph
 
                         sync_ok = sync_entry_to_graph(
@@ -265,25 +265,20 @@ def run_with_sync(
                             generate_embeddings=graph_config.generate_embeddings,
                         )
                         if sync_ok:
-                            log_debug(f"[GRAPH] Enriched sync complete for {topic}/{entry_id}")
+                            log_debug(f"[GRAPH] Enrichment complete for {topic}/{entry_id}")
                         else:
-                            log_warning(f"[GRAPH] Enriched sync returned False for {topic}/{entry_id}")
+                            log_warning(f"[GRAPH] Enrichment returned False for {topic}/{entry_id}")
                     else:
-                        # Structural sync only - services unavailable or not configured
-                        from watercooler.baseline_graph.sync import sync_entry_structure_only
-
-                        sync_ok = sync_entry_structure_only(
-                            threads_dir=context.threads_dir,
-                            topic=topic,
-                            entry_id=entry_id,
+                        # Services unavailable - log and continue without enrichment
+                        # Entry is already saved (by graph-first write), just without
+                        # summaries/embeddings. Use watercooler_backfill_graph later.
+                        log_warning(
+                            f"[GRAPH] Enrichment services unavailable for {topic}/{entry_id}. "
+                            f"Entry saved without summary/embedding. Run backfill to add later."
                         )
-                        if sync_ok:
-                            log_debug(f"[GRAPH] Structural sync complete for {topic}/{entry_id}")
-                        else:
-                            log_warning(f"[GRAPH] Structural sync returned False for {topic}/{entry_id}")
                 except Exception as graph_err:
-                    # Graph sync failure is logged but doesn't block the write
-                    log_warning(f"[GRAPH] Graph sync failed: {graph_err}")
+                    # Enrichment failure is logged but doesn't block the write
+                    log_warning(f"[GRAPH] Enrichment failed for {topic}/{entry_id}: {graph_err}")
 
             return result
 
