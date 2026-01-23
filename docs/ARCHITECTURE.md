@@ -22,6 +22,26 @@ Drop-in replacement for existing watercooler.py workflows. All capabilities avai
 
 Watercooler implements thread-based collaboration with the following components:
 
+### Graph-First Data Model
+
+Watercooler uses a **graph-first architecture** where:
+
+- **Graph (JSONL) is the source of truth** - All thread and entry data is stored in structured JSONL files at `graph/baseline/threads/{topic}/`
+- **Markdown is a derived projection** - Human-readable `.md` files are generated from graph data for convenience
+
+**Write Flow:**
+1. Entry data written to graph (`meta.json`, `entries.jsonl`, `edges.jsonl`)
+2. Markdown projected from graph (for human readability)
+3. Enrichment (summaries, embeddings) added to graph asynchronously
+
+**Benefits:**
+- Fast queries without parsing markdown
+- Semantic search via embeddings
+- Cross-reference tracking
+- Structured data for analytics
+
+See [Baseline Graph](baseline-graph.md) and [Graph Sync](GRAPH_SYNC.md) for details.
+
 ### Status Tracking
 Threads maintain explicit status values:
 - **OPEN** - Active discussion

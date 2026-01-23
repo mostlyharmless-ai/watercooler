@@ -1,14 +1,18 @@
-"""Graph sync module for atomic updates after MCP writes.
+"""Graph sync module for enrichment and reconciliation.
 
-This module provides functions to sync thread/entry data to the baseline graph
-atomically after markdown writes. It integrates with the MCP write pipeline
-to keep the graph in sync with markdown files.
+In the graph-first architecture, the graph is the source of truth:
+1. commands_graph.py writes entry/thread data to graph first
+2. projector.py creates markdown as a derived projection
+3. This module adds ENRICHMENT (summaries, embeddings) to graph entries
 
 Key functions:
-- sync_entry_to_graph(): Upsert entry + thread nodes/edges after a write
-- sync_thread_to_graph(): Full thread sync (for rebuilds)
+- enrich_graph_entry(): Add LLM summaries and embeddings to existing graph entry
+- sync_thread_to_graph(): Full thread sync (for migration/reconciliation)
 - record_graph_sync_error(): Track sync failures for later reconciliation
 - get_graph_sync_state(): Check current sync state
+
+DEPRECATED (MD-first era):
+- sync_entry_to_graph(): Reads from markdown - use enrich_graph_entry() instead
 
 Feature Configuration:
     The following features are configurable and may be disabled by default:
@@ -59,6 +63,11 @@ from watercooler.baseline_graph.parser import (
     ParsedEntry,
     ParsedThread,
     parse_thread_file,
+)
+from watercooler.baseline_graph.writer import (
+    get_thread_from_graph,
+    get_entry_node_from_graph,
+    get_entries_for_thread,
 )
 from watercooler.baseline_graph.summarizer import (
     SummarizerConfig,
@@ -584,6 +593,112 @@ def sync_entry_structure_only(
         return False
 
 
+def enrich_graph_entry(
+    threads_dir: Path,
+    topic: str,
+    entry_id: str,
+    generate_summaries: bool = False,
+    generate_embeddings: bool = False,
+) -> bool:
+    """Enrich an existing graph entry with summaries and embeddings.
+
+    This function reads from the GRAPH (not markdown) and adds enrichment data.
+    It is designed for the graph-first architecture where:
+    1. Entry is already written to graph by commands_graph.py
+    2. This function adds optional LLM summaries and embeddings
+    3. Markdown is a projection, not a source
+
+    Args:
+        threads_dir: Threads directory
+        topic: Thread topic
+        entry_id: Entry ID to enrich
+        generate_summaries: Whether to generate LLM summary
+        generate_embeddings: Whether to generate embedding vector
+
+    Returns:
+        True if enrichment succeeded, False otherwise
+    """
+    try:
+        # Read entry from graph (source of truth)
+        entry_node = get_entry_node_from_graph(threads_dir, entry_id, topic)
+        if not entry_node:
+            logger.warning(f"Entry not found in graph for enrichment: {topic}/{entry_id}")
+            return False
+
+        # Extract fields we need for enrichment
+        body = entry_node.get("body", "")
+        title = entry_node.get("title", "")
+        entry_type = entry_node.get("entry_type", "Note")
+        existing_summary = entry_node.get("summary", "")
+
+        updated = False
+        new_summary = existing_summary
+        new_embedding = None
+
+        # Generate summary if enabled and not already present
+        if generate_summaries and not existing_summary:
+            summarizer_config = create_summarizer_config()
+            if is_llm_service_available(summarizer_config):
+                new_summary = summarize_entry(
+                    body,
+                    entry_title=title,
+                    entry_type=entry_type,
+                    config=summarizer_config,
+                )
+                if new_summary:
+                    logger.debug(f"Generated summary for entry {entry_id}")
+                    updated = True
+            else:
+                logger.debug(f"LLM service unavailable, skipping summary for {entry_id}")
+
+        # Generate embedding if enabled
+        if generate_embeddings:
+            embed_config = EmbeddingConfig.from_env()
+            if is_embedding_available(embed_config):
+                # Use summary for embedding if available, otherwise truncated body
+                embed_text = new_summary if new_summary else body[:500]
+                new_embedding = generate_embedding(embed_text)
+                if new_embedding:
+                    logger.debug(f"Generated embedding for entry {entry_id}")
+                    updated = True
+            else:
+                logger.debug(f"Embedding service unavailable, skipping for {entry_id}")
+
+        if not updated:
+            logger.debug(f"No enrichment generated for {entry_id}")
+            return True  # Not an error, just nothing to do
+
+        # Update entry node in graph with enrichment data
+        graph_dir = storage.ensure_graph_dir(threads_dir)
+        entries = storage.load_thread_entries_dict(graph_dir, topic)
+        entry_node_id = f"entry:{entry_id}"
+
+        if entry_node_id in entries:
+            if new_summary and new_summary != existing_summary:
+                entries[entry_node_id]["summary"] = new_summary
+            if new_embedding:
+                entries[entry_node_id]["embedding"] = new_embedding
+
+            # Load existing meta and edges (we only update entries)
+            meta = storage.load_thread_meta(graph_dir, topic) or {}
+            edges = storage.load_thread_edges(graph_dir, topic)
+
+            # Write back atomically
+            storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+
+            # Update search index if embedding was generated
+            if new_embedding:
+                storage.upsert_search_index_entry(graph_dir, entry_id, topic, new_embedding)
+
+            logger.debug(f"Enrichment complete for {topic}/{entry_id}")
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Enrichment failed for {topic}/{entry_id}: {e}")
+        return False
+
+
 def sync_entry_to_graph(
     threads_dir: Path,
     topic: str,
@@ -591,10 +706,20 @@ def sync_entry_to_graph(
     generate_summaries: bool = False,
     generate_embeddings: bool = False,
 ) -> bool:
-    """Sync a single entry to the graph after an MCP write.
+    """DEPRECATED: Use enrich_graph_entry() instead.
+
+    This function is from the MD-first era and reads from markdown files.
+    In graph-first architecture, use enrich_graph_entry() which reads from
+    the graph (source of truth) and only adds enrichment data.
+
+    This function is preserved for backward compatibility with legacy repos
+    that may not have graph data yet. It will be removed in a future version.
+
+    Original docstring:
+    Sync a single entry to the graph after an MCP write.
 
     This function:
-    1. Parses the thread file
+    1. Parses the thread file (DEPRECATED - reads from MD not graph)
     2. Generates entry summary (if enabled)
     3. Generates entry embedding (if enabled)
     4. Optionally updates thread summary (if arc changed)

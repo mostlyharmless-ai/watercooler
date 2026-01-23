@@ -39,7 +39,7 @@ def _check_enrichment_services_available(graph_config) -> bool:
     """Check if ANY enrichment service is available.
 
     Returns True if at least one service (LLM or embedding) is reachable.
-    The sync_entry_to_graph function handles individual service checks and
+    The enrich_graph_entry function handles individual service checks and
     will generate what it can based on actual availability.
 
     Args:
@@ -73,9 +73,11 @@ def _check_enrichment_services_available(graph_config) -> bool:
                     with httpx.Client(timeout=2.0) as client:
                         url = f"{llm_base.rstrip('/')}/models"
                         response = client.get(url)
-                        if response.status_code < 500:
+                        if 200 <= response.status_code < 300:
                             llm_available = True
                             log_debug(f"[GRAPH] LLM service available at {llm_base}")
+                        else:
+                            log_debug(f"[GRAPH] LLM service returned {response.status_code} at {llm_base}")
                 except (httpx.ConnectError, httpx.TimeoutException):
                     log_debug(f"[GRAPH] Cannot connect to LLM at {llm_base}")
 
@@ -90,9 +92,11 @@ def _check_enrichment_services_available(graph_config) -> bool:
                     with httpx.Client(timeout=2.0) as client:
                         url = f"{embed_base.rstrip('/')}/models"
                         response = client.get(url)
-                        if response.status_code < 500:
+                        if 200 <= response.status_code < 300:
                             embed_available = True
                             log_debug(f"[GRAPH] Embedding service available at {embed_base}")
+                        else:
+                            log_debug(f"[GRAPH] Embedding service returned {response.status_code} at {embed_base}")
                 except (httpx.ConnectError, httpx.TimeoutException):
                     log_debug(f"[GRAPH] Cannot connect to embedding service at {embed_base}")
 
@@ -255,16 +259,16 @@ def run_with_sync(
 
                     if services_available:
                         # Run enrichment - add summaries/embeddings to existing entry
-                        from watercooler.baseline_graph.sync import sync_entry_to_graph
+                        from watercooler.baseline_graph.sync import enrich_graph_entry
 
-                        sync_ok = sync_entry_to_graph(
+                        enrich_ok = enrich_graph_entry(
                             threads_dir=context.threads_dir,
                             topic=topic,
                             entry_id=entry_id,
                             generate_summaries=graph_config.generate_summaries,
                             generate_embeddings=graph_config.generate_embeddings,
                         )
-                        if sync_ok:
+                        if enrich_ok:
                             log_debug(f"[GRAPH] Enrichment complete for {topic}/{entry_id}")
                         else:
                             log_warning(f"[GRAPH] Enrichment returned False for {topic}/{entry_id}")

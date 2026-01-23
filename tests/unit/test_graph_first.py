@@ -413,5 +413,59 @@ class TestCommandsGraphModule:
         assert "Handoff to" in entries[0]["title"]
 
 
+class TestEnrichGraphEntry:
+    """Tests for enrich_graph_entry() - graph-first enrichment."""
+
+    def test_enrich_graph_entry_reads_from_graph(self, tmp_path):
+        """Test that enrich_graph_entry reads entry from graph, not markdown."""
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create thread and entry via graph-first
+        entry_id = str(ULID())
+        say_graph_first(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test Entry",
+            body="This is test content for enrichment.",
+            entry_id=entry_id,
+        )
+
+        # Verify entry exists in graph
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
+        assert entry is not None
+        assert entry["body"] == "This is test content for enrichment."
+
+        # Call enrich (without services, should still succeed)
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=False,  # Skip to avoid service deps
+            generate_embeddings=False,
+        )
+        assert result is True
+
+    def test_enrich_graph_entry_missing_entry_returns_false(self, tmp_path):
+        """Test that enrich_graph_entry returns False for missing entry."""
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="nonexistent",
+            entry_id="nonexistent-id",
+            generate_summaries=False,
+            generate_embeddings=False,
+        )
+        assert result is False
+
+
 # NOTE: TestFeatureFlag class removed - graph-first mode is now always enabled
 # and the WATERCOOLER_GRAPH_FIRST env var has been deprecated.
