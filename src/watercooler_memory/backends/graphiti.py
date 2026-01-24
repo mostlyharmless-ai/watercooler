@@ -194,6 +194,7 @@ class GraphitiConfig:
     embedding_api_base: str | None = None  # e.g., "http://localhost:8080/v1" for local
     embedding_api_key: str | None = None   # Required for all providers
     embedding_model: str = "text-embedding-3-small"
+    embedding_dim: int = 1024  # Vector dimension (must match your embedding model)
 
     # Legacy fields (deprecated, use llm_* and embedding_* instead)
     openai_api_key: str | None = None      # DEPRECATED: use llm_api_key
@@ -264,6 +265,7 @@ class GraphitiConfig:
             embedding_api_key=embedding.api_key,
             embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
             embedding_model=embedding.model,
+            embedding_dim=embedding.dim,
             falkordb_host=db.host,
             falkordb_port=db.port,
             falkordb_username=db.username if db.username else None,
@@ -740,6 +742,7 @@ class GraphitiBackend(MemoryBackend):
             embedding_model=self.config.embedding_model,
             api_key=self.config.embedding_api_key,
             base_url=self.config.embedding_api_base,
+            embedding_dim=self.config.embedding_dim,
         )
         embedder = OpenAIEmbedder(config=embedder_config)
 
