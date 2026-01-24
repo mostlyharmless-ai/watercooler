@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 # subprocess removed - now using native build_hierarchical_graph()
 import sys
@@ -28,18 +29,120 @@ from . import (
     TransientError,
 )
 
+logger = logging.getLogger(__name__)
+
 # Thread-safe lock for os.chdir() operations
 # os.chdir() changes the process-wide current directory, which is not thread-safe.
 # This lock ensures that only one thread can change directories at a time.
 _chdir_lock = threading.Lock()
+
+# Resolve default submodule path from package location
+_PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_DEFAULT_LEANRAG_PATH = _PACKAGE_ROOT / "external" / "LeanRAG"
+
+# Track whether leanrag is available as installed package vs submodule
+_LEANRAG_INSTALLED_AS_PACKAGE: bool | None = None
+
+
+def _is_leanrag_installed() -> bool:
+    """Check if leanrag is installed as a Python package.
+
+    Returns:
+        True if leanrag can be imported directly (installed via pip/uv),
+        False if it needs to be loaded from submodule path.
+    """
+    global _LEANRAG_INSTALLED_AS_PACKAGE
+    if _LEANRAG_INSTALLED_AS_PACKAGE is not None:
+        return _LEANRAG_INSTALLED_AS_PACKAGE
+
+    try:
+        import leanrag  # noqa: F401
+        _LEANRAG_INSTALLED_AS_PACKAGE = True
+        logger.debug("leanrag found as installed package")
+        return True
+    except ImportError:
+        _LEANRAG_INSTALLED_AS_PACKAGE = False
+        logger.debug("leanrag not installed as package, will use submodule")
+        return False
+
+
+def _get_leanrag_path() -> Path | None:
+    """Get leanrag submodule path (only needed if not installed as package).
+
+    Environment Variables:
+        LEANRAG_PATH: Override the default leanrag path
+
+    Returns:
+        Path to the leanrag submodule directory, or None if installed as package
+    """
+    # If installed as package, no path needed
+    if _is_leanrag_installed():
+        return None
+
+    env_path = os.environ.get("LEANRAG_PATH")
+    if env_path:
+        return Path(env_path)
+    return _DEFAULT_LEANRAG_PATH
+
+
+def _ensure_leanrag_available() -> None:
+    """Ensure leanrag is importable, either as package or via submodule.
+
+    For installed packages (uvx --from "watercooler-cloud[memory]"):
+        leanrag is already in site-packages, nothing to do.
+
+    For development (git submodule):
+        Add the submodule path to sys.path so imports work.
+
+    Raises:
+        ConfigError: If leanrag cannot be made available.
+    """
+    # Already installed as package? Nothing to do.
+    if _is_leanrag_installed():
+        return
+
+    # Get submodule path
+    leanrag_path = _get_leanrag_path()
+    if leanrag_path is None:
+        raise ConfigError("leanrag not installed and no submodule path available")
+
+    if not leanrag_path.exists():
+        raise ConfigError(
+            f"LeanRAG not found at {leanrag_path}. "
+            "Either install with: pip install 'watercooler-cloud[memory]' "
+            "or run: git submodule update --init external/LeanRAG"
+        )
+
+    leanrag_module = leanrag_path / "leanrag"
+    if not leanrag_module.exists():
+        raise ConfigError(
+            f"LeanRAG module not found at {leanrag_module}. "
+            "Ensure LeanRAG submodule is properly initialized."
+        )
+
+    # Add to sys.path if not already there
+    leanrag_path_str = str(leanrag_path)
+    if leanrag_path_str not in sys.path:
+        sys.path.insert(0, leanrag_path_str)
+        logger.debug(f"Added leanrag submodule to sys.path: {leanrag_path_str}")
+
+    # Verify import works now
+    try:
+        import leanrag  # noqa: F401
+    except ImportError as e:
+        raise ConfigError(
+            f"Failed to import leanrag after adding to path: {e}"
+        ) from e
 
 
 @dataclass
 class LeanRAGConfig:
     """Configuration for LeanRAG backend."""
 
-    # LeanRAG submodule location
-    leanrag_path: Path = Path("external/LeanRAG")
+    # LeanRAG submodule location (None if installed as package, Path if using submodule)
+    # For installed packages: leanrag is in site-packages, no path needed
+    # For development: points to external/LeanRAG submodule
+    leanrag_path: Path | None = None  # Resolved by _get_leanrag_path() if needed
 
     # Database configuration
     falkordb_host: str = "localhost"
@@ -128,18 +231,8 @@ class LeanRAGBackend(MemoryBackend):
 
     def _validate_config(self) -> None:
         """Validate configuration and LeanRAG availability."""
-        if not self.config.leanrag_path.exists():
-            raise ConfigError(
-                f"LeanRAG not found at {self.config.leanrag_path}. "
-                "Run: git submodule update --init external/LeanRAG"
-            )
-
-        process_script = self.config.leanrag_path / "leanrag/pipelines/process.py"
-        if not process_script.exists():
-            raise ConfigError(
-                f"LeanRAG process script not found at {process_script}. "
-                "Ensure LeanRAG submodule is properly initialized."
-            )
+        # Ensure leanrag is importable (installed package or submodule)
+        _ensure_leanrag_available()
 
     def _normalize_entity_name(self, name: str | None) -> str | None:
         """Normalize entity name by stripping quotes and whitespace.

@@ -19,10 +19,10 @@ This guide covers setting up LeanRAG as a memory backend for watercooler-cloud.
 
 ## Version & License
 
-**Pinned commit:** `1ea1360caa50bec5531ac665d39a73bb152d8fb4`
+**Branch:** `feature/falkordb-vector-backend-2`
 **License:** Accepted by AAAI-26
 **Repository:** https://github.com/mostlyharmless-ai/LeanRAG
-**Submodule location:** `external/LeanRAG/`
+**Submodule location (dev only):** `external/LeanRAG/`
 
 ---
 
@@ -135,20 +135,40 @@ umap_dimensions: 5
 
 ## Installation Steps
 
-### Step 1: Initialize Submodule
+### Option A: Install as Package (Recommended for Users)
 
-If you haven't already:
+The simplest approach - LeanRAG is installed automatically as a dependency:
+
 ```bash
-git submodule update --init external/LeanRAG
-cd external/LeanRAG
-git checkout 1ea1360caa50bec5531ac665d39a73bb152d8fb4
+# Using uvx (self-contained, nothing to install locally)
+uvx --from 'watercooler-cloud[leanrag]' watercooler-mcp
+
+# Or using pip
+pip install 'watercooler-cloud[leanrag]'
+
+# Or install both LeanRAG and Graphiti backends
+pip install 'watercooler-cloud[memory]'
 ```
 
-### Step 2: Install Dependencies
+### Option B: Development with Submodules (For Contributors)
+
+For development where you need to edit LeanRAG code:
+
+#### Step 1: Initialize Submodule
+
+```bash
+git clone --recurse-submodules https://github.com/mostlyharmless-ai/watercooler-cloud
+# Or if already cloned:
+git submodule update --init external/LeanRAG
+```
+
+#### Step 2: Install Dependencies
 
 ```bash
 cd external/LeanRAG
 pip install -r requirements.txt
+# Or install as editable package
+pip install -e .
 ```
 
 ### Step 3: Verify FalkorDB Connection

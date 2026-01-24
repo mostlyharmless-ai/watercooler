@@ -23,13 +23,24 @@ docker exec falkordb redis-cli PING  # Should return: PONG
 
 ### 2. Install Graphiti Dependencies
 
-```bash
-# From watercooler-cloud root directory
-# Use uv (recommended for this project)
-uv pip install -e "external/graphiti[falkordb]"
+**Option A: Install as package (recommended for users)**
 
-# Or if using pip directly
-pip install -e "external/graphiti[falkordb]"
+```bash
+# Using uvx (self-contained, nothing to install locally)
+uvx --from 'watercooler-cloud[graphiti]' watercooler-mcp
+
+# Or using pip (includes graphiti-core[falkordb] automatically)
+pip install 'watercooler-cloud[graphiti]'
+```
+
+**Option B: Development with submodules (for contributors)**
+
+```bash
+# Clone with submodules
+git clone --recurse-submodules https://github.com/mostlyharmless-ai/watercooler-cloud
+
+# Install graphiti from submodule (editable, with FalkorDB support)
+uv pip install -e "external/graphiti[falkordb]"
 ```
 
 ### 3. Configure Environment Variables

@@ -175,10 +175,19 @@ docs/
 ### Immediate (Complete Phase 3)
 1. Set up test environment:
    ```bash
+   # Option A: Install as packages (recommended)
+   pip install 'watercooler-cloud[memory]'
+
+   # Option B: Development with submodules
    pip install -e external/LeanRAG
    pip install -e 'external/graphiti[falkordb]'
+
+   # Start FalkorDB
    docker run -p 6379:6379 -p 3000:3000 -it --rm falkordb/falkordb:latest
-   export OPENAI_API_KEY="sk-..."
+
+   # Configure LLM (OpenAI or local)
+   export LLM_API_KEY="sk-..."  # or "local" for Ollama
+   export LLM_API_BASE="http://localhost:11434/v1"  # for Ollama
    ```
 
 2. Run full test suite:

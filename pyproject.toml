@@ -60,19 +60,30 @@ http = [
 baseline = [
     "httpx>=0.25",
 ]
+# Memory backends - includes graphiti-core and leanrag from MostlyHarmless forks
+# Usage: uvx --from "watercooler-cloud[memory]" watercooler-mcp
+# For development with submodules, omit [memory] and use WATERCOOLER_GRAPHITI_PATH
 memory = [
     "tiktoken>=0.5",
     "httpx>=0.25",
     "openai>=1.0",
+    "graphiti-core[falkordb] @ git+https://github.com/mostlyharmless-ai/graphiti.git@feature/hnsw-entity-index",
+    "leanrag @ git+https://github.com/mostlyharmless-ai/LeanRAG.git@feature/falkordb-vector-backend-2",
 ]
-# Graphiti temporal graph memory backend
-# NOTE: graphiti-core must be installed separately from the git submodule:
-#   pip install -e external/graphiti[falkordb]
-# This extra only installs the supporting dependencies
+# Graphiti temporal graph memory backend (without leanrag)
+# For production deployments that only need Graphiti
 graphiti = [
     "tiktoken>=0.5",
     "httpx>=0.25",
     "openai>=1.0",
+    "graphiti-core[falkordb] @ git+https://github.com/mostlyharmless-ai/graphiti.git@feature/hnsw-entity-index",
+]
+# LeanRAG hierarchical graph memory backend (without graphiti)
+leanrag = [
+    "tiktoken>=0.5",
+    "httpx>=0.25",
+    "openai>=1.0",
+    "leanrag @ git+https://github.com/mostlyharmless-ai/LeanRAG.git@feature/falkordb-vector-backend-2",
 ]
 # Local LLM inference - provides OpenAI-compatible server for offline summarization
 # Usage: pip install watercooler-cloud[local]

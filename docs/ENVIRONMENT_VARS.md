@@ -795,17 +795,30 @@ Variables for querying thread history via Graphiti temporal graph memory. These 
 Enables the memory query tools (`watercooler_smart_query`, `watercooler_search`) for asking questions about thread history using Graphiti's temporal graph memory. When disabled, the tools return an error message directing users to enable it.
 
 **Prerequisites** (when enabled):
-- `OPENAI_API_KEY` environment variable set
+- LLM API key configured (via `LLM_API_KEY` env var or `[memory.llm].api_key` in TOML)
 - FalkorDB running locally: `docker run -d -p 6379:6379 falkordb/falkordb:latest`
-- Memory extras installed: `pip install watercooler-cloud[memory]`
+- Memory extras installed: `pip install 'watercooler-cloud[memory]'`
 - Index built via CLI: `python -m watercooler_memory.pipeline run --backend graphiti --threads /path/to/threads`
 
-**Hardcoded defaults:**
-- Graphiti path: `external/graphiti`
+**Configuration (TOML recommended):**
+```toml
+# ~/.watercooler/config.toml
+[memory]
+enabled = true
+backend = "graphiti"
+
+[memory.llm]
+api_key = "local"  # or your API key
+api_base = "http://localhost:11434/v1"  # Ollama
+model = "qwen3:30b"
+```
+
+**Defaults:**
+- Graphiti path: Installed as package (or `WATERCOOLER_GRAPHITI_PATH` for submodule dev)
 - Work directory: `~/.watercooler/graphiti`
 - FalkorDB host: `localhost`
 - FalkorDB port: `6379`
-- OpenAI model: `gpt-4o-mini`
+- LLM model: `gpt-4o-mini`
 
 **Configuration examples:**
 

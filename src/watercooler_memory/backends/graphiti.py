@@ -39,27 +39,105 @@ import os
 _PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _DEFAULT_GRAPHITI_PATH = _PACKAGE_ROOT / "external" / "graphiti"
 
+# Track whether graphiti is available as installed package vs submodule
+_GRAPHITI_INSTALLED_AS_PACKAGE: bool | None = None
 
-def _get_graphiti_path() -> Path:
-    """Get graphiti path from env or package default.
 
-    This resolves the graphiti submodule path in a way that works for both:
-    - Editable installs (pip install -e .)
-    - Regular installs (pip install watercooler-cloud)
+def _is_graphiti_installed() -> bool:
+    """Check if graphiti_core is installed as a Python package.
 
-    The path is resolved relative to this package's installation location,
-    not the current working directory.
+    Returns:
+        True if graphiti_core can be imported directly (installed via pip/uv),
+        False if it needs to be loaded from submodule path.
+    """
+    global _GRAPHITI_INSTALLED_AS_PACKAGE
+    if _GRAPHITI_INSTALLED_AS_PACKAGE is not None:
+        return _GRAPHITI_INSTALLED_AS_PACKAGE
+
+    try:
+        import graphiti_core  # noqa: F401
+        _GRAPHITI_INSTALLED_AS_PACKAGE = True
+        logger.debug("graphiti_core found as installed package")
+        return True
+    except ImportError:
+        _GRAPHITI_INSTALLED_AS_PACKAGE = False
+        logger.debug("graphiti_core not installed as package, will use submodule")
+        return False
+
+
+def _get_graphiti_path() -> Path | None:
+    """Get graphiti submodule path (only needed if not installed as package).
+
+    This resolves the graphiti submodule path for development setups where
+    graphiti is checked out as a git submodule rather than installed as a package.
 
     Environment Variables:
         WATERCOOLER_GRAPHITI_PATH: Override the default graphiti path
 
     Returns:
-        Path to the graphiti submodule directory
+        Path to the graphiti submodule directory, or None if installed as package
     """
+    # If installed as package, no path needed
+    if _is_graphiti_installed():
+        return None
+
     env_path = os.environ.get("WATERCOOLER_GRAPHITI_PATH")
     if env_path:
         return Path(env_path)
     return _DEFAULT_GRAPHITI_PATH
+
+
+def _ensure_graphiti_available() -> None:
+    """Ensure graphiti_core is importable, either as package or via submodule.
+
+    For installed packages (uvx --from "watercooler-cloud[memory]"):
+        graphiti_core is already in site-packages, nothing to do.
+
+    For development (git submodule):
+        Add the submodule path to sys.path so imports work.
+
+    Raises:
+        ConfigError: If graphiti cannot be made available.
+    """
+    import sys
+
+    # Already installed as package? Nothing to do.
+    if _is_graphiti_installed():
+        return
+
+    # Get submodule path
+    graphiti_path = _get_graphiti_path()
+    if graphiti_path is None:
+        # Shouldn't happen, but handle gracefully
+        raise ConfigError("graphiti_core not installed and no submodule path available")
+
+    if not graphiti_path.exists():
+        raise ConfigError(
+            f"Graphiti not found at {graphiti_path}. "
+            "Either install with: pip install 'watercooler-cloud[memory]' "
+            "or run: git submodule update --init external/graphiti"
+        )
+
+    graphiti_core_dir = graphiti_path / "graphiti_core"
+    if not graphiti_core_dir.exists():
+        raise ConfigError(
+            f"Graphiti core not found at {graphiti_core_dir}. "
+            "Ensure Graphiti submodule is properly initialized."
+        )
+
+    # Add to sys.path if not already there
+    graphiti_path_str = str(graphiti_path)
+    if graphiti_path_str not in sys.path:
+        sys.path.insert(0, graphiti_path_str)
+        logger.debug(f"Added graphiti submodule to sys.path: {graphiti_path_str}")
+
+    # Verify import works now
+    try:
+        import graphiti_core  # noqa: F401
+    except ImportError as e:
+        raise ConfigError(
+            f"Failed to import graphiti_core after adding to path: {e}"
+        ) from e
 
 
 def _derive_database_name(code_path: Path | str | None) -> str:
@@ -92,8 +170,10 @@ def _derive_database_name(code_path: Path | str | None) -> str:
 class GraphitiConfig:
     """Configuration for Graphiti backend."""
 
-    # Graphiti submodule location (resolved from package installation, not cwd)
-    graphiti_path: Path = field(default_factory=_get_graphiti_path)
+    # Graphiti submodule location (None if installed as package, Path if using submodule)
+    # For installed packages: graphiti_core is in site-packages, no path needed
+    # For development: points to external/graphiti submodule
+    graphiti_path: Path | None = field(default_factory=_get_graphiti_path)
 
     # Database configuration (FalkorDB)
     falkordb_host: str = "localhost"
@@ -301,19 +381,8 @@ class GraphitiBackend(MemoryBackend):
 
     def _validate_config(self) -> None:
         """Validate configuration and Graphiti availability."""
-        if not self.config.graphiti_path.exists():
-            raise ConfigError(
-                f"Graphiti not found at {self.config.graphiti_path}. "
-                "Run: git submodule update --init external/graphiti"
-            )
-
-        # Check for required Graphiti module
-        graphiti_core = self.config.graphiti_path / "graphiti_core"
-        if not graphiti_core.exists():
-            raise ConfigError(
-                f"Graphiti core not found at {graphiti_core}. "
-                "Ensure Graphiti submodule is properly initialized."
-            )
+        # Ensure graphiti_core is importable (installed package or submodule)
+        _ensure_graphiti_available()
 
         # Validate LLM API key is set (required for Graphiti)
         # Support legacy openai_api_key field for backwards compatibility
