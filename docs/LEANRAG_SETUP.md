@@ -19,7 +19,7 @@ This guide covers setting up LeanRAG as a memory backend for watercooler-cloud.
 
 ## Version & License
 
-**Branch:** `feature/falkordb-vector-backend-2`
+**Branch:** `feature/falkordb-vector-backend`
 **License:** Accepted by AAAI-26
 **Repository:** https://github.com/mostlyharmless-ai/LeanRAG
 **Submodule location (dev only):** `external/LeanRAG/`
