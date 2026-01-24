@@ -244,7 +244,11 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
         if config:
             diagnostics["openai_key_set"] = bool(config.openai_api_key)
         else:
-            diagnostics["config_issue"] = "WATERCOOLER_GRAPHITI_ENABLED != '1' or OPENAI_API_KEY not set"
+            diagnostics["config_issue"] = (
+                "Graphiti not enabled. Either set WATERCOOLER_GRAPHITI_ENABLED=1, "
+                "or configure [memory] backend = 'graphiti' in config.toml. "
+                "Also ensure [memory.llm].api_key and [memory.embedding].api_key are set."
+            )
 
         # Check backend initialization
         if config:

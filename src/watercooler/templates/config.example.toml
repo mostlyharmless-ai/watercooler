@@ -159,6 +159,41 @@ default_spec = "general-purpose"
 
 
 # -----------------------------------------------------------------------------
+# Slack Integration Settings
+# Env overrides: WATERCOOLER_SLACK_WEBHOOK, WATERCOOLER_SLACK_BOT_TOKEN,
+#                WATERCOOLER_SLACK_APP_TOKEN, WATERCOOLER_SLACK_CHANNEL,
+#                WATERCOOLER_SLACK_CHANNEL_PREFIX
+# -----------------------------------------------------------------------------
+[mcp.slack]
+
+# Slack incoming webhook URL for notifications
+# Env: WATERCOOLER_SLACK_WEBHOOK
+# webhook_url = ""
+
+# Slack bot token (xoxb-...) for rich interactions
+# Env: WATERCOOLER_SLACK_BOT_TOKEN
+# bot_token = ""
+
+# Slack app token (xapp-...) for socket mode
+# Env: WATERCOOLER_SLACK_APP_TOKEN
+# app_token = ""
+
+# Default Slack channel for notifications
+# Env: WATERCOOLER_SLACK_CHANNEL
+# default_channel = ""
+
+# Prefix for auto-created channels (e.g., "wc-" → "wc-feature-auth")
+# Env: WATERCOOLER_SLACK_CHANNEL_PREFIX
+# channel_prefix = ""
+
+# Notification triggers (when to send Slack notifications)
+# notify_on_say = true
+# notify_on_ball_flip = true
+# notify_on_status_change = true
+# notify_on_handoff = true
+
+
+# -----------------------------------------------------------------------------
 # Logging Settings
 # -----------------------------------------------------------------------------
 [mcp.logging]
@@ -327,12 +362,13 @@ auto_detect_services = true
 
 # -----------------------------------------------------------------------------
 # LLM Service Configuration (shared across backends)
-# Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+# Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT, LLM_MAX_TOKENS
 # -----------------------------------------------------------------------------
 [memory.llm]
 
 # LLM API key (REQUIRED - set via env var for security)
 # Env: LLM_API_KEY
+# For local servers (Ollama, llama.cpp), use "local" or any non-empty string
 # api_key = ""
 
 # LLM API base URL
@@ -345,20 +381,33 @@ auto_detect_services = true
 # Env: LLM_MODEL
 # model = "gpt-4o-mini"
 
+# Request timeout in seconds
+# Env: LLM_TIMEOUT
+# Increase for slow models or thinking models (e.g., qwen3 with /think)
+# timeout = 60.0
+
+# Maximum tokens for LLM response
+# Env: LLM_MAX_TOKENS
+# Increase for thinking models that need extra tokens for reasoning
+# max_tokens = 512
+
 
 # -----------------------------------------------------------------------------
 # Embedding Service Configuration (shared across backends)
-# Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM
+# Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM,
+#                EMBEDDING_TIMEOUT, EMBEDDING_BATCH_SIZE
 # -----------------------------------------------------------------------------
 [memory.embedding]
 
 # Embedding API key (often not required for local servers)
 # Env: EMBEDDING_API_KEY
+# For local servers (Ollama, llama.cpp), use "local" or any non-empty string
 # api_key = ""
 
 # Embedding API base URL
 # Env: EMBEDDING_API_BASE
 # Default: local llama.cpp (http://localhost:8080/v1)
+# For Ollama: "http://localhost:11434/v1" (same port as LLM, different model)
 # api_base = "http://localhost:8080/v1"
 
 # Embedding model name
@@ -368,6 +417,15 @@ auto_detect_services = true
 # Embedding vector dimension
 # Env: EMBEDDING_DIM
 # dim = 1024
+
+# Request timeout in seconds
+# Env: EMBEDDING_TIMEOUT
+# timeout = 60.0
+
+# Batch size for embedding requests
+# Env: EMBEDDING_BATCH_SIZE
+# Higher values improve throughput but increase memory usage
+# batch_size = 32
 
 
 # -----------------------------------------------------------------------------
@@ -451,14 +509,40 @@ auto_detect_services = true
 # MEMORY BACKEND QUICK START
 # =============================================================================
 #
-# To enable Graphiti memory:
-#   1. Set WATERCOOLER_GRAPHITI_ENABLED=1
-#   2. Set LLM_API_KEY=<your-api-key>
-#   3. Set EMBEDDING_API_KEY=<your-api-key> (or use local server)
+# To enable Graphiti memory backend:
 #
-# For local LLM/embedding servers:
-#   - Configure [memory.llm].api_base for Ollama: "http://localhost:11434/v1"
-#   - Configure [memory.embedding].api_base for llama.cpp: "http://localhost:8080/v1"
+#   Option 1 - TOML config (recommended):
+#     [memory]
+#     enabled = true
+#     backend = "graphiti"
+#
+#     [memory.llm]
+#     api_key = "local"  # For Ollama/llama.cpp
+#     api_base = "http://localhost:11434/v1"
+#     model = "qwen3:30b"  # or your preferred model
+#
+#     [memory.embedding]
+#     api_key = "local"
+#     api_base = "http://localhost:11434/v1"  # Ollama serves both LLM and embeddings
+#     model = "nomic-embed-text:latest"
+#
+#   Option 2 - Environment variables:
+#     WATERCOOLER_GRAPHITI_ENABLED=1  # or WATERCOOLER_MEMORY_BACKEND=graphiti
+#     LLM_API_KEY=<your-api-key>
+#     LLM_API_BASE=http://localhost:11434/v1
+#     LLM_MODEL=qwen3:30b
+#     EMBEDDING_API_KEY=<your-api-key>
+#     EMBEDDING_API_BASE=http://localhost:11434/v1
+#     EMBEDDING_MODEL=nomic-embed-text:latest
+#
+# For Ollama (local LLM + embedding on same port):
+#   - Both LLM and embedding use port 11434
+#   - Specify different models per service
+#   - api_key = "local" (or any non-empty string)
+#
+# For llama.cpp (separate processes):
+#   - LLM: http://localhost:8000/v1
+#   - Embedding: http://localhost:8080/v1
 #
 # To disable all memory backends (e.g., for CI):
 #   WATERCOOLER_MEMORY_DISABLED=1
@@ -507,16 +591,28 @@ auto_detect_services = true
 # validation.on_write            WATERCOOLER_VALIDATE_ON_WRITE
 # validation.fail_on_violation   WATERCOOLER_FAIL_ON_VIOLATION
 #
+# Slack integration:
+# mcp.slack.webhook_url          WATERCOOLER_SLACK_WEBHOOK
+# mcp.slack.bot_token            WATERCOOLER_SLACK_BOT_TOKEN
+# mcp.slack.app_token            WATERCOOLER_SLACK_APP_TOKEN
+# mcp.slack.default_channel      WATERCOOLER_SLACK_CHANNEL
+# mcp.slack.channel_prefix       WATERCOOLER_SLACK_CHANNEL_PREFIX
+#
 # Memory backend configuration:
 # memory.enabled                 WATERCOOLER_MEMORY_DISABLED (inverted)
 # memory.backend                 WATERCOOLER_MEMORY_BACKEND
+#                                WATERCOOLER_GRAPHITI_ENABLED (legacy, use backend instead)
 # memory.llm.api_key             LLM_API_KEY
 # memory.llm.api_base            LLM_API_BASE
 # memory.llm.model               LLM_MODEL
+# memory.llm.timeout             LLM_TIMEOUT
+# memory.llm.max_tokens          LLM_MAX_TOKENS
 # memory.embedding.api_key       EMBEDDING_API_KEY
 # memory.embedding.api_base      EMBEDDING_API_BASE
 # memory.embedding.model         EMBEDDING_MODEL
 # memory.embedding.dim           EMBEDDING_DIM
+# memory.embedding.timeout       EMBEDDING_TIMEOUT
+# memory.embedding.batch_size    EMBEDDING_BATCH_SIZE
 # memory.database.host           FALKORDB_HOST
 # memory.database.port           FALKORDB_PORT
 # memory.database.password       FALKORDB_PASSWORD

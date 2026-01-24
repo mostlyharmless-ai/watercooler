@@ -43,12 +43,15 @@ class ResolvedLLMConfig:
     api_key: str
     api_base: str
     model: str
+    timeout: float
+    max_tokens: int
 
     def __repr__(self) -> str:
         """Return string representation with redacted API key."""
         return (
             f"ResolvedLLMConfig(api_key='{_redact_key(self.api_key)}', "
-            f"api_base='{self.api_base}', model='{self.model}')"
+            f"api_base='{self.api_base}', model='{self.model}', "
+            f"timeout={self.timeout}, max_tokens={self.max_tokens})"
         )
 
 
@@ -63,12 +66,15 @@ class ResolvedEmbeddingConfig:
     api_base: str
     model: str
     dim: int
+    timeout: float
+    batch_size: int
 
     def __repr__(self) -> str:
         """Return string representation with redacted API key."""
         return (
             f"ResolvedEmbeddingConfig(api_key='{_redact_key(self.api_key)}', "
-            f"api_base='{self.api_base}', model='{self.model}', dim={self.dim})"
+            f"api_base='{self.api_base}', model='{self.model}', dim={self.dim}, "
+            f"timeout={self.timeout}, batch_size={self.batch_size})"
         )
 
 
@@ -166,7 +172,33 @@ def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
     if not model:
         model = mem.llm.model
 
-    return ResolvedLLMConfig(api_key=api_key, api_base=api_base, model=model)
+    # Resolve timeout: env > shared
+    timeout_str = os.getenv("LLM_TIMEOUT")
+    if timeout_str:
+        try:
+            timeout = float(timeout_str)
+        except ValueError:
+            timeout = mem.llm.timeout
+    else:
+        timeout = mem.llm.timeout
+
+    # Resolve max_tokens: env > shared
+    max_tokens_str = os.getenv("LLM_MAX_TOKENS")
+    if max_tokens_str:
+        try:
+            max_tokens = int(max_tokens_str)
+        except ValueError:
+            max_tokens = mem.llm.max_tokens
+    else:
+        max_tokens = mem.llm.max_tokens
+
+    return ResolvedLLMConfig(
+        api_key=api_key,
+        api_base=api_base,
+        model=model,
+        timeout=timeout,
+        max_tokens=max_tokens,
+    )
 
 
 def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConfig:
@@ -229,7 +261,34 @@ def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConf
     else:
         dim = mem.embedding.dim
 
-    return ResolvedEmbeddingConfig(api_key=api_key, api_base=api_base, model=model, dim=dim)
+    # Resolve timeout: env > shared
+    timeout_str = os.getenv("EMBEDDING_TIMEOUT")
+    if timeout_str:
+        try:
+            timeout = float(timeout_str)
+        except ValueError:
+            timeout = mem.embedding.timeout
+    else:
+        timeout = mem.embedding.timeout
+
+    # Resolve batch_size: env > shared
+    batch_size_str = os.getenv("EMBEDDING_BATCH_SIZE")
+    if batch_size_str:
+        try:
+            batch_size = int(batch_size_str)
+        except ValueError:
+            batch_size = mem.embedding.batch_size
+    else:
+        batch_size = mem.embedding.batch_size
+
+    return ResolvedEmbeddingConfig(
+        api_key=api_key,
+        api_base=api_base,
+        model=model,
+        dim=dim,
+        timeout=timeout,
+        batch_size=batch_size,
+    )
 
 
 def resolve_database_config() -> ResolvedDatabaseConfig:

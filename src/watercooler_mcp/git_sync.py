@@ -591,6 +591,9 @@ class GitSyncManager:
                 )
             log_debug(f"GIT_OP_END: clone {self.repo_url}")
             self._log(f"Clone completed successfully")
+
+            # Setup .gitignore and hooks for threads repo
+            self._setup_threads_repo_safeguards()
         except GitCommandError as e:
             # Check if we should attempt provisioning
             if self._should_attempt_provision(e):
@@ -735,7 +738,31 @@ class GitSyncManager:
         # Add remote if not present
         if 'origin' not in [remote.name for remote in repo.remotes]:
             repo.create_remote('origin', self.repo_url)
+
+        # Setup .gitignore and hooks for threads repo
+        self._setup_threads_repo_safeguards()
+
         self._log("Local repository bootstrapped")
+
+    def _setup_threads_repo_safeguards(self) -> None:
+        """Setup .gitignore and hooks to prevent large file commits.
+
+        This prevents the common failure mode of accidentally committing
+        FalkorDB dumps or other large files that exceed GitHub's 100MB limit.
+        """
+        try:
+            from .repo_setup import setup_threads_repo
+            result = setup_threads_repo(self.local_path, install_git_hooks=True)
+            if result["gitignore_modified"]:
+                entries = ", ".join(result["gitignore_entries"][:3])
+                self._log(f"Added .gitignore entries: {entries}...")
+            if result["hooks_installed"]:
+                self._log(f"Installed hooks: {', '.join(result['hooks_installed'])}")
+            if result["large_files"]:
+                self._log(f"Warning: {len(result['large_files'])} large files detected")
+        except Exception as e:
+            # Don't fail repo init if safeguards fail
+            log_debug(f"[GIT_SYNC] Failed to setup repo safeguards: {e}")
 
     def set_remote_allowed(self, allowed: bool) -> None:
         """Toggle whether remote interactions are permitted."""
@@ -1075,6 +1102,58 @@ class GitSyncManager:
             self._last_pull_error = f"Unexpected error during pull: {e}"
             return False
 
+    def _check_staged_file_sizes(self, repo: Repo) -> None:
+        """Check staged files for size violations before commit.
+
+        Raises GitSyncError if any staged file exceeds GitHub's 100MB limit.
+        This prevents commits that would inevitably fail on push.
+        """
+        MAX_SIZE_BYTES = 100 * 1024 * 1024  # 100MB - GitHub's hard limit
+
+        try:
+            # Get list of staged files
+            staged = repo.git.diff('--cached', '--name-only', '--diff-filter=ACM')
+            if not staged:
+                return
+
+            oversized = []
+            for filename in staged.strip().split('\n'):
+                if not filename:
+                    continue
+                filepath = self.local_path / filename
+                if not filepath.exists():
+                    continue
+                try:
+                    size = filepath.stat().st_size
+                    if size > MAX_SIZE_BYTES:
+                        size_mb = size / (1024 * 1024)
+                        oversized.append((filename, size_mb))
+                except OSError:
+                    pass
+
+            if oversized:
+                files_str = ", ".join(f"{f} ({s:.1f}MB)" for f, s in oversized[:3])
+                if len(oversized) > 3:
+                    files_str += f" and {len(oversized) - 3} more"
+
+                # Unstage the oversized files
+                for filename, _ in oversized:
+                    try:
+                        repo.git.reset('HEAD', '--', filename)
+                    except Exception:
+                        pass
+
+                raise GitSyncError(
+                    f"Blocked commit: {len(oversized)} file(s) exceed GitHub's 100MB limit: {files_str}. "
+                    f"Files have been unstaged. Add them to .gitignore or use Git LFS."
+                )
+
+        except GitSyncError:
+            raise
+        except Exception as e:
+            # Don't block commit if size check fails
+            log_debug(f"[GIT_SYNC] File size check failed: {e}")
+
     def commit_local(self, message: str) -> bool:
         """Commit staged changes locally without pushing (GitPython, no subprocess).
 
@@ -1094,6 +1173,9 @@ class GitSyncManager:
             if not repo.is_dirty(untracked_files=True):
                 self._log("No changes to commit")
                 return False
+
+            # Check for oversized files before committing
+            self._check_staged_file_sizes(repo)
 
             log_debug(f"GIT_OP_START: commit -m '{message[:40]}'")
             with git.Git().custom_environment(**self._env):

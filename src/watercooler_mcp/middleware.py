@@ -212,7 +212,9 @@ def run_with_sync(
                 raise BranchPairingError(f"Failed to acquire lock for topic '{topic}': {e}")
 
         # Run preflight with auto-remediation instead of old validation
+        log_debug(f"[PARITY] Preflight check: skip_validation={skip_validation}, code_root={context.code_root}, threads_dir={context.threads_dir}")
         if not skip_validation and context.code_root and context.threads_dir:
+            log_debug("[PARITY] Running run_preflight...")
             preflight_result = run_preflight(
                 code_repo_path=context.code_root,
                 threads_repo_path=context.threads_dir,
@@ -225,6 +227,9 @@ def run_with_sync(
                 )
             if preflight_result.auto_fixed:
                 log_debug(f"[PARITY] Auto-fixed: {preflight_result.state.actions_taken}")
+            log_debug(f"[PARITY] Preflight result: can_proceed={preflight_result.can_proceed}")
+        else:
+            log_debug(f"[PARITY] Skipping preflight (condition not met)")
 
         # Build commit footers
         footers = _build_commit_footers(

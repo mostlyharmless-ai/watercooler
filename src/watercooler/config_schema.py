@@ -503,7 +503,7 @@ class ValidationConfig(BaseModel):
 class LLMServiceConfig(BaseModel):
     """LLM service configuration for memory backends.
 
-    Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+    Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT, LLM_MAX_TOKENS
     """
 
     api_key: str = Field(
@@ -518,12 +518,23 @@ class LLMServiceConfig(BaseModel):
         default="gpt-4o-mini",
         description="LLM model name",
     )
+    timeout: float = Field(
+        default=60.0,
+        ge=1.0,
+        description="Request timeout in seconds",
+    )
+    max_tokens: int = Field(
+        default=512,
+        ge=1,
+        description="Maximum tokens for LLM response",
+    )
 
 
 class EmbeddingServiceConfig(BaseModel):
     """Embedding service configuration for memory backends.
 
-    Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM
+    Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM,
+                   EMBEDDING_TIMEOUT, EMBEDDING_BATCH_SIZE
     """
 
     api_key: str = Field(
@@ -542,6 +553,16 @@ class EmbeddingServiceConfig(BaseModel):
         default=1024,
         ge=1,
         description="Embedding dimension",
+    )
+    timeout: float = Field(
+        default=60.0,
+        ge=1.0,
+        description="Request timeout in seconds",
+    )
+    batch_size: int = Field(
+        default=32,
+        ge=1,
+        description="Batch size for embedding requests",
     )
 
 

@@ -72,6 +72,24 @@ def _get_default_api_key() -> Optional[str]:
         return os.environ.get("LLM_API_KEY")
 
 
+def _get_default_timeout() -> float:
+    """Get default LLM timeout from unified config."""
+    try:
+        from watercooler.memory_config import resolve_llm_config
+        return resolve_llm_config().timeout
+    except ImportError:
+        return float(os.environ.get("LLM_TIMEOUT", DEFAULT_TIMEOUT))
+
+
+def _get_default_max_tokens() -> int:
+    """Get default LLM max_tokens from unified config."""
+    try:
+        from watercooler.memory_config import resolve_llm_config
+        return resolve_llm_config().max_tokens
+    except ImportError:
+        return int(os.environ.get("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS))
+
+
 @dataclass
 class SummarizerConfig:
     """Configuration for summary generation.
@@ -112,9 +130,9 @@ class SummarizerConfig:
         return cls(
             api_base=_get_default_api_base(),
             model=_get_default_model(),
-            timeout=float(os.environ.get("LLM_TIMEOUT", DEFAULT_TIMEOUT)),
+            timeout=_get_default_timeout(),
             max_retries=int(os.environ.get("LLM_MAX_RETRIES", DEFAULT_MAX_RETRIES)),
-            max_tokens=int(os.environ.get("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS)),
+            max_tokens=_get_default_max_tokens(),
             max_concurrent=int(os.environ.get("LLM_MAX_CONCURRENT", DEFAULT_MAX_CONCURRENT)),
             api_key=_get_default_api_key(),
         )
