@@ -16,6 +16,14 @@ from watercooler.config_facade import config
 
 LOGGER_NAME = "watercooler_mcp"
 
+# All logger namespaces that should share the same configuration
+# This ensures consistent logging across all watercooler modules
+LOGGER_NAMESPACES = [
+    "watercooler_mcp",    # MCP server and tools
+    "watercooler",        # Core library (baseline_graph, config, etc.)
+    "watercooler_memory", # Memory backends (graphiti, leanrag, etc.)
+]
+
 # Environment variables for configuration (env vars override config file)
 ENV_LOG_DIR = "WATERCOOLER_LOG_DIR"
 ENV_LOG_LEVEL = "WATERCOOLER_LOG_LEVEL"
@@ -50,11 +58,12 @@ def _reset_logging_state() -> None:
     _cached_logging_config = None
     _session_start = None
 
-    # Reset logger handlers if already initialized
+    # Reset logger handlers for ALL namespaces if already initialized
     if _logger_initialized:
         _logger_initialized = False
-        logger = logging.getLogger(LOGGER_NAME)
-        logger.handlers.clear()
+        for namespace in LOGGER_NAMESPACES:
+            ns_logger = logging.getLogger(namespace)
+            ns_logger.handlers.clear()
 
 
 def _get_logging_config_safe() -> Dict[str, Any]:
@@ -169,6 +178,10 @@ def _get_logger() -> logging.Logger:
     - WATERCOOLER_LOG_DISABLE_FILE: Set to 1 to disable file logging (stderr only)
 
     Environment variables override config file values.
+
+    Note: This configures ALL watercooler logger namespaces (watercooler_mcp,
+    watercooler, watercooler_memory) to share the same handlers and format.
+    This ensures consistent logging across the entire codebase.
     """
     global _logger_initialized
     logger = logging.getLogger(LOGGER_NAME)
@@ -178,16 +191,17 @@ def _get_logger() -> logging.Logger:
             # Double-check pattern for thread safety
             if not _logger_initialized:
                 _logger_initialized = True
-                logger.handlers.clear()  # Remove any existing handlers
 
                 log_level = _get_log_level()
-                logger.setLevel(log_level)
 
-                # Human-readable formatter
+                # Human-readable formatter with logger name for traceability
                 formatter = logging.Formatter(
-                    "[%(levelname)s %(asctime)s] %(message)s",
+                    "[%(levelname)s %(asctime)s] [%(name)s] %(message)s",
                     datefmt="%Y-%m-%dT%H:%M:%S"
                 )
+
+                # Create handlers (shared across all loggers)
+                handlers = []
 
                 # File handler (enabled by default)
                 log_file = _get_log_file_path()
@@ -204,13 +218,24 @@ def _get_logger() -> logging.Logger:
                     )
                     file_handler.setFormatter(formatter)
                     file_handler.setLevel(log_level)
-                    logger.addHandler(file_handler)
+                    handlers.append(file_handler)
 
                 # Also log to stderr for visibility (only warnings and above by default)
                 stream_handler = logging.StreamHandler()
                 stream_handler.setFormatter(formatter)
                 stream_handler.setLevel(max(log_level, logging.WARNING))
-                logger.addHandler(stream_handler)
+                handlers.append(stream_handler)
+
+                # Configure ALL watercooler logger namespaces with shared handlers
+                # This ensures logging from watercooler, watercooler_mcp, and
+                # watercooler_memory all go to the same place with the same format
+                for namespace in LOGGER_NAMESPACES:
+                    ns_logger = logging.getLogger(namespace)
+                    ns_logger.handlers.clear()  # Remove any existing handlers
+                    ns_logger.setLevel(log_level)
+                    ns_logger.propagate = False  # Don't propagate to root logger
+                    for handler in handlers:
+                        ns_logger.addHandler(handler)
 
     return logger
 
