@@ -505,9 +505,12 @@ class GraphitiBackend(MemoryBackend):
             BackendError: If Graphiti client creation or episode addition fails
             TransientError: If database connection fails
         """
+        logger.error(f"DIAG: add_episode_direct called, group_id={group_id}")
         try:
             # Use cached client with indices already built to avoid per-call overhead
+            logger.error("DIAG: Calling _get_graphiti_client_with_indices")
             graphiti = await self._get_graphiti_client_with_indices()
+            logger.error("DIAG: Got graphiti client successfully")
         except (ConnectionError, TimeoutError, OSError) as e:
             raise TransientError(f"Database connection failed: {e}") from e
         except ConfigError:
@@ -838,12 +841,18 @@ class GraphitiBackend(MemoryBackend):
             TransientError: If database connection fails.
             ConfigError: If dependencies are not installed.
         """
+        logger.error(f"DIAG: _get_graphiti_client_with_indices called, _indices_built={self._indices_built}")
         graphiti = self._create_graphiti_client(use_cache=True)
+        logger.error("DIAG: _create_graphiti_client returned")
 
         # Build indices once per client instance
         if not self._indices_built:
+            logger.error("DIAG: Building indices...")
             await graphiti.build_indices_and_constraints()
             self._indices_built = True
+            logger.error("DIAG: Indices built successfully")
+        else:
+            logger.error("DIAG: Indices already built, skipping")
 
         return graphiti
 
