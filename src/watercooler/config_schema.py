@@ -599,6 +599,10 @@ class GraphitiBackendConfig(BaseModel):
     """
 
     # LLM overrides (empty = use shared)
+    llm_api_key: str = Field(
+        default="",
+        description="Override LLM API key for Graphiti (e.g., OpenAI key when shared uses local)",
+    )
     llm_model: str = Field(
         default="",
         description="Override LLM model for Graphiti",
@@ -609,6 +613,10 @@ class GraphitiBackendConfig(BaseModel):
     )
 
     # Embedding overrides (empty = use shared)
+    embedding_api_key: str = Field(
+        default="",
+        description="Override embedding API key for Graphiti",
+    )
     embedding_model: str = Field(
         default="",
         description="Override embedding model for Graphiti",
@@ -654,6 +662,10 @@ class LeanRAGBackendConfig(BaseModel):
     """
 
     # LLM overrides (empty = use shared)
+    llm_api_key: str = Field(
+        default="",
+        description="Override LLM API key for LeanRAG (e.g., OpenAI key when shared uses local)",
+    )
     llm_model: str = Field(
         default="",
         description="Override LLM model for LeanRAG",
@@ -664,6 +676,10 @@ class LeanRAGBackendConfig(BaseModel):
     )
 
     # Embedding overrides (empty = use shared)
+    embedding_api_key: str = Field(
+        default="",
+        description="Override embedding API key for LeanRAG",
+    )
     embedding_model: str = Field(
         default="",
         description="Override embedding model for LeanRAG",

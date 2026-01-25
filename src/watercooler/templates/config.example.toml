@@ -450,6 +450,12 @@ auto_detect_services = true
 # -----------------------------------------------------------------------------
 # Graphiti-Specific Settings
 # These override shared settings above when using the Graphiti backend
+#
+# IMPORTANT: Graphiti uses LLM for entity extraction, relation finding, and
+# fact deduplication. This requires a capable model (gpt-4o-mini or better).
+# The shared [memory.llm] and [memory.embedding] settings are used by default,
+# but you can override them here if Graphiti needs different models than
+# the baseline graph (e.g., OpenAI for Graphiti, local for baseline graph).
 # -----------------------------------------------------------------------------
 [memory.graphiti]
 
@@ -461,13 +467,19 @@ auto_detect_services = true
 # Track entry-episode mappings for provenance
 # track_entry_episodes = true
 
-# Override LLM settings for Graphiti only (empty = use shared)
-# llm_model = ""
-# llm_api_base = ""
+# Override LLM settings for Graphiti only (empty = use shared [memory.llm])
+# Use this when Graphiti needs a more capable model than the baseline graph.
+# API key resolution: TOML > provider-specific env (OPENAI_API_KEY if api_base is openai.com)
+# llm_api_key = ""  # Empty = check OPENAI_API_KEY if api_base is openai.com
+# llm_api_base = "https://api.openai.com/v1"
+# llm_model = "gpt-4o-mini"
 
-# Override embedding settings for Graphiti only (empty = use shared)
-# embedding_model = ""
-# embedding_api_base = ""
+# Override embedding settings for Graphiti only (empty = use shared [memory.embedding])
+# Use this when Graphiti needs a different embedding model than the baseline graph.
+# API key resolution: TOML > provider-specific env (OPENAI_API_KEY, VOYAGE_API_KEY, etc.)
+# embedding_api_key = ""  # Empty = check provider env var based on api_base
+# embedding_api_base = "https://api.openai.com/v1"
+# embedding_model = "text-embedding-3-small"
 
 # Chunking settings for entry sync
 # When enabled, long entries are split into chunks before indexing to Graphiti.
@@ -490,19 +502,30 @@ auto_detect_services = true
 # -----------------------------------------------------------------------------
 # LeanRAG-Specific Settings
 # These override shared settings above when using the LeanRAG backend
+#
+# IMPORTANT: LeanRAG uses LLM for triple extraction and summary generation.
+# This requires a capable model (gpt-4o-mini or better).
+# The shared [memory.llm] and [memory.embedding] settings are used by default,
+# but you can override them here if LeanRAG needs different models.
 # -----------------------------------------------------------------------------
 [memory.leanrag]
 
 # Max parallel workers for graph building
 # max_workers = 8
 
-# Override LLM settings for LeanRAG only (empty = use shared)
-# llm_model = ""
-# llm_api_base = ""
+# Override LLM settings for LeanRAG only (empty = use shared [memory.llm])
+# Use this when LeanRAG needs a more capable model than the baseline graph.
+# API key resolution: TOML > provider-specific env (OPENAI_API_KEY if api_base is openai.com)
+# llm_api_key = ""  # Empty = check OPENAI_API_KEY if api_base is openai.com
+# llm_api_base = "https://api.openai.com/v1"
+# llm_model = "gpt-4o-mini"
 
-# Override embedding settings for LeanRAG only (empty = use shared)
-# embedding_model = ""
-# embedding_api_base = ""
+# Override embedding settings for LeanRAG only (empty = use shared [memory.embedding])
+# Use this when LeanRAG needs a different embedding model than the baseline graph.
+# API key resolution: TOML > provider-specific env (OPENAI_API_KEY, VOYAGE_API_KEY, etc.)
+# embedding_api_key = ""  # Empty = check provider env var based on api_base
+# embedding_api_base = "https://api.openai.com/v1"
+# embedding_model = "text-embedding-3-small"
 
 
 # =============================================================================

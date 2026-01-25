@@ -122,14 +122,42 @@ def get_memory_backend() -> str:
     return os.getenv("WATERCOOLER_MEMORY_BACKEND") or config.full().memory.backend
 
 
+def _get_provider_api_key(api_base: str) -> str | None:
+    """Get provider-specific API key based on api_base URL.
+
+    Checks standard provider environment variables based on the API endpoint.
+    This allows users to use their existing OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.
+
+    Args:
+        api_base: The resolved API base URL
+
+    Returns:
+        API key from provider-specific env var, or None if not found
+    """
+    api_base_lower = api_base.lower() if api_base else ""
+
+    # Map provider domains to their standard env vars
+    if "openai.com" in api_base_lower or "openai.azure.com" in api_base_lower:
+        return os.getenv("OPENAI_API_KEY")
+    if "anthropic.com" in api_base_lower:
+        return os.getenv("ANTHROPIC_API_KEY")
+    if "googleapis.com" in api_base_lower or "generativelanguage" in api_base_lower:
+        return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if "groq.com" in api_base_lower:
+        return os.getenv("GROQ_API_KEY")
+
+    return None
+
+
 def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
     """Resolve LLM config with proper priority chain.
 
     Priority (highest first):
     1. Environment variables (LLM_API_KEY, LLM_API_BASE, LLM_MODEL)
     2. Backend-specific TOML overrides (memory.{backend}.llm_*)
-    3. Shared TOML settings (memory.llm.*)
-    4. Built-in defaults
+    3. Provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+    4. Shared TOML settings (memory.llm.*)
+    5. Built-in defaults
 
     Args:
         backend: Backend name for backend-specific overrides ("graphiti" or "leanrag")
@@ -143,27 +171,22 @@ def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
     # Get backend-specific config if available
     backend_cfg = getattr(mem, backend, None)
 
-    # Resolve api_key with deprecated OPENAI_API_KEY fallback
-    api_key = os.getenv("LLM_API_KEY")
-    if not api_key:
-        # Deprecated fallback - scheduled for removal in v0.5.0
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            warnings.warn(
-                "OPENAI_API_KEY is deprecated and will be removed in v0.5.0. "
-                "Use LLM_API_KEY instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-    if not api_key:
-        api_key = mem.llm.api_key
-
-    # Resolve api_base: env > backend-specific > shared
+    # Resolve api_base FIRST (needed for provider-specific API key lookup)
     api_base = os.getenv("LLM_API_BASE")
     if not api_base and backend_cfg:
         api_base = backend_cfg.llm_api_base or None
     if not api_base:
         api_base = mem.llm.api_base
+
+    # Resolve api_key: env > backend-specific > provider-specific > shared
+    api_key = os.getenv("LLM_API_KEY")
+    if not api_key and backend_cfg:
+        api_key = backend_cfg.llm_api_key or None
+    if not api_key:
+        # Check provider-specific env vars based on resolved api_base
+        api_key = _get_provider_api_key(api_base)
+    if not api_key:
+        api_key = mem.llm.api_key
 
     # Resolve model: env > backend-specific > shared
     model = os.getenv("LLM_MODEL")
@@ -201,14 +224,40 @@ def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
     )
 
 
+def _get_embedding_provider_api_key(api_base: str) -> str | None:
+    """Get provider-specific API key for embeddings based on api_base URL.
+
+    Checks standard provider environment variables based on the API endpoint.
+    This allows users to use their existing OPENAI_API_KEY, VOYAGE_API_KEY, etc.
+
+    Args:
+        api_base: The resolved API base URL
+
+    Returns:
+        API key from provider-specific env var, or None if not found
+    """
+    api_base_lower = api_base.lower() if api_base else ""
+
+    # Map provider domains to their standard env vars
+    if "openai.com" in api_base_lower or "openai.azure.com" in api_base_lower:
+        return os.getenv("OPENAI_API_KEY")
+    if "voyageai.com" in api_base_lower:
+        return os.getenv("VOYAGE_API_KEY")
+    if "googleapis.com" in api_base_lower or "generativelanguage" in api_base_lower:
+        return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+    return None
+
+
 def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConfig:
     """Resolve embedding config with proper priority chain.
 
     Priority (highest first):
     1. Environment variables (EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM)
     2. Backend-specific TOML overrides (memory.{backend}.embedding_*)
-    3. Shared TOML settings (memory.embedding.*)
-    4. Built-in defaults
+    3. Provider-specific env vars (OPENAI_API_KEY, VOYAGE_API_KEY, etc.)
+    4. Shared TOML settings (memory.embedding.*)
+    5. Built-in defaults
 
     Args:
         backend: Backend name for backend-specific overrides ("graphiti" or "leanrag")
@@ -222,27 +271,22 @@ def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConf
     # Get backend-specific config if available
     backend_cfg = getattr(mem, backend, None)
 
-    # Resolve api_key with deprecated OPENAI_API_KEY fallback
-    api_key = os.getenv("EMBEDDING_API_KEY")
-    if not api_key:
-        # Deprecated fallback (same as LLM for OpenAI) - scheduled for removal in v0.5.0
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            warnings.warn(
-                "OPENAI_API_KEY is deprecated for embeddings and will be removed in v0.5.0. "
-                "Use EMBEDDING_API_KEY instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-    if not api_key:
-        api_key = mem.embedding.api_key
-
-    # Resolve api_base: env > backend-specific > shared
+    # Resolve api_base FIRST (needed for provider-specific API key lookup)
     api_base = os.getenv("EMBEDDING_API_BASE")
     if not api_base and backend_cfg:
         api_base = backend_cfg.embedding_api_base or None
     if not api_base:
         api_base = mem.embedding.api_base
+
+    # Resolve api_key: env > backend-specific > provider-specific > shared
+    api_key = os.getenv("EMBEDDING_API_KEY")
+    if not api_key and backend_cfg:
+        api_key = backend_cfg.embedding_api_key or None
+    if not api_key:
+        # Check provider-specific env vars based on resolved api_base
+        api_key = _get_embedding_provider_api_key(api_base)
+    if not api_key:
+        api_key = mem.embedding.api_key
 
     # Resolve model: env > backend-specific > shared
     model = os.getenv("EMBEDDING_MODEL")
