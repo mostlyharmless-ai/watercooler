@@ -232,12 +232,28 @@ def generate_embedding(
 
 
 def _should_auto_start_services() -> bool:
-    """Check if auto-start services is enabled via env var.
+    """Check if auto-start services is enabled.
+
+    Priority (highest first):
+    1. Environment variable: WATERCOOLER_AUTO_START_SERVICES
+    2. TOML config: mcp.graph.auto_start_services
 
     Returns:
-        True if WATERCOOLER_AUTO_START_SERVICES is set to a truthy value
+        True if auto-start is enabled via env var or config
     """
-    return os.environ.get("WATERCOOLER_AUTO_START_SERVICES", "").lower() in ("1", "true", "yes")
+    # Check env var first (takes priority)
+    env_val = os.environ.get("WATERCOOLER_AUTO_START_SERVICES", "").lower()
+    if env_val:
+        return env_val in ("1", "true", "yes")
+
+    # Fall back to TOML config
+    try:
+        from watercooler.config_facade import config
+        cfg = config.full()
+        return cfg.mcp.graph.auto_start_services
+    except Exception as e:
+        logger.debug(f"Failed to load config for auto_start_services: {e}")
+        return False
 
 
 def _try_auto_start_service(service_type: str, api_base: str) -> bool:
