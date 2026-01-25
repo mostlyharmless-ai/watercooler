@@ -262,48 +262,40 @@ def _should_auto_start_services() -> bool:
 
 
 def _try_auto_start_service(service_type: str, api_base: str) -> bool:
-    """Attempt to auto-start a service using ServerManager.
+    """Attempt to auto-start a service using MCP startup utilities.
+
+    Uses ensure_ollama_running() for LLM and ensure_embedding_running() for embeddings.
+    These functions are in watercooler_mcp.startup and handle platform-specific startup.
 
     Args:
         service_type: "llm" or "embedding"
         api_base: API base URL for the service
 
     Returns:
-        True if service was started or already running, False otherwise
+        True if service is now available, False otherwise
     """
     if not _should_auto_start_services():
         return False
 
     try:
-        from watercooler.memory_config import (
-            resolve_baseline_graph_llm_config,
-            resolve_baseline_graph_embedding_config,
-        )
-        from watercooler_memory.pipeline.server_manager import ServerManager
-
-        # Use unified config for URLs instead of hardcoded defaults
-        llm_config = resolve_baseline_graph_llm_config()
-        embedding_config = resolve_baseline_graph_embedding_config()
-
-        manager = ServerManager(
-            llm_api_base=api_base if service_type == "llm" else llm_config.api_base,
-            embedding_api_base=api_base if service_type == "embedding" else embedding_config.api_base,
-            interactive=False,
-            auto_approve=True,
-            verbose=False,
-        )
+        # Try to use the MCP startup utilities
         if service_type == "llm":
-            if manager.check_llm_server():
-                return True
-            return manager.start_llm_server()
+            from watercooler_mcp.startup import ensure_ollama_running
+            ensure_ollama_running()
         else:
-            if manager.check_embedding_server():
-                return True
-            return manager.start_embedding_server()
+            from watercooler_mcp.startup import ensure_embedding_running
+            ensure_embedding_running()
+
+        # Check if service is now available
+        if service_type == "embedding":
+            return is_embedding_available(EmbeddingConfig(api_base=api_base))
+        else:
+            return is_llm_service_available()
+
     except ImportError:
         logger.debug(
-            f"WATERCOOLER_AUTO_START_SERVICES is enabled but ServerManager not available. "
-            f"Cannot auto-start {service_type} service."
+            f"WATERCOOLER_AUTO_START_SERVICES is enabled but startup module not available. "
+            f"Cannot auto-start {service_type} service (running outside MCP context?)."
         )
         return False
     except Exception as e:

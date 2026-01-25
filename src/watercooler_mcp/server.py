@@ -22,7 +22,7 @@ from fastmcp import FastMCP
 # Local application imports
 from watercooler.config_facade import config
 from .config import ThreadContext
-from .startup import check_first_run, ensure_ollama_running
+from .startup import check_first_run, ensure_ollama_running, ensure_embedding_running
 
 # Import validation functions (extracted to break circular imports)
 from .validation import (
@@ -194,6 +194,9 @@ def main():
 
     # Auto-start Ollama if graph features are enabled
     ensure_ollama_running()
+
+    # Auto-start embedding service if needed (provides guidance for llama.cpp)
+    ensure_embedding_running()
 
     # Get transport configuration from unified config system
     from .config import get_mcp_transport_config

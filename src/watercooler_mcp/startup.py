@@ -175,3 +175,91 @@ def ensure_ollama_running() -> None:
     except Exception as e:
         # Don't let auto-start errors break server startup
         log_debug(f"Ollama auto-start check failed: {e}")
+
+
+def ensure_embedding_running() -> None:
+    """Start embedding service if graph features are enabled and it's not running.
+
+    This reduces friction for new users - if they have embedding features enabled,
+    we'll try to start the service automatically.
+
+    For Ollama-based embeddings (:11434), this is a no-op if ensure_ollama_running()
+    already ran. For llama.cpp-based embeddings (:8080), provides user guidance.
+
+    Only attempts auto-start for localhost URLs (won't try to start remote services).
+    """
+    try:
+        from .config import get_watercooler_config
+        from watercooler.memory_config import resolve_baseline_graph_embedding_config
+
+        config = get_watercooler_config()
+        graph_config = config.mcp.graph
+
+        # Only auto-start if graph features are enabled and embedding generation is on
+        if not graph_config.generate_embeddings:
+            return
+
+        # Get configured embedding API base from unified config
+        embed_config = resolve_baseline_graph_embedding_config()
+        api_base = embed_config.api_base.rstrip("/")
+
+        # Only attempt auto-start for localhost URLs
+        if not _is_localhost_url(api_base):
+            log_debug(f"Embedding API base is not localhost ({api_base}), skipping auto-start")
+            return
+
+        # Check if embedding service is already responding
+        models_url = f"{api_base}/models"
+        try:
+            req = urllib.request.Request(
+                models_url,
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                if resp.status == 200:
+                    return  # Already running
+        except (urllib.error.URLError, TimeoutError, OSError):
+            pass  # Not running, continue to check what to do
+
+        # Check if this is an Ollama endpoint (same port as LLM)
+        from watercooler.memory_config import resolve_baseline_graph_llm_config
+        llm_config = resolve_baseline_graph_llm_config()
+        llm_api_base = llm_config.api_base.rstrip("/")
+
+        # If embedding uses same endpoint as LLM, Ollama should handle both
+        if api_base == llm_api_base:
+            log_debug("Embedding uses same endpoint as LLM, Ollama should serve both")
+            return
+
+        # For llama.cpp embedding server (:8080), provide guidance
+        # We don't auto-start llama.cpp as it requires model-specific configuration
+        log_debug(f"Embedding service not available at {api_base}")
+
+        # Extract port for context
+        from urllib.parse import urlparse
+        parsed = urlparse(api_base)
+        port = parsed.port or 8080
+
+        if port == 8080:
+            # llama.cpp embedding server
+            _add_startup_warning(
+                f"Embedding service not available at {api_base}.\n"
+                "For llama.cpp embeddings, start the server:\n"
+                "  llama-server --embedding -m /path/to/embedding-model.gguf --port 8080\n"
+                "Recommended model: bge-m3 (1024 dim) or nomic-embed-text (768 dim)\n"
+                "\nAlternatively, use Ollama for embeddings by setting in config.toml:\n"
+                "  [memory.embedding]\n"
+                "  api_base = \"http://localhost:11434/v1\"\n"
+                "  model = \"nomic-embed-text:latest\"\n"
+                "  dim = 768"
+            )
+        else:
+            # Unknown embedding endpoint
+            _add_startup_warning(
+                f"Embedding service not available at {api_base}.\n"
+                "Graph embedding features will be disabled until the service is started."
+            )
+
+    except Exception as e:
+        # Don't let auto-start errors break server startup
+        log_debug(f"Embedding auto-start check failed: {e}")

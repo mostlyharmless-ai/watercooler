@@ -505,12 +505,10 @@ class GraphitiBackend(MemoryBackend):
             BackendError: If Graphiti client creation or episode addition fails
             TransientError: If database connection fails
         """
-        logger.error(f"DIAG: add_episode_direct called, group_id={group_id}")
+        logger.debug(f"add_episode_direct called, group_id={group_id}")
         try:
             # Use cached client with indices already built to avoid per-call overhead
-            logger.error("DIAG: Calling _get_graphiti_client_with_indices")
             graphiti = await self._get_graphiti_client_with_indices()
-            logger.error("DIAG: Got graphiti client successfully")
         except (ConnectionError, TimeoutError, OSError) as e:
             raise TransientError(f"Database connection failed: {e}") from e
         except ConfigError:
@@ -688,7 +686,7 @@ class GraphitiBackend(MemoryBackend):
         This uses the same auto-start logic as the baseline graph module,
         ensuring consistent behavior across both systems.
         """
-        logger.error(f"DIAG: _ensure_embedding_service_available called, api_base={self.config.embedding_api_base}")
+        logger.debug(f"Checking embedding service availability at {self.config.embedding_api_base}")
         try:
             from watercooler.baseline_graph.sync import (
                 is_embedding_available,
@@ -696,7 +694,6 @@ class GraphitiBackend(MemoryBackend):
                 _should_auto_start_services,
                 _try_auto_start_service,
             )
-            logger.error("DIAG: imports succeeded")
 
             # Create config matching our embedder settings
             embed_config = EmbeddingConfig(
@@ -705,40 +702,35 @@ class GraphitiBackend(MemoryBackend):
             )
 
             # Check if already available
-            avail = is_embedding_available(embed_config)
-            logger.error(f"DIAG: is_embedding_available={avail}")
-            if avail:
+            if is_embedding_available(embed_config):
+                logger.debug("Embedding service is available")
                 return
 
             # Try auto-start if enabled
-            auto_start = _should_auto_start_services()
-            logger.error(f"DIAG: _should_auto_start_services={auto_start}")
-            if auto_start:
-                logger.error(
-                    f"DIAG: Embedding service not available at {self.config.embedding_api_base}, "
+            if _should_auto_start_services():
+                logger.debug(
+                    f"Embedding service not available at {self.config.embedding_api_base}, "
                     "attempting auto-start..."
                 )
                 if _try_auto_start_service("embedding", self.config.embedding_api_base):
                     # Verify it's now available
                     if is_embedding_available(embed_config):
-                        logger.error("DIAG: Embedding service auto-started successfully")
+                        logger.debug("Embedding service auto-started successfully")
                         return
                     else:
-                        logger.error("DIAG: Embedding service started but not responding")
+                        logger.warning("Embedding service started but not responding")
                 else:
-                    logger.error("DIAG: Failed to auto-start embedding service")
+                    logger.warning("Failed to auto-start embedding service")
             else:
-                logger.error(
-                    f"DIAG: Embedding service not available at {self.config.embedding_api_base} "
+                logger.debug(
+                    f"Embedding service not available at {self.config.embedding_api_base} "
                     "and auto_start_services is disabled"
                 )
 
         except ImportError as e:
-            logger.error(f"DIAG: ImportError in _ensure_embedding_service_available: {e}")
+            logger.debug(f"Could not import auto-start utilities: {e}")
         except Exception as e:
-            logger.error(f"DIAG: Exception in _ensure_embedding_service_available: {e}")
-            import traceback
-            logger.error(f"DIAG: Traceback: {traceback.format_exc()}")
+            logger.debug(f"Error checking embedding service: {e}")
 
     def _create_graphiti_client(self, use_cache: bool = True) -> Any:
         """Create and configure Graphiti client with FalkorDB, LLM, and embedder.
@@ -754,9 +746,8 @@ class GraphitiBackend(MemoryBackend):
             ConfigError: If required dependencies are not installed.
         """
         # Return cached client if available and caching enabled
-        logger.error(f"DIAG: _create_graphiti_client called, use_cache={use_cache}, cached={self._cached_graphiti_client is not None}")
         if use_cache and self._cached_graphiti_client is not None:
-            logger.error("DIAG: Returning cached client, skipping _ensure_embedding_service_available")
+            logger.debug("Returning cached Graphiti client")
             return self._cached_graphiti_client
 
         try:
@@ -841,18 +832,14 @@ class GraphitiBackend(MemoryBackend):
             TransientError: If database connection fails.
             ConfigError: If dependencies are not installed.
         """
-        logger.error(f"DIAG: _get_graphiti_client_with_indices called, _indices_built={self._indices_built}")
         graphiti = self._create_graphiti_client(use_cache=True)
-        logger.error("DIAG: _create_graphiti_client returned")
 
         # Build indices once per client instance
         if not self._indices_built:
-            logger.error("DIAG: Building indices...")
+            logger.debug("Building Graphiti indices and constraints...")
             await graphiti.build_indices_and_constraints()
             self._indices_built = True
-            logger.error("DIAG: Indices built successfully")
-        else:
-            logger.error("DIAG: Indices already built, skipping")
+            logger.debug("Graphiti indices built successfully")
 
         return graphiti
 
