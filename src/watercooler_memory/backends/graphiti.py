@@ -685,6 +685,7 @@ class GraphitiBackend(MemoryBackend):
         This uses the same auto-start logic as the baseline graph module,
         ensuring consistent behavior across both systems.
         """
+        logger.error(f"DIAG: _ensure_embedding_service_available called, api_base={self.config.embedding_api_base}")
         try:
             from watercooler.baseline_graph.sync import (
                 is_embedding_available,
@@ -692,6 +693,7 @@ class GraphitiBackend(MemoryBackend):
                 _should_auto_start_services,
                 _try_auto_start_service,
             )
+            logger.error("DIAG: imports succeeded")
 
             # Create config matching our embedder settings
             embed_config = EmbeddingConfig(
@@ -700,34 +702,40 @@ class GraphitiBackend(MemoryBackend):
             )
 
             # Check if already available
-            if is_embedding_available(embed_config):
-                logger.debug(f"Embedding service available at {self.config.embedding_api_base}")
+            avail = is_embedding_available(embed_config)
+            logger.error(f"DIAG: is_embedding_available={avail}")
+            if avail:
                 return
 
             # Try auto-start if enabled
-            if _should_auto_start_services():
-                logger.info(
-                    f"Embedding service not available at {self.config.embedding_api_base}, "
+            auto_start = _should_auto_start_services()
+            logger.error(f"DIAG: _should_auto_start_services={auto_start}")
+            if auto_start:
+                logger.error(
+                    f"DIAG: Embedding service not available at {self.config.embedding_api_base}, "
                     "attempting auto-start..."
                 )
                 if _try_auto_start_service("embedding", self.config.embedding_api_base):
                     # Verify it's now available
                     if is_embedding_available(embed_config):
-                        logger.info("Embedding service auto-started successfully")
+                        logger.error("DIAG: Embedding service auto-started successfully")
                         return
                     else:
-                        logger.warning("Embedding service started but not responding")
+                        logger.error("DIAG: Embedding service started but not responding")
                 else:
-                    logger.warning("Failed to auto-start embedding service")
+                    logger.error("DIAG: Failed to auto-start embedding service")
             else:
-                logger.debug(
-                    f"Embedding service not available at {self.config.embedding_api_base} "
+                logger.error(
+                    f"DIAG: Embedding service not available at {self.config.embedding_api_base} "
                     "and auto_start_services is disabled"
                 )
 
         except ImportError as e:
-            # baseline_graph.sync not available (shouldn't happen in normal install)
-            logger.debug(f"Could not import auto-start utilities: {e}")
+            logger.error(f"DIAG: ImportError in _ensure_embedding_service_available: {e}")
+        except Exception as e:
+            logger.error(f"DIAG: Exception in _ensure_embedding_service_available: {e}")
+            import traceback
+            logger.error(f"DIAG: Traceback: {traceback.format_exc()}")
 
     def _create_graphiti_client(self, use_cache: bool = True) -> Any:
         """Create and configure Graphiti client with FalkorDB, LLM, and embedder.
