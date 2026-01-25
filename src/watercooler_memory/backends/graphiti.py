@@ -751,7 +751,9 @@ class GraphitiBackend(MemoryBackend):
             ConfigError: If required dependencies are not installed.
         """
         # Return cached client if available and caching enabled
+        logger.error(f"DIAG: _create_graphiti_client called, use_cache={use_cache}, cached={self._cached_graphiti_client is not None}")
         if use_cache and self._cached_graphiti_client is not None:
+            logger.error("DIAG: Returning cached client, skipping _ensure_embedding_service_available")
             return self._cached_graphiti_client
 
         try:
