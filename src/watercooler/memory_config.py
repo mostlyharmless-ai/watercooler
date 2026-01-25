@@ -573,4 +573,18 @@ def resolve_baseline_graph_embedding_config() -> ResolvedEmbeddingConfig:
     else:
         dim = mem.embedding.dim
 
-    return ResolvedEmbeddingConfig(api_key=api_key, api_base=api_base, model=model, dim=dim)
+    # Resolve timeout and batch_size from env/TOML
+    timeout_str = os.getenv("EMBEDDING_TIMEOUT")
+    timeout = float(timeout_str) if timeout_str else mem.embedding.timeout
+
+    batch_size_str = os.getenv("EMBEDDING_BATCH_SIZE")
+    batch_size = int(batch_size_str) if batch_size_str else mem.embedding.batch_size
+
+    return ResolvedEmbeddingConfig(
+        api_key=api_key,
+        api_base=api_base,
+        model=model,
+        dim=dim,
+        timeout=timeout,
+        batch_size=batch_size,
+    )
