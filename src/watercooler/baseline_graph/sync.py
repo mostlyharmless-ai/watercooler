@@ -250,9 +250,14 @@ def _should_auto_start_services() -> bool:
     try:
         from watercooler.config_facade import config
         cfg = config.full()
-        return cfg.mcp.graph.auto_start_services
+        result = cfg.mcp.graph.auto_start_services
+        logger.debug(f"auto_start_services from TOML config: {result}")
+        return result
     except Exception as e:
-        logger.debug(f"Failed to load config for auto_start_services: {e}")
+        # Log at ERROR level so we can see what's failing
+        logger.error(f"Failed to load config for auto_start_services: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
 
