@@ -508,7 +508,20 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
         or _BASELINE_GRAPH_DEFAULT_LLM_MODEL
     )
 
-    return ResolvedLLMConfig(api_key=api_key, api_base=api_base, model=model)
+    # Resolve timeout and max_tokens from env/TOML (use shared defaults)
+    timeout_str = os.getenv("LLM_TIMEOUT")
+    timeout = float(timeout_str) if timeout_str else mem.llm.timeout
+
+    max_tokens_str = os.getenv("LLM_MAX_TOKENS")
+    max_tokens = int(max_tokens_str) if max_tokens_str else mem.llm.max_tokens
+
+    return ResolvedLLMConfig(
+        api_key=api_key,
+        api_base=api_base,
+        model=model,
+        timeout=timeout,
+        max_tokens=max_tokens,
+    )
 
 
 def resolve_baseline_graph_embedding_config() -> ResolvedEmbeddingConfig:
