@@ -46,6 +46,7 @@ dev = [
     "pytest>=7.0",
     "mypy>=1.0",
     "jsonschema>=4.0",
+    "tqdm>=4.0",
 ]
 mcp = [
     "fastmcp>=2.0",
