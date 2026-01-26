@@ -316,10 +316,14 @@ def _call_llm(
 
     url = f"{config.api_base.rstrip('/')}/chat/completions"
 
+    # Ensure max_tokens is sufficient for thinking models
+    from watercooler.models import get_min_max_tokens
+    max_tokens = max(config.max_tokens, get_min_max_tokens(config.model, config.max_tokens))
+
     payload = {
         "model": config.model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": config.max_tokens,
+        "max_tokens": max_tokens,
         "temperature": 0.3,  # Low temp for factual summaries
     }
 

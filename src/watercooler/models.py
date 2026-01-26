@@ -320,36 +320,44 @@ class LLMModelSpec(TypedDict, total=False):
 
     response_field: str  # Field containing response: "content" or "reasoning"
     supports_thinking: bool  # Whether model uses thinking/reasoning mode
+    min_max_tokens: int  # Minimum max_tokens needed (thinking models need more)
     default_temperature: float  # Suggested temperature for this model
 
 
 # Registry of known LLM models with special configurations
 # Models not in this registry default to response_field="content"
 LLM_MODELS: dict[str, LLMModelSpec | str] = {
-    # Qwen3 models use "reasoning" field for thinking mode
+    # Qwen3 models output to "content" but need extra tokens for thinking
+    # The thinking happens internally, final answer goes to content
     "qwen3:30b": {
-        "response_field": "reasoning",
+        "response_field": "content",
         "supports_thinking": True,
+        "min_max_tokens": 512,  # Thinking needs extra tokens
     },
     "qwen3:14b": {
-        "response_field": "reasoning",
+        "response_field": "content",
         "supports_thinking": True,
+        "min_max_tokens": 512,
     },
     "qwen3:8b": {
-        "response_field": "reasoning",
+        "response_field": "content",
         "supports_thinking": True,
+        "min_max_tokens": 512,
     },
     "qwen3:4b": {
-        "response_field": "reasoning",
+        "response_field": "content",
         "supports_thinking": True,
+        "min_max_tokens": 512,
     },
     "qwen3:1.7b": {
-        "response_field": "reasoning",
+        "response_field": "content",
         "supports_thinking": True,
+        "min_max_tokens": 512,
     },
     "qwen3:0.6b": {
-        "response_field": "reasoning",
+        "response_field": "content",
         "supports_thinking": True,
+        "min_max_tokens": 512,
     },
     # Aliases for version tags
     "qwen3:30b-q4_K_M": "qwen3:30b",
@@ -451,3 +459,20 @@ def supports_thinking(model_name: str) -> bool:
     """
     spec = resolve_llm_model(model_name)
     return spec.get("supports_thinking", False)
+
+
+def get_min_max_tokens(model_name: str, default: int = 256) -> int:
+    """Get the minimum max_tokens needed for a model.
+
+    Thinking models need more tokens to complete their reasoning
+    before producing the final answer.
+
+    Args:
+        model_name: Model name
+        default: Default value for models not in registry
+
+    Returns:
+        Minimum max_tokens value
+    """
+    spec = resolve_llm_model(model_name)
+    return spec.get("min_max_tokens", default)
