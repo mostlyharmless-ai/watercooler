@@ -534,7 +534,7 @@ class EmbeddingServiceConfig(BaseModel):
     """Embedding service configuration for memory backends.
 
     Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM,
-                   EMBEDDING_TIMEOUT, EMBEDDING_BATCH_SIZE
+                   EMBEDDING_TIMEOUT, EMBEDDING_BATCH_SIZE, EMBEDDING_CONTEXT_SIZE
     """
 
     api_key: str = Field(
@@ -553,6 +553,11 @@ class EmbeddingServiceConfig(BaseModel):
         default=1024,
         ge=1,
         description="Embedding dimension",
+    )
+    context_size: int = Field(
+        default=8192,
+        ge=128,
+        description="Context window size for embedding server (tokens). Env: EMBEDDING_CONTEXT_SIZE",
     )
     timeout: float = Field(
         default=60.0,

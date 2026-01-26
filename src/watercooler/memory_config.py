@@ -66,6 +66,7 @@ class ResolvedEmbeddingConfig:
     api_base: str
     model: str
     dim: int
+    context_size: int
     timeout: float
     batch_size: int
 
@@ -74,7 +75,8 @@ class ResolvedEmbeddingConfig:
         return (
             f"ResolvedEmbeddingConfig(api_key='{_redact_key(self.api_key)}', "
             f"api_base='{self.api_base}', model='{self.model}', dim={self.dim}, "
-            f"timeout={self.timeout}, batch_size={self.batch_size})"
+            f"context_size={self.context_size}, timeout={self.timeout}, "
+            f"batch_size={self.batch_size})"
         )
 
 
@@ -325,11 +327,22 @@ def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConf
     else:
         batch_size = mem.embedding.batch_size
 
+    # Resolve context_size: env > shared
+    context_size_str = os.getenv("EMBEDDING_CONTEXT_SIZE")
+    if context_size_str:
+        try:
+            context_size = int(context_size_str)
+        except ValueError:
+            context_size = mem.embedding.context_size
+    else:
+        context_size = mem.embedding.context_size
+
     return ResolvedEmbeddingConfig(
         api_key=api_key,
         api_base=api_base,
         model=model,
         dim=dim,
+        context_size=context_size,
         timeout=timeout,
         batch_size=batch_size,
     )
@@ -573,18 +586,22 @@ def resolve_baseline_graph_embedding_config() -> ResolvedEmbeddingConfig:
     else:
         dim = mem.embedding.dim
 
-    # Resolve timeout and batch_size from env/TOML
+    # Resolve timeout, batch_size, and context_size from env/TOML
     timeout_str = os.getenv("EMBEDDING_TIMEOUT")
     timeout = float(timeout_str) if timeout_str else mem.embedding.timeout
 
     batch_size_str = os.getenv("EMBEDDING_BATCH_SIZE")
     batch_size = int(batch_size_str) if batch_size_str else mem.embedding.batch_size
 
+    context_size_str = os.getenv("EMBEDDING_CONTEXT_SIZE")
+    context_size = int(context_size_str) if context_size_str else mem.embedding.context_size
+
     return ResolvedEmbeddingConfig(
         api_key=api_key,
         api_base=api_base,
         model=model,
         dim=dim,
+        context_size=context_size,
         timeout=timeout,
         batch_size=batch_size,
     )

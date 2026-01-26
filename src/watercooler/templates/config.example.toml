@@ -427,6 +427,11 @@ auto_detect_services = true
 # Higher values improve throughput but increase memory usage
 # batch_size = 32
 
+# Context window size for embedding server (tokens)
+# Env: EMBEDDING_CONTEXT_SIZE
+# Default matches bge-m3 max context (8192). Reduce to save VRAM if needed.
+# context_size = 8192
+
 
 # -----------------------------------------------------------------------------
 # Database Configuration (FalkorDB)
@@ -636,6 +641,7 @@ auto_detect_services = true
 # memory.embedding.dim           EMBEDDING_DIM
 # memory.embedding.timeout       EMBEDDING_TIMEOUT
 # memory.embedding.batch_size    EMBEDDING_BATCH_SIZE
+# memory.embedding.context_size  EMBEDDING_CONTEXT_SIZE
 # memory.database.host           FALKORDB_HOST
 # memory.database.port           FALKORDB_PORT
 # memory.database.password       FALKORDB_PASSWORD

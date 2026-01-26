@@ -269,7 +269,7 @@ def _start_embedding_direct(
     model_path: Path,
     host: str,
     port: int,
-    n_ctx: int = 512,
+    n_ctx: int = 8192,
 ) -> bool:
     """Start embedding server as a detached background process.
 
@@ -322,6 +322,7 @@ def _start_embedding_direct(
             "--model", str(model_path),
             "--host", host,
             "--port", str(port),
+            "--n-ctx", str(n_ctx),
         ]
         log_debug(f"Starting embedding server via Python: {' '.join(cmd)}")
 
@@ -342,7 +343,12 @@ def _start_embedding_direct(
     return False
 
 
-def _start_embedding_windows(model_path: Path, host: str, port: int) -> bool:
+def _start_embedding_windows(
+    model_path: Path,
+    host: str,
+    port: int,
+    n_ctx: int = 8192,
+) -> bool:
     """Start embedding server on Windows.
 
     Windows doesn't have start_new_session equivalent, so we try pythonw.exe
@@ -352,6 +358,7 @@ def _start_embedding_windows(model_path: Path, host: str, port: int) -> bool:
         model_path: Path to GGUF model file
         host: Host to bind to
         port: Port to listen on
+        n_ctx: Context window size
 
     Returns:
         True if server started successfully
@@ -368,6 +375,7 @@ def _start_embedding_windows(model_path: Path, host: str, port: int) -> bool:
                 "--model", str(model_path),
                 "--host", host,
                 "--port", str(port),
+                "--n-ctx", str(n_ctx),
             ]
             log_debug(f"Starting embedding server via pythonw: {' '.join(cmd)}")
 
@@ -400,6 +408,7 @@ def _start_embedding_windows(model_path: Path, host: str, port: int) -> bool:
 def _ensure_embedding_service_available(
     model_name: str,
     api_base: str,
+    context_size: int = 8192,
 ) -> bool:
     """Ensure embedding service is running, starting it if needed.
 
@@ -409,6 +418,7 @@ def _ensure_embedding_service_available(
     Args:
         model_name: Friendly model name (e.g., "bge-m3")
         api_base: Target API base URL
+        context_size: Context window size for embedding server (tokens)
 
     Returns:
         True if service is available
@@ -467,19 +477,19 @@ def _ensure_embedding_service_available(
             if _wait_for_embedding_ready(api_base, max_wait=10.0):
                 return True
         # Fall back to direct process
-        return _start_embedding_direct(model_path, host, port)
+        return _start_embedding_direct(model_path, host, port, context_size)
 
     elif system == "darwin":
         # macOS: direct process only
-        return _start_embedding_direct(model_path, host, port)
+        return _start_embedding_direct(model_path, host, port, context_size)
 
     elif system == "windows":
         # Windows: try pythonw, provide guidance if fails
-        return _start_embedding_windows(model_path, host, port)
+        return _start_embedding_windows(model_path, host, port, context_size)
 
     else:
         log_debug(f"Unknown platform {system}, trying direct start")
-        return _start_embedding_direct(model_path, host, port)
+        return _start_embedding_direct(model_path, host, port, context_size)
 
 
 def ensure_embedding_running() -> None:
@@ -546,8 +556,9 @@ def ensure_embedding_running() -> None:
 
         # For llama.cpp embedding server, try auto-start
         log_debug(f"Embedding service not available at {api_base}, attempting auto-start")
+        context_size = embed_config.context_size
 
-        if _ensure_embedding_service_available(model_name, api_base):
+        if _ensure_embedding_service_available(model_name, api_base, context_size):
             log_debug("Embedding service started successfully")
         else:
             # Auto-start failed, provide guidance
