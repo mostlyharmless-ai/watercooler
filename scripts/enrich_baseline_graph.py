@@ -17,6 +17,9 @@ Usage:
     # Preview what would be processed (dry run)
     ./scripts/enrich_baseline_graph.py /path/to/threads --mode all --embeddings --dry-run
 
+    # Test batch of 5 entries with summaries and embeddings
+    ./scripts/enrich_baseline_graph.py /path/to/threads --summaries --embeddings --limit 5
+
 Requirements:
     - For summaries: Ollama or compatible LLM server at localhost:11434
     - For embeddings: llama.cpp server or compatible at localhost:8080
@@ -120,6 +123,9 @@ Examples:
     # Full refresh (preview first)
     %(prog)s /path/to/threads --mode all --embeddings --dry-run
     %(prog)s /path/to/threads --mode all --embeddings
+
+    # Test batch of 5 entries with summaries and embeddings
+    %(prog)s /path/to/threads --summaries --embeddings --limit 5
         """,
     )
     parser.add_argument(
@@ -152,6 +158,12 @@ Examples:
         type=int,
         default=10,
         help="Batch size for processing (default: 10)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Limit number of entries to process (0 = no limit, default: 0)",
     )
     parser.add_argument(
         "--dry-run",
@@ -198,6 +210,8 @@ Examples:
     print(f"Mode: {args.mode}")
     print(f"Summaries: {'yes' if args.summaries else 'no'}")
     print(f"Embeddings: {'yes' if args.embeddings else 'no'}")
+    if args.limit > 0:
+        print(f"Limit: {args.limit} entries")
     if args.dry_run:
         print("DRY RUN - no changes will be made")
     print()
@@ -228,6 +242,7 @@ Examples:
         mode=args.mode,
         topics=topic_list,
         batch_size=args.batch_size,
+        limit=args.limit if args.limit > 0 else None,
         dry_run=args.dry_run,
         progress_callback=progress_callback if not args.dry_run else None,
     )

@@ -1680,6 +1680,7 @@ def enrich_graph(
     mode: str = "missing",  # "missing" | "selective" | "all"
     topics: Optional[List[str]] = None,
     batch_size: int = 10,
+    limit: Optional[int] = None,
     dry_run: bool = False,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> EnrichResult:
@@ -1700,6 +1701,7 @@ def enrich_graph(
         mode: Processing mode - "missing", "selective", or "all"
         topics: Topics to process (required for "selective" mode)
         batch_size: Number of items to process before writing
+        limit: Maximum number of entries to process (None = no limit)
         dry_run: If True, return what would be processed without making changes
         progress_callback: Optional callback(current, total, description) for progress
 
@@ -1715,6 +1717,9 @@ def enrich_graph(
 
         # Full refresh of all embeddings
         enrich_graph(threads_dir, embeddings=True, summaries=False, mode="all")
+
+        # Process only 5 entries (for testing)
+        enrich_graph(threads_dir, summaries=True, embeddings=True, limit=5)
     """
     result = EnrichResult(dry_run=dry_run)
     graph_dir = storage.get_graph_dir(threads_dir)
@@ -1777,9 +1782,13 @@ def enrich_graph(
 
     # Track progress
     entries_seen = 0
+    entries_actually_processed = 0
+    limit_reached = False
 
     # Process each thread
     for topic in target_topics:
+        if limit_reached:
+            break
         try:
             meta = storage.load_thread_meta(graph_dir, topic)
             entries = storage.load_thread_entries_dict(graph_dir, topic)
@@ -1823,7 +1832,15 @@ def enrich_graph(
                         result.summaries_generated += 1
                     if should_do_embedding:
                         result.embeddings_generated += 1
+                    entries_actually_processed += 1
+                    # Check limit even in dry run
+                    if limit and entries_actually_processed >= limit:
+                        limit_reached = True
+                        break
                     continue
+
+                # Track if this entry gets processed
+                entry_processed = False
 
                 # Generate summary
                 if should_do_summary and llm_available:
@@ -1838,6 +1855,7 @@ def enrich_graph(
                             entry["summary"] = summary
                             result.summaries_generated += 1
                             thread_updated = True
+                            entry_processed = True
                     except Exception as e:
                         result.errors.append(f"Entry {entry_raw_id} summary: {e}")
 
@@ -1852,12 +1870,23 @@ def enrich_graph(
                             entry["embedding"] = embedding
                             result.embeddings_generated += 1
                             thread_updated = True
+                            entry_processed = True
                             # Also update search index
                             storage.upsert_search_index_entry(
                                 graph_dir, entry_raw_id, topic, embedding
                             )
                     except Exception as e:
                         result.errors.append(f"Entry {entry_raw_id} embedding: {e}")
+
+                # Track actual processing and check limit
+                if entry_processed:
+                    entries_actually_processed += 1
+                    if limit and entries_actually_processed >= limit:
+                        limit_reached = True
+                        # Report progress before breaking
+                        if progress_callback:
+                            progress_callback(entries_seen, total_entries, f"{topic}/{entry_raw_id}")
+                        break
 
                 # Report progress
                 if progress_callback:
