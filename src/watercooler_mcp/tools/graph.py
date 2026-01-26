@@ -2,13 +2,16 @@
 
 Tools:
 - watercooler_baseline_graph_stats: Graph statistics
-- watercooler_baseline_graph_build: Build baseline graph
 - watercooler_search: Search threads and entries (tier-aware routing)
 - watercooler_find_similar: Find similar entries
 - watercooler_graph_health: Graph sync health
-- watercooler_reconcile_graph: Reconcile graph with markdown
-- watercooler_backfill_graph: Backfill missing summaries/embeddings
 - watercooler_access_stats: Access statistics
+
+New Tool Suite (Fresh Suite Design):
+- watercooler_graph_enrich: Generate/regenerate summaries and embeddings
+- watercooler_graph_recover: Rebuild graph from markdown (emergency recovery)
+- watercooler_graph_project: Generate markdown from graph (source of truth)
+- watercooler_graph_clear: Clear graph data for specific topics
 """
 
 import asyncio

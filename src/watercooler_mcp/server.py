@@ -167,12 +167,15 @@ set_status = _thread_write_tools.set_status
 force_sync = _sync_tools.force_sync
 reindex = _sync_tools.reindex
 baseline_graph_stats = _graph_tools.baseline_graph_stats
-baseline_graph_build = _graph_tools.baseline_graph_build
 search_graph_tool = _graph_tools.search_graph_tool
 find_similar_entries_tool = _graph_tools.find_similar_entries_tool
 graph_health_tool = _graph_tools.graph_health_tool
-reconcile_graph_tool = _graph_tools.reconcile_graph_tool
 access_stats_tool = _graph_tools.access_stats_tool
+# New graph tooling suite
+graph_enrich_tool = _graph_tools.graph_enrich_tool
+graph_recover_tool = _graph_tools.graph_recover_tool
+graph_project_tool = _graph_tools.graph_project_tool
+graph_clear_tool = _graph_tools.graph_clear_tool
 validate_branch_pairing_tool = _branch_parity_tools.validate_branch_pairing_tool
 sync_branch_state = _branch_parity_tools.sync_branch_state_tool
 audit_branch_pairing = _branch_parity_tools.audit_branch_pairing_tool
