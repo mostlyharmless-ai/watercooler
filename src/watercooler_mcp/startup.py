@@ -425,12 +425,12 @@ def _ensure_embedding_service_available(
     """
     from urllib.parse import urlparse
 
-    from watercooler.embedding_models import (
+    from watercooler.models import (
         ModelDownloadError,
         ModelNotFoundError,
         ensure_model_available,
         get_model_dimension,
-        is_ollama_model,
+        is_ollama_embedding_model as is_ollama_model,
         resolve_embedding_model,
     )
 
@@ -546,7 +546,7 @@ def ensure_embedding_running() -> None:
         if api_base == llm_api_base:
             log_debug("Embedding uses same endpoint as LLM, Ollama should serve both")
             # Still set EMBEDDING_DIM for Ollama models
-            from watercooler.embedding_models import is_ollama_model
+            from watercooler.models import is_ollama_embedding_model as is_ollama_model
 
             if is_ollama_model(model_name):
                 # nomic-embed-text is 768 dim

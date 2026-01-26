@@ -1,35 +1,59 @@
-"""Embedding model registry and resolution.
+"""Model registry and resolution for embeddings and LLMs.
 
-Maps friendly model names (like "bge-m3") to their HuggingFace repo paths,
-file names, and configurations. This enables zero-config embedding setup
-where users just specify `model = "bge-m3"` and everything works.
+Maps friendly model names to their specifications. Supports:
+- Embedding models (GGUF files for llama.cpp)
+- LLM models (Ollama models with response field configuration)
 
 Usage:
-    from watercooler.embedding_models import (
+    from watercooler.models import (
+        # Embedding models
         resolve_embedding_model,
         get_model_path,
         ensure_model_available,
+        get_model_dimension,
+        # LLM models
+        resolve_llm_model,
+        get_response_field,
     )
 
-    # Get model spec from friendly name
+    # Get embedding model spec
     spec = resolve_embedding_model("bge-m3")
-    # Returns: {"hf_repo": "KimChen/bge-m3-GGUF", "hf_file": "bge-m3-q8_0.gguf", ...}
+    # Returns: {"hf_repo": "...", "dim": 1024, ...}
 
-    # Get cached model path (None if not downloaded)
-    path = get_model_path("bge-m3")
-
-    # Ensure model is downloaded and return path
-    path = ensure_model_available("bge-m3")
+    # Get LLM response field
+    field = get_response_field("qwen3:30b")
+    # Returns: "reasoning" (for thinking models)
 """
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
-from typing import Any, Optional, TypedDict
+from typing import Optional, TypedDict
+
+
+# =============================================================================
+# Common
+# =============================================================================
 
 # Default models directory
 DEFAULT_MODELS_DIR = Path.home() / ".watercooler" / "models"
+
+
+class ModelNotFoundError(Exception):
+    """Raised when a model name cannot be resolved."""
+
+    pass
+
+
+class ModelDownloadError(Exception):
+    """Raised when a model cannot be downloaded."""
+
+    pass
+
+
+# =============================================================================
+# Embedding Models
+# =============================================================================
 
 
 class EmbeddingModelSpec(TypedDict, total=False):
@@ -71,20 +95,8 @@ EMBEDDING_MODELS: dict[str, EmbeddingModelSpec | str] = {
     "nomic-embed-text:v1.5": "nomic-embed-text",
 }
 
-# Default model when none specified
-DEFAULT_MODEL = "bge-m3"
-
-
-class ModelNotFoundError(Exception):
-    """Raised when a model name cannot be resolved."""
-
-    pass
-
-
-class ModelDownloadError(Exception):
-    """Raised when a model cannot be downloaded."""
-
-    pass
+# Default embedding model when none specified
+DEFAULT_EMBEDDING_MODEL = "bge-m3"
 
 
 def resolve_embedding_model(name: str) -> EmbeddingModelSpec:
@@ -258,8 +270,8 @@ def ensure_model_available(
         raise ModelDownloadError(f"Failed to download model {name}: {e}") from e
 
 
-def is_ollama_model(name: str) -> bool:
-    """Check if a model name refers to an Ollama model.
+def is_ollama_embedding_model(name: str) -> bool:
+    """Check if a model name refers to an Ollama embedding model.
 
     Ollama models are identified by:
     - Not being in our registry (custom Ollama model)
@@ -292,3 +304,150 @@ def is_ollama_model(name: str) -> bool:
             return True
 
     return False
+
+
+# Backwards compatibility alias
+is_ollama_model = is_ollama_embedding_model
+
+
+# =============================================================================
+# LLM Models (for summarization)
+# =============================================================================
+
+
+class LLMModelSpec(TypedDict, total=False):
+    """Specification for an LLM model."""
+
+    response_field: str  # Field containing response: "content" or "reasoning"
+    supports_thinking: bool  # Whether model uses thinking/reasoning mode
+    default_temperature: float  # Suggested temperature for this model
+
+
+# Registry of known LLM models with special configurations
+# Models not in this registry default to response_field="content"
+LLM_MODELS: dict[str, LLMModelSpec | str] = {
+    # Qwen3 models use "reasoning" field for thinking mode
+    "qwen3:30b": {
+        "response_field": "reasoning",
+        "supports_thinking": True,
+    },
+    "qwen3:14b": {
+        "response_field": "reasoning",
+        "supports_thinking": True,
+    },
+    "qwen3:8b": {
+        "response_field": "reasoning",
+        "supports_thinking": True,
+    },
+    "qwen3:4b": {
+        "response_field": "reasoning",
+        "supports_thinking": True,
+    },
+    "qwen3:1.7b": {
+        "response_field": "reasoning",
+        "supports_thinking": True,
+    },
+    "qwen3:0.6b": {
+        "response_field": "reasoning",
+        "supports_thinking": True,
+    },
+    # Aliases for version tags
+    "qwen3:30b-q4_K_M": "qwen3:30b",
+    "qwen3:30b-q8_0": "qwen3:30b",
+    "qwen3:latest": "qwen3:30b",
+    # Standard models use "content" (explicit for documentation)
+    "llama3.2": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+    "llama3.2:latest": "llama3.2",
+    "llama3.1": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+    "mistral": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+    "mixtral": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+}
+
+# Default LLM configuration for unknown models
+DEFAULT_LLM_SPEC: LLMModelSpec = {
+    "response_field": "content",
+    "supports_thinking": False,
+}
+
+
+def resolve_llm_model(name: str) -> LLMModelSpec:
+    """Resolve an LLM model name to its specification.
+
+    For unknown models, returns default spec (response_field="content").
+
+    Args:
+        name: Model name (e.g., "qwen3:30b", "llama3.2")
+
+    Returns:
+        LLMModelSpec with response_field and other config
+    """
+    # Normalize name (lowercase, strip whitespace)
+    normalized = name.strip().lower()
+
+    # Follow aliases
+    visited: set[str] = set()
+    current = normalized
+
+    while True:
+        if current in visited:
+            # Circular alias, return default
+            return DEFAULT_LLM_SPEC
+        visited.add(current)
+
+        entry = LLM_MODELS.get(current)
+        if entry is None:
+            # Try without version suffix
+            if ":" in current:
+                base_name = current.split(":")[0]
+                entry = LLM_MODELS.get(base_name)
+                if entry is not None:
+                    current = base_name
+                    continue
+
+            # Unknown model, return default
+            return DEFAULT_LLM_SPEC
+
+        if isinstance(entry, str):
+            # It's an alias, follow it
+            current = entry
+        else:
+            # It's a spec, return it
+            return entry
+
+
+def get_response_field(model_name: str) -> str:
+    """Get the response field for an LLM model.
+
+    Args:
+        model_name: Model name (e.g., "qwen3:30b")
+
+    Returns:
+        Field name to extract response from: "content" or "reasoning"
+    """
+    spec = resolve_llm_model(model_name)
+    return spec.get("response_field", "content")
+
+
+def supports_thinking(model_name: str) -> bool:
+    """Check if a model supports thinking/reasoning mode.
+
+    Args:
+        model_name: Model name
+
+    Returns:
+        True if model uses thinking mode with reasoning field
+    """
+    spec = resolve_llm_model(model_name)
+    return spec.get("supports_thinking", False)

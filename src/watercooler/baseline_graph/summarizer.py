@@ -334,7 +334,18 @@ def _call_llm(
             response = client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
+            message = data["choices"][0]["message"]
+
+            # Get response field based on model (e.g., "reasoning" for qwen3)
+            from watercooler.models import get_response_field
+            response_field = get_response_field(config.model)
+
+            # Try configured field first, fall back to content
+            content = message.get(response_field, "").strip()
+            if not content and response_field != "content":
+                content = message.get("content", "").strip()
+
+            return content
     except httpx.ConnectError:
         logger.warning(f"Cannot connect to LLM at {config.api_base}")
         return None
