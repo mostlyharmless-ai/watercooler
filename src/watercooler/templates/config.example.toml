@@ -391,6 +391,14 @@ auto_detect_services = true
 # Increase for thinking models that need extra tokens for reasoning
 # max_tokens = 512
 
+# Summary prompt for baseline graph entry summarization
+# Env: LLM_SUMMARY_PROMPT
+# Simple instruction (context and content added automatically):
+#   summary_prompt = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
+# Or use {context} and {content} placeholders for full control:
+#   summary_prompt = "Given the following entry:\n{context}\n{content}\n\nProvide a brief summary."
+# summary_prompt = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
+
 
 # -----------------------------------------------------------------------------
 # Embedding Service Configuration (shared across backends)

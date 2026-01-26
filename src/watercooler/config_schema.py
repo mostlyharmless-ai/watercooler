@@ -528,6 +528,10 @@ class LLMServiceConfig(BaseModel):
         ge=1,
         description="Maximum tokens for LLM response",
     )
+    summary_prompt: str = Field(
+        default="Summarize this thread entry in 1-2 sentences. Be concise and factual.",
+        description="Prompt template for entry summarization. Use {context} and {content} placeholders.",
+    )
 
 
 class EmbeddingServiceConfig(BaseModel):

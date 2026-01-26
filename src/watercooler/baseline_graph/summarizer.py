@@ -31,6 +31,12 @@ def _get_default_api_key() -> str:
     return resolve_baseline_graph_llm_config().api_key
 
 
+def _get_default_summary_prompt() -> str:
+    """Get default summary prompt from unified config (checks env vars first)."""
+    from watercooler.memory_config import resolve_baseline_graph_llm_config
+    return resolve_baseline_graph_llm_config().summary_prompt
+
+
 @dataclass
 class SummarizerConfig:
     """Configuration for the summarizer.
@@ -48,6 +54,9 @@ class SummarizerConfig:
     api_key: str = field(default_factory=_get_default_api_key)
     timeout: float = 30.0
     max_tokens: int = 256
+
+    # Summary prompt (configurable via [memory.llm] summary_prompt)
+    summary_prompt: str = field(default_factory=_get_default_summary_prompt)
 
     # Extractive fallback settings
     extractive_max_chars: int = 200
@@ -76,6 +85,7 @@ class SummarizerConfig:
             api_key=llm.get("api_key", llm_defaults.api_key),
             timeout=llm.get("timeout", cls.timeout),
             max_tokens=llm.get("max_tokens", cls.max_tokens),
+            summary_prompt=llm.get("summary_prompt", llm_defaults.summary_prompt),
             extractive_max_chars=extractive.get("max_chars", cls.extractive_max_chars),
             include_headers=extractive.get("include_headers", cls.include_headers),
             max_headers=extractive.get("max_headers", cls.max_headers),
@@ -117,6 +127,7 @@ class SummarizerConfig:
             api_key=llm_config.api_key,
             timeout=timeout,
             max_tokens=max_tokens,
+            summary_prompt=llm_config.summary_prompt,
             prefer_extractive=os.environ.get("BASELINE_GRAPH_EXTRACTIVE_ONLY", "").lower() in ("1", "true", "yes"),
         )
 
@@ -398,11 +409,20 @@ def summarize_entry(
     if entry_type:
         context += f"Type: {entry_type}\n"
 
-    prompt = f"""Summarize this thread entry in 1-2 sentences. Be concise and factual.
+    content = _truncate_text(entry_body, 2000)
+
+    # Use configurable prompt with {context} and {content} placeholders
+    base_prompt = config.summary_prompt
+    if "{context}" in base_prompt or "{content}" in base_prompt:
+        # Template-style prompt
+        prompt = base_prompt.format(context=context, content=content)
+    else:
+        # Simple instruction prompt - wrap with context and content
+        prompt = f"""{base_prompt}
 
 {context}
 Content:
-{_truncate_text(entry_body, 2000)}
+{content}
 
 Summary:"""
 
