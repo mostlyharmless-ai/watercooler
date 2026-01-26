@@ -490,12 +490,9 @@ def _search_leanrag_impl(
 
 # Module-level references to registered tools (populated by register_graph_tools)
 baseline_graph_stats = None
-baseline_graph_build = None
 search_graph_tool = None
 find_similar_entries_tool = None
 graph_health_tool = None
-reconcile_graph_tool = None
-backfill_graph_tool = None
 access_stats_tool = None
 
 
@@ -533,96 +530,6 @@ def _baseline_graph_stats_impl(
     except Exception as e:
         return f"Error getting baseline graph stats: {str(e)}"
 
-
-def _baseline_graph_build_impl(
-    ctx: Context,
-    code_path: str = "",
-    output_dir: str = "",
-    extractive_only: Optional[bool] = None,
-    skip_closed: bool = False,
-    generate_embeddings: Optional[bool] = None,
-) -> str:
-    """Build baseline graph from threads.
-
-    DEPRECATED: This tool is deprecated. Use watercooler_graph_recover instead
-    for rebuilding graph from markdown, which provides a cleaner API with modes:
-    - mode="stale": Recover stale/error threads
-    - mode="selective": Target specific topics
-    - mode="all": Full rebuild
-
-    This tool will continue to work but may be removed in a future version.
-
-    Creates a lightweight knowledge graph using extractive summaries
-    or local LLM. Output is JSONL format (nodes.jsonl, edges.jsonl).
-
-    Default output is {threads_dir}/graph/baseline.
-
-    Args:
-        code_path: Path to code repository (for resolving threads dir).
-        output_dir: Output directory for graph files (optional).
-        extractive_only: Use extractive summaries only (no LLM).
-            Defaults to inverse of config generate_summaries from ~/.watercooler/config.toml.
-        skip_closed: Skip closed threads. Default: False.
-        generate_embeddings: Generate embedding vectors for entries.
-            Defaults to config value from ~/.watercooler/config.toml.
-
-    Returns:
-        JSON manifest with export statistics.
-    """
-    try:
-        from watercooler.baseline_graph import export_all_threads, SummarizerConfig
-        from watercooler_mcp.config import get_watercooler_config
-
-        error, context = validation._require_context(code_path)
-        if error:
-            return error
-        if context is None or not context.threads_dir:
-            return "Error: Unable to resolve threads directory."
-
-        threads_dir = context.threads_dir
-        if not threads_dir.exists():
-            return f"Threads directory not found: {threads_dir}"
-
-        # Get config defaults for summary/embedding generation
-        wc_config = get_watercooler_config()
-        graph_config = wc_config.mcp.graph
-
-        # Use config values if not explicitly provided
-        # extractive_only is inverse of generate_summaries
-        do_extractive = extractive_only if extractive_only is not None else not graph_config.generate_summaries
-        do_embeddings = generate_embeddings if generate_embeddings is not None else graph_config.generate_embeddings
-
-        # Default output to threads_dir/graph/baseline
-        if output_dir:
-            out_path = Path(output_dir)
-        else:
-            out_path = threads_dir / "graph" / "baseline"
-
-        config = SummarizerConfig(prefer_extractive=do_extractive)
-
-        # Define the build operation
-        def _do_build() -> dict:
-            return export_all_threads(
-                threads_dir,
-                out_path,
-                config,
-                skip_closed=skip_closed,
-                generate_embeddings=do_embeddings,
-            )
-
-        # Run with full parity protocol (preflight + commit + push)
-        manifest = run_with_graph_sync(
-            context,
-            _do_build,
-            "graph: build baseline",
-        )
-
-        return json.dumps(manifest, indent=2)
-
-    except BranchPairingError as e:
-        return f"Branch parity error: {str(e)}"
-    except Exception as e:
-        return f"Error building baseline graph: {str(e)}"
 
 
 async def _search_graph_impl(
@@ -930,207 +837,6 @@ def _graph_health_impl(
 
     except Exception as e:
         return f"Error checking graph health: {str(e)}"
-
-
-def _reconcile_graph_impl(
-    ctx: Context,
-    code_path: str = "",
-    topics: str = "",
-    generate_summaries: Optional[bool] = None,
-    generate_embeddings: Optional[bool] = None,
-) -> str:
-    """Reconcile graph with markdown files to fix sync issues.
-
-    DEPRECATED: This tool is deprecated. Use the new tool suite instead:
-    - watercooler_graph_recover: For rebuilding graph from markdown
-    - watercooler_graph_enrich: For generating summaries/embeddings
-
-    This tool will continue to work but may be removed in a future version.
-
-    Rebuilds graph nodes and edges for threads that are stale, have errors,
-    or are explicitly specified. This is the primary tool for ingesting
-    legacy markdown-only threads into the graph representation.
-
-    In hosted mode (Railway MCP), uses GitHub API to read markdown and write graph.
-    In local mode, uses filesystem operations with git sync.
-
-    Args:
-        code_path: Path to code repository (for resolving threads dir).
-        topics: Comma-separated list of topics to reconcile. If empty,
-                reconciles all stale/error topics (local) or all threads (hosted).
-        generate_summaries: Whether to generate LLM summaries (slower).
-            Defaults to config value from ~/.watercooler/config.toml.
-            Note: Not supported in hosted mode.
-        generate_embeddings: Whether to generate embedding vectors (slower).
-            Defaults to config value from ~/.watercooler/config.toml.
-            Note: Not supported in hosted mode.
-
-    Returns:
-        JSON report with reconciliation results per topic.
-    """
-    try:
-        from watercooler.baseline_graph.sync import reconcile_graph
-        from watercooler_mcp.config import get_watercooler_config
-        from watercooler_mcp.hosted_ops import reconcile_graph_hosted
-        from watercooler_mcp.validation import is_hosted_context
-
-        error, context = validation._require_context(code_path)
-        if error:
-            return error
-        if context is None:
-            return "Error: Unable to resolve context."
-
-        # Parse topics list
-        topic_list = None
-        if topics:
-            topic_list = [t.strip() for t in topics.split(",") if t.strip()]
-
-        # =====================================================================
-        # Hosted Mode Path (GitHub API)
-        # =====================================================================
-        if is_hosted_context(context):
-            err, result = reconcile_graph_hosted(topics=topic_list)
-            if err:
-                return f"Error reconciling graph (hosted): {err}"
-
-            # Note about summaries/embeddings
-            if generate_summaries or generate_embeddings:
-                result["warning"] = "Summary/embedding generation not supported in hosted mode"
-
-            return json.dumps(result, indent=2)
-
-        # =====================================================================
-        # Local Mode Path (filesystem + git sync)
-        # =====================================================================
-        threads_dir = context.threads_dir
-        if not threads_dir or not threads_dir.exists():
-            return f"Threads directory not found: {threads_dir}"
-
-        # Get config defaults for summary/embedding generation
-        wc_config = get_watercooler_config()
-        graph_config = wc_config.mcp.graph
-
-        # Use config values if not explicitly provided
-        do_summaries = generate_summaries if generate_summaries is not None else graph_config.generate_summaries
-        do_embeddings = generate_embeddings if generate_embeddings is not None else graph_config.generate_embeddings
-
-        # Define the reconcile operation
-        def _do_reconcile() -> dict:
-            return reconcile_graph(
-                threads_dir=threads_dir,
-                topics=topic_list,
-                generate_summaries=do_summaries,
-                generate_embeddings=do_embeddings,
-            )
-
-        # Run with full parity protocol (preflight + commit + push)
-        results = run_with_graph_sync(
-            context,
-            _do_reconcile,
-            f"graph: reconcile {topics or 'all'}",
-        )
-
-        # Build output
-        successes = [t for t, ok in results.items() if ok]
-        failures = [t for t, ok in results.items() if not ok]
-
-        output = {
-            "total_reconciled": len(results),
-            "successes": len(successes),
-            "failures": len(failures),
-            "success_topics": successes,
-            "failure_topics": failures,
-        }
-
-        return json.dumps(output, indent=2)
-
-    except BranchPairingError as e:
-        return f"Branch parity error: {str(e)}"
-    except Exception as e:
-        return f"Error reconciling graph: {str(e)}"
-
-
-def _backfill_graph_impl(
-    ctx: Context,
-    code_path: str = "",
-    backfill_summaries: bool = True,
-    backfill_embeddings: bool = True,
-    batch_size: int = 10,
-) -> str:
-    """Backfill missing summaries and embeddings in existing graph nodes.
-
-    DEPRECATED: This tool is deprecated. Use watercooler_graph_enrich instead,
-    which provides a cleaner API with mode-based control:
-    - mode="missing": Equivalent to this tool's behavior
-    - mode="selective": Target specific topics
-    - mode="all": Force regenerate everything
-
-    This tool will continue to work but may be removed in a future version.
-
-    Unlike reconcile_graph which syncs stale threads from markdown, this function
-    updates existing graph nodes that are missing summaries or embeddings. This is
-    useful after a graph build when services were unavailable, or for incremental
-    enrichment of the graph.
-
-    Args:
-        code_path: Path to code repository (for resolving threads dir).
-        backfill_summaries: Generate missing thread and entry summaries.
-            Requires LLM service (Ollama) to be running. Default: True.
-        backfill_embeddings: Generate missing entry embeddings.
-            Requires embedding service (llama.cpp) to be running. Default: True.
-        batch_size: Number of items to process before writing (for progress).
-            Default: 10.
-
-    Returns:
-        JSON report with counts of processed and generated items.
-    """
-    try:
-        from watercooler.baseline_graph.sync import backfill_missing
-
-        error, context = validation._require_context(code_path)
-        if error:
-            return error
-        if context is None or not context.threads_dir:
-            return "Error: Unable to resolve threads directory."
-
-        threads_dir = context.threads_dir
-        if not threads_dir.exists():
-            return f"Threads directory not found: {threads_dir}"
-
-        # Define the backfill operation
-        def _do_backfill() -> dict:
-            result = backfill_missing(
-                threads_dir=threads_dir,
-                backfill_summaries=backfill_summaries,
-                backfill_embeddings=backfill_embeddings,
-                batch_size=max(1, min(batch_size, 100)),
-            )
-            return {
-                "threads_processed": result.threads_processed,
-                "threads_missing_summary": result.threads_missing_summary,
-                "threads_summary_generated": result.threads_summary_generated,
-                "entries_processed": result.entries_processed,
-                "entries_missing_summary": result.entries_missing_summary,
-                "entries_summary_generated": result.entries_summary_generated,
-                "entries_missing_embedding": result.entries_missing_embedding,
-                "entries_embedding_generated": result.entries_embedding_generated,
-                "errors": result.errors[:10],  # Limit errors in output
-                "error_count": len(result.errors),
-            }
-
-        # Run with full parity protocol (preflight + commit + push)
-        output = run_with_graph_sync(
-            context,
-            _do_backfill,
-            "graph: backfill summaries/embeddings",
-        )
-
-        return json.dumps(output, indent=2)
-
-    except BranchPairingError as e:
-        return f"Branch parity error: {str(e)}"
-    except Exception as e:
-        return f"Error backfilling graph: {str(e)}"
 
 
 def _access_stats_impl(
@@ -1547,22 +1253,15 @@ def register_graph_tools(mcp):
     Args:
         mcp: The FastMCP server instance
     """
-    global baseline_graph_stats, baseline_graph_build, search_graph_tool
-    global find_similar_entries_tool, graph_health_tool, reconcile_graph_tool
-    global backfill_graph_tool, access_stats_tool
+    global baseline_graph_stats, search_graph_tool
+    global find_similar_entries_tool, graph_health_tool, access_stats_tool
     global graph_enrich_tool, graph_recover_tool, graph_project_tool, graph_clear_tool
 
     # Register tools and store references for testing
     baseline_graph_stats = mcp.tool(name="watercooler_baseline_graph_stats")(_baseline_graph_stats_impl)
-    baseline_graph_build = mcp.tool(name="watercooler_baseline_graph_build")(_baseline_graph_build_impl)
     search_graph_tool = mcp.tool(name="watercooler_search")(_search_graph_impl)
     find_similar_entries_tool = mcp.tool(name="watercooler_find_similar")(_find_similar_entries_impl)
     graph_health_tool = mcp.tool(name="watercooler_graph_health")(_graph_health_impl)
-
-    # Legacy tools (deprecated, but kept working)
-    reconcile_graph_tool = mcp.tool(name="watercooler_reconcile_graph")(_reconcile_graph_impl)
-    backfill_graph_tool = mcp.tool(name="watercooler_backfill_graph")(_backfill_graph_impl)
-
     access_stats_tool = mcp.tool(name="watercooler_access_stats")(_access_stats_impl)
 
     # New tool suite (Fresh Suite Design)
