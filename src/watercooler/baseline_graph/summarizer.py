@@ -37,6 +37,12 @@ def _get_default_summary_prompt() -> str:
     return resolve_baseline_graph_llm_config().summary_prompt
 
 
+def _get_default_thread_summary_prompt() -> str:
+    """Get default thread summary prompt from unified config (checks env vars first)."""
+    from watercooler.memory_config import resolve_baseline_graph_llm_config
+    return resolve_baseline_graph_llm_config().thread_summary_prompt
+
+
 @dataclass
 class SummarizerConfig:
     """Configuration for the summarizer.
@@ -55,8 +61,9 @@ class SummarizerConfig:
     timeout: float = 30.0
     max_tokens: int = 256
 
-    # Summary prompt (configurable via [memory.llm] summary_prompt)
+    # Summary prompts (configurable via [memory.llm])
     summary_prompt: str = field(default_factory=_get_default_summary_prompt)
+    thread_summary_prompt: str = field(default_factory=_get_default_thread_summary_prompt)
 
     # Extractive fallback settings
     extractive_max_chars: int = 200
@@ -86,6 +93,7 @@ class SummarizerConfig:
             timeout=llm.get("timeout", cls.timeout),
             max_tokens=llm.get("max_tokens", cls.max_tokens),
             summary_prompt=llm.get("summary_prompt", llm_defaults.summary_prompt),
+            thread_summary_prompt=llm.get("thread_summary_prompt", llm_defaults.thread_summary_prompt),
             extractive_max_chars=extractive.get("max_chars", cls.extractive_max_chars),
             include_headers=extractive.get("include_headers", cls.include_headers),
             max_headers=extractive.get("max_headers", cls.max_headers),
@@ -128,6 +136,7 @@ class SummarizerConfig:
             timeout=timeout,
             max_tokens=max_tokens,
             summary_prompt=llm_config.summary_prompt,
+            thread_summary_prompt=llm_config.thread_summary_prompt,
             prefer_extractive=os.environ.get("BASELINE_GRAPH_EXTRACTIVE_ONLY", "").lower() in ("1", "true", "yes"),
         )
 
@@ -483,10 +492,18 @@ def summarize_thread(
             include_headers=False,
         )
 
-    # Build LLM prompt
-    prompt = f"""Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any.
+    # Build LLM prompt using configurable template
+    title = thread_title or "Development Discussion"
 
-Thread: {thread_title or 'Development Discussion'}
+    base_prompt = config.thread_summary_prompt
+    if "{title}" in base_prompt or "{entries}" in base_prompt:
+        # Template-style prompt
+        prompt = base_prompt.format(title=title, entries=combined)
+    else:
+        # Simple instruction prompt - wrap with context
+        prompt = f"""{base_prompt}
+
+Thread: {title}
 
 Entries:
 {combined}

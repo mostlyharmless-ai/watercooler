@@ -46,6 +46,7 @@ class ResolvedLLMConfig:
     timeout: float
     max_tokens: int
     summary_prompt: str = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
+    thread_summary_prompt: str = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
 
     def __repr__(self) -> str:
         """Return string representation with redacted API key."""
@@ -529,8 +530,9 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
     max_tokens_str = os.getenv("LLM_MAX_TOKENS")
     max_tokens = int(max_tokens_str) if max_tokens_str else mem.llm.max_tokens
 
-    # Resolve summary_prompt from env/TOML
+    # Resolve summary prompts from env/TOML
     summary_prompt = os.getenv("LLM_SUMMARY_PROMPT") or mem.llm.summary_prompt
+    thread_summary_prompt = os.getenv("LLM_THREAD_SUMMARY_PROMPT") or mem.llm.thread_summary_prompt
 
     return ResolvedLLMConfig(
         api_key=api_key,
@@ -539,6 +541,7 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
         timeout=timeout,
         max_tokens=max_tokens,
         summary_prompt=summary_prompt,
+        thread_summary_prompt=thread_summary_prompt,
     )
 
 

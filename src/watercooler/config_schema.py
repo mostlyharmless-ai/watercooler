@@ -532,6 +532,10 @@ class LLMServiceConfig(BaseModel):
         default="Summarize this thread entry in 1-2 sentences. Be concise and factual.",
         description="Prompt template for entry summarization. Use {context} and {content} placeholders.",
     )
+    thread_summary_prompt: str = Field(
+        default="Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any.",
+        description="Prompt template for thread summarization. Use {title} and {entries} placeholders.",
+    )
 
 
 class EmbeddingServiceConfig(BaseModel):

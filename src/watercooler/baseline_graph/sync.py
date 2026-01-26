@@ -146,7 +146,8 @@ class EnrichResult:
 
     threads_processed: int = 0
     entries_processed: int = 0
-    summaries_generated: int = 0
+    summaries_generated: int = 0  # Entry summaries
+    thread_summaries_generated: int = 0  # Thread summaries
     embeddings_generated: int = 0
     skipped: int = 0
     errors: List[str] = field(default_factory=list)
@@ -1862,6 +1863,33 @@ def enrich_graph(
                 if progress_callback:
                     progress_callback(entries_seen, total_entries, f"{topic}/{entry_raw_id}")
 
+            # Generate thread summary if enabled (summaries flag controls both entry and thread)
+            if summaries:
+                has_thread_summary = bool(meta.get("summary"))
+                should_do_thread_summary = (
+                    mode == "all" or
+                    mode == "selective" or
+                    (mode == "missing" and not has_thread_summary)
+                )
+
+                if should_do_thread_summary:
+                    if dry_run:
+                        result.thread_summaries_generated += 1
+                    elif llm_available:
+                        try:
+                            thread_summary = summarize_thread(
+                                entries=entry_list,
+                                thread_title=meta.get("title", topic),
+                                config=config,
+                            )
+                            if thread_summary:
+                                meta["summary"] = thread_summary
+                                result.thread_summaries_generated += 1
+                                thread_updated = True
+                                logger.debug(f"Generated thread summary for {topic}")
+                        except Exception as e:
+                            result.errors.append(f"Thread {topic} summary: {e}")
+
             # Write updated thread data if changed
             if thread_updated and not dry_run:
                 storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
@@ -1873,7 +1901,8 @@ def enrich_graph(
 
     if not dry_run:
         logger.info(
-            f"Enrichment complete: {result.summaries_generated} summaries, "
+            f"Enrichment complete: {result.summaries_generated} entry summaries, "
+            f"{result.thread_summaries_generated} thread summaries, "
             f"{result.embeddings_generated} embeddings"
         )
 

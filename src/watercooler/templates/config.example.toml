@@ -412,6 +412,28 @@ auto_detect_services = true
 #
 # summary_prompt = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
 
+# Thread summary prompt for baseline graph thread summarization
+# Env: LLM_THREAD_SUMMARY_PROMPT
+#
+# Two formats supported:
+#
+# 1. Simple instruction (default) - title and entries appended automatically:
+#    thread_summary_prompt = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
+#
+# 2. Template with placeholders - full control over prompt structure:
+#    thread_summary_prompt = """Thread: {title}
+#
+#    Entries:
+#    {entries}
+#
+#    Summarize the above thread in 2-3 sentences."""
+#
+# Variables available in template mode:
+#   {title} - Thread title
+#   {entries} - Bullet list of entry summaries (up to max_thread_entries)
+#
+# thread_summary_prompt = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
+
 
 # -----------------------------------------------------------------------------
 # Embedding Service Configuration (shared across backends)
@@ -657,6 +679,7 @@ auto_detect_services = true
 # memory.llm.timeout             LLM_TIMEOUT
 # memory.llm.max_tokens          LLM_MAX_TOKENS
 # memory.llm.summary_prompt      LLM_SUMMARY_PROMPT
+# memory.llm.thread_summary_prompt LLM_THREAD_SUMMARY_PROMPT
 # memory.embedding.api_key       EMBEDDING_API_KEY
 # memory.embedding.api_base      EMBEDDING_API_BASE
 # memory.embedding.model         EMBEDDING_MODEL
