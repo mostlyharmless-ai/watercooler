@@ -1680,6 +1680,7 @@ def enrich_graph(
     topics: Optional[List[str]] = None,
     batch_size: int = 10,
     dry_run: bool = False,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> EnrichResult:
     """Generate or regenerate summaries and embeddings.
 
@@ -1699,6 +1700,7 @@ def enrich_graph(
         topics: Topics to process (required for "selective" mode)
         batch_size: Number of items to process before writing
         dry_run: If True, return what would be processed without making changes
+        progress_callback: Optional callback(current, total, description) for progress
 
     Returns:
         EnrichResult with counts of processed/generated items
@@ -1761,6 +1763,20 @@ def enrich_graph(
     else:
         target_topics = all_topics
 
+    # Count total entries for progress reporting
+    total_entries = 0
+    if progress_callback:
+        for topic in target_topics:
+            try:
+                entries = storage.load_thread_entries_dict(graph_dir, topic)
+                total_entries += len(entries)
+            except Exception:
+                pass
+        progress_callback(0, total_entries, "Starting enrichment...")
+
+    # Track progress
+    entries_seen = 0
+
     # Process each thread
     for topic in target_topics:
         try:
@@ -1778,6 +1794,7 @@ def enrich_graph(
 
             # Process entries
             for entry_id, entry in entries.items():
+                entries_seen += 1
                 entry_raw_id = entry.get("entry_id", entry_id)
 
                 # Check if we should process this entry
@@ -1840,6 +1857,10 @@ def enrich_graph(
                             )
                     except Exception as e:
                         result.errors.append(f"Entry {entry_raw_id} embedding: {e}")
+
+                # Report progress
+                if progress_callback:
+                    progress_callback(entries_seen, total_entries, f"{topic}/{entry_raw_id}")
 
             # Write updated thread data if changed
             if thread_updated and not dry_run:

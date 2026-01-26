@@ -6,16 +6,16 @@ Supports mode-based control for targeted or full enrichment.
 
 Usage:
     # Fill missing embeddings only (safe default)
-    ./scripts/enrich_graph.py /path/to/threads --mode missing --embeddings
+    ./scripts/enrich_baseline_graph.py /path/to/threads --mode missing --embeddings
 
     # Regenerate embeddings for specific topics
-    ./scripts/enrich_graph.py /path/to/threads --mode selective --topics topic-a,topic-b --embeddings
+    ./scripts/enrich_baseline_graph.py /path/to/threads --mode selective --topics topic-a,topic-b --embeddings
 
     # Full refresh of all embeddings (use with caution)
-    ./scripts/enrich_graph.py /path/to/threads --mode all --embeddings
+    ./scripts/enrich_baseline_graph.py /path/to/threads --mode all --embeddings
 
     # Preview what would be processed (dry run)
-    ./scripts/enrich_graph.py /path/to/threads --mode all --embeddings --dry-run
+    ./scripts/enrich_baseline_graph.py /path/to/threads --mode all --embeddings --dry-run
 
 Requirements:
     - For summaries: Ollama or compatible LLM server at localhost:11434
@@ -29,6 +29,55 @@ from pathlib import Path
 
 # Add src to path for local dev
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+
+# Progress bar support (tqdm if available, fallback to simple counter)
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+
+
+class ProgressTracker:
+    """Progress tracker with tqdm or simple fallback."""
+
+    def __init__(self, total: int, desc: str = "Processing"):
+        self.total = total
+        self.current = 0
+        self.desc = desc
+        self.last_print = 0
+        self.pbar = None
+
+        if TQDM_AVAILABLE and total > 0:
+            self.pbar = tqdm(total=total, desc=desc, unit="entry")
+        elif total > 0:
+            print(f"{desc}: 0/{total}", end="", flush=True)
+
+    def update(self, current: int, total: int, description: str = ""):
+        """Update progress."""
+        if self.pbar:
+            # tqdm mode
+            increment = current - self.current
+            if increment > 0:
+                self.pbar.update(increment)
+                self.pbar.set_postfix_str(description[:40] if description else "")
+        else:
+            # Simple fallback - print every 10 entries or 5%
+            if total > 0:
+                pct = (current * 100) // total
+                if current - self.last_print >= 10 or pct % 5 == 0 and pct != self.last_print:
+                    print(f"\r{self.desc}: {current}/{total} ({pct}%)", end="", flush=True)
+                    self.last_print = current
+
+        self.current = current
+
+    def close(self):
+        """Close the progress tracker."""
+        if self.pbar:
+            self.pbar.close()
+        elif self.total > 0:
+            print()  # Newline after simple progress
 
 
 def find_threads_dir(path: Path) -> Path | None:
@@ -114,6 +163,11 @@ Examples:
         action="store_true",
         help="Verbose output",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress bar",
+    )
     args = parser.parse_args()
 
     # Validate arguments
@@ -151,8 +205,20 @@ Examples:
     # Import after path setup
     from watercooler.baseline_graph.sync import enrich_graph
 
+    # Set up progress tracking
+    progress = None
+
+    def progress_callback(current: int, total: int, description: str):
+        nonlocal progress
+        if args.no_progress or args.dry_run:
+            return
+        if progress is None:
+            progress = ProgressTracker(total, "Enriching")
+        progress.update(current, total, description)
+
     # Run enrichment
-    print("Starting enrichment...")
+    if not args.no_progress and not args.dry_run:
+        print("Starting enrichment...")
     start_time = time.time()
 
     result = enrich_graph(
@@ -163,7 +229,12 @@ Examples:
         topics=topic_list,
         batch_size=args.batch_size,
         dry_run=args.dry_run,
+        progress_callback=progress_callback if not args.dry_run else None,
     )
+
+    # Close progress bar
+    if progress:
+        progress.close()
 
     elapsed = time.time() - start_time
 
