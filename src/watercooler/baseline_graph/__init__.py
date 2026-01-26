@@ -57,6 +57,13 @@ from .sync import (
     reconcile_graph,
     backfill_missing,
     BackfillResult,
+    # New tool suite (Fresh Suite Design)
+    EnrichResult,
+    RecoverResult,
+    ClearResult,
+    enrich_graph,
+    recover_graph,
+    clear_graph,
 )
 
 from .writer import (
@@ -83,6 +90,9 @@ from .projector import (
     append_entry_and_project,
     update_header_and_write,
     create_thread_file,
+    # New tool suite
+    ProjectResult,
+    project_graph,
 )
 
 from .search import (
@@ -138,6 +148,15 @@ __all__ = [
     "reconcile_graph",
     "backfill_missing",
     "BackfillResult",
+    # New tool suite (Fresh Suite Design)
+    "EnrichResult",
+    "RecoverResult",
+    "ClearResult",
+    "ProjectResult",
+    "enrich_graph",
+    "recover_graph",
+    "clear_graph",
+    "project_graph",
     # Writer (graph-first mutations)
     "ThreadData",
     "EntryData",

@@ -132,6 +132,116 @@ class EnrichmentResult:
 
 
 # ============================================================================
+# New Tool Suite Result Types (Milestone: Fresh Suite Design)
+# ============================================================================
+
+
+@dataclass
+class EnrichResult:
+    """Result of bulk enrichment operation.
+
+    Used by enrich_graph() - the new unified enrichment function.
+    Provides detailed statistics for all enrichment operations.
+    """
+
+    threads_processed: int = 0
+    entries_processed: int = 0
+    summaries_generated: int = 0
+    embeddings_generated: int = 0
+    skipped: int = 0
+    errors: List[str] = field(default_factory=list)
+    dry_run: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "threads_processed": self.threads_processed,
+            "entries_processed": self.entries_processed,
+            "summaries_generated": self.summaries_generated,
+            "embeddings_generated": self.embeddings_generated,
+            "skipped": self.skipped,
+            "errors": self.errors[:20],  # Limit errors in output
+            "error_count": len(self.errors),
+            "dry_run": self.dry_run,
+        }
+
+
+@dataclass
+class RecoverResult:
+    """Result of graph recovery operation.
+
+    Used by recover_graph() - rebuilds graph from markdown.
+    """
+
+    threads_recovered: int = 0
+    entries_parsed: int = 0
+    summaries_generated: int = 0
+    embeddings_generated: int = 0
+    errors: List[str] = field(default_factory=list)
+    dry_run: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "threads_recovered": self.threads_recovered,
+            "entries_parsed": self.entries_parsed,
+            "summaries_generated": self.summaries_generated,
+            "embeddings_generated": self.embeddings_generated,
+            "errors": self.errors[:20],
+            "error_count": len(self.errors),
+            "dry_run": self.dry_run,
+        }
+
+
+@dataclass
+class ProjectResult:
+    """Result of graph projection operation.
+
+    Used by project_graph() - generates markdown from graph.
+    """
+
+    files_created: int = 0
+    files_updated: int = 0
+    files_skipped: int = 0
+    errors: List[str] = field(default_factory=list)
+    dry_run: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "files_created": self.files_created,
+            "files_updated": self.files_updated,
+            "files_skipped": self.files_skipped,
+            "errors": self.errors[:20],
+            "error_count": len(self.errors),
+            "dry_run": self.dry_run,
+        }
+
+
+@dataclass
+class ClearResult:
+    """Result of graph clear operation.
+
+    Used by clear_graph() - removes graph data for specific topics.
+    """
+
+    topics_cleared: int = 0
+    entries_removed: int = 0
+    errors: List[str] = field(default_factory=list)
+    dry_run: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "topics_cleared": self.topics_cleared,
+            "entries_removed": self.entries_removed,
+            "errors": self.errors[:20],
+            "error_count": len(self.errors),
+            "dry_run": self.dry_run,
+        }
+
+
+# ============================================================================
 # Embedding Configuration & Generation
 # ============================================================================
 
@@ -1576,6 +1686,389 @@ def backfill_missing(
         f"{result.entries_summary_generated} entry summaries, "
         f"{result.entries_embedding_generated} embeddings"
     )
+
+    return result
+
+
+# ============================================================================
+# New Tool Suite Core Functions (Milestone: Fresh Suite Design)
+# ============================================================================
+
+
+def enrich_graph(
+    threads_dir: Path,
+    summaries: bool = True,
+    embeddings: bool = True,
+    mode: str = "missing",  # "missing" | "selective" | "all"
+    topics: Optional[List[str]] = None,
+    batch_size: int = 10,
+    dry_run: bool = False,
+) -> EnrichResult:
+    """Generate or regenerate summaries and embeddings.
+
+    This is the unified enrichment function that replaces backfill_missing
+    with a cleaner, more consistent API.
+
+    Modes:
+    - "missing": Only fill missing values (default, safe)
+    - "selective": Process only specified topics (force regenerate)
+    - "all": Regenerate everything (global refresh, use with caution)
+
+    Args:
+        threads_dir: Threads directory
+        summaries: Whether to generate/regenerate summaries
+        embeddings: Whether to generate/regenerate embeddings
+        mode: Processing mode - "missing", "selective", or "all"
+        topics: Topics to process (required for "selective" mode)
+        batch_size: Number of items to process before writing
+        dry_run: If True, return what would be processed without making changes
+
+    Returns:
+        EnrichResult with counts of processed/generated items
+
+    Examples:
+        # Fill missing embeddings only
+        enrich_graph(threads_dir, embeddings=True, summaries=False, mode="missing")
+
+        # Regenerate embeddings for specific topics
+        enrich_graph(threads_dir, embeddings=True, mode="selective", topics=["topic-a"])
+
+        # Full refresh of all embeddings
+        enrich_graph(threads_dir, embeddings=True, summaries=False, mode="all")
+    """
+    result = EnrichResult(dry_run=dry_run)
+    graph_dir = storage.get_graph_dir(threads_dir)
+
+    if not storage.is_per_thread_format(graph_dir):
+        result.errors.append(f"No per-thread graph format found at {graph_dir}")
+        return result
+
+    # Validate mode
+    if mode not in ("missing", "selective", "all"):
+        result.errors.append(f"Invalid mode: {mode}. Use 'missing', 'selective', or 'all'")
+        return result
+
+    if mode == "selective" and not topics:
+        result.errors.append("Mode 'selective' requires topics list")
+        return result
+
+    # Check service availability (skip for dry run)
+    llm_available = False
+    embedding_available = False
+
+    if not dry_run:
+        if summaries:
+            llm_available = is_llm_service_available()
+            if not llm_available:
+                logger.warning("LLM service not available, skipping summary enrichment")
+
+        if embeddings:
+            embedding_available = is_embedding_available()
+            if not embedding_available:
+                logger.warning("Embedding service not available, skipping embedding enrichment")
+
+        if not llm_available and not embedding_available:
+            result.errors.append("No services available for enrichment")
+            return result
+
+    # Get summarizer config
+    config = create_summarizer_config() if summaries else None
+
+    # Determine which topics to process
+    all_topics = storage.list_thread_topics(graph_dir)
+    if mode == "selective":
+        target_topics = [t for t in topics if t in all_topics]
+        if not target_topics:
+            result.errors.append(f"No matching topics found. Available: {all_topics[:10]}")
+            return result
+    else:
+        target_topics = all_topics
+
+    # Process each thread
+    for topic in target_topics:
+        try:
+            meta = storage.load_thread_meta(graph_dir, topic)
+            entries = storage.load_thread_entries_dict(graph_dir, topic)
+            edges = storage.load_thread_edges(graph_dir, topic)
+
+            if not meta:
+                continue
+
+            result.threads_processed += 1
+            thread_updated = False
+            entry_list = list(entries.values())
+            result.entries_processed += len(entry_list)
+
+            # Process entries
+            for entry_id, entry in entries.items():
+                entry_raw_id = entry.get("entry_id", entry_id)
+
+                # Check if we should process this entry
+                has_summary = bool(entry.get("summary"))
+                has_embedding = bool(entry.get("embedding"))
+
+                should_do_summary = summaries and (
+                    mode == "all" or
+                    mode == "selective" or
+                    (mode == "missing" and not has_summary)
+                )
+                should_do_embedding = embeddings and (
+                    mode == "all" or
+                    mode == "selective" or
+                    (mode == "missing" and not has_embedding)
+                )
+
+                if not should_do_summary and not should_do_embedding:
+                    result.skipped += 1
+                    continue
+
+                if dry_run:
+                    # Just count what would be processed
+                    if should_do_summary:
+                        result.summaries_generated += 1
+                    if should_do_embedding:
+                        result.embeddings_generated += 1
+                    continue
+
+                # Generate summary
+                if should_do_summary and llm_available:
+                    try:
+                        summary = summarize_entry(
+                            entry_body=entry.get("body", ""),
+                            entry_title=entry.get("title", ""),
+                            entry_type=entry.get("entry_type", "Note"),
+                            config=config,
+                        )
+                        if summary:
+                            entry["summary"] = summary
+                            result.summaries_generated += 1
+                            thread_updated = True
+                    except Exception as e:
+                        result.errors.append(f"Entry {entry_raw_id} summary: {e}")
+
+                # Generate embedding
+                if should_do_embedding and embedding_available:
+                    try:
+                        text = entry.get("summary") or entry.get("body", "")
+                        if entry.get("title"):
+                            text = f"{entry['title']}\n\n{text}"
+                        embedding = generate_embedding(text)
+                        if embedding:
+                            entry["embedding"] = embedding
+                            result.embeddings_generated += 1
+                            thread_updated = True
+                            # Also update search index
+                            storage.upsert_search_index_entry(
+                                graph_dir, entry_raw_id, topic, embedding
+                            )
+                    except Exception as e:
+                        result.errors.append(f"Entry {entry_raw_id} embedding: {e}")
+
+            # Write updated thread data if changed
+            if thread_updated and not dry_run:
+                storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+                logger.debug(f"Updated graph files for thread {topic}")
+
+        except Exception as e:
+            result.errors.append(f"Thread {topic}: {e}")
+            continue
+
+    if not dry_run:
+        logger.info(
+            f"Enrichment complete: {result.summaries_generated} summaries, "
+            f"{result.embeddings_generated} embeddings"
+        )
+
+    return result
+
+
+def recover_graph(
+    threads_dir: Path,
+    mode: str = "stale",  # "stale" | "selective" | "all"
+    topics: Optional[List[str]] = None,
+    generate_summaries: bool = True,
+    generate_embeddings: bool = True,
+    dry_run: bool = False,
+) -> RecoverResult:
+    """Rebuild graph from markdown (emergency recovery).
+
+    WARNING: This parses markdown to rebuild graph nodes. Use only when:
+    - Graph data is corrupted or lost
+    - Manual edits were made to markdown
+    - Migrating from old format
+    - Recovering stale/error threads
+
+    Modes:
+    - "stale": Recover only stale/error threads (auto-detected)
+    - "selective": Recover specific topics only
+    - "all": Full rebuild from all markdown (slow, destructive)
+
+    Note: In normal operation, graph is source of truth.
+    This tool is the exception for recovery scenarios.
+
+    Args:
+        threads_dir: Threads directory
+        mode: Recovery mode - "stale", "selective", or "all"
+        topics: Topics to recover (required for "selective" mode)
+        generate_summaries: Generate summaries during recovery
+        generate_embeddings: Generate embeddings during recovery
+        dry_run: If True, return what would be recovered without making changes
+
+    Returns:
+        RecoverResult with recovery statistics
+    """
+    result = RecoverResult(dry_run=dry_run)
+
+    # Validate mode
+    if mode not in ("stale", "selective", "all"):
+        result.errors.append(f"Invalid mode: {mode}. Use 'stale', 'selective', or 'all'")
+        return result
+
+    if mode == "selective" and not topics:
+        result.errors.append("Mode 'selective' requires topics list")
+        return result
+
+    # Determine which topics to process
+    thread_files = list(threads_dir.glob("*.md"))
+    available_topics = [f.stem for f in thread_files]
+
+    if mode == "stale":
+        # Get stale/error topics from health check
+        health = check_graph_health(threads_dir)
+        target_topics = health.stale_threads + list(health.error_details.keys())
+        if not target_topics:
+            logger.info("No stale or error threads found, nothing to recover")
+            return result
+    elif mode == "selective":
+        target_topics = [t for t in topics if t in available_topics]
+        if not target_topics:
+            result.errors.append(f"No matching topics found in markdown files")
+            return result
+    else:  # mode == "all"
+        target_topics = available_topics
+
+    # Count for dry run
+    if dry_run:
+        for topic in target_topics:
+            thread_path = threads_dir / f"{topic}.md"
+            if thread_path.exists():
+                try:
+                    parsed = parse_thread_file(thread_path, generate_summaries=False)
+                    if parsed:
+                        result.threads_recovered += 1
+                        result.entries_parsed += len(parsed.entries)
+                        if generate_summaries:
+                            result.summaries_generated += len(parsed.entries) + 1  # entries + thread
+                        if generate_embeddings:
+                            result.embeddings_generated += len(parsed.entries)
+                except Exception as e:
+                    result.errors.append(f"Thread {topic}: {e}")
+        return result
+
+    # Actual recovery - use sync_thread_to_graph for each topic
+    for topic in target_topics:
+        try:
+            success = sync_thread_to_graph(
+                threads_dir=threads_dir,
+                topic=topic,
+                generate_summaries=generate_summaries,
+                generate_embeddings=generate_embeddings,
+            )
+            if success:
+                result.threads_recovered += 1
+                # Count entries from the thread
+                thread_path = threads_dir / f"{topic}.md"
+                if thread_path.exists():
+                    parsed = parse_thread_file(thread_path, generate_summaries=False)
+                    if parsed:
+                        result.entries_parsed += len(parsed.entries)
+            else:
+                result.errors.append(f"Thread {topic}: sync failed")
+        except Exception as e:
+            result.errors.append(f"Thread {topic}: {e}")
+
+    logger.info(
+        f"Recovery complete: {result.threads_recovered} threads, "
+        f"{result.entries_parsed} entries"
+    )
+
+    return result
+
+
+def clear_graph(
+    threads_dir: Path,
+    topics: List[str],
+    confirm: bool = False,
+    dry_run: bool = False,
+) -> ClearResult:
+    """Clear graph data for specific topics.
+
+    WARNING: Destructive operation. Removes graph nodes/edges.
+    Markdown files are NOT affected.
+
+    Requires explicit topics - no "all" mode for safety.
+    Use with graph_recover to rebuild from markdown after clearing.
+
+    Args:
+        threads_dir: Threads directory
+        topics: Topics to clear (required, must be explicit)
+        confirm: Must be True to execute (safety check)
+        dry_run: If True, return what would be cleared without making changes
+
+    Returns:
+        ClearResult with cleared topic/entry counts
+    """
+    result = ClearResult(dry_run=dry_run)
+
+    if not topics:
+        result.errors.append("Topics list is required (no 'all' mode for safety)")
+        return result
+
+    if not confirm and not dry_run:
+        result.errors.append("Set confirm=True to execute destructive operation")
+        return result
+
+    graph_dir = storage.get_graph_dir(threads_dir)
+
+    if not storage.is_per_thread_format(graph_dir):
+        result.errors.append(f"No per-thread graph format found at {graph_dir}")
+        return result
+
+    available_topics = storage.list_thread_topics(graph_dir)
+    target_topics = [t for t in topics if t in available_topics]
+
+    if not target_topics:
+        result.errors.append(f"No matching topics in graph. Available: {available_topics[:10]}")
+        return result
+
+    for topic in target_topics:
+        try:
+            # Count entries before clearing
+            entries = storage.load_thread_entries_dict(graph_dir, topic)
+            entry_count = len(entries)
+
+            if dry_run:
+                result.topics_cleared += 1
+                result.entries_removed += entry_count
+                continue
+
+            # Clear by removing the thread directory
+            thread_graph_dir = storage.get_thread_graph_dir(graph_dir, topic)
+            if thread_graph_dir.exists():
+                import shutil
+                shutil.rmtree(thread_graph_dir)
+                result.topics_cleared += 1
+                result.entries_removed += entry_count
+                logger.info(f"Cleared graph data for topic: {topic}")
+
+        except Exception as e:
+            result.errors.append(f"Topic {topic}: {e}")
+
+    if not dry_run:
+        logger.info(
+            f"Clear complete: {result.topics_cleared} topics, "
+            f"{result.entries_removed} entries removed"
+        )
 
     return result
 

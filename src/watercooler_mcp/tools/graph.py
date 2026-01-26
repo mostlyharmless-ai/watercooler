@@ -544,6 +544,14 @@ def _baseline_graph_build_impl(
 ) -> str:
     """Build baseline graph from threads.
 
+    DEPRECATED: This tool is deprecated. Use watercooler_graph_recover instead
+    for rebuilding graph from markdown, which provides a cleaner API with modes:
+    - mode="stale": Recover stale/error threads
+    - mode="selective": Target specific topics
+    - mode="all": Full rebuild
+
+    This tool will continue to work but may be removed in a future version.
+
     Creates a lightweight knowledge graph using extractive summaries
     or local LLM. Output is JSONL format (nodes.jsonl, edges.jsonl).
 
@@ -933,6 +941,12 @@ def _reconcile_graph_impl(
 ) -> str:
     """Reconcile graph with markdown files to fix sync issues.
 
+    DEPRECATED: This tool is deprecated. Use the new tool suite instead:
+    - watercooler_graph_recover: For rebuilding graph from markdown
+    - watercooler_graph_enrich: For generating summaries/embeddings
+
+    This tool will continue to work but may be removed in a future version.
+
     Rebuilds graph nodes and edges for threads that are stale, have errors,
     or are explicitly specified. This is the primary tool for ingesting
     legacy markdown-only threads into the graph representation.
@@ -1044,6 +1058,14 @@ def _backfill_graph_impl(
     batch_size: int = 10,
 ) -> str:
     """Backfill missing summaries and embeddings in existing graph nodes.
+
+    DEPRECATED: This tool is deprecated. Use watercooler_graph_enrich instead,
+    which provides a cleaner API with mode-based control:
+    - mode="missing": Equivalent to this tool's behavior
+    - mode="selective": Target specific topics
+    - mode="all": Force regenerate everything
+
+    This tool will continue to work but may be removed in a future version.
 
     Unlike reconcile_graph which syncs stale threads from markdown, this function
     updates existing graph nodes that are missing summaries or embeddings. This is
@@ -1173,6 +1195,352 @@ def _access_stats_impl(
         return f"Error getting access stats: {str(e)}"
 
 
+# =============================================================================
+# New Tool Suite (Fresh Suite Design)
+# =============================================================================
+
+
+def _graph_enrich_impl(
+    ctx: Context,
+    code_path: str = "",
+    summaries: bool = True,
+    embeddings: bool = True,
+    mode: str = "missing",
+    topics: str = "",
+    batch_size: int = 10,
+    dry_run: bool = False,
+) -> str:
+    """Generate or regenerate summaries and embeddings.
+
+    This is the unified enrichment tool that replaces backfill_graph with a cleaner,
+    more consistent API. Use this for all enrichment operations.
+
+    Modes:
+    - "missing": Only fill missing values (default, safe)
+    - "selective": Process only specified topics (force regenerate)
+    - "all": Regenerate everything (global refresh, use with caution)
+
+    Args:
+        code_path: Path to code repository (for resolving threads dir).
+        summaries: Whether to generate/regenerate summaries. Default: True.
+        embeddings: Whether to generate/regenerate embeddings. Default: True.
+        mode: Processing mode - "missing", "selective", or "all". Default: "missing".
+        topics: Comma-separated list of topics (required for "selective" mode).
+        batch_size: Number of items to process before writing. Default: 10.
+        dry_run: If True, return what would be processed without making changes.
+
+    Returns:
+        JSON with counts: processed, generated, skipped, errors
+
+    Examples:
+        # Fill missing embeddings only
+        graph_enrich(embeddings=True, summaries=False, mode="missing")
+
+        # Regenerate embeddings for specific topics (e.g., after dimension change)
+        graph_enrich(embeddings=True, mode="selective", topics="topic-a,topic-b")
+
+        # Full refresh of all embeddings
+        graph_enrich(embeddings=True, summaries=False, mode="all")
+    """
+    try:
+        from watercooler.baseline_graph.sync import enrich_graph
+
+        error, context = validation._require_context(code_path)
+        if error:
+            return error
+        if context is None or not context.threads_dir:
+            return "Error: Unable to resolve threads directory."
+
+        threads_dir = context.threads_dir
+        if not threads_dir.exists():
+            return f"Threads directory not found: {threads_dir}"
+
+        # Parse topics list
+        topic_list = None
+        if topics:
+            topic_list = [t.strip() for t in topics.split(",") if t.strip()]
+
+        # Define the enrich operation
+        def _do_enrich() -> dict:
+            result = enrich_graph(
+                threads_dir=threads_dir,
+                summaries=summaries,
+                embeddings=embeddings,
+                mode=mode,
+                topics=topic_list,
+                batch_size=max(1, min(batch_size, 100)),
+                dry_run=dry_run,
+            )
+            return result.to_dict()
+
+        # For dry_run, don't wrap in git sync
+        if dry_run:
+            output = _do_enrich()
+        else:
+            # Run with full parity protocol (preflight + commit + push)
+            output = run_with_graph_sync(
+                context,
+                _do_enrich,
+                f"graph: enrich mode={mode}",
+            )
+
+        return json.dumps(output, indent=2)
+
+    except BranchPairingError as e:
+        return f"Branch parity error: {str(e)}"
+    except Exception as e:
+        return f"Error enriching graph: {str(e)}"
+
+
+def _graph_recover_impl(
+    ctx: Context,
+    code_path: str = "",
+    mode: str = "stale",
+    topics: str = "",
+    generate_summaries: bool = True,
+    generate_embeddings: bool = True,
+    dry_run: bool = False,
+) -> str:
+    """Rebuild graph from markdown (emergency recovery).
+
+    WARNING: This parses markdown to rebuild graph nodes. Use only when:
+    - Graph data is corrupted or lost
+    - Manual edits were made to markdown
+    - Migrating from old format
+    - Recovering stale/error threads
+
+    In normal operation, the graph is the source of truth.
+    This tool is the exception for recovery scenarios.
+
+    Modes:
+    - "stale": Recover only stale/error threads (auto-detected)
+    - "selective": Recover specific topics only
+    - "all": Full rebuild from all markdown (slow, destructive)
+
+    Args:
+        code_path: Path to code repository (for resolving threads dir).
+        mode: Recovery mode - "stale", "selective", or "all". Default: "stale".
+        topics: Comma-separated list of topics (required for "selective" mode).
+        generate_summaries: Generate summaries during recovery. Default: True.
+        generate_embeddings: Generate embeddings during recovery. Default: True.
+        dry_run: If True, return what would be recovered without making changes.
+
+    Returns:
+        JSON with recovery results: threads recovered, entries parsed, errors
+    """
+    try:
+        from watercooler.baseline_graph.sync import recover_graph
+
+        error, context = validation._require_context(code_path)
+        if error:
+            return error
+        if context is None or not context.threads_dir:
+            return "Error: Unable to resolve threads directory."
+
+        threads_dir = context.threads_dir
+        if not threads_dir.exists():
+            return f"Threads directory not found: {threads_dir}"
+
+        # Parse topics list
+        topic_list = None
+        if topics:
+            topic_list = [t.strip() for t in topics.split(",") if t.strip()]
+
+        # Define the recover operation
+        def _do_recover() -> dict:
+            result = recover_graph(
+                threads_dir=threads_dir,
+                mode=mode,
+                topics=topic_list,
+                generate_summaries=generate_summaries,
+                generate_embeddings=generate_embeddings,
+                dry_run=dry_run,
+            )
+            return result.to_dict()
+
+        # For dry_run, don't wrap in git sync
+        if dry_run:
+            output = _do_recover()
+        else:
+            # Run with full parity protocol (preflight + commit + push)
+            output = run_with_graph_sync(
+                context,
+                _do_recover,
+                f"graph: recover mode={mode}",
+            )
+
+        return json.dumps(output, indent=2)
+
+    except BranchPairingError as e:
+        return f"Branch parity error: {str(e)}"
+    except Exception as e:
+        return f"Error recovering graph: {str(e)}"
+
+
+def _graph_project_impl(
+    ctx: Context,
+    code_path: str = "",
+    mode: str = "missing",
+    topics: str = "",
+    overwrite: bool = False,
+    dry_run: bool = False,
+) -> str:
+    """Generate markdown files from graph (source of truth).
+
+    Use this to regenerate markdown projections from graph data.
+    The graph is the source of truth; this tool creates the derived markdown.
+
+    Modes:
+    - "missing": Only create markdown for topics without .md files
+    - "selective": Project specific topics
+    - "all": Regenerate all markdown (requires overwrite=True)
+
+    Use cases:
+    - Initial markdown generation after graph import
+    - Regenerating corrupted markdown
+    - Syncing after direct graph edits
+
+    Args:
+        code_path: Path to code repository (for resolving threads dir).
+        mode: Processing mode - "missing", "selective", or "all". Default: "missing".
+        topics: Comma-separated list of topics (required for "selective" mode).
+        overwrite: Allow overwriting existing files (required for "all" mode).
+        dry_run: If True, return what would be created/updated without changes.
+
+    Returns:
+        JSON with files created/updated, skipped, errors
+    """
+    try:
+        from watercooler.baseline_graph.projector import project_graph
+
+        error, context = validation._require_context(code_path)
+        if error:
+            return error
+        if context is None or not context.threads_dir:
+            return "Error: Unable to resolve threads directory."
+
+        threads_dir = context.threads_dir
+        if not threads_dir.exists():
+            return f"Threads directory not found: {threads_dir}"
+
+        # Parse topics list
+        topic_list = None
+        if topics:
+            topic_list = [t.strip() for t in topics.split(",") if t.strip()]
+
+        # Define the project operation
+        def _do_project() -> dict:
+            result = project_graph(
+                threads_dir=threads_dir,
+                mode=mode,
+                topics=topic_list,
+                overwrite=overwrite,
+                dry_run=dry_run,
+            )
+            return result.to_dict()
+
+        # For dry_run, don't wrap in git sync
+        if dry_run:
+            output = _do_project()
+        else:
+            # Run with full parity protocol (preflight + commit + push)
+            output = run_with_graph_sync(
+                context,
+                _do_project,
+                f"graph: project mode={mode}",
+            )
+
+        return json.dumps(output, indent=2)
+
+    except BranchPairingError as e:
+        return f"Branch parity error: {str(e)}"
+    except Exception as e:
+        return f"Error projecting graph: {str(e)}"
+
+
+def _graph_clear_impl(
+    ctx: Context,
+    code_path: str = "",
+    topics: str = "",
+    confirm: bool = False,
+    dry_run: bool = False,
+) -> str:
+    """Clear graph data for specific topics.
+
+    WARNING: Destructive operation. Removes graph nodes/edges.
+    Markdown files are NOT affected.
+
+    Requires explicit topics - no "all" mode for safety.
+    Use with graph_recover to rebuild from markdown after clearing.
+
+    Args:
+        code_path: Path to code repository (for resolving threads dir).
+        topics: Comma-separated list of topics to clear (required).
+        confirm: Must be True to execute destructive operation. Default: False.
+        dry_run: If True, return what would be cleared without changes.
+
+    Returns:
+        JSON with topics cleared, entries removed
+    """
+    try:
+        from watercooler.baseline_graph.sync import clear_graph
+
+        error, context = validation._require_context(code_path)
+        if error:
+            return error
+        if context is None or not context.threads_dir:
+            return "Error: Unable to resolve threads directory."
+
+        threads_dir = context.threads_dir
+        if not threads_dir.exists():
+            return f"Threads directory not found: {threads_dir}"
+
+        # Parse topics list
+        if not topics:
+            return json.dumps({
+                "error": "Topics list is required (no 'all' mode for safety)",
+                "topics_cleared": 0,
+                "entries_removed": 0,
+            }, indent=2)
+
+        topic_list = [t.strip() for t in topics.split(",") if t.strip()]
+
+        # Define the clear operation
+        def _do_clear() -> dict:
+            result = clear_graph(
+                threads_dir=threads_dir,
+                topics=topic_list,
+                confirm=confirm,
+                dry_run=dry_run,
+            )
+            return result.to_dict()
+
+        # For dry_run, don't wrap in git sync
+        if dry_run:
+            output = _do_clear()
+        else:
+            # Run with full parity protocol (preflight + commit + push)
+            output = run_with_graph_sync(
+                context,
+                _do_clear,
+                f"graph: clear topics={topics}",
+            )
+
+        return json.dumps(output, indent=2)
+
+    except BranchPairingError as e:
+        return f"Branch parity error: {str(e)}"
+    except Exception as e:
+        return f"Error clearing graph: {str(e)}"
+
+
+# Module-level references for new tools
+graph_enrich_tool = None
+graph_recover_tool = None
+graph_project_tool = None
+graph_clear_tool = None
+
+
 def register_graph_tools(mcp):
     """Register graph tools with the MCP server.
 
@@ -1182,6 +1550,7 @@ def register_graph_tools(mcp):
     global baseline_graph_stats, baseline_graph_build, search_graph_tool
     global find_similar_entries_tool, graph_health_tool, reconcile_graph_tool
     global backfill_graph_tool, access_stats_tool
+    global graph_enrich_tool, graph_recover_tool, graph_project_tool, graph_clear_tool
 
     # Register tools and store references for testing
     baseline_graph_stats = mcp.tool(name="watercooler_baseline_graph_stats")(_baseline_graph_stats_impl)
@@ -1189,6 +1558,15 @@ def register_graph_tools(mcp):
     search_graph_tool = mcp.tool(name="watercooler_search")(_search_graph_impl)
     find_similar_entries_tool = mcp.tool(name="watercooler_find_similar")(_find_similar_entries_impl)
     graph_health_tool = mcp.tool(name="watercooler_graph_health")(_graph_health_impl)
+
+    # Legacy tools (deprecated, but kept working)
     reconcile_graph_tool = mcp.tool(name="watercooler_reconcile_graph")(_reconcile_graph_impl)
     backfill_graph_tool = mcp.tool(name="watercooler_backfill_graph")(_backfill_graph_impl)
+
     access_stats_tool = mcp.tool(name="watercooler_access_stats")(_access_stats_impl)
+
+    # New tool suite (Fresh Suite Design)
+    graph_enrich_tool = mcp.tool(name="watercooler_graph_enrich")(_graph_enrich_impl)
+    graph_recover_tool = mcp.tool(name="watercooler_graph_recover")(_graph_recover_impl)
+    graph_project_tool = mcp.tool(name="watercooler_graph_project")(_graph_project_impl)
+    graph_clear_tool = mcp.tool(name="watercooler_graph_clear")(_graph_clear_impl)

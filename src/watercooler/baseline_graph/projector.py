@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -389,3 +390,152 @@ def create_thread_file(
 
     write_thread_markdown(threads_dir, topic, content)
     return thread_path
+
+
+# ============================================================================
+# Bulk Projection Operations (New Tool Suite)
+# ============================================================================
+
+
+@dataclass
+class ProjectResult:
+    """Result of bulk graph projection operation."""
+
+    files_created: int = 0
+    files_updated: int = 0
+    files_skipped: int = 0
+    errors: List[str] = field(default_factory=list)
+    dry_run: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "files_created": self.files_created,
+            "files_updated": self.files_updated,
+            "files_skipped": self.files_skipped,
+            "errors": self.errors[:20],
+            "error_count": len(self.errors),
+            "dry_run": self.dry_run,
+        }
+
+
+def project_graph(
+    threads_dir: Path,
+    mode: str = "missing",  # "missing" | "selective" | "all"
+    topics: Optional[List[str]] = None,
+    overwrite: bool = False,
+    dry_run: bool = False,
+) -> ProjectResult:
+    """Generate markdown files from graph (source of truth).
+
+    Modes:
+    - "missing": Only create markdown for topics without .md files
+    - "selective": Project specific topics
+    - "all": Regenerate all markdown (requires overwrite=True)
+
+    Use cases:
+    - Initial markdown generation after graph import
+    - Regenerating corrupted markdown
+    - Syncing after direct graph edits
+
+    Args:
+        threads_dir: Threads directory
+        mode: Processing mode - "missing", "selective", or "all"
+        topics: Topics to project (required for "selective" mode)
+        overwrite: Allow overwriting existing files (required for "all" mode)
+        dry_run: If True, return what would be created/updated without changes
+
+    Returns:
+        ProjectResult with file operation counts
+    """
+    from .writer import get_thread_from_graph, get_entries_for_thread
+    from . import storage
+
+    result = ProjectResult(dry_run=dry_run)
+
+    # Validate mode
+    if mode not in ("missing", "selective", "all"):
+        result.errors.append(f"Invalid mode: {mode}. Use 'missing', 'selective', or 'all'")
+        return result
+
+    if mode == "selective" and not topics:
+        result.errors.append("Mode 'selective' requires topics list")
+        return result
+
+    if mode == "all" and not overwrite:
+        result.errors.append("Mode 'all' requires overwrite=True to regenerate existing files")
+        return result
+
+    graph_dir = storage.get_graph_dir(threads_dir)
+
+    if not storage.is_per_thread_format(graph_dir):
+        result.errors.append(f"No per-thread graph format found at {graph_dir}")
+        return result
+
+    # Get available topics from graph
+    graph_topics = storage.list_thread_topics(graph_dir)
+
+    if not graph_topics:
+        result.errors.append("No topics found in graph")
+        return result
+
+    # Determine target topics
+    if mode == "selective":
+        target_topics = [t for t in topics if t in graph_topics]
+        if not target_topics:
+            result.errors.append(f"No matching topics in graph. Available: {graph_topics[:10]}")
+            return result
+    else:
+        target_topics = graph_topics
+
+    # Process each topic
+    for topic in target_topics:
+        try:
+            thread_path = threads_dir / f"{topic}.md"
+            file_exists = thread_path.exists()
+
+            # Check if we should process this topic
+            if mode == "missing" and file_exists:
+                result.files_skipped += 1
+                continue
+
+            if file_exists and not overwrite and mode != "missing":
+                result.files_skipped += 1
+                continue
+
+            if dry_run:
+                if file_exists:
+                    result.files_updated += 1
+                else:
+                    result.files_created += 1
+                continue
+
+            # Get thread and entries from graph
+            thread = get_thread_from_graph(threads_dir, topic)
+            if not thread:
+                result.errors.append(f"Thread not found in graph: {topic}")
+                continue
+
+            entries = get_entries_for_thread(threads_dir, topic)
+
+            # Project to markdown
+            content = project_thread_to_markdown(thread, entries)
+            write_thread_markdown(threads_dir, topic, content)
+
+            if file_exists:
+                result.files_updated += 1
+            else:
+                result.files_created += 1
+
+            logger.debug(f"Projected thread to markdown: {topic}")
+
+        except Exception as e:
+            result.errors.append(f"Topic {topic}: {e}")
+
+    if not dry_run:
+        logger.info(
+            f"Projection complete: {result.files_created} created, "
+            f"{result.files_updated} updated, {result.files_skipped} skipped"
+        )
+
+    return result
