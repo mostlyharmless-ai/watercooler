@@ -11,7 +11,6 @@ New Tool Suite (Fresh Suite Design):
 - watercooler_graph_enrich: Generate/regenerate summaries and embeddings
 - watercooler_graph_recover: Rebuild graph from markdown (emergency recovery)
 - watercooler_graph_project: Generate markdown from graph (source of truth)
-- watercooler_graph_clear: Clear graph data for specific topics
 """
 
 import asyncio
@@ -1167,87 +1166,10 @@ def _graph_project_impl(
         return f"Error projecting graph: {str(e)}"
 
 
-def _graph_clear_impl(
-    ctx: Context,
-    code_path: str = "",
-    topics: str = "",
-    confirm: bool = False,
-    dry_run: bool = False,
-) -> str:
-    """Clear graph data for specific topics.
-
-    WARNING: Destructive operation. Removes graph nodes/edges.
-    Markdown files are NOT affected.
-
-    Requires explicit topics - no "all" mode for safety.
-    Use with graph_recover to rebuild from markdown after clearing.
-
-    Args:
-        code_path: Path to code repository (for resolving threads dir).
-        topics: Comma-separated list of topics to clear (required).
-        confirm: Must be True to execute destructive operation. Default: False.
-        dry_run: If True, return what would be cleared without changes.
-
-    Returns:
-        JSON with topics cleared, entries removed
-    """
-    try:
-        from watercooler.baseline_graph.sync import clear_graph
-
-        error, context = validation._require_context(code_path)
-        if error:
-            return error
-        if context is None or not context.threads_dir:
-            return "Error: Unable to resolve threads directory."
-
-        threads_dir = context.threads_dir
-        if not threads_dir.exists():
-            return f"Threads directory not found: {threads_dir}"
-
-        # Parse topics list
-        if not topics:
-            return json.dumps({
-                "error": "Topics list is required (no 'all' mode for safety)",
-                "topics_cleared": 0,
-                "entries_removed": 0,
-            }, indent=2)
-
-        topic_list = [t.strip() for t in topics.split(",") if t.strip()]
-
-        # Define the clear operation
-        def _do_clear() -> dict:
-            result = clear_graph(
-                threads_dir=threads_dir,
-                topics=topic_list,
-                confirm=confirm,
-                dry_run=dry_run,
-            )
-            return result.to_dict()
-
-        # For dry_run, don't wrap in git sync
-        if dry_run:
-            output = _do_clear()
-        else:
-            # Run with full parity protocol (preflight + commit + push)
-            output = run_with_graph_sync(
-                context,
-                _do_clear,
-                f"graph: clear topics={topics}",
-            )
-
-        return json.dumps(output, indent=2)
-
-    except BranchPairingError as e:
-        return f"Branch parity error: {str(e)}"
-    except Exception as e:
-        return f"Error clearing graph: {str(e)}"
-
-
 # Module-level references for new tools
 graph_enrich_tool = None
 graph_recover_tool = None
 graph_project_tool = None
-graph_clear_tool = None
 
 
 def register_graph_tools(mcp):
@@ -1258,7 +1180,7 @@ def register_graph_tools(mcp):
     """
     global baseline_graph_stats, search_graph_tool
     global find_similar_entries_tool, graph_health_tool, access_stats_tool
-    global graph_enrich_tool, graph_recover_tool, graph_project_tool, graph_clear_tool
+    global graph_enrich_tool, graph_recover_tool, graph_project_tool
 
     # Register tools and store references for testing
     baseline_graph_stats = mcp.tool(name="watercooler_baseline_graph_stats")(_baseline_graph_stats_impl)
@@ -1271,4 +1193,3 @@ def register_graph_tools(mcp):
     graph_enrich_tool = mcp.tool(name="watercooler_graph_enrich")(_graph_enrich_impl)
     graph_recover_tool = mcp.tool(name="watercooler_graph_recover")(_graph_recover_impl)
     graph_project_tool = mcp.tool(name="watercooler_graph_project")(_graph_project_impl)
-    graph_clear_tool = mcp.tool(name="watercooler_graph_clear")(_graph_clear_impl)

@@ -175,7 +175,6 @@ access_stats_tool = _graph_tools.access_stats_tool
 graph_enrich_tool = _graph_tools.graph_enrich_tool
 graph_recover_tool = _graph_tools.graph_recover_tool
 graph_project_tool = _graph_tools.graph_project_tool
-graph_clear_tool = _graph_tools.graph_clear_tool
 validate_branch_pairing_tool = _branch_parity_tools.validate_branch_pairing_tool
 sync_branch_state = _branch_parity_tools.sync_branch_state_tool
 audit_branch_pairing = _branch_parity_tools.audit_branch_pairing_tool

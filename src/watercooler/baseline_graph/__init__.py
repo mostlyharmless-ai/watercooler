@@ -60,10 +60,8 @@ from .sync import (
     # New tool suite (Fresh Suite Design)
     EnrichResult,
     RecoverResult,
-    ClearResult,
     enrich_graph,
     recover_graph,
-    clear_graph,
 )
 
 from .writer import (
@@ -151,11 +149,9 @@ __all__ = [
     # New tool suite (Fresh Suite Design)
     "EnrichResult",
     "RecoverResult",
-    "ClearResult",
     "ProjectResult",
     "enrich_graph",
     "recover_graph",
-    "clear_graph",
     "project_graph",
     # Writer (graph-first mutations)
     "ThreadData",

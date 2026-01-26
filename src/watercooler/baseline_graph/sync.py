@@ -218,29 +218,6 @@ class ProjectResult:
         }
 
 
-@dataclass
-class ClearResult:
-    """Result of graph clear operation.
-
-    Used by clear_graph() - removes graph data for specific topics.
-    """
-
-    topics_cleared: int = 0
-    entries_removed: int = 0
-    errors: List[str] = field(default_factory=list)
-    dry_run: bool = False
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dict."""
-        return {
-            "topics_cleared": self.topics_cleared,
-            "entries_removed": self.entries_removed,
-            "errors": self.errors[:20],
-            "error_count": len(self.errors),
-            "dry_run": self.dry_run,
-        }
-
-
 # ============================================================================
 # Embedding Configuration & Generation
 # ============================================================================
@@ -1991,84 +1968,6 @@ def recover_graph(
         f"Recovery complete: {result.threads_recovered} threads, "
         f"{result.entries_parsed} entries"
     )
-
-    return result
-
-
-def clear_graph(
-    threads_dir: Path,
-    topics: List[str],
-    confirm: bool = False,
-    dry_run: bool = False,
-) -> ClearResult:
-    """Clear graph data for specific topics.
-
-    WARNING: Destructive operation. Removes graph nodes/edges.
-    Markdown files are NOT affected.
-
-    Requires explicit topics - no "all" mode for safety.
-    Use with graph_recover to rebuild from markdown after clearing.
-
-    Args:
-        threads_dir: Threads directory
-        topics: Topics to clear (required, must be explicit)
-        confirm: Must be True to execute (safety check)
-        dry_run: If True, return what would be cleared without making changes
-
-    Returns:
-        ClearResult with cleared topic/entry counts
-    """
-    result = ClearResult(dry_run=dry_run)
-
-    if not topics:
-        result.errors.append("Topics list is required (no 'all' mode for safety)")
-        return result
-
-    if not confirm and not dry_run:
-        result.errors.append("Set confirm=True to execute destructive operation")
-        return result
-
-    graph_dir = storage.get_graph_dir(threads_dir)
-
-    if not storage.is_per_thread_format(graph_dir):
-        result.errors.append(f"No per-thread graph format found at {graph_dir}")
-        return result
-
-    available_topics = storage.list_thread_topics(graph_dir)
-    target_topics = [t for t in topics if t in available_topics]
-
-    if not target_topics:
-        result.errors.append(f"No matching topics in graph. Available: {available_topics[:10]}")
-        return result
-
-    for topic in target_topics:
-        try:
-            # Count entries before clearing
-            entries = storage.load_thread_entries_dict(graph_dir, topic)
-            entry_count = len(entries)
-
-            if dry_run:
-                result.topics_cleared += 1
-                result.entries_removed += entry_count
-                continue
-
-            # Clear by removing the thread directory
-            thread_graph_dir = storage.get_thread_graph_dir(graph_dir, topic)
-            if thread_graph_dir.exists():
-                import shutil
-                shutil.rmtree(thread_graph_dir)
-                result.topics_cleared += 1
-                result.entries_removed += entry_count
-                logger.info(f"Cleared graph data for topic: {topic}")
-
-        except Exception as e:
-            result.errors.append(f"Topic {topic}: {e}")
-
-    if not dry_run:
-        logger.info(
-            f"Clear complete: {result.topics_cleared} topics, "
-            f"{result.entries_removed} entries removed"
-        )
 
     return result
 
