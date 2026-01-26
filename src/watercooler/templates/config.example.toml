@@ -393,10 +393,23 @@ auto_detect_services = true
 
 # Summary prompt for baseline graph entry summarization
 # Env: LLM_SUMMARY_PROMPT
-# Simple instruction (context and content added automatically):
-#   summary_prompt = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
-# Or use {context} and {content} placeholders for full control:
-#   summary_prompt = "Given the following entry:\n{context}\n{content}\n\nProvide a brief summary."
+#
+# Two formats supported:
+#
+# 1. Simple instruction (default) - context and content appended automatically:
+#    summary_prompt = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
+#
+# 2. Template with placeholders - full control over prompt structure:
+#    summary_prompt = """Given this entry:
+#    {context}
+#    {content}
+#
+#    Provide a 1-2 sentence summary focusing on key decisions and outcomes."""
+#
+# Variables available in template mode:
+#   {context} - Entry metadata (Title: ..., Type: ...)
+#   {content} - Entry body text (truncated to 2000 chars)
+#
 # summary_prompt = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
 
 
@@ -643,6 +656,7 @@ auto_detect_services = true
 # memory.llm.model               LLM_MODEL
 # memory.llm.timeout             LLM_TIMEOUT
 # memory.llm.max_tokens          LLM_MAX_TOKENS
+# memory.llm.summary_prompt      LLM_SUMMARY_PROMPT
 # memory.embedding.api_key       EMBEDDING_API_KEY
 # memory.embedding.api_base      EMBEDDING_API_BASE
 # memory.embedding.model         EMBEDDING_MODEL
