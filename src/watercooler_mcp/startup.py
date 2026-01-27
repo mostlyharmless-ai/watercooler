@@ -1,6 +1,9 @@
 """Startup utilities for watercooler MCP server.
 
 Contains initialization checks and auto-start logic for external services.
+
+Services are started in background threads to avoid blocking MCP initialization.
+Use get_service_status() to check current status of all services.
 """
 
 from __future__ import annotations
@@ -10,14 +13,93 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 from .helpers import _add_startup_warning
 from .observability import log_debug
+
+
+class ServiceState(Enum):
+    """Service lifecycle states."""
+    UNKNOWN = "unknown"
+    DISABLED = "disabled"
+    STARTING = "starting"
+    RUNNING = "running"
+    FAILED = "failed"
+    NOT_CONFIGURED = "not_configured"
+
+
+@dataclass
+class ServiceStatus:
+    """Status of a single service."""
+    name: str
+    state: ServiceState = ServiceState.UNKNOWN
+    message: str = ""
+    endpoint: str = ""
+    started_at: Optional[float] = None
+    ready_at: Optional[float] = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "name": self.name,
+            "state": self.state.value,
+            "message": self.message,
+            "endpoint": self.endpoint,
+            "started_at": self.started_at,
+            "ready_at": self.ready_at,
+            "startup_time_ms": int((self.ready_at - self.started_at) * 1000)
+                if self.started_at and self.ready_at else None,
+        }
+
+
+# Module-level service status tracking
+_service_status: dict[str, ServiceStatus] = {
+    "ollama": ServiceStatus(name="ollama"),
+    "embedding": ServiceStatus(name="embedding"),
+    "falkordb": ServiceStatus(name="falkordb"),
+}
+_status_lock = threading.Lock()
+
+
+def get_service_status() -> dict[str, dict]:
+    """Get current status of all services.
+
+    Returns:
+        Dictionary mapping service name to status dict.
+    """
+    with _status_lock:
+        return {name: status.to_dict() for name, status in _service_status.items()}
+
+
+def _update_service_status(
+    name: str,
+    state: ServiceState,
+    message: str = "",
+    endpoint: str = "",
+    started_at: Optional[float] = None,
+    ready_at: Optional[float] = None,
+) -> None:
+    """Update status for a service."""
+    with _status_lock:
+        if name in _service_status:
+            status = _service_status[name]
+            status.state = state
+            if message:
+                status.message = message
+            if endpoint:
+                status.endpoint = endpoint
+            if started_at is not None:
+                status.started_at = started_at
+            if ready_at is not None:
+                status.ready_at = ready_at
 
 
 def check_first_run() -> None:
@@ -57,13 +139,98 @@ def _is_localhost_url(url: str) -> bool:
         return False
 
 
+def _check_ollama_health(api_base: str, timeout: float = 2.0) -> bool:
+    """Check if Ollama is responding."""
+    models_url = f"{api_base}/models"
+    try:
+        req = urllib.request.Request(
+            models_url,
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+def _ollama_startup_worker(api_base: str) -> None:
+    """Background worker to start Ollama and wait for it to be ready."""
+    start_time = time.time()
+    _update_service_status("ollama", ServiceState.STARTING, endpoint=api_base, started_at=start_time)
+
+    models_url = f"{api_base}/models"
+
+    # Method 1: Try systemctl (Linux with systemd)
+    try:
+        result = subprocess.run(
+            ["systemctl", "start", "ollama"],
+            capture_output=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            # Wait for it to be ready (up to 30s)
+            for _ in range(60):
+                time.sleep(0.5)
+                if _check_ollama_health(api_base):
+                    _update_service_status(
+                        "ollama", ServiceState.RUNNING,
+                        message="Started via systemctl",
+                        ready_at=time.time()
+                    )
+                    log_debug("Ollama started successfully via systemctl.")
+                    return
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Method 2: Try ollama serve directly (macOS, or Linux without systemd)
+    try:
+        result = subprocess.run(
+            ["which", "ollama"],
+            capture_output=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            # Wait for it to be ready (up to 30s)
+            for _ in range(60):
+                time.sleep(0.5)
+                if _check_ollama_health(api_base):
+                    _update_service_status(
+                        "ollama", ServiceState.RUNNING,
+                        message="Started via ollama serve",
+                        ready_at=time.time()
+                    )
+                    log_debug("Ollama started successfully via ollama serve.")
+                    return
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Failed to start
+    system = platform.system().lower()
+    if system == "windows":
+        install_cmd = "winget install Ollama.Ollama"
+    elif system == "darwin":
+        install_cmd = "brew install ollama"
+    else:
+        install_cmd = "curl -fsSL https://ollama.com/install.sh | sh"
+
+    _update_service_status(
+        "ollama", ServiceState.FAILED,
+        message=f"Could not start. Install with: {install_cmd}"
+    )
+    log_debug("Ollama auto-start failed")
+
+
 def ensure_ollama_running() -> None:
     """Start Ollama if graph features are enabled and it's not running.
 
-    This reduces friction for new users - if they have Ollama installed
-    and graph features enabled, we'll start it automatically.
-
-    Only attempts auto-start for localhost URLs (won't try to start remote services).
+    This is non-blocking - spawns a background thread if Ollama needs to start.
+    Check get_service_status()["ollama"] to see current state.
     """
     try:
         from .config import get_watercooler_config
@@ -74,6 +241,7 @@ def ensure_ollama_running() -> None:
 
         # Only auto-start if graph features are enabled
         if not (graph_config.generate_summaries or graph_config.generate_embeddings):
+            _update_service_status("ollama", ServiceState.DISABLED, message="Graph features disabled")
             return
 
         # Get configured LLM API base from unified config
@@ -82,106 +250,37 @@ def ensure_ollama_running() -> None:
 
         # Only attempt auto-start for localhost URLs
         if not _is_localhost_url(api_base):
+            _update_service_status(
+                "ollama", ServiceState.NOT_CONFIGURED,
+                message=f"Remote endpoint: {api_base}",
+                endpoint=api_base
+            )
             log_debug(f"LLM API base is not localhost ({api_base}), skipping Ollama auto-start")
             return
 
-        models_url = f"{api_base}/models"
-
-        # Check if LLM service is already responding
-        try:
-            req = urllib.request.Request(
-                models_url,
-                headers={"Content-Type": "application/json"}
+        # Check if already running
+        if _check_ollama_health(api_base):
+            _update_service_status(
+                "ollama", ServiceState.RUNNING,
+                message="Already running",
+                endpoint=api_base,
+                ready_at=time.time()
             )
-            with urllib.request.urlopen(req, timeout=2) as resp:
-                if resp.status == 200:
-                    return  # Already running
-        except (urllib.error.URLError, TimeoutError, OSError):
-            pass  # Not running, try to start
+            log_debug(f"Ollama already running at {api_base}")
+            return
 
-        # Try to start Ollama
-        log_debug("Starting Ollama for graph features...")
-
-        # Method 1: Try systemctl (Linux with systemd)
-        try:
-            result = subprocess.run(
-                ["systemctl", "start", "ollama"],
-                capture_output=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                # Wait for it to be ready
-                for _ in range(10):
-                    time.sleep(0.5)
-                    try:
-                        req = urllib.request.Request(models_url)
-                        with urllib.request.urlopen(req, timeout=2):
-                            log_debug("Ollama started successfully via systemctl.")
-                            return
-                    except (urllib.error.URLError, TimeoutError, OSError):
-                        continue
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-
-        # Method 2: Try ollama serve directly (macOS, or Linux without systemd)
-        try:
-            # Check if ollama command exists
-            result = subprocess.run(
-                ["which", "ollama"],
-                capture_output=True,
-                timeout=2
-            )
-            if result.returncode == 0:
-                # Start ollama serve in background
-                subprocess.Popen(
-                    ["ollama", "serve"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True
-                )
-                # Wait for it to be ready
-                for _ in range(10):
-                    time.sleep(0.5)
-                    try:
-                        req = urllib.request.Request(models_url)
-                        with urllib.request.urlopen(req, timeout=2):
-                            log_debug("Ollama started successfully via ollama serve.")
-                            return
-                    except (urllib.error.URLError, TimeoutError, OSError):
-                        continue
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-
-        # If we get here, couldn't start Ollama - give platform-aware guidance
-        import platform
-        system = platform.system().lower()
-
-        if system == "windows":
-            install_cmd = "winget install Ollama.Ollama"
-            alt_msg = "Or download from: https://ollama.com/download/windows\n"
-        elif system == "darwin":
-            install_cmd = "brew install ollama"
-            alt_msg = "Or: curl -fsSL https://ollama.com/install.sh | sh\n"
-        else:  # Linux
-            install_cmd = "curl -fsSL https://ollama.com/install.sh | sh"
-            alt_msg = ""
-
-        msg = (
-            "Ollama not available - graph features (summaries/embeddings) disabled.\n"
-            "To enable AI-powered summaries and semantic search:\n"
-            f"  {install_cmd}\n"
+        # Start in background thread
+        log_debug("Starting Ollama in background...")
+        thread = threading.Thread(
+            target=_ollama_startup_worker,
+            args=(api_base,),
+            daemon=True,
+            name="ollama-startup"
         )
-        if alt_msg:
-            msg += f"  {alt_msg}"
-        msg += (
-            "Then pull models:\n"
-            "  ollama pull llama3.2:3b\n"
-            "  ollama pull nomic-embed-text\n"
-            "Restart your IDE to reload the MCP server."
-        )
-        _add_startup_warning(msg)
+        thread.start()
+
     except Exception as e:
-        # Don't let auto-start errors break server startup
+        _update_service_status("ollama", ServiceState.FAILED, message=str(e))
         log_debug(f"Ollama auto-start check failed: {e}")
 
 
@@ -492,20 +591,37 @@ def _ensure_embedding_service_available(
         return _start_embedding_direct(model_path, host, port, context_size)
 
 
+def _embedding_startup_worker(model_name: str, api_base: str, context_size: int) -> None:
+    """Background worker to start embedding service and wait for it to be ready."""
+    start_time = time.time()
+    _update_service_status("embedding", ServiceState.STARTING, endpoint=api_base, started_at=start_time)
+
+    if _ensure_embedding_service_available(model_name, api_base, context_size):
+        _update_service_status(
+            "embedding", ServiceState.RUNNING,
+            message=f"Model: {model_name}",
+            ready_at=time.time()
+        )
+        log_debug("Embedding service started successfully")
+    else:
+        _update_service_status(
+            "embedding", ServiceState.FAILED,
+            message="Could not start. Run: python -m watercooler_memory.embedding_server"
+        )
+        log_debug("Embedding auto-start failed")
+
+
 def ensure_embedding_running() -> None:
     """Start embedding service if graph features are enabled and it's not running.
 
-    This provides seamless embedding server management - users just specify
-    `model = "bge-m3"` in config and the service starts automatically.
+    This is non-blocking - spawns a background thread if embedding service needs to start.
+    Check get_service_status()["embedding"] to see current state.
 
     Features:
     - Auto-downloads model from HuggingFace on first use
     - Auto-starts llama.cpp or Python embedding server
     - Auto-sets EMBEDDING_DIM to match model
     - Works on Linux, macOS, Windows (with platform-specific handling)
-
-    For Ollama-based embeddings (:11434), this is a no-op if ensure_ollama_running()
-    already ran. Only attempts auto-start for localhost URLs.
     """
     try:
         from .config import get_watercooler_config
@@ -516,6 +632,7 @@ def ensure_embedding_running() -> None:
 
         # Only auto-start if graph features are enabled and embedding generation is on
         if not graph_config.generate_embeddings:
+            _update_service_status("embedding", ServiceState.DISABLED, message="Embedding generation disabled")
             log_debug("Embedding generation disabled, skipping auto-start")
             return
 
@@ -528,11 +645,22 @@ def ensure_embedding_running() -> None:
 
         # Only attempt auto-start for localhost URLs
         if not _is_localhost_url(api_base):
+            _update_service_status(
+                "embedding", ServiceState.NOT_CONFIGURED,
+                message=f"Remote endpoint: {api_base}",
+                endpoint=api_base
+            )
             log_debug(f"Embedding API base is not localhost ({api_base}), skipping auto-start")
             return
 
         # Check if embedding service is already responding
         if _check_embedding_health(api_base):
+            _update_service_status(
+                "embedding", ServiceState.RUNNING,
+                message=f"Already running, model: {model_name}",
+                endpoint=api_base,
+                ready_at=time.time()
+            )
             log_debug(f"Embedding service already running at {api_base}")
             return
 
@@ -544,48 +672,34 @@ def ensure_embedding_running() -> None:
 
         # If embedding uses same endpoint as LLM, Ollama should handle both
         if api_base == llm_api_base:
+            _update_service_status(
+                "embedding", ServiceState.NOT_CONFIGURED,
+                message="Using Ollama endpoint",
+                endpoint=api_base
+            )
             log_debug("Embedding uses same endpoint as LLM, Ollama should serve both")
             # Still set EMBEDDING_DIM for Ollama models
             from watercooler.models import is_ollama_embedding_model as is_ollama_model
 
             if is_ollama_model(model_name):
-                # nomic-embed-text is 768 dim
                 if "nomic" in model_name.lower():
                     os.environ.setdefault("EMBEDDING_DIM", "768")
             return
 
-        # For llama.cpp embedding server, try auto-start
-        log_debug(f"Embedding service not available at {api_base}, attempting auto-start")
+        # Start in background thread
+        log_debug(f"Embedding service not available at {api_base}, starting in background...")
         context_size = embed_config.context_size
 
-        if _ensure_embedding_service_available(model_name, api_base, context_size):
-            log_debug("Embedding service started successfully")
-        else:
-            # Auto-start failed, provide guidance
-            from urllib.parse import urlparse
-
-            parsed = urlparse(api_base)
-            port = parsed.port or 8080
-
-            if port == 8080:
-                _add_startup_warning(
-                    f"Could not auto-start embedding service at {api_base}.\n"
-                    "To start manually:\n"
-                    "  python -m watercooler_memory.embedding_server\n"
-                    "Or use Ollama for embeddings:\n"
-                    "  [memory.embedding]\n"
-                    "  api_base = \"http://localhost:11434/v1\"\n"
-                    "  model = \"nomic-embed-text:latest\"\n"
-                    "  dim = 768"
-                )
-            else:
-                _add_startup_warning(
-                    f"Embedding service not available at {api_base}.\n"
-                    "Graph embedding features will be disabled until the service is started."
-                )
+        thread = threading.Thread(
+            target=_embedding_startup_worker,
+            args=(model_name, api_base, context_size),
+            daemon=True,
+            name="embedding-startup"
+        )
+        thread.start()
 
     except Exception as e:
-        # Don't let auto-start errors break server startup
+        _update_service_status("embedding", ServiceState.FAILED, message=str(e))
         log_debug(f"Embedding auto-start check failed: {e}")
 
 
@@ -641,11 +755,107 @@ def _wait_for_falkordb_ready(
     return False
 
 
+def _falkordb_startup_worker(host: str, port: int) -> None:
+    """Background worker to start FalkorDB and wait for it to be ready."""
+    start_time = time.time()
+    endpoint = f"{host}:{port}"
+    _update_service_status("falkordb", ServiceState.STARTING, endpoint=endpoint, started_at=start_time)
+
+    # Check if Docker is available
+    docker_path = shutil.which("docker")
+    if not docker_path:
+        _update_service_status(
+            "falkordb", ServiceState.FAILED,
+            message="Docker not found. Install Docker to use FalkorDB."
+        )
+        return
+
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "name=falkordb", "--format", "{{.Status}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        container_status = result.stdout.strip()
+
+        if container_status:
+            # Container exists - try to start it
+            if "Exited" in container_status or "Created" in container_status:
+                log_debug("Starting existing FalkorDB container...")
+                result = subprocess.run(
+                    ["docker", "start", "falkordb"],
+                    capture_output=True,
+                    timeout=30,
+                )
+                if result.returncode == 0:
+                    if _wait_for_falkordb_ready(host, port, max_wait=60.0):
+                        _update_service_status(
+                            "falkordb", ServiceState.RUNNING,
+                            message="Container started",
+                            ready_at=time.time()
+                        )
+                        log_debug("FalkorDB container started successfully")
+                        return
+            elif "Up" in container_status:
+                # Container is running but not responding - might be loading
+                log_debug("FalkorDB container is up, waiting for it to be ready...")
+                if _wait_for_falkordb_ready(host, port, max_wait=60.0):
+                    _update_service_status(
+                        "falkordb", ServiceState.RUNNING,
+                        message="Container ready",
+                        ready_at=time.time()
+                    )
+                    log_debug("FalkorDB is now ready")
+                    return
+        else:
+            # Container doesn't exist - create and start it
+            log_debug("Creating new FalkorDB container...")
+            result = subprocess.run(
+                [
+                    "docker", "run", "-d",
+                    "-p", f"{port}:6379",
+                    "-p", "3000:3000",
+                    "--name", "falkordb",
+                    "-v", "falkordb_data:/var/lib/falkordb/data",
+                    "-e", "FALKORDB_ARGS=TIMEOUT 120000",
+                    "falkordb/falkordb:latest",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                if _wait_for_falkordb_ready(host, port, max_wait=60.0):
+                    _update_service_status(
+                        "falkordb", ServiceState.RUNNING,
+                        message="Container created",
+                        ready_at=time.time()
+                    )
+                    log_debug("FalkorDB container created and started successfully")
+                    return
+                else:
+                    log_debug("FalkorDB container created but not responding")
+            else:
+                log_debug(f"Failed to create FalkorDB container: {result.stderr}")
+
+    except subprocess.TimeoutExpired:
+        log_debug("Docker command timed out")
+    except Exception as e:
+        log_debug(f"Docker command failed: {e}")
+
+    # If we get here, auto-start failed
+    _update_service_status(
+        "falkordb", ServiceState.FAILED,
+        message="Could not start. Run: docker start falkordb"
+    )
+
+
 def ensure_falkordb_running() -> None:
     """Start FalkorDB if Graphiti backend is enabled and it's not running.
 
-    This provides seamless FalkorDB management - if Graphiti is enabled,
-    the database starts automatically via Docker.
+    This is non-blocking - spawns a background thread if FalkorDB needs to start.
+    Check get_service_status()["falkordb"] to see current state.
 
     Requires Docker to be installed and accessible.
     """
@@ -655,6 +865,7 @@ def ensure_falkordb_running() -> None:
         # Only auto-start if Graphiti backend is enabled
         backend = get_memory_backend()
         if backend != "graphiti":
+            _update_service_status("falkordb", ServiceState.DISABLED, message=f"Backend is '{backend}'")
             log_debug(f"Memory backend is '{backend}', skipping FalkorDB auto-start")
             return
 
@@ -662,101 +873,39 @@ def ensure_falkordb_running() -> None:
         db_config = resolve_database_config()
         host = db_config.host
         port = db_config.port
+        endpoint = f"{host}:{port}"
 
         # Only auto-start for localhost
         if host not in ("localhost", "127.0.0.1", "::1"):
+            _update_service_status(
+                "falkordb", ServiceState.NOT_CONFIGURED,
+                message=f"Remote host: {host}",
+                endpoint=endpoint
+            )
             log_debug(f"FalkorDB host is not localhost ({host}), skipping auto-start")
             return
 
         # Check if FalkorDB is already running
         if _check_falkordb_health(host, port):
+            _update_service_status(
+                "falkordb", ServiceState.RUNNING,
+                message="Already running",
+                endpoint=endpoint,
+                ready_at=time.time()
+            )
             log_debug(f"FalkorDB already running at {host}:{port}")
             return
 
-        log_debug(f"FalkorDB not responding at {host}:{port}, attempting auto-start")
-
-        # Check if Docker is available
-        docker_path = shutil.which("docker")
-        if not docker_path:
-            _add_startup_warning(
-                "FalkorDB not running and Docker not found.\n"
-                "Install Docker and run:\n"
-                "  docker run -d -p 6379:6379 --name falkordb falkordb/falkordb:latest\n"
-                "Or install Docker: https://docs.docker.com/get-docker/"
-            )
-            return
-
-        # Check if falkordb container exists (stopped or running)
-        try:
-            result = subprocess.run(
-                ["docker", "ps", "-a", "--filter", "name=falkordb", "--format", "{{.Status}}"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            container_status = result.stdout.strip()
-
-            if container_status:
-                # Container exists - try to start it
-                if "Exited" in container_status or "Created" in container_status:
-                    log_debug("Starting existing FalkorDB container...")
-                    result = subprocess.run(
-                        ["docker", "start", "falkordb"],
-                        capture_output=True,
-                        timeout=30,
-                    )
-                    if result.returncode == 0:
-                        if _wait_for_falkordb_ready(host, port, max_wait=30.0):
-                            log_debug("FalkorDB container started successfully")
-                            return
-                        else:
-                            log_debug("FalkorDB container started but not responding")
-                elif "Up" in container_status:
-                    # Container is running but not responding - might be loading
-                    log_debug("FalkorDB container is up, waiting for it to be ready...")
-                    if _wait_for_falkordb_ready(host, port, max_wait=60.0):
-                        log_debug("FalkorDB is now ready")
-                        return
-            else:
-                # Container doesn't exist - create and start it
-                log_debug("Creating new FalkorDB container...")
-                result = subprocess.run(
-                    [
-                        "docker", "run", "-d",
-                        "-p", f"{port}:6379",
-                        "-p", "3000:3000",
-                        "--name", "falkordb",
-                        "-v", "falkordb_data:/var/lib/falkordb/data",
-                        "-e", "FALKORDB_ARGS=TIMEOUT 120000",
-                        "falkordb/falkordb:latest",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-                if result.returncode == 0:
-                    if _wait_for_falkordb_ready(host, port, max_wait=30.0):
-                        log_debug("FalkorDB container created and started successfully")
-                        return
-                    else:
-                        log_debug("FalkorDB container created but not responding")
-                else:
-                    log_debug(f"Failed to create FalkorDB container: {result.stderr}")
-
-        except subprocess.TimeoutExpired:
-            log_debug("Docker command timed out")
-        except Exception as e:
-            log_debug(f"Docker command failed: {e}")
-
-        # If we get here, auto-start failed
-        _add_startup_warning(
-            f"Could not auto-start FalkorDB at {host}:{port}.\n"
-            "Start it manually:\n"
-            "  docker start falkordb\n"
-            "Or create a new container:\n"
-            "  docker run -d -p 6379:6379 --name falkordb falkordb/falkordb:latest"
+        # Start in background thread
+        log_debug(f"FalkorDB not responding at {host}:{port}, starting in background...")
+        thread = threading.Thread(
+            target=_falkordb_startup_worker,
+            args=(host, port),
+            daemon=True,
+            name="falkordb-startup"
         )
+        thread.start()
 
     except Exception as e:
-        # Don't let auto-start errors break server startup
+        _update_service_status("falkordb", ServiceState.FAILED, message=str(e))
         log_debug(f"FalkorDB auto-start check failed: {e}")

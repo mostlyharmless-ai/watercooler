@@ -490,6 +490,49 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
         except Exception as e:
             status_lines.append(f"\nGraph Services: Error - {e}")
 
+        # Add backend service auto-start status
+        try:
+            from watercooler_mcp.startup import get_service_status, ServiceState
+
+            service_status = get_service_status()
+            status_lines.extend([
+                "",
+                "Backend Services (Auto-Start):",
+            ])
+
+            state_icons = {
+                "running": "✓",
+                "starting": "⏳",
+                "failed": "✗",
+                "disabled": "○",
+                "not_configured": "○",
+                "unknown": "?",
+            }
+
+            for name, status in service_status.items():
+                state = status["state"]
+                icon = state_icons.get(state, "?")
+                msg = status.get("message", "")
+                endpoint = status.get("endpoint", "")
+
+                if state == "running":
+                    startup_ms = status.get("startup_time_ms")
+                    if startup_ms:
+                        status_lines.append(f"  {icon} {name}: {state} ({startup_ms}ms) {endpoint}")
+                    else:
+                        status_lines.append(f"  {icon} {name}: {state} {endpoint}")
+                elif state in ("disabled", "not_configured"):
+                    status_lines.append(f"  {icon} {name}: {state} - {msg}")
+                elif state == "starting":
+                    status_lines.append(f"  {icon} {name}: {state}... {endpoint}")
+                elif state == "failed":
+                    status_lines.append(f"  {icon} {name}: {state} - {msg}")
+                else:
+                    status_lines.append(f"  {icon} {name}: {state}")
+
+        except Exception as e:
+            status_lines.append(f"\nBackend Services: Error - {e}")
+
         # Add branch parity health if code and threads repos are available
         if context.code_root and context.threads_dir:
             try:
