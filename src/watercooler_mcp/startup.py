@@ -153,16 +153,104 @@ def _check_ollama_health(api_base: str, timeout: float = 2.0) -> bool:
         return False
 
 
-def _ollama_startup_worker(api_base: str) -> None:
-    """Background worker to start Ollama and wait for it to be ready.
+def _check_ollama_model_available(model_name: str) -> bool:
+    """Check if a model is already pulled in Ollama.
+
+    Args:
+        model_name: Model name (e.g., "qwen3:30b")
+
+    Returns:
+        True if model is available locally
+    """
+    ollama_path = shutil.which("ollama")
+    if not ollama_path:
+        return False
+
+    try:
+        result = subprocess.run(
+            [ollama_path, "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            # Parse output - model names are in first column
+            for line in result.stdout.strip().split("\n")[1:]:  # Skip header
+                if line.strip():
+                    available_model = line.split()[0]
+                    # Check exact match or base name match
+                    if available_model == model_name:
+                        return True
+                    # Handle tag matching (qwen3:30b matches qwen3:30b-q4_K_M)
+                    if ":" in model_name:
+                        base = model_name.split(":")[0]
+                        if available_model.startswith(base + ":"):
+                            return True
+        return False
+    except (subprocess.TimeoutExpired, Exception):
+        return False
+
+
+def _pull_ollama_model(model_name: str) -> bool:
+    """Pull an Ollama model if not already available.
+
+    Args:
+        model_name: Model name to pull (e.g., "qwen3:30b")
+
+    Returns:
+        True if model is now available
+    """
+    ollama_path = shutil.which("ollama")
+    if not ollama_path:
+        log_debug("Ollama binary not found, cannot pull model")
+        return False
+
+    # Check if already available
+    if _check_ollama_model_available(model_name):
+        log_debug(f"Ollama model {model_name} already available")
+        return True
+
+    log_debug(f"Pulling Ollama model: {model_name}")
+    try:
+        # Pull can take a long time for large models
+        result = subprocess.run(
+            [ollama_path, "pull", model_name],
+            capture_output=True,
+            text=True,
+            timeout=1800,  # 30 minute timeout for large models
+        )
+        if result.returncode == 0:
+            log_debug(f"Successfully pulled Ollama model: {model_name}")
+            return True
+        else:
+            log_debug(f"Failed to pull Ollama model {model_name}: {result.stderr}")
+            return False
+    except subprocess.TimeoutExpired:
+        log_debug(f"Timeout pulling Ollama model: {model_name}")
+        return False
+    except Exception as e:
+        log_debug(f"Error pulling Ollama model {model_name}: {e}")
+        return False
+
+
+def _ollama_startup_worker(api_base: str, model_name: Optional[str] = None) -> None:
+    """Background worker to start Ollama and ensure model is available.
 
     Prefers 'ollama serve' over systemctl because:
     - No root/sudo permissions required
     - Works consistently across Linux, macOS
     - start_new_session=True ensures process survives parent exit
+
+    After starting Ollama, pulls the configured model if not already available.
+
+    Args:
+        api_base: Ollama API base URL
+        model_name: Model to ensure is available (e.g., "qwen3:30b")
     """
     start_time = time.time()
     _update_service_status("ollama", ServiceState.STARTING, endpoint=api_base, started_at=start_time)
+
+    ollama_started = False
 
     # Method 1 (preferred): Try ollama serve directly - no root permissions needed
     ollama_path = shutil.which("ollama")
@@ -178,59 +266,79 @@ def _ollama_startup_worker(api_base: str) -> None:
             for _ in range(60):
                 time.sleep(0.5)
                 if _check_ollama_health(api_base):
-                    _update_service_status(
-                        "ollama", ServiceState.RUNNING,
-                        message="Started via ollama serve",
-                        ready_at=time.time()
-                    )
+                    ollama_started = True
                     log_debug("Ollama started successfully via ollama serve.")
-                    return
+                    break
         except Exception as e:
             log_debug(f"ollama serve failed: {e}")
 
     # Method 2 (fallback): Try systemctl (Linux with systemd, if ollama serve fails)
-    # This requires root permissions but may be needed if ollama service is misconfigured
-    try:
-        result = subprocess.run(
-            ["systemctl", "start", "ollama"],
-            capture_output=True,
-            timeout=5
+    if not ollama_started:
+        try:
+            result = subprocess.run(
+                ["systemctl", "start", "ollama"],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                # Wait for it to be ready (up to 30s)
+                for _ in range(60):
+                    time.sleep(0.5)
+                    if _check_ollama_health(api_base):
+                        ollama_started = True
+                        log_debug("Ollama started successfully via systemctl.")
+                        break
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    if not ollama_started:
+        # Failed to start
+        system = platform.system().lower()
+        if system == "windows":
+            install_cmd = "winget install Ollama.Ollama"
+        elif system == "darwin":
+            install_cmd = "brew install ollama"
+        else:
+            install_cmd = "curl -fsSL https://ollama.com/install.sh | sh"
+
+        _update_service_status(
+            "ollama", ServiceState.FAILED,
+            message=f"Could not start. Install with: {install_cmd}"
         )
-        if result.returncode == 0:
-            # Wait for it to be ready (up to 30s)
-            for _ in range(60):
-                time.sleep(0.5)
-                if _check_ollama_health(api_base):
-                    _update_service_status(
-                        "ollama", ServiceState.RUNNING,
-                        message="Started via systemctl",
-                        ready_at=time.time()
-                    )
-                    log_debug("Ollama started successfully via systemctl.")
-                    return
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        log_debug("Ollama auto-start failed")
+        return
 
-    # Failed to start
-    system = platform.system().lower()
-    if system == "windows":
-        install_cmd = "winget install Ollama.Ollama"
-    elif system == "darwin":
-        install_cmd = "brew install ollama"
+    # Ollama is running - now ensure the model is available
+    if model_name:
+        _update_service_status(
+            "ollama", ServiceState.STARTING,
+            message=f"Pulling model: {model_name}"
+        )
+        if _pull_ollama_model(model_name):
+            _update_service_status(
+                "ollama", ServiceState.RUNNING,
+                message=f"Model: {model_name}",
+                ready_at=time.time()
+            )
+        else:
+            _update_service_status(
+                "ollama", ServiceState.RUNNING,
+                message=f"Running (model pull failed: {model_name})",
+                ready_at=time.time()
+            )
     else:
-        install_cmd = "curl -fsSL https://ollama.com/install.sh | sh"
-
-    _update_service_status(
-        "ollama", ServiceState.FAILED,
-        message=f"Could not start. Install with: {install_cmd}"
-    )
-    log_debug("Ollama auto-start failed")
+        _update_service_status(
+            "ollama", ServiceState.RUNNING,
+            message="Started (no model configured)",
+            ready_at=time.time()
+        )
 
 
 def ensure_ollama_running() -> None:
     """Start Ollama if graph features are enabled and it's not running.
 
     This is non-blocking - spawns a background thread if Ollama needs to start.
+    Also ensures the configured model is available (pulls if needed).
     Check get_service_status()["ollama"] to see current state.
     """
     try:
@@ -245,9 +353,10 @@ def ensure_ollama_running() -> None:
             _update_service_status("ollama", ServiceState.DISABLED, message="Graph features disabled")
             return
 
-        # Get configured LLM API base from unified config
+        # Get configured LLM API base and model from unified config
         llm_config = resolve_baseline_graph_llm_config()
         api_base = llm_config.api_base.rstrip("/")
+        model_name = llm_config.model  # e.g., "qwen3:30b"
 
         # Only attempt auto-start for localhost URLs
         if not _is_localhost_url(api_base):
@@ -261,20 +370,31 @@ def ensure_ollama_running() -> None:
 
         # Check if already running
         if _check_ollama_health(api_base):
-            _update_service_status(
-                "ollama", ServiceState.RUNNING,
-                message="Already running",
-                endpoint=api_base,
-                ready_at=time.time()
-            )
             log_debug(f"Ollama already running at {api_base}")
+            # Even if running, ensure model is available in background
+            if model_name:
+                log_debug(f"Checking if model {model_name} needs to be pulled...")
+                thread = threading.Thread(
+                    target=_ensure_model_available_worker,
+                    args=(model_name, api_base),
+                    daemon=True,
+                    name="ollama-model-check"
+                )
+                thread.start()
+            else:
+                _update_service_status(
+                    "ollama", ServiceState.RUNNING,
+                    message="Already running",
+                    endpoint=api_base,
+                    ready_at=time.time()
+                )
             return
 
-        # Start in background thread
-        log_debug("Starting Ollama in background...")
+        # Start in background thread (will also pull model)
+        log_debug(f"Starting Ollama in background (model: {model_name})...")
         thread = threading.Thread(
             target=_ollama_startup_worker,
-            args=(api_base,),
+            args=(api_base, model_name),
             daemon=True,
             name="ollama-startup"
         )
@@ -283,6 +403,30 @@ def ensure_ollama_running() -> None:
     except Exception as e:
         _update_service_status("ollama", ServiceState.FAILED, message=str(e))
         log_debug(f"Ollama auto-start check failed: {e}")
+
+
+def _ensure_model_available_worker(model_name: str, api_base: str) -> None:
+    """Background worker to ensure model is available when Ollama is already running."""
+    start_time = time.time()
+    _update_service_status(
+        "ollama", ServiceState.STARTING,
+        endpoint=api_base,
+        started_at=start_time,
+        message=f"Checking model: {model_name}"
+    )
+
+    if _pull_ollama_model(model_name):
+        _update_service_status(
+            "ollama", ServiceState.RUNNING,
+            message=f"Model: {model_name}",
+            ready_at=time.time()
+        )
+    else:
+        _update_service_status(
+            "ollama", ServiceState.RUNNING,
+            message=f"Running (model pull failed: {model_name})",
+            ready_at=time.time()
+        )
 
 
 def _check_embedding_health(api_base: str, timeout: float = 2.0) -> bool:
