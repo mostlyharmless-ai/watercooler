@@ -1,7 +1,7 @@
-"""Summarizer for baseline graph using local LLM or extractive fallback.
+"""Summarizer for baseline graph using local LLM.
 
 Uses OpenAI-compatible API for local LLM inference (Ollama, llama.cpp).
-Falls back to extractive summarization when LLM is unavailable.
+Returns empty string when LLM is unavailable (no fallback to extractive).
 """
 
 import logging
@@ -389,7 +389,7 @@ def summarize_entry(
 ) -> str:
     """Summarize a single thread entry.
 
-    Uses LLM if available, falls back to extractive summary.
+    Uses LLM for summarization. Returns empty string if LLM unavailable.
 
     Args:
         entry_body: Entry body text
@@ -437,15 +437,9 @@ Summary:"""
 
     result = _call_llm(prompt, config)
 
-    # Fall back to extractive if LLM fails
     if result is None:
-        logger.debug("Falling back to extractive summary")
-        return extractive_summary(
-            entry_body,
-            max_chars=config.extractive_max_chars,
-            include_headers=config.include_headers,
-            max_headers=config.max_headers,
-        )
+        logger.debug("LLM unavailable, no summary generated")
+        return ""
 
     return result
 
@@ -513,12 +507,8 @@ Summary:"""
     result = _call_llm(prompt, config)
 
     if result is None:
-        # Fall back to extractive
-        return extractive_summary(
-            combined,
-            max_chars=config.extractive_max_chars * 2,
-            include_headers=False,
-        )
+        logger.debug("LLM unavailable, no thread summary generated")
+        return ""
 
     return result
 
