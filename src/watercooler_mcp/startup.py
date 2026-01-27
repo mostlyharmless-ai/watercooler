@@ -154,13 +154,42 @@ def _check_ollama_health(api_base: str, timeout: float = 2.0) -> bool:
 
 
 def _ollama_startup_worker(api_base: str) -> None:
-    """Background worker to start Ollama and wait for it to be ready."""
+    """Background worker to start Ollama and wait for it to be ready.
+
+    Prefers 'ollama serve' over systemctl because:
+    - No root/sudo permissions required
+    - Works consistently across Linux, macOS
+    - start_new_session=True ensures process survives parent exit
+    """
     start_time = time.time()
     _update_service_status("ollama", ServiceState.STARTING, endpoint=api_base, started_at=start_time)
 
-    models_url = f"{api_base}/models"
+    # Method 1 (preferred): Try ollama serve directly - no root permissions needed
+    ollama_path = shutil.which("ollama")
+    if ollama_path:
+        try:
+            subprocess.Popen(
+                [ollama_path, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True  # Detach from parent process
+            )
+            # Wait for it to be ready (up to 30s)
+            for _ in range(60):
+                time.sleep(0.5)
+                if _check_ollama_health(api_base):
+                    _update_service_status(
+                        "ollama", ServiceState.RUNNING,
+                        message="Started via ollama serve",
+                        ready_at=time.time()
+                    )
+                    log_debug("Ollama started successfully via ollama serve.")
+                    return
+        except Exception as e:
+            log_debug(f"ollama serve failed: {e}")
 
-    # Method 1: Try systemctl (Linux with systemd)
+    # Method 2 (fallback): Try systemctl (Linux with systemd, if ollama serve fails)
+    # This requires root permissions but may be needed if ollama service is misconfigured
     try:
         result = subprocess.run(
             ["systemctl", "start", "ollama"],
@@ -178,34 +207,6 @@ def _ollama_startup_worker(api_base: str) -> None:
                         ready_at=time.time()
                     )
                     log_debug("Ollama started successfully via systemctl.")
-                    return
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-    # Method 2: Try ollama serve directly (macOS, or Linux without systemd)
-    try:
-        result = subprocess.run(
-            ["which", "ollama"],
-            capture_output=True,
-            timeout=2
-        )
-        if result.returncode == 0:
-            subprocess.Popen(
-                ["ollama", "serve"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True
-            )
-            # Wait for it to be ready (up to 30s)
-            for _ in range(60):
-                time.sleep(0.5)
-                if _check_ollama_health(api_base):
-                    _update_service_status(
-                        "ollama", ServiceState.RUNNING,
-                        message="Started via ollama serve",
-                        ready_at=time.time()
-                    )
-                    log_debug("Ollama started successfully via ollama serve.")
                     return
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
