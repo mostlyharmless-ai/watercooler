@@ -587,3 +587,176 @@ def ensure_embedding_running() -> None:
     except Exception as e:
         # Don't let auto-start errors break server startup
         log_debug(f"Embedding auto-start check failed: {e}")
+
+
+def _check_falkordb_health(host: str, port: int, timeout: float = 2.0) -> bool:
+    """Check if FalkorDB is responding.
+
+    Args:
+        host: FalkorDB host
+        port: FalkorDB port
+        timeout: Connection timeout in seconds
+
+    Returns:
+        True if FalkorDB is responding to PING
+    """
+    import socket
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        # Send Redis PING command
+        sock.send(b"*1\r\n$4\r\nPING\r\n")
+        response = sock.recv(32)
+        sock.close()
+        return b"+PONG" in response
+    except (socket.error, socket.timeout, OSError):
+        return False
+
+
+def _wait_for_falkordb_ready(
+    host: str,
+    port: int,
+    max_wait: float = 30.0,
+    poll_interval: float = 1.0,
+) -> bool:
+    """Wait for FalkorDB to become ready.
+
+    Args:
+        host: FalkorDB host
+        port: FalkorDB port
+        max_wait: Maximum time to wait in seconds
+        poll_interval: Time between health checks
+
+    Returns:
+        True if FalkorDB became ready, False if timeout
+    """
+    elapsed = 0.0
+    while elapsed < max_wait:
+        if _check_falkordb_health(host, port):
+            return True
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+    return False
+
+
+def ensure_falkordb_running() -> None:
+    """Start FalkorDB if Graphiti backend is enabled and it's not running.
+
+    This provides seamless FalkorDB management - if Graphiti is enabled,
+    the database starts automatically via Docker.
+
+    Requires Docker to be installed and accessible.
+    """
+    try:
+        from watercooler.memory_config import get_memory_backend, resolve_database_config
+
+        # Only auto-start if Graphiti backend is enabled
+        backend = get_memory_backend()
+        if backend != "graphiti":
+            log_debug(f"Memory backend is '{backend}', skipping FalkorDB auto-start")
+            return
+
+        # Get database config
+        db_config = resolve_database_config()
+        host = db_config.host
+        port = db_config.port
+
+        # Only auto-start for localhost
+        if host not in ("localhost", "127.0.0.1", "::1"):
+            log_debug(f"FalkorDB host is not localhost ({host}), skipping auto-start")
+            return
+
+        # Check if FalkorDB is already running
+        if _check_falkordb_health(host, port):
+            log_debug(f"FalkorDB already running at {host}:{port}")
+            return
+
+        log_debug(f"FalkorDB not responding at {host}:{port}, attempting auto-start")
+
+        # Check if Docker is available
+        docker_path = shutil.which("docker")
+        if not docker_path:
+            _add_startup_warning(
+                "FalkorDB not running and Docker not found.\n"
+                "Install Docker and run:\n"
+                "  docker run -d -p 6379:6379 --name falkordb falkordb/falkordb:latest\n"
+                "Or install Docker: https://docs.docker.com/get-docker/"
+            )
+            return
+
+        # Check if falkordb container exists (stopped or running)
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "-a", "--filter", "name=falkordb", "--format", "{{.Status}}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            container_status = result.stdout.strip()
+
+            if container_status:
+                # Container exists - try to start it
+                if "Exited" in container_status or "Created" in container_status:
+                    log_debug("Starting existing FalkorDB container...")
+                    result = subprocess.run(
+                        ["docker", "start", "falkordb"],
+                        capture_output=True,
+                        timeout=30,
+                    )
+                    if result.returncode == 0:
+                        if _wait_for_falkordb_ready(host, port, max_wait=30.0):
+                            log_debug("FalkorDB container started successfully")
+                            return
+                        else:
+                            log_debug("FalkorDB container started but not responding")
+                elif "Up" in container_status:
+                    # Container is running but not responding - might be loading
+                    log_debug("FalkorDB container is up, waiting for it to be ready...")
+                    if _wait_for_falkordb_ready(host, port, max_wait=60.0):
+                        log_debug("FalkorDB is now ready")
+                        return
+            else:
+                # Container doesn't exist - create and start it
+                log_debug("Creating new FalkorDB container...")
+                result = subprocess.run(
+                    [
+                        "docker", "run", "-d",
+                        "-p", f"{port}:6379",
+                        "-p", "3000:3000",
+                        "--name", "falkordb",
+                        "-v", "falkordb_data:/var/lib/falkordb/data",
+                        "-e", "FALKORDB_ARGS=TIMEOUT 120000",
+                        "falkordb/falkordb:latest",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if result.returncode == 0:
+                    if _wait_for_falkordb_ready(host, port, max_wait=30.0):
+                        log_debug("FalkorDB container created and started successfully")
+                        return
+                    else:
+                        log_debug("FalkorDB container created but not responding")
+                else:
+                    log_debug(f"Failed to create FalkorDB container: {result.stderr}")
+
+        except subprocess.TimeoutExpired:
+            log_debug("Docker command timed out")
+        except Exception as e:
+            log_debug(f"Docker command failed: {e}")
+
+        # If we get here, auto-start failed
+        _add_startup_warning(
+            f"Could not auto-start FalkorDB at {host}:{port}.\n"
+            "Start it manually:\n"
+            "  docker start falkordb\n"
+            "Or create a new container:\n"
+            "  docker run -d -p 6379:6379 --name falkordb falkordb/falkordb:latest"
+        )
+
+    except Exception as e:
+        # Don't let auto-start errors break server startup
+        log_debug(f"FalkorDB auto-start check failed: {e}")

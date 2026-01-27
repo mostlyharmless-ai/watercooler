@@ -22,7 +22,7 @@ from fastmcp import FastMCP
 # Local application imports
 from watercooler.config_facade import config
 from .config import ThreadContext
-from .startup import check_first_run, ensure_ollama_running, ensure_embedding_running
+from .startup import check_first_run, ensure_ollama_running, ensure_embedding_running, ensure_falkordb_running
 
 # Import validation functions (extracted to break circular imports)
 from .validation import (
@@ -199,6 +199,9 @@ def main():
 
     # Auto-start embedding service if needed (provides guidance for llama.cpp)
     ensure_embedding_running()
+
+    # Auto-start FalkorDB if Graphiti backend is enabled
+    ensure_falkordb_running()
 
     # Get transport configuration from unified config system
     from .config import get_mcp_transport_config
