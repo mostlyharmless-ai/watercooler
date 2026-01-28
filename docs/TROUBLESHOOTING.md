@@ -26,6 +26,8 @@ Common issues and solutions for the watercooler MCP server.
 - [Thread folder inside code repo](#thread-folder-inside-code-repo)
 - [Ball Not Flipping](#ball-not-flipping)
 - [Server Crashes or Hangs](#server-crashes-or-hangs)
+- [Cache Management](#cache-management)
+- [llama-server Issues](#llama-server-issues)
 - [Format Parameter Errors](#format-parameter-errors)
 - [401 Unauthorized (Remote MCP)](#401-unauthorized-remote-mcp)
 - [Getting More Help](#getting-more-help)
@@ -938,6 +940,109 @@ MCP server stops responding or crashes.
    python3 -m watercooler_mcp
    ```
    Should start without errors.
+
+## Cache Management
+
+The watercooler MCP server uses multiple caches that can sometimes get out of sync,
+especially during rapid development or when troubleshooting installation issues.
+
+### Understanding the Caches
+
+There are three separate caches involved:
+
+| Cache | Location | Contains |
+|-------|----------|----------|
+| **Watercooler binaries** | `~/.watercooler/bin/` | llama-server binary and shared libraries (.so files) |
+| **Watercooler models** | `~/.watercooler/models/` | Downloaded GGUF model files |
+| **uvx package cache** | `~/.cache/uv/archive-v0/` | Built Python packages |
+| **uvx git cache** | `~/.cache/uv/git-v0/` | Git repository checkouts |
+
+### Quick Reset
+
+Use the built-in reset command to clear watercooler caches:
+
+```bash
+watercooler-mcp --reset-cache
+```
+
+This clears:
+- `~/.watercooler/bin/` (llama-server and shared libraries)
+- `~/.watercooler/models/` (downloaded GGUF models)
+
+### Full Reset (Including uvx)
+
+For a complete reset including the uvx package cache:
+
+```bash
+# Clear watercooler caches
+watercooler-mcp --reset-cache
+
+# Clear uvx caches
+uv cache clean
+
+# Or selectively clear watercooler-related uvx caches:
+rm -rf ~/.cache/uv/archive-v0/*watercooler*
+```
+
+### When to Reset Caches
+
+Reset caches when you experience:
+- llama-server fails to start with "shared library not found" errors
+- Old version of code running despite pulling updates
+- Model download failures or corrupted models
+- Unexplained behavior after updating watercooler
+
+## llama-server Issues
+
+### Symptom: Missing Shared Libraries
+
+```
+error while loading shared libraries: libllama.so.0: cannot open shared object file
+```
+
+### Cause
+
+The llama-server binary requires shared libraries (.so files) that should be
+extracted alongside it. This can happen if:
+- An old version extracted only the binary without libraries
+- The extraction was interrupted
+- Cache contains stale binaries
+
+### Solution
+
+```bash
+# Reset watercooler caches and restart
+watercooler-mcp --reset-cache
+
+# Then restart your MCP client to trigger fresh download
+```
+
+The server will automatically download llama-server and extract all required
+shared libraries to `~/.watercooler/bin/`.
+
+### Symptom: llama-server Download Timeout
+
+If llama-server download takes too long or times out:
+
+1. Check your internet connection
+2. Try downloading manually:
+   ```bash
+   # Find the latest release
+   gh release view --repo ggml-org/llama.cpp
+
+   # Download the appropriate build for your platform
+   gh release download --repo ggml-org/llama.cpp --pattern "*ubuntu-vulkan*" -D ~/.watercooler/bin/
+   ```
+
+3. Extract and set permissions:
+   ```bash
+   cd ~/.watercooler/bin/
+   tar -xzf *.tar.gz
+   mv llama-*/llama-server .
+   mv llama-*/*.so* .
+   chmod +x llama-server
+   rm -rf llama-*/
+   ```
 
 ## Format Parameter Errors
 

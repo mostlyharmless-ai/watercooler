@@ -189,8 +189,79 @@ diagnose_memory = _memory_tools.diagnose_memory
 # ============================================================================
 
 
+def _reset_cache() -> None:
+    """Clear watercooler caches (binaries and models).
+
+    Clears:
+    - ~/.watercooler/bin/ (llama-server and shared libraries)
+    - ~/.watercooler/models/ (downloaded GGUF models)
+
+    Also prints instructions for clearing uvx caches if needed.
+    """
+    import shutil
+    from pathlib import Path
+
+    watercooler_dir = Path.home() / ".watercooler"
+    cleared = []
+
+    # Clear binaries (llama-server, .so files)
+    bin_dir = watercooler_dir / "bin"
+    if bin_dir.exists():
+        shutil.rmtree(bin_dir)
+        cleared.append(f"  - {bin_dir}")
+
+    # Clear downloaded models
+    models_dir = watercooler_dir / "models"
+    if models_dir.exists():
+        shutil.rmtree(models_dir)
+        cleared.append(f"  - {models_dir}")
+
+    if cleared:
+        print("Cleared watercooler caches:", file=sys.stderr)
+        for path in cleared:
+            print(path, file=sys.stderr)
+    else:
+        print("No watercooler caches to clear.", file=sys.stderr)
+
+    # Print uvx cache instructions
+    print("\nTo fully reset (including uvx package cache), also run:", file=sys.stderr)
+    print("  rm -rf ~/.cache/uv/archive-v0/*watercooler* ~/.cache/uv/git-v0/checkouts/*/watercooler*", file=sys.stderr)
+    print("\nOr for a complete uvx reset:", file=sys.stderr)
+    print("  uv cache clean", file=sys.stderr)
+
+
 def main():
     """Entry point for watercooler-mcp command."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Watercooler MCP Server - AI agent collaboration tools",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  watercooler-mcp              Start MCP server (stdio transport)
+  watercooler-mcp --help       Show this help message
+  watercooler-mcp --reset-cache  Clear downloaded binaries and models
+
+Environment variables:
+  WATERCOOLER_DIR              Path to threads directory
+  WATERCOOLER_AGENT            Default agent identity
+  WATERCOOLER_TRANSPORT        Transport type (stdio or http)
+  WATERCOOLER_HOST             HTTP host (default: 127.0.0.1)
+  WATERCOOLER_PORT             HTTP port (default: 8765)
+"""
+    )
+    parser.add_argument(
+        "--reset-cache",
+        action="store_true",
+        help="Clear watercooler caches (binaries, models) and exit"
+    )
+    args = parser.parse_args()
+
+    if args.reset_cache:
+        _reset_cache()
+        sys.exit(0)
+
     # Check for first-run and suggest config initialization
     check_first_run()
 
