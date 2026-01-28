@@ -70,8 +70,7 @@ memory = [
     "openai>=1.0",
     "graphiti-core[falkordb] @ git+https://github.com/mostlyharmless-ai/graphiti.git@feature/hnsw-entity-index",
     "leanrag @ git+https://github.com/mostlyharmless-ai/LeanRAG.git@feature/falkordb-vector-backend",
-    # Local embedding server for auto-start (llama.cpp based)
-    "llama-cpp-python[server]>=0.2.50",
+    # Model downloads from HuggingFace (llama-server binary is downloaded separately)
     "huggingface_hub>=0.20",
 ]
 # Graphiti temporal graph memory backend (without leanrag)
@@ -81,8 +80,7 @@ graphiti = [
     "httpx>=0.25",
     "openai>=1.0",
     "graphiti-core[falkordb] @ git+https://github.com/mostlyharmless-ai/graphiti.git@feature/hnsw-entity-index",
-    # Local embedding server for auto-start (llama.cpp based)
-    "llama-cpp-python[server]>=0.2.50",
+    # Model downloads from HuggingFace (llama-server binary is downloaded separately)
     "huggingface_hub>=0.20",
 ]
 # LeanRAG hierarchical graph memory backend (without graphiti)
@@ -91,23 +89,14 @@ leanrag = [
     "httpx>=0.25",
     "openai>=1.0",
     "leanrag @ git+https://github.com/mostlyharmless-ai/LeanRAG.git@feature/falkordb-vector-backend",
-    # Local embedding server for auto-start (llama.cpp based)
-    "llama-cpp-python[server]>=0.2.50",
+    # Model downloads from HuggingFace (llama-server binary is downloaded separately)
     "huggingface_hub>=0.20",
 ]
-# Local LLM inference - provides OpenAI-compatible server for offline summarization
+# Local model support - downloads GGUF models, llama-server binary auto-downloaded at runtime
 # Usage: pip install watercooler-cloud[local]
-#        python -m watercooler_memory.local_server  (auto-downloads default model)
 local = [
-    "llama-cpp-python[server]>=0.2.50",
     "huggingface_hub>=0.20",
     "httpx>=0.25",
-]
-# Full graph building with local models
-graph-local = [
-    "tiktoken>=0.5",
-    "httpx>=0.25",
-    "llama-cpp-python[server]>=0.2.50",
 ]
 # Interactive graph visualization for baseline graphs (scripts/visualize_graph.py)
 # See docs/visualization.md for usage
