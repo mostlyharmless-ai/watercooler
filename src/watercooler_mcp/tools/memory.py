@@ -242,7 +242,19 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
         config = mem.load_graphiti_config(code_path=code_path if code_path else None)
         diagnostics["graphiti_enabled"] = config is not None
         if config:
-            diagnostics["openai_key_set"] = bool(config.openai_api_key)
+            # Check LLM API key (llm_api_key is the current field, openai_api_key is deprecated)
+            llm_key = config.llm_api_key or config.openai_api_key
+            diagnostics["llm_api_key_set"] = bool(llm_key)
+            diagnostics["llm_api_base"] = config.llm_api_base or "https://api.openai.com/v1 (default)"
+            diagnostics["llm_model"] = config.llm_model or "gpt-4o-mini (default)"
+            # Validate key format (basic check - not a full auth test)
+            if llm_key:
+                if llm_key.startswith("sk-"):
+                    diagnostics["llm_api_key_format"] = "valid (sk-...)"
+                else:
+                    diagnostics["llm_api_key_format"] = f"unusual format: {llm_key[:10]}..."
+            # Legacy field check (for backwards compatibility awareness)
+            diagnostics["openai_key_set"] = bool(config.openai_api_key)  # Deprecated field
         else:
             diagnostics["config_issue"] = (
                 "Graphiti not enabled. Either set WATERCOOLER_GRAPHITI_ENABLED=1, "

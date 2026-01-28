@@ -505,7 +505,9 @@ class GraphitiBackend(MemoryBackend):
             BackendError: If Graphiti client creation or episode addition fails
             TransientError: If database connection fails
         """
+        import time
         logger.debug(f"add_episode_direct called, group_id={group_id}")
+        logger.debug(f"add_episode_direct LLM config: api_base={self.config.llm_api_base}, model={self.config.llm_model}, key_set={bool(self.config.llm_api_key)}")
         try:
             # Use cached client with indices already built to avoid per-call overhead
             graphiti = await self._get_graphiti_client_with_indices()
@@ -522,6 +524,8 @@ class GraphitiBackend(MemoryBackend):
             # entity deduplication (same as _map_entries_to_episodes does for index())
             sanitized_body = self._sanitize_redisearch_operators(episode_body)
 
+            logger.debug(f"add_episode_direct calling graphiti.add_episode (LLM entity extraction starts)")
+            start_time = time.time()
             result = await graphiti.add_episode(
                 name=name,
                 episode_body=sanitized_body,
@@ -530,6 +534,8 @@ class GraphitiBackend(MemoryBackend):
                 group_id=group_id,
                 previous_episode_uuids=previous_episode_uuids,
             )
+            elapsed = time.time() - start_time
+            logger.debug(f"add_episode_direct graphiti.add_episode completed in {elapsed:.2f}s")
 
             # Extract episode UUID from result - fail if missing
             # AddEpisodeResults has an 'episode' field containing the EpisodicNode
@@ -548,6 +554,10 @@ class GraphitiBackend(MemoryBackend):
                 entities = [getattr(n, "name", str(n)) for n in result.nodes]
             if hasattr(result, "edges"):
                 facts_count = len(result.edges)
+
+            logger.debug(f"add_episode_direct extracted {len(entities)} entities, {facts_count} facts")
+            if entities:
+                logger.debug(f"add_episode_direct entities: {entities[:5]}{'...' if len(entities) > 5 else ''}")
 
             return {
                 "episode_uuid": episode_uuid,
