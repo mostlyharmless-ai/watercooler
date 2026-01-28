@@ -272,11 +272,24 @@ def _start_llama_server(
         log_debug(f"Starting llama-server in completion mode: {' '.join(cmd)}")
 
     try:
+        # Set LD_LIBRARY_PATH to include the directory containing llama-server
+        # This is needed because llama.cpp shared libraries (.so files) are
+        # extracted alongside the binary
+        env = os.environ.copy()
+        lib_dir = str(llama_server.parent)
+        existing_ld_path = env.get("LD_LIBRARY_PATH", "")
+        if existing_ld_path:
+            env["LD_LIBRARY_PATH"] = f"{lib_dir}:{existing_ld_path}"
+        else:
+            env["LD_LIBRARY_PATH"] = lib_dir
+        log_debug(f"Setting LD_LIBRARY_PATH={env['LD_LIBRARY_PATH']}")
+
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,  # Detach from parent process
+            env=env,
         )
         return True
     except Exception as e:
@@ -693,51 +706,89 @@ def _download_llama_server() -> Optional[Path]:
 
         log_debug(f"Downloaded archive to: {archive_path}")
 
-        # Extract llama-server from archive
+        # Extract llama-server AND shared libraries from archive
+        # The llama.cpp releases include .so files that llama-server depends on:
+        # libmtmd.so.0, libllama.so.0, libggml.so.0, libggml-base.so.0, etc.
+        extracted_files: list[Path] = []
+
         if archive_ext == ".tar.gz":
             with tarfile.open(archive_path, "r:gz") as tf:
-                # Find llama-server in the archive
+                found_binary = False
                 for member in tf.getmembers():
-                    if member.name.endswith("llama-server"):
-                        log_debug(f"Extracting {member.name} from archive")
-                        # Extract to temp location
+                    basename = Path(member.name).name
+                    # Extract llama-server binary
+                    if basename == "llama-server":
+                        log_debug(f"Extracting binary: {member.name}")
                         tf.extract(member, bin_dir)
                         extracted_path = bin_dir / member.name
-                        # Move to target location
                         if extracted_path != target_binary:
                             if target_binary.exists():
                                 target_binary.unlink()
                             extracted_path.rename(target_binary)
-                        break
-                else:
+                        found_binary = True
+                    # Extract shared libraries (.so files)
+                    elif ".so" in basename and member.isfile():
+                        log_debug(f"Extracting library: {member.name}")
+                        tf.extract(member, bin_dir)
+                        extracted_path = bin_dir / member.name
+                        target_lib = bin_dir / basename
+                        if extracted_path != target_lib:
+                            if target_lib.exists():
+                                target_lib.unlink()
+                            extracted_path.rename(target_lib)
+                        extracted_files.append(target_lib)
+
+                if not found_binary:
                     log_debug("llama-server not found in tar.gz archive")
                     archive_path.unlink()
                     return None
+
         elif archive_ext == ".zip":
             with zipfile.ZipFile(archive_path, "r") as zf:
-                # Find llama-server in the archive
+                found_binary = False
                 for name in zf.namelist():
-                    if name.endswith("llama-server") or name.endswith("llama-server.exe"):
-                        log_debug(f"Extracting {name} from archive")
+                    basename = Path(name).name
+                    # Extract llama-server binary
+                    if basename in ("llama-server", "llama-server.exe"):
+                        log_debug(f"Extracting binary: {name}")
                         extracted = zf.extract(name, bin_dir)
                         extracted_path = Path(extracted)
                         if extracted_path != target_binary:
                             if target_binary.exists():
                                 target_binary.unlink()
                             extracted_path.rename(target_binary)
-                        break
-                else:
+                        found_binary = True
+                    # Extract shared libraries (.dll on Windows, .so on Linux)
+                    elif (".so" in basename or basename.endswith(".dll")) and not name.endswith("/"):
+                        log_debug(f"Extracting library: {name}")
+                        extracted = zf.extract(name, bin_dir)
+                        extracted_path = Path(extracted)
+                        target_lib = bin_dir / basename
+                        if extracted_path != target_lib:
+                            if target_lib.exists():
+                                target_lib.unlink()
+                            extracted_path.rename(target_lib)
+                        extracted_files.append(target_lib)
+
+                if not found_binary:
                     log_debug("llama-server not found in zip archive")
                     archive_path.unlink()
                     return None
 
-        # Make executable
+        # Make binary executable
         target_binary.chmod(0o755)
+
+        # Make libraries readable
+        for lib in extracted_files:
+            if lib.exists():
+                lib.chmod(0o644)
+
+        log_debug(f"Extracted {len(extracted_files)} shared libraries to {bin_dir}")
 
         # Clean up archive
         archive_path.unlink()
 
-        # Clean up any extracted subdirectories
+        # Clean up any extracted subdirectories (but keep the .so files we moved)
         for item in bin_dir.iterdir():
             if item.is_dir() and item.name.startswith("llama-"):
                 shutil.rmtree(item, ignore_errors=True)
@@ -854,6 +905,12 @@ def _start_embedding_windows(
         ]
         log_debug(f"Starting embedding server on Windows: {' '.join(cmd)}")
 
+        # Add llama-server directory to PATH for DLL discovery
+        env = os.environ.copy()
+        lib_dir = str(llama_server.parent)
+        existing_path = env.get("PATH", "")
+        env["PATH"] = f"{lib_dir};{existing_path}" if existing_path else lib_dir
+
         # Windows-specific: DETACHED_PROCESS
         DETACHED_PROCESS = 0x00000008
         subprocess.Popen(
@@ -861,6 +918,8 @@ def _start_embedding_windows(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=DETACHED_PROCESS,
+            env=env,
+            cwd=lib_dir,  # Run from the directory containing DLLs
         )
 
         if _wait_for_embedding_ready(api_base, max_wait=30.0):
