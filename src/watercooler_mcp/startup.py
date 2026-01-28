@@ -726,14 +726,16 @@ def _download_llama_server() -> Optional[Path]:
                                 target_binary.unlink()
                             extracted_path.rename(target_binary)
                         found_binary = True
-                    # Extract shared libraries (.so files)
-                    elif ".so" in basename and member.isfile():
-                        log_debug(f"Extracting library: {member.name}")
+                    # Extract shared libraries (.so files) - both regular files and symlinks
+                    # The tarball contains versioned files (libfoo.so.0.0.123) and symlinks
+                    # (libfoo.so.0 -> libfoo.so.0.0.123) that llama-server needs
+                    elif ".so" in basename and (member.isfile() or member.issym()):
+                        log_debug(f"Extracting library: {member.name} (symlink={member.issym()})")
                         tf.extract(member, bin_dir)
                         extracted_path = bin_dir / member.name
                         target_lib = bin_dir / basename
                         if extracted_path != target_lib:
-                            if target_lib.exists():
+                            if target_lib.exists() or target_lib.is_symlink():
                                 target_lib.unlink()
                             extracted_path.rename(target_lib)
                         extracted_files.append(target_lib)
