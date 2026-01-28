@@ -359,7 +359,7 @@ async def _search_graphiti_nodes_impl(
         raise RuntimeError("Graphiti backend unavailable")
 
     # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
-    results = await asyncio.to_thread(backend.search_nodes, query=query, max_nodes=limit)
+    results = await asyncio.to_thread(backend.search_nodes, query=query, max_results=limit)
 
     output: Dict[str, Any] = {
         "count": len(results),
