@@ -439,6 +439,21 @@ auto_detect_services = true
 # Embedding Service Configuration (shared across backends)
 # Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM,
 #                EMBEDDING_TIMEOUT, EMBEDDING_BATCH_SIZE
+#
+# IMPORTANT: Graphiti requires BATCH embeddings (multiple strings per API call).
+# The native llama-server binary with proper flags handles this correctly.
+# Watercooler auto-starts llama-server with these flags when available:
+#   llama-server --embedding --parallel 8 -c 8192 -b 4096 -ub 4096
+#
+# Manual startup (if auto-start fails):
+#   llama-server --model ~/.watercooler/models/bge-m3-q8_0.gguf \
+#     --host localhost --port 8080 --embedding \
+#     --parallel 8 -c 8192 -b 4096 -ub 4096
+#
+# Installing llama-server:
+#   - Build from source: https://github.com/ggml-org/llama.cpp
+#   - Or download release: https://github.com/ggml-org/llama.cpp/releases
+#   - Watercooler will auto-download if not found
 # -----------------------------------------------------------------------------
 [memory.embedding]
 
@@ -449,8 +464,9 @@ auto_detect_services = true
 
 # Embedding API base URL
 # Env: EMBEDDING_API_BASE
-# Default: local llama.cpp (http://localhost:8080/v1)
+# Default: local llama-server (http://localhost:8080/v1)
 # For Ollama: "http://localhost:11434/v1" (same port as LLM, different model)
+# NOTE: Ollama does NOT support batch embeddings - use llama-server for Graphiti
 # api_base = "http://localhost:8080/v1"
 
 # Embedding model name

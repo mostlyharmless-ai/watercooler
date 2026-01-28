@@ -25,6 +25,9 @@ from typing import Optional
 from .helpers import _add_startup_warning
 from .observability import log_debug
 
+# llama.cpp GitHub releases URL pattern
+LLAMA_CPP_RELEASE_URL = "https://github.com/ggml-org/llama.cpp/releases/latest"
+
 
 class ServiceState(Enum):
     """Service lifecycle states."""
@@ -509,6 +512,161 @@ def _try_systemctl_embedding() -> bool:
     return False
 
 
+def _find_llama_server() -> Optional[Path]:
+    """Find llama-server binary in PATH or common locations.
+
+    Checks:
+    1. System PATH (via shutil.which)
+    2. ~/.local/bin/llama-server (user-local install)
+    3. /usr/local/bin/llama-server (system install)
+    4. ~/.watercooler/bin/llama-server (watercooler-managed)
+
+    Returns:
+        Path to llama-server binary if found, None otherwise
+    """
+    # Check PATH first
+    binary = shutil.which("llama-server")
+    if binary:
+        log_debug(f"Found llama-server in PATH: {binary}")
+        return Path(binary)
+
+    # Check common install locations
+    common_locations = [
+        Path.home() / ".local" / "bin" / "llama-server",
+        Path("/usr/local/bin/llama-server"),
+        Path.home() / ".watercooler" / "bin" / "llama-server",
+    ]
+
+    for location in common_locations:
+        if location.exists() and location.is_file():
+            log_debug(f"Found llama-server at: {location}")
+            return location
+
+    log_debug("llama-server binary not found")
+    return None
+
+
+def _download_llama_server() -> Optional[Path]:
+    """Download llama-server binary from GitHub releases.
+
+    Downloads the latest release for the current platform and extracts
+    llama-server to ~/.watercooler/bin/.
+
+    Supported platforms:
+    - Linux x86_64
+    - macOS arm64 (Apple Silicon)
+    - macOS x86_64 (Intel)
+
+    Returns:
+        Path to downloaded llama-server binary, or None if download failed
+    """
+    import json
+    import tarfile
+    import zipfile
+    from urllib.error import HTTPError
+
+    # Determine platform
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    # Map platform to release asset pattern
+    # Release assets follow pattern: llama-<version>-bin-<platform>.zip
+    if system == "linux" and machine in ("x86_64", "amd64"):
+        asset_pattern = "ubuntu-x64"
+        archive_type = "zip"
+    elif system == "darwin" and machine == "arm64":
+        asset_pattern = "macos-arm64"
+        archive_type = "zip"
+    elif system == "darwin" and machine in ("x86_64", "amd64"):
+        asset_pattern = "macos-x64"
+        archive_type = "zip"
+    else:
+        log_debug(f"Unsupported platform for llama-server download: {system}/{machine}")
+        return None
+
+    # Create target directory
+    bin_dir = Path.home() / ".watercooler" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    target_binary = bin_dir / "llama-server"
+
+    try:
+        # Get latest release info from GitHub API
+        api_url = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+        log_debug(f"Fetching latest llama.cpp release info from: {api_url}")
+
+        req = urllib.request.Request(
+            api_url,
+            headers={
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "watercooler-cloud",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            release_info = json.loads(resp.read().decode())
+
+        # Find the matching asset
+        download_url = None
+        for asset in release_info.get("assets", []):
+            name = asset.get("name", "")
+            if asset_pattern in name and name.endswith(".zip"):
+                download_url = asset.get("browser_download_url")
+                log_debug(f"Found matching asset: {name}")
+                break
+
+        if not download_url:
+            log_debug(f"No matching release asset found for pattern: {asset_pattern}")
+            return None
+
+        # Download the archive
+        log_debug(f"Downloading llama-server from: {download_url}")
+        archive_path = bin_dir / f"llama-cpp-{asset_pattern}.zip"
+
+        req = urllib.request.Request(
+            download_url,
+            headers={"User-Agent": "watercooler-cloud"},
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:  # 5 min timeout for large download
+            with open(archive_path, "wb") as f:
+                f.write(resp.read())
+
+        log_debug(f"Downloaded archive to: {archive_path}")
+
+        # Extract llama-server from archive
+        if archive_type == "zip":
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                # Find llama-server in the archive
+                for name in zf.namelist():
+                    if name.endswith("llama-server") or name.endswith("llama-server.exe"):
+                        log_debug(f"Extracting {name} from archive")
+                        # Extract to temp location first
+                        extracted = zf.extract(name, bin_dir)
+                        extracted_path = Path(extracted)
+                        # Move to target location
+                        if extracted_path != target_binary:
+                            extracted_path.rename(target_binary)
+                        break
+                else:
+                    log_debug("llama-server not found in archive")
+                    archive_path.unlink()
+                    return None
+
+        # Make executable
+        target_binary.chmod(0o755)
+
+        # Clean up archive
+        archive_path.unlink()
+
+        log_debug(f"llama-server installed to: {target_binary}")
+        return target_binary
+
+    except HTTPError as e:
+        log_debug(f"HTTP error downloading llama-server: {e}")
+        return None
+    except Exception as e:
+        log_debug(f"Error downloading llama-server: {e}")
+        return None
+
+
 def _start_embedding_direct(
     model_path: Path,
     host: str,
@@ -517,7 +675,17 @@ def _start_embedding_direct(
 ) -> bool:
     """Start embedding server as a detached background process.
 
-    Tries llama-server binary first (faster startup), falls back to Python module.
+    Uses llama-server with Jay's proven configuration for batch embeddings:
+    - --parallel 8: Allow 8 concurrent requests
+    - -c 8192: Context window (matches bge-m3)
+    - -b 4096: Batch size for prompt processing
+    - -ub 4096: Micro-batch size for prompt processing
+    - --embedding: Enable embedding mode
+
+    These flags are critical for Graphiti's create_batch() calls which send
+    multiple strings in a single API request.
+
+    Falls back to Python module if llama-server is not available.
 
     Args:
         model_path: Path to GGUF model file
@@ -530,19 +698,27 @@ def _start_embedding_direct(
     """
     api_base = f"http://{host}:{port}/v1"
 
-    # Method 1: Try llama-server binary (faster startup)
-    llama_server = shutil.which("llama-server")
+    # Method 1: Try llama-server binary (faster startup, better batch support)
+    llama_server = _find_llama_server()
+    if not llama_server:
+        log_debug("llama-server not found, attempting download...")
+        llama_server = _download_llama_server()
+
     if llama_server:
         try:
+            # Jay's proven configuration for batch embeddings
             cmd = [
-                llama_server,
+                str(llama_server),
                 "--model", str(model_path),
                 "--host", host,
                 "--port", str(port),
-                "--embedding",
-                "--ctx-size", str(n_ctx),
+                "--embedding",         # Enable embedding mode
+                "--parallel", "8",     # Allow 8 concurrent requests
+                "-c", str(n_ctx),      # Context window (8192 for bge-m3)
+                "-b", "4096",          # Batch size for prompt processing
+                "-ub", "4096",         # Micro-batch size for prompt processing
             ]
-            log_debug(f"Starting embedding server: {' '.join(cmd)}")
+            log_debug(f"Starting embedding server with batch support: {' '.join(cmd)}")
 
             subprocess.Popen(
                 cmd,
@@ -552,13 +728,13 @@ def _start_embedding_direct(
             )
 
             if _wait_for_embedding_ready(api_base, max_wait=30.0):
-                log_debug("Embedding server started successfully via llama-server")
+                log_debug("Embedding server started successfully via llama-server (batch mode)")
                 return True
 
         except Exception as e:
             log_debug(f"llama-server start failed: {e}")
 
-    # Method 2: Fall back to Python module
+    # Method 2: Fall back to Python module (no batch support)
     try:
         cmd = [
             sys.executable,
@@ -568,7 +744,7 @@ def _start_embedding_direct(
             "--port", str(port),
             "--n-ctx", str(n_ctx),
         ]
-        log_debug(f"Starting embedding server via Python: {' '.join(cmd)}")
+        log_debug(f"Starting embedding server via Python (fallback, no batch): {' '.join(cmd)}")
 
         subprocess.Popen(
             cmd,
@@ -579,6 +755,12 @@ def _start_embedding_direct(
 
         if _wait_for_embedding_ready(api_base, max_wait=30.0):
             log_debug("Embedding server started successfully via Python module")
+            _add_startup_warning(
+                "Embedding server running in fallback mode (Python).\n"
+                "Batch embeddings may fail. Install llama-server for full support:\n"
+                "  # Build from source or download from:\n"
+                "  # https://github.com/ggml-org/llama.cpp/releases"
+            )
             return True
 
     except Exception as e:
