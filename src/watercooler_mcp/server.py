@@ -22,7 +22,7 @@ from fastmcp import FastMCP
 # Local application imports
 from watercooler.config_facade import config
 from .config import ThreadContext
-from .startup import check_first_run, ensure_ollama_running, ensure_embedding_running, ensure_falkordb_running
+from .startup import check_first_run, ensure_llm_running, ensure_embedding_running, ensure_falkordb_running
 
 # Import validation functions (extracted to break circular imports)
 from .validation import (
@@ -194,10 +194,10 @@ def main():
     # Check for first-run and suggest config initialization
     check_first_run()
 
-    # Auto-start Ollama if graph features are enabled
-    ensure_ollama_running()
+    # Auto-start llama-server for LLM if graph features are enabled
+    ensure_llm_running()
 
-    # Auto-start embedding service if needed (provides guidance for llama.cpp)
+    # Auto-start llama-server for embeddings if needed
     ensure_embedding_running()
 
     # Auto-start FalkorDB if Graphiti backend is enabled

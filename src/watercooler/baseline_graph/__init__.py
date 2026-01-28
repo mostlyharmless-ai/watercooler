@@ -1,10 +1,10 @@
 """Baseline graph module for free-tier knowledge graphs.
 
 This module provides a lightweight knowledge graph built from threads
-using locally-hosted LLMs (Ollama, llama.cpp) - no API costs required.
+using locally-hosted LLMs (llama-server, OpenAI) - no API costs required for local.
 
 Key components:
-- summarizer: LLM-based summarization with extractive fallback
+- summarizer: LLM-based summarization
 - parser: Thread parsing and entity extraction
 - export: JSONL export for graph storage
 """

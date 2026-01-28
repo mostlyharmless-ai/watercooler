@@ -352,7 +352,7 @@ def _should_auto_start_services() -> bool:
 def _try_auto_start_service(service_type: str, api_base: str) -> bool:
     """Attempt to auto-start a service using MCP startup utilities.
 
-    Uses ensure_ollama_running() for LLM and ensure_embedding_running() for embeddings.
+    Uses ensure_llm_running() for LLM and ensure_embedding_running() for embeddings.
     These functions are in watercooler_mcp.startup and handle platform-specific startup.
 
     Args:
@@ -368,8 +368,8 @@ def _try_auto_start_service(service_type: str, api_base: str) -> bool:
     try:
         # Try to use the MCP startup utilities
         if service_type == "llm":
-            from watercooler_mcp.startup import ensure_ollama_running
-            ensure_ollama_running()
+            from watercooler_mcp.startup import ensure_llm_running
+            ensure_llm_running()
         else:
             from watercooler_mcp.startup import ensure_embedding_running
             ensure_embedding_running()
@@ -991,7 +991,7 @@ def sync_entry_to_graph(
                 logger.warning(
                     f"LLM service unavailable at {summarizer_config.api_base}. "
                     "Skipping summary generation. To enable summaries: "
-                    "1) Start Ollama: 'ollama serve' "
+                    "1) Start llama-server on port 8000 "
                     "2) Or set WATERCOOLER_AUTO_START_SERVICES=true"
                 )
 

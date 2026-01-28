@@ -2,14 +2,14 @@
 
 import pytest
 
-from watercooler.embedding_models import (
-    DEFAULT_MODEL,
+from watercooler.models import (
+    DEFAULT_EMBEDDING_MODEL as DEFAULT_MODEL,
     EMBEDDING_MODELS,
     ModelNotFoundError,
     get_model_dimension,
     get_model_path,
     get_models_dir,
-    is_ollama_model,
+    is_ollama_embedding_model as is_ollama_model,
     resolve_embedding_model,
 )
 

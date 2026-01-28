@@ -12,7 +12,6 @@ import os
 import platform
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -20,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from .helpers import _add_startup_warning
 from .observability import log_debug
@@ -65,8 +64,8 @@ class ServiceStatus:
 
 # Module-level service status tracking
 _service_status: dict[str, ServiceStatus] = {
-    "ollama": ServiceStatus(name="ollama"),
-    "embedding": ServiceStatus(name="embedding"),
+    "llm": ServiceStatus(name="llm"),           # llama-server (completion mode)
+    "embedding": ServiceStatus(name="embedding"),  # llama-server (embedding mode)
     "falkordb": ServiceStatus(name="falkordb"),
 }
 _status_lock = threading.Lock()
@@ -142,13 +141,44 @@ def _is_localhost_url(url: str) -> bool:
         return False
 
 
-def _check_ollama_health(api_base: str, timeout: float = 2.0) -> bool:
-    """Check if Ollama is responding."""
-    models_url = f"{api_base}/models"
+def _extract_port(url: str, default: int = 8000) -> int:
+    """Extract port from a URL.
+
+    Args:
+        url: URL to parse
+        default: Default port if not specified
+
+    Returns:
+        Port number
+    """
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        if parsed.port:
+            return parsed.port
+        # Default ports based on scheme
+        if parsed.scheme == "https":
+            return 443
+        return default
+    except Exception:
+        return default
+
+
+def _check_llm_health(api_base: str, timeout: float = 2.0) -> bool:
+    """Check if LLM service (llama-server) is responding.
+
+    Args:
+        api_base: API base URL (without /models suffix)
+        timeout: Request timeout in seconds
+
+    Returns:
+        True if service is responding
+    """
+    models_url = f"{api_base.rstrip('/')}/models"
     try:
         req = urllib.request.Request(
             models_url,
-            headers={"Content-Type": "application/json"}
+            headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status == 200
@@ -156,193 +186,183 @@ def _check_ollama_health(api_base: str, timeout: float = 2.0) -> bool:
         return False
 
 
-def _check_ollama_model_available(model_name: str) -> bool:
-    """Check if a model is already pulled in Ollama.
+def _wait_for_llm_ready(
+    api_base: str,
+    max_wait: float = 60.0,
+    poll_interval: float = 1.0,
+) -> bool:
+    """Wait for LLM server to become ready.
 
     Args:
-        model_name: Model name (e.g., "qwen3:30b")
+        api_base: API base URL
+        max_wait: Maximum time to wait in seconds
+        poll_interval: Time between health checks
 
     Returns:
-        True if model is available locally
+        True if server became ready, False if timeout
     """
-    ollama_path = shutil.which("ollama")
-    if not ollama_path:
-        return False
-
-    try:
-        result = subprocess.run(
-            [ollama_path, "list"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            # Parse output - model names are in first column
-            for line in result.stdout.strip().split("\n")[1:]:  # Skip header
-                if line.strip():
-                    available_model = line.split()[0]
-                    # Check exact match or base name match
-                    if available_model == model_name:
-                        return True
-                    # Handle tag matching (qwen3:30b matches qwen3:30b-q4_K_M)
-                    if ":" in model_name:
-                        base = model_name.split(":")[0]
-                        if available_model.startswith(base + ":"):
-                            return True
-        return False
-    except (subprocess.TimeoutExpired, Exception):
-        return False
-
-
-def _pull_ollama_model(model_name: str) -> bool:
-    """Pull an Ollama model if not already available.
-
-    Args:
-        model_name: Model name to pull (e.g., "qwen3:30b")
-
-    Returns:
-        True if model is now available
-    """
-    ollama_path = shutil.which("ollama")
-    if not ollama_path:
-        log_debug("Ollama binary not found, cannot pull model")
-        return False
-
-    # Check if already available
-    if _check_ollama_model_available(model_name):
-        log_debug(f"Ollama model {model_name} already available")
-        return True
-
-    log_debug(f"Pulling Ollama model: {model_name}")
-    try:
-        # Pull can take a long time for large models
-        result = subprocess.run(
-            [ollama_path, "pull", model_name],
-            capture_output=True,
-            text=True,
-            timeout=1800,  # 30 minute timeout for large models
-        )
-        if result.returncode == 0:
-            log_debug(f"Successfully pulled Ollama model: {model_name}")
+    elapsed = 0.0
+    while elapsed < max_wait:
+        if _check_llm_health(api_base):
             return True
-        else:
-            log_debug(f"Failed to pull Ollama model {model_name}: {result.stderr}")
-            return False
-    except subprocess.TimeoutExpired:
-        log_debug(f"Timeout pulling Ollama model: {model_name}")
-        return False
-    except Exception as e:
-        log_debug(f"Error pulling Ollama model {model_name}: {e}")
-        return False
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+    return False
 
 
-def _ollama_startup_worker(api_base: str, model_name: Optional[str] = None) -> None:
-    """Background worker to start Ollama and ensure model is available.
+def _start_llama_server(
+    model_path: Path,
+    port: int,
+    mode: str,
+    context_size: int = 8192,
+    host: str = "127.0.0.1",
+) -> bool:
+    """Start llama-server for either embedding or LLM completion.
 
-    Prefers 'ollama serve' over systemctl because:
-    - No root/sudo permissions required
-    - Works consistently across Linux, macOS
-    - start_new_session=True ensures process survives parent exit
-
-    After starting Ollama, pulls the configured model if not already available.
+    NO FALLBACK - llama-server is required. If not found, we download it.
+    If download fails, we raise an error.
 
     Args:
-        api_base: Ollama API base URL
-        model_name: Model to ensure is available (e.g., "qwen3:30b")
+        model_path: Path to GGUF model file
+        port: Port to listen on
+        mode: "embedding" or "completion"
+        context_size: Context window size
+        host: Host to bind to
+
+    Returns:
+        True if server started successfully
+
+    Raises:
+        RuntimeError: If llama-server cannot be found or downloaded
     """
-    start_time = time.time()
-    _update_service_status("ollama", ServiceState.STARTING, endpoint=api_base, started_at=start_time)
+    llama_server = _find_llama_server()
+    if not llama_server:
+        log_debug("llama-server not found, attempting download from GitHub releases...")
+        llama_server = _download_llama_server()
 
-    ollama_started = False
-
-    # Method 1 (preferred): Try ollama serve directly - no root permissions needed
-    ollama_path = shutil.which("ollama")
-    if ollama_path:
-        try:
-            subprocess.Popen(
-                [ollama_path, "serve"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True  # Detach from parent process
-            )
-            # Wait for it to be ready (up to 30s)
-            for _ in range(60):
-                time.sleep(0.5)
-                if _check_ollama_health(api_base):
-                    ollama_started = True
-                    log_debug("Ollama started successfully via ollama serve.")
-                    break
-        except Exception as e:
-            log_debug(f"ollama serve failed: {e}")
-
-    # Method 2 (fallback): Try systemctl (Linux with systemd, if ollama serve fails)
-    if not ollama_started:
-        try:
-            result = subprocess.run(
-                ["systemctl", "start", "ollama"],
-                capture_output=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                # Wait for it to be ready (up to 30s)
-                for _ in range(60):
-                    time.sleep(0.5)
-                    if _check_ollama_health(api_base):
-                        ollama_started = True
-                        log_debug("Ollama started successfully via systemctl.")
-                        break
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-
-    if not ollama_started:
-        # Failed to start
-        system = platform.system().lower()
-        if system == "windows":
-            install_cmd = "winget install Ollama.Ollama"
-        elif system == "darwin":
-            install_cmd = "brew install ollama"
-        else:
-            install_cmd = "curl -fsSL https://ollama.com/install.sh | sh"
-
-        _update_service_status(
-            "ollama", ServiceState.FAILED,
-            message=f"Could not start. Install with: {install_cmd}"
+    if not llama_server:
+        # No fallback - fail with clear error
+        raise RuntimeError(
+            "llama-server binary required but could not be found or downloaded. "
+            "Install manually from: https://github.com/ggml-org/llama.cpp/releases"
         )
-        log_debug("Ollama auto-start failed")
+
+    cmd = [
+        str(llama_server),
+        "--model", str(model_path),
+        "--host", host,
+        "--port", str(port),
+        "-c", str(context_size),
+    ]
+
+    if mode == "embedding":
+        # Jay's batch-optimized flags - required for Graphiti's create_batch()
+        cmd.extend([
+            "--embedding",      # Enable embedding mode
+            "--parallel", "8",  # Allow 8 concurrent requests
+            "-b", "4096",       # Batch size for prompt processing
+            "-ub", "4096",      # Micro-batch size for prompt processing
+        ])
+        log_debug(f"Starting llama-server in embedding mode: {' '.join(cmd)}")
+    else:
+        # Completion mode for LLM inference
+        cmd.extend([
+            "--parallel", "4",  # Allow 4 concurrent requests
+        ])
+        log_debug(f"Starting llama-server in completion mode: {' '.join(cmd)}")
+
+    try:
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,  # Detach from parent process
+        )
+        return True
+    except Exception as e:
+        log_debug(f"Failed to start llama-server: {e}")
+        return False
+
+
+def _llm_startup_worker(model_name: str, api_base: str, context_size: int) -> None:
+    """Background worker to start LLM service (llama-server) and wait for it to be ready.
+
+    Args:
+        model_name: Model name to load (resolved via GGUF registry)
+        api_base: Target API base URL
+        context_size: Context window size
+    """
+    from watercooler.models import (
+        ModelDownloadError,
+        ModelNotFoundError,
+        ensure_llm_model_available,
+        is_known_llm_gguf_model,
+    )
+
+    start_time = time.time()
+    port = _extract_port(api_base, default=8000)
+    endpoint = f"http://127.0.0.1:{port}/v1"
+
+    _update_service_status("llm", ServiceState.STARTING, endpoint=endpoint, started_at=start_time)
+
+    # Check if model is in our GGUF registry
+    if not is_known_llm_gguf_model(model_name):
+        _update_service_status(
+            "llm", ServiceState.FAILED,
+            message=f"Model '{model_name}' not in GGUF registry. Add to models.py or use a cloud endpoint."
+        )
+        log_debug(f"LLM model {model_name} not in GGUF registry")
         return
 
-    # Ollama is running - now ensure the model is available
-    if model_name:
-        _update_service_status(
-            "ollama", ServiceState.STARTING,
-            message=f"Pulling model: {model_name}"
-        )
-        if _pull_ollama_model(model_name):
+    # Download model if needed
+    _update_service_status("llm", ServiceState.STARTING, message=f"Downloading model: {model_name}")
+    try:
+        model_path = ensure_llm_model_available(model_name, verbose=False)
+    except (ModelNotFoundError, ModelDownloadError) as e:
+        _update_service_status("llm", ServiceState.FAILED, message=f"Model download failed: {e}")
+        log_debug(f"Failed to download LLM model {model_name}: {e}")
+        return
+
+    log_debug(f"LLM model available at: {model_path}")
+
+    # Start llama-server in completion mode
+    _update_service_status("llm", ServiceState.STARTING, message="Starting llama-server...")
+    try:
+        if not _start_llama_server(model_path, port, mode="completion", context_size=context_size):
             _update_service_status(
-                "ollama", ServiceState.RUNNING,
-                message=f"Model: {model_name}",
-                ready_at=time.time()
+                "llm", ServiceState.FAILED,
+                message="Failed to start llama-server process"
             )
-        else:
-            _update_service_status(
-                "ollama", ServiceState.RUNNING,
-                message=f"Running (model pull failed: {model_name})",
-                ready_at=time.time()
-            )
-    else:
+            return
+    except RuntimeError as e:
+        _update_service_status("llm", ServiceState.FAILED, message=str(e))
+        log_debug(f"llama-server startup error: {e}")
+        return
+
+    # Wait for server to be ready
+    if _wait_for_llm_ready(endpoint, max_wait=60.0):
         _update_service_status(
-            "ollama", ServiceState.RUNNING,
-            message="Started (no model configured)",
+            "llm", ServiceState.RUNNING,
+            message=f"Model: {model_name}",
             ready_at=time.time()
         )
+        log_debug(f"LLM service started successfully at {endpoint}")
+    else:
+        _update_service_status(
+            "llm", ServiceState.FAILED,
+            message="Server started but not responding after 60s"
+        )
+        log_debug("LLM server started but health check timed out")
 
 
-def ensure_ollama_running() -> None:
-    """Start Ollama if graph features are enabled and it's not running.
+def ensure_llm_running() -> None:
+    """Start llama-server for LLM if configured for localhost and not running.
 
-    This is non-blocking - spawns a background thread if Ollama needs to start.
-    Also ensures the configured model is available (pulls if needed).
-    Check get_service_status()["ollama"] to see current state.
+    This is non-blocking - spawns a background thread if LLM service needs to start.
+    Check get_service_status()["llm"] to see current state.
+
+    Auto-starts only for localhost URLs. Remote endpoints (OpenAI, etc.) are assumed
+    to be managed externally.
     """
     try:
         from .config import get_watercooler_config
@@ -353,83 +373,53 @@ def ensure_ollama_running() -> None:
 
         # Only auto-start if graph features are enabled
         if not (graph_config.generate_summaries or graph_config.generate_embeddings):
-            _update_service_status("ollama", ServiceState.DISABLED, message="Graph features disabled")
+            _update_service_status("llm", ServiceState.DISABLED, message="Graph features disabled")
             return
 
         # Get configured LLM API base and model from unified config
         llm_config = resolve_baseline_graph_llm_config()
         api_base = llm_config.api_base.rstrip("/")
-        model_name = llm_config.model  # e.g., "qwen3:30b"
+        model_name = llm_config.model
 
         # Only attempt auto-start for localhost URLs
         if not _is_localhost_url(api_base):
             _update_service_status(
-                "ollama", ServiceState.NOT_CONFIGURED,
+                "llm", ServiceState.NOT_CONFIGURED,
                 message=f"Remote endpoint: {api_base}",
                 endpoint=api_base
             )
-            log_debug(f"LLM API base is not localhost ({api_base}), skipping Ollama auto-start")
+            log_debug(f"LLM API base is not localhost ({api_base}), skipping auto-start")
             return
 
         # Check if already running
-        if _check_ollama_health(api_base):
-            log_debug(f"Ollama already running at {api_base}")
-            # Even if running, ensure model is available in background
-            if model_name:
-                log_debug(f"Checking if model {model_name} needs to be pulled...")
-                thread = threading.Thread(
-                    target=_ensure_model_available_worker,
-                    args=(model_name, api_base),
-                    daemon=True,
-                    name="ollama-model-check"
-                )
-                thread.start()
-            else:
-                _update_service_status(
-                    "ollama", ServiceState.RUNNING,
-                    message="Already running",
-                    endpoint=api_base,
-                    ready_at=time.time()
-                )
+        if _check_llm_health(api_base):
+            _update_service_status(
+                "llm", ServiceState.RUNNING,
+                message=f"Already running, model: {model_name}",
+                endpoint=api_base,
+                ready_at=time.time()
+            )
+            log_debug(f"LLM service already running at {api_base}")
             return
 
-        # Start in background thread (will also pull model)
-        log_debug(f"Starting Ollama in background (model: {model_name})...")
+        # Start in background thread
+        log_debug(f"LLM service not available at {api_base}, starting in background...")
+
+        # Get context size from model spec or use default
+        from watercooler.models import get_llm_context_size
+        context_size = get_llm_context_size(model_name, default=8192)
+
         thread = threading.Thread(
-            target=_ollama_startup_worker,
-            args=(api_base, model_name),
+            target=_llm_startup_worker,
+            args=(model_name, api_base, context_size),
             daemon=True,
-            name="ollama-startup"
+            name="llm-startup"
         )
         thread.start()
 
     except Exception as e:
-        _update_service_status("ollama", ServiceState.FAILED, message=str(e))
-        log_debug(f"Ollama auto-start check failed: {e}")
-
-
-def _ensure_model_available_worker(model_name: str, api_base: str) -> None:
-    """Background worker to ensure model is available when Ollama is already running."""
-    start_time = time.time()
-    _update_service_status(
-        "ollama", ServiceState.STARTING,
-        endpoint=api_base,
-        started_at=start_time,
-        message=f"Checking model: {model_name}"
-    )
-
-    if _pull_ollama_model(model_name):
-        _update_service_status(
-            "ollama", ServiceState.RUNNING,
-            message=f"Model: {model_name}",
-            ready_at=time.time()
-        )
-    else:
-        _update_service_status(
-            "ollama", ServiceState.RUNNING,
-            message=f"Running (model pull failed: {model_name})",
-            ready_at=time.time()
-        )
+        _update_service_status("llm", ServiceState.FAILED, message=str(e))
+        log_debug(f"LLM auto-start check failed: {e}")
 
 
 def _check_embedding_health(api_base: str, timeout: float = 2.0) -> bool:
@@ -546,14 +536,79 @@ def _find_llama_server() -> Optional[Path]:
     return None
 
 
+def _has_nvidia_gpu() -> bool:
+    """Check if NVIDIA GPU is available via nvidia-smi.
+
+    Returns:
+        True if nvidia-smi succeeds (NVIDIA GPU with drivers installed)
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            gpu_name = result.stdout.decode().strip().split("\n")[0]
+            log_debug(f"Detected NVIDIA GPU: {gpu_name}")
+            return True
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return False
+
+
+def _download_with_progress(url: str, dest_path: Path, desc: str = "Downloading") -> bool:
+    """Download a file with progress indication.
+
+    Args:
+        url: URL to download
+        dest_path: Destination file path
+        desc: Description for progress display
+
+    Returns:
+        True if download succeeded
+    """
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "watercooler-cloud"})
+        with urllib.request.urlopen(req, timeout=600) as resp:  # 10 min timeout
+            total_size = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            chunk_size = 1024 * 1024  # 1MB chunks
+
+            with open(dest_path, "wb") as f:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    # Show progress
+                    if total_size > 0:
+                        pct = (downloaded / total_size) * 100
+                        mb_down = downloaded / (1024 * 1024)
+                        mb_total = total_size / (1024 * 1024)
+                        log_debug(f"{desc}: {mb_down:.1f}/{mb_total:.1f} MB ({pct:.0f}%)")
+
+        return True
+    except Exception as e:
+        log_debug(f"Download failed: {e}")
+        if dest_path.exists():
+            dest_path.unlink()
+        return False
+
+
 def _download_llama_server() -> Optional[Path]:
     """Download llama-server binary from GitHub releases.
 
     Downloads the latest release for the current platform and extracts
     llama-server to ~/.watercooler/bin/.
 
+    On Linux with NVIDIA GPU, prefers Vulkan build for GPU acceleration.
+    Falls back to CPU build if Vulkan not available.
+
     Supported platforms:
-    - Linux x86_64
+    - Linux x86_64 (CPU or Vulkan)
     - macOS arm64 (Apple Silicon)
     - macOS x86_64 (Intel)
 
@@ -569,17 +624,20 @@ def _download_llama_server() -> Optional[Path]:
     system = platform.system().lower()
     machine = platform.machine().lower()
 
-    # Map platform to release asset pattern
-    # Release assets follow pattern: llama-<version>-bin-<platform>.zip
+    # Build list of asset patterns to try (in preference order)
+    asset_patterns: list[tuple[str, str]] = []  # (pattern, archive_ext)
+
     if system == "linux" and machine in ("x86_64", "amd64"):
-        asset_pattern = "ubuntu-x64"
-        archive_type = "zip"
+        # On Linux, prefer Vulkan build if GPU detected (works with NVIDIA via Vulkan)
+        if _has_nvidia_gpu():
+            log_debug("NVIDIA GPU detected, preferring Vulkan build for GPU acceleration")
+            asset_patterns.append(("ubuntu-vulkan-x64", ".tar.gz"))
+        # Always have CPU fallback
+        asset_patterns.append(("ubuntu-x64", ".tar.gz"))
     elif system == "darwin" and machine == "arm64":
-        asset_pattern = "macos-arm64"
-        archive_type = "zip"
+        asset_patterns.append(("macos-arm64", ".tar.gz"))
     elif system == "darwin" and machine in ("x86_64", "amd64"):
-        asset_pattern = "macos-x64"
-        archive_type = "zip"
+        asset_patterns.append(("macos-x64", ".tar.gz"))
     else:
         log_debug(f"Unsupported platform for llama-server download: {system}/{machine}")
         return None
@@ -604,49 +662,72 @@ def _download_llama_server() -> Optional[Path]:
         with urllib.request.urlopen(req, timeout=30) as resp:
             release_info = json.loads(resp.read().decode())
 
-        # Find the matching asset
+        # Try each asset pattern in preference order
         download_url = None
-        for asset in release_info.get("assets", []):
-            name = asset.get("name", "")
-            if asset_pattern in name and name.endswith(".zip"):
-                download_url = asset.get("browser_download_url")
-                log_debug(f"Found matching asset: {name}")
+        archive_ext = None
+        asset_name = None
+
+        for pattern, ext in asset_patterns:
+            for asset in release_info.get("assets", []):
+                name = asset.get("name", "")
+                if pattern in name and name.endswith(ext):
+                    download_url = asset.get("browser_download_url")
+                    archive_ext = ext
+                    asset_name = name
+                    log_debug(f"Found matching asset: {name}")
+                    break
+            if download_url:
                 break
 
         if not download_url:
-            log_debug(f"No matching release asset found for pattern: {asset_pattern}")
+            patterns_tried = [p[0] for p in asset_patterns]
+            log_debug(f"No matching release asset found for patterns: {patterns_tried}")
             return None
 
-        # Download the archive
+        # Download the archive with progress
+        archive_path = bin_dir / f"llama-cpp-download{archive_ext}"
         log_debug(f"Downloading llama-server from: {download_url}")
-        archive_path = bin_dir / f"llama-cpp-{asset_pattern}.zip"
 
-        req = urllib.request.Request(
-            download_url,
-            headers={"User-Agent": "watercooler-cloud"},
-        )
-        with urllib.request.urlopen(req, timeout=300) as resp:  # 5 min timeout for large download
-            with open(archive_path, "wb") as f:
-                f.write(resp.read())
+        if not _download_with_progress(download_url, archive_path, "llama-server"):
+            return None
 
         log_debug(f"Downloaded archive to: {archive_path}")
 
         # Extract llama-server from archive
-        if archive_type == "zip":
+        if archive_ext == ".tar.gz":
+            with tarfile.open(archive_path, "r:gz") as tf:
+                # Find llama-server in the archive
+                for member in tf.getmembers():
+                    if member.name.endswith("llama-server"):
+                        log_debug(f"Extracting {member.name} from archive")
+                        # Extract to temp location
+                        tf.extract(member, bin_dir)
+                        extracted_path = bin_dir / member.name
+                        # Move to target location
+                        if extracted_path != target_binary:
+                            if target_binary.exists():
+                                target_binary.unlink()
+                            extracted_path.rename(target_binary)
+                        break
+                else:
+                    log_debug("llama-server not found in tar.gz archive")
+                    archive_path.unlink()
+                    return None
+        elif archive_ext == ".zip":
             with zipfile.ZipFile(archive_path, "r") as zf:
                 # Find llama-server in the archive
                 for name in zf.namelist():
                     if name.endswith("llama-server") or name.endswith("llama-server.exe"):
                         log_debug(f"Extracting {name} from archive")
-                        # Extract to temp location first
                         extracted = zf.extract(name, bin_dir)
                         extracted_path = Path(extracted)
-                        # Move to target location
                         if extracted_path != target_binary:
+                            if target_binary.exists():
+                                target_binary.unlink()
                             extracted_path.rename(target_binary)
                         break
                 else:
-                    log_debug("llama-server not found in archive")
+                    log_debug("llama-server not found in zip archive")
                     archive_path.unlink()
                     return None
 
@@ -655,6 +736,11 @@ def _download_llama_server() -> Optional[Path]:
 
         # Clean up archive
         archive_path.unlink()
+
+        # Clean up any extracted subdirectories
+        for item in bin_dir.iterdir():
+            if item.is_dir() and item.name.startswith("llama-"):
+                shutil.rmtree(item, ignore_errors=True)
 
         log_debug(f"llama-server installed to: {target_binary}")
         return target_binary
@@ -675,7 +761,7 @@ def _start_embedding_direct(
 ) -> bool:
     """Start embedding server as a detached background process.
 
-    Uses llama-server with Jay's proven configuration for batch embeddings:
+    Uses llama-server with batch-optimized configuration for embeddings:
     - --parallel 8: Allow 8 concurrent requests
     - -c 8192: Context window (matches bge-m3)
     - -b 4096: Batch size for prompt processing
@@ -685,7 +771,8 @@ def _start_embedding_direct(
     These flags are critical for Graphiti's create_batch() calls which send
     multiple strings in a single API request.
 
-    Falls back to Python module if llama-server is not available.
+    NO FALLBACK - llama-server is required. If not available, it will be
+    downloaded from GitHub releases.
 
     Args:
         model_path: Path to GGUF model file
@@ -695,78 +782,28 @@ def _start_embedding_direct(
 
     Returns:
         True if server started successfully
+
+    Raises:
+        RuntimeError: If llama-server cannot be found or downloaded
     """
     api_base = f"http://{host}:{port}/v1"
 
-    # Method 1: Try llama-server binary (faster startup, better batch support)
-    llama_server = _find_llama_server()
-    if not llama_server:
-        log_debug("llama-server not found, attempting download...")
-        llama_server = _download_llama_server()
-
-    if llama_server:
-        try:
-            # Jay's proven configuration for batch embeddings
-            cmd = [
-                str(llama_server),
-                "--model", str(model_path),
-                "--host", host,
-                "--port", str(port),
-                "--embedding",         # Enable embedding mode
-                "--parallel", "8",     # Allow 8 concurrent requests
-                "-c", str(n_ctx),      # Context window (8192 for bge-m3)
-                "-b", "4096",          # Batch size for prompt processing
-                "-ub", "4096",         # Micro-batch size for prompt processing
-            ]
-            log_debug(f"Starting embedding server with batch support: {' '.join(cmd)}")
-
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,  # Detach from parent
-            )
-
-            if _wait_for_embedding_ready(api_base, max_wait=30.0):
-                log_debug("Embedding server started successfully via llama-server (batch mode)")
-                return True
-
-        except Exception as e:
-            log_debug(f"llama-server start failed: {e}")
-
-    # Method 2: Fall back to Python module (no batch support)
     try:
-        cmd = [
-            sys.executable,
-            "-m", "watercooler_memory.embedding_server",
-            "--model", str(model_path),
-            "--host", host,
-            "--port", str(port),
-            "--n-ctx", str(n_ctx),
-        ]
-        log_debug(f"Starting embedding server via Python (fallback, no batch): {' '.join(cmd)}")
-
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        # Use unified _start_llama_server function
+        if not _start_llama_server(model_path, port, mode="embedding",
+                                   context_size=n_ctx, host=host):
+            return False
 
         if _wait_for_embedding_ready(api_base, max_wait=30.0):
-            log_debug("Embedding server started successfully via Python module")
-            _add_startup_warning(
-                "Embedding server running in fallback mode (Python).\n"
-                "Batch embeddings may fail. Install llama-server for full support:\n"
-                "  # Build from source or download from:\n"
-                "  # https://github.com/ggml-org/llama.cpp/releases"
-            )
+            log_debug("Embedding server started successfully via llama-server (batch mode)")
             return True
 
-    except Exception as e:
-        log_debug(f"Python embedding server start failed: {e}")
+        log_debug("Embedding server process started but health check failed")
+        return False
 
-    return False
+    except RuntimeError as e:
+        log_debug(f"llama-server startup error: {e}")
+        raise
 
 
 def _start_embedding_windows(
@@ -777,8 +814,7 @@ def _start_embedding_windows(
 ) -> bool:
     """Start embedding server on Windows.
 
-    Windows doesn't have start_new_session equivalent, so we try pythonw.exe
-    with DETACHED_PROCESS flag. Falls back to guidance if that fails.
+    Uses llama-server with DETACHED_PROCESS flag for Windows.
 
     Args:
         model_path: Path to GGUF model file
@@ -791,42 +827,52 @@ def _start_embedding_windows(
     """
     api_base = f"http://{host}:{port}/v1"
 
-    # Try pythonw.exe with DETACHED_PROCESS
+    llama_server = _find_llama_server()
+    if not llama_server:
+        log_debug("llama-server not found, attempting download...")
+        llama_server = _download_llama_server()
+
+    if not llama_server:
+        _add_startup_warning(
+            "llama-server not found and could not be downloaded.\n"
+            "Download from: https://github.com/ggml-org/llama.cpp/releases\n"
+            "Or build from source."
+        )
+        return False
+
     try:
-        pythonw = shutil.which("pythonw")
-        if pythonw:
-            cmd = [
-                pythonw,
-                "-m", "watercooler_memory.embedding_server",
-                "--model", str(model_path),
-                "--host", host,
-                "--port", str(port),
-                "--n-ctx", str(n_ctx),
-            ]
-            log_debug(f"Starting embedding server via pythonw: {' '.join(cmd)}")
+        cmd = [
+            str(llama_server),
+            "--model", str(model_path),
+            "--host", host,
+            "--port", str(port),
+            "--embedding",
+            "--parallel", "8",
+            "-c", str(n_ctx),
+            "-b", "4096",
+            "-ub", "4096",
+        ]
+        log_debug(f"Starting embedding server on Windows: {' '.join(cmd)}")
 
-            # Windows-specific: DETACHED_PROCESS
-            DETACHED_PROCESS = 0x00000008
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=DETACHED_PROCESS,
-            )
+        # Windows-specific: DETACHED_PROCESS
+        DETACHED_PROCESS = 0x00000008
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=DETACHED_PROCESS,
+        )
 
-            if _wait_for_embedding_ready(api_base, max_wait=30.0):
-                log_debug("Embedding server started successfully via pythonw")
-                return True
+        if _wait_for_embedding_ready(api_base, max_wait=30.0):
+            log_debug("Embedding server started successfully on Windows")
+            return True
 
     except Exception as e:
-        log_debug(f"pythonw start failed: {e}")
+        log_debug(f"Windows llama-server start failed: {e}")
 
-    # Provide guidance if auto-start failed
     _add_startup_warning(
-        f"Embedding server not running.\n"
-        f"On Windows, start it manually in a separate terminal:\n"
-        f"  python -m watercooler_memory.embedding_server --model {model_path}\n"
-        f"Or configure Ollama for embeddings (simpler on Windows)."
+        f"Embedding server failed to start.\n"
+        f"Start manually: llama-server --model {model_path} --embedding --port {port}"
     )
     return False
 
@@ -838,7 +884,7 @@ def _ensure_embedding_service_available(
 ) -> bool:
     """Ensure embedding service is running, starting it if needed.
 
-    Resolves model name, downloads model if needed, and starts the server.
+    Resolves model name, downloads model if needed, and starts llama-server.
     Also auto-sets EMBEDDING_DIM to prevent graphiti-core index mismatch.
 
     Args:
@@ -855,15 +901,8 @@ def _ensure_embedding_service_available(
         ModelDownloadError,
         ModelNotFoundError,
         ensure_model_available,
-        get_model_dimension,
-        is_ollama_embedding_model as is_ollama_model,
         resolve_embedding_model,
     )
-
-    # Check if this is an Ollama model - those are handled by ensure_ollama_running()
-    if is_ollama_model(model_name):
-        log_debug(f"Model {model_name} appears to be Ollama model, skipping llama.cpp start")
-        return False
 
     # Resolve model specification
     try:
@@ -919,34 +958,41 @@ def _ensure_embedding_service_available(
 
 
 def _embedding_startup_worker(model_name: str, api_base: str, context_size: int) -> None:
-    """Background worker to start embedding service and wait for it to be ready."""
+    """Background worker to start embedding service (llama-server) and wait for it to be ready."""
     start_time = time.time()
     _update_service_status("embedding", ServiceState.STARTING, endpoint=api_base, started_at=start_time)
 
-    if _ensure_embedding_service_available(model_name, api_base, context_size):
-        _update_service_status(
-            "embedding", ServiceState.RUNNING,
-            message=f"Model: {model_name}",
-            ready_at=time.time()
-        )
-        log_debug("Embedding service started successfully")
-    else:
+    try:
+        if _ensure_embedding_service_available(model_name, api_base, context_size):
+            _update_service_status(
+                "embedding", ServiceState.RUNNING,
+                message=f"Model: {model_name}",
+                ready_at=time.time()
+            )
+            log_debug("Embedding service started successfully")
+        else:
+            _update_service_status(
+                "embedding", ServiceState.FAILED,
+                message="Could not start llama-server for embeddings"
+            )
+            log_debug("Embedding auto-start failed")
+    except RuntimeError as e:
         _update_service_status(
             "embedding", ServiceState.FAILED,
-            message="Could not start. Run: python -m watercooler_memory.embedding_server"
+            message=str(e)
         )
-        log_debug("Embedding auto-start failed")
+        log_debug(f"Embedding startup error: {e}")
 
 
 def ensure_embedding_running() -> None:
-    """Start embedding service if graph features are enabled and it's not running.
+    """Start embedding service (llama-server) if graph features are enabled and it's not running.
 
     This is non-blocking - spawns a background thread if embedding service needs to start.
     Check get_service_status()["embedding"] to see current state.
 
     Features:
     - Auto-downloads model from HuggingFace on first use
-    - Auto-starts llama.cpp or Python embedding server
+    - Auto-starts llama-server with batch embedding support
     - Auto-sets EMBEDDING_DIM to match model
     - Works on Linux, macOS, Windows (with platform-specific handling)
     """
@@ -991,28 +1037,6 @@ def ensure_embedding_running() -> None:
             log_debug(f"Embedding service already running at {api_base}")
             return
 
-        # Check if this is an Ollama endpoint (same port as LLM)
-        from watercooler.memory_config import resolve_baseline_graph_llm_config
-
-        llm_config = resolve_baseline_graph_llm_config()
-        llm_api_base = llm_config.api_base.rstrip("/")
-
-        # If embedding uses same endpoint as LLM, Ollama should handle both
-        if api_base == llm_api_base:
-            _update_service_status(
-                "embedding", ServiceState.NOT_CONFIGURED,
-                message="Using Ollama endpoint",
-                endpoint=api_base
-            )
-            log_debug("Embedding uses same endpoint as LLM, Ollama should serve both")
-            # Still set EMBEDDING_DIM for Ollama models
-            from watercooler.models import is_ollama_embedding_model as is_ollama_model
-
-            if is_ollama_model(model_name):
-                if "nomic" in model_name.lower():
-                    os.environ.setdefault("EMBEDDING_DIM", "768")
-            return
-
         # Start in background thread
         log_debug(f"Embedding service not available at {api_base}, starting in background...")
         context_size = embed_config.context_size
@@ -1028,6 +1052,168 @@ def ensure_embedding_running() -> None:
     except Exception as e:
         _update_service_status("embedding", ServiceState.FAILED, message=str(e))
         log_debug(f"Embedding auto-start check failed: {e}")
+
+
+# ============================================================================
+# Docker Management for FalkorDB
+# ============================================================================
+
+
+def _is_docker_daemon_running() -> bool:
+    """Check if Docker daemon is running (not just if binary exists).
+
+    Returns:
+        True if Docker daemon is responsive.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _install_docker_linux() -> bool:
+    """Attempt to install Docker on Linux using get.docker.com convenience script.
+
+    This requires sudo/root access. If the user doesn't have sudo, this will fail
+    and we'll provide manual instructions.
+
+    Returns:
+        True if Docker was installed successfully.
+    """
+    log_debug("Attempting to install Docker via get.docker.com...")
+
+    try:
+        # Download the convenience script
+        script_path = Path("/tmp/get-docker.sh")
+        result = subprocess.run(
+            ["curl", "-fsSL", "https://get.docker.com", "-o", str(script_path)],
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            log_debug(f"Failed to download Docker install script: {result.stderr.decode()}")
+            return False
+
+        # Make executable and run with sudo
+        script_path.chmod(0o755)
+
+        log_debug("Running Docker install script (requires sudo)...")
+        result = subprocess.run(
+            ["sudo", "sh", str(script_path)],
+            capture_output=True,
+            timeout=300,  # 5 minutes for install
+        )
+
+        if result.returncode != 0:
+            log_debug(f"Docker install failed: {result.stderr.decode()}")
+            return False
+
+        # Add current user to docker group (so future commands don't need sudo)
+        import getpass
+        username = getpass.getuser()
+        subprocess.run(
+            ["sudo", "usermod", "-aG", "docker", username],
+            capture_output=True,
+            timeout=10,
+        )
+        log_debug(f"Added {username} to docker group (may need re-login)")
+
+        # Clean up
+        script_path.unlink(missing_ok=True)
+
+        # Verify installation
+        docker_path = shutil.which("docker")
+        if docker_path:
+            log_debug(f"Docker installed successfully: {docker_path}")
+            return True
+
+        return False
+
+    except subprocess.TimeoutExpired:
+        log_debug("Docker installation timed out")
+        return False
+    except Exception as e:
+        log_debug(f"Docker installation failed: {e}")
+        return False
+
+
+def _ensure_docker_available() -> tuple[bool, str]:
+    """Ensure Docker is available and daemon is running.
+
+    Attempts auto-install on Linux if Docker is not found.
+    Provides clear instructions on macOS.
+
+    Returns:
+        Tuple of (success, message). If success is False, message contains
+        user-friendly error/instructions.
+    """
+    system = platform.system().lower()
+    docker_path = shutil.which("docker")
+
+    # Step 1: Check if Docker binary exists
+    if not docker_path:
+        if system == "linux":
+            log_debug("Docker not found on Linux, attempting auto-install...")
+            if _install_docker_linux():
+                # Re-check after install
+                docker_path = shutil.which("docker")
+                if docker_path:
+                    log_debug("Docker installed, checking daemon...")
+                else:
+                    return False, (
+                        "Docker installed but not in PATH. "
+                        "Please restart your shell or run: source ~/.bashrc"
+                    )
+            else:
+                return False, (
+                    "Docker auto-install failed (requires sudo). "
+                    "Install manually: curl -fsSL https://get.docker.com | sh"
+                )
+        elif system == "darwin":
+            return False, (
+                "Docker not found. Install Docker Desktop: "
+                "https://docs.docker.com/desktop/install/mac-install/"
+            )
+        else:
+            return False, "Docker not found. Please install Docker for your platform."
+
+    # Step 2: Check if Docker daemon is running
+    if not _is_docker_daemon_running():
+        if system == "darwin":
+            return False, (
+                "Docker Desktop is installed but not running. "
+                "Please start Docker Desktop from Applications."
+            )
+        elif system == "linux":
+            # Try to start Docker daemon
+            log_debug("Docker daemon not running, attempting to start...")
+            try:
+                result = subprocess.run(
+                    ["sudo", "systemctl", "start", "docker"],
+                    capture_output=True,
+                    timeout=30,
+                )
+                if result.returncode == 0:
+                    # Wait a moment for daemon to be ready
+                    time.sleep(2)
+                    if _is_docker_daemon_running():
+                        log_debug("Docker daemon started successfully")
+                        return True, "Docker daemon started"
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
+
+            return False, (
+                "Docker daemon not running. Start it with: sudo systemctl start docker"
+            )
+        else:
+            return False, "Docker daemon not running. Please start Docker."
+
+    return True, "Docker ready"
 
 
 def _check_falkordb_health(host: str, port: int, timeout: float = 2.0) -> bool:
@@ -1088,14 +1274,16 @@ def _falkordb_startup_worker(host: str, port: int) -> None:
     endpoint = f"{host}:{port}"
     _update_service_status("falkordb", ServiceState.STARTING, endpoint=endpoint, started_at=start_time)
 
-    # Check if Docker is available
-    docker_path = shutil.which("docker")
-    if not docker_path:
+    # Ensure Docker is available (installs on Linux if needed, checks daemon)
+    docker_available, docker_message = _ensure_docker_available()
+    if not docker_available:
         _update_service_status(
             "falkordb", ServiceState.FAILED,
-            message="Docker not found. Install Docker to use FalkorDB."
+            message=docker_message
         )
         return
+
+    log_debug(f"Docker check: {docker_message}")
 
     try:
         result = subprocess.run(

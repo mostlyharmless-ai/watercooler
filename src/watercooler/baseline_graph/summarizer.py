@@ -1,6 +1,6 @@
 """Summarizer for baseline graph using local LLM.
 
-Uses OpenAI-compatible API for local LLM inference (Ollama, llama.cpp).
+Uses OpenAI-compatible API for local LLM inference (llama-server, OpenAI, etc.).
 Returns empty string when LLM is unavailable (no fallback to extractive).
 """
 
@@ -51,7 +51,7 @@ class SummarizerConfig:
     1. Environment variables (LLM_API_BASE, LLM_MODEL, LLM_API_KEY)
     2. Legacy env vars (BASELINE_GRAPH_API_BASE, etc.)
     3. TOML config ([memory.llm])
-    4. Built-in defaults (localhost:11434 for Ollama)
+    4. Built-in defaults (localhost:8000 for llama-server)
     """
 
     # LLM settings (resolved via unified config by default)
@@ -350,7 +350,8 @@ def _call_llm(
     headers = {
         "Content-Type": "application/json",
     }
-    if config.api_key and config.api_key != "ollama":
+    # Add authorization header for non-local endpoints (local llama-server doesn't need it)
+    if config.api_key and config.api_key not in ("", "local", "ollama"):
         headers["Authorization"] = f"Bearer {config.api_key}"
 
     try:
