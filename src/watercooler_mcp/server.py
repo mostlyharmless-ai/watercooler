@@ -230,6 +230,75 @@ def _reset_cache() -> None:
     print("  uv cache clean", file=sys.stderr)
 
 
+def _warm_cache() -> None:
+    """Pre-download llama-server binary and configured models.
+
+    Downloads:
+    - llama-server binary from GitHub releases (if not present)
+    - LLM model GGUF file (if configured for local inference)
+    - Embedding model GGUF file (if configured for local inference)
+
+    This allows pre-warming the cache before starting the MCP server,
+    avoiding download delays during first connection.
+    """
+    from .startup import (
+        _find_llama_server,
+        _download_llama_server,
+        _is_localhost_url,
+    )
+    from watercooler.memory_config import (
+        resolve_baseline_graph_llm_config,
+        resolve_baseline_graph_embedding_config,
+    )
+    from watercooler.models import ensure_gguf_model_available, ensure_embedding_model_available
+
+    print("Warming watercooler cache...", file=sys.stderr)
+
+    # 1. Download llama-server binary
+    llama_server = _find_llama_server()
+    if llama_server:
+        print(f"  llama-server: {llama_server} (already installed)", file=sys.stderr)
+    else:
+        print("  llama-server: downloading from GitHub releases...", file=sys.stderr)
+        llama_server = _download_llama_server()
+        if llama_server:
+            print(f"  llama-server: {llama_server} (downloaded)", file=sys.stderr)
+        else:
+            print("  llama-server: FAILED to download", file=sys.stderr)
+
+    # 2. Download LLM model if configured for localhost
+    try:
+        llm_config = resolve_baseline_graph_llm_config()
+        if _is_localhost_url(llm_config.api_base):
+            print(f"  LLM model ({llm_config.model}): checking...", file=sys.stderr)
+            model_path = ensure_gguf_model_available(llm_config.model)
+            if model_path:
+                print(f"  LLM model: {model_path}", file=sys.stderr)
+            else:
+                print(f"  LLM model: not found in registry", file=sys.stderr)
+        else:
+            print(f"  LLM model: skipped (remote API: {llm_config.api_base})", file=sys.stderr)
+    except Exception as e:
+        print(f"  LLM model: error - {e}", file=sys.stderr)
+
+    # 3. Download embedding model if configured for localhost
+    try:
+        emb_config = resolve_baseline_graph_embedding_config()
+        if _is_localhost_url(emb_config.api_base):
+            print(f"  Embedding model ({emb_config.model}): checking...", file=sys.stderr)
+            model_path = ensure_embedding_model_available(emb_config.model)
+            if model_path:
+                print(f"  Embedding model: {model_path}", file=sys.stderr)
+            else:
+                print(f"  Embedding model: not found in registry", file=sys.stderr)
+        else:
+            print(f"  Embedding model: skipped (remote API: {emb_config.api_base})", file=sys.stderr)
+    except Exception as e:
+        print(f"  Embedding model: error - {e}", file=sys.stderr)
+
+    print("\nCache warm complete. Ready to start server.", file=sys.stderr)
+
+
 def main():
     """Entry point for watercooler-mcp command."""
     import argparse
@@ -240,7 +309,7 @@ def main():
         epilog="""
 Examples:
   watercooler-mcp              Start MCP server (stdio transport)
-  watercooler-mcp --help       Show this help message
+  watercooler-mcp --warm       Pre-download binaries and models, then exit
   watercooler-mcp --reset-cache  Clear downloaded binaries and models
 
 Environment variables:
@@ -256,10 +325,19 @@ Environment variables:
         action="store_true",
         help="Clear watercooler caches (binaries, models) and exit"
     )
+    parser.add_argument(
+        "--warm",
+        action="store_true",
+        help="Pre-download llama-server and models, then exit (use for cache warming)"
+    )
     args = parser.parse_args()
 
     if args.reset_cache:
         _reset_cache()
+        sys.exit(0)
+
+    if args.warm:
+        _warm_cache()
         sys.exit(0)
 
     # Check for first-run and suggest config initialization
