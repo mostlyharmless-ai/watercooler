@@ -318,7 +318,7 @@ async def _search_graphiti_impl(
 
     # Use Graphiti's search_memory_facts for entry-level search
     # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
-    results = await asyncio.to_thread(backend.search_facts, query=query, max_facts=limit)
+    results = await asyncio.to_thread(backend.search_facts, query=query, max_results=limit)
 
     output: Dict[str, Any] = {
         "count": len(results),
