@@ -957,6 +957,22 @@ There are three separate caches involved:
 | **uvx package cache** | `~/.cache/uv/archive-v0/` | Built Python packages |
 | **uvx git cache** | `~/.cache/uv/git-v0/` | Git repository checkouts |
 
+### Pre-Warming the Cache
+
+Before connecting an MCP client, pre-download binaries and models:
+
+```bash
+uvx --from "git+https://github.com/mostlyharmless-ai/watercooler-cloud@main" watercooler-mcp --warm
+```
+
+This downloads:
+- llama-server binary from GitHub releases
+- LLM model GGUF (if configured for localhost)
+- Embedding model GGUF (if configured for localhost)
+
+The `--warm` flag ensures everything is ready before the MCP client connects,
+avoiding timeouts and race conditions during startup.
+
 ### Quick Reset
 
 Use the built-in reset command to clear watercooler caches:
