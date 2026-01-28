@@ -333,36 +333,31 @@ class LLMGGUFModelSpec(TypedDict, total=False):
 # Registry of known LLM GGUF models for llama-server
 # Maps friendly names (Ollama-style) to HuggingFace GGUF specs
 LLM_GGUF_MODELS: dict[str, LLMGGUFModelSpec | str] = {
-    # Qwen models (instruct versions for chat/summarization)
+    # Qwen3 models (MoE architecture with thinking mode support)
     "qwen3:30b": {
-        "hf_repo": "Qwen/Qwen2.5-32B-Instruct-GGUF",
-        "hf_file": "qwen2.5-32b-instruct-q4_k_m.gguf",
-        "context": 32768,
-    },
-    "qwen3:14b": {
-        "hf_repo": "Qwen/Qwen2.5-14B-Instruct-GGUF",
-        "hf_file": "qwen2.5-14b-instruct-q4_k_m.gguf",
-        "context": 32768,
+        "hf_repo": "Qwen/Qwen3-30B-A3B-GGUF",
+        "hf_file": "Qwen3-30B-A3B-Q4_K_M.gguf",
+        "context": 40960,
     },
     "qwen3:8b": {
-        "hf_repo": "Qwen/Qwen2.5-7B-Instruct-GGUF",
-        "hf_file": "qwen2.5-7b-instruct-q4_k_m.gguf",
-        "context": 32768,
+        "hf_repo": "Qwen/Qwen3-8B-GGUF",
+        "hf_file": "Qwen3-8B-Q4_K_M.gguf",
+        "context": 40960,
     },
     "qwen3:4b": {
-        "hf_repo": "Qwen/Qwen2.5-3B-Instruct-GGUF",
-        "hf_file": "qwen2.5-3b-instruct-q4_k_m.gguf",
-        "context": 32768,
+        "hf_repo": "Qwen/Qwen3-4B-GGUF",
+        "hf_file": "Qwen3-4B-Q4_K_M.gguf",
+        "context": 40960,
     },
     "qwen3:1.7b": {
-        "hf_repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-        "hf_file": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        "context": 32768,
+        "hf_repo": "Qwen/Qwen3-1.7B-GGUF",
+        "hf_file": "Qwen3-1.7B-Q4_K_M.gguf",
+        "context": 40960,
     },
     "qwen3:0.6b": {
-        "hf_repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-        "hf_file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
-        "context": 32768,
+        "hf_repo": "Qwen/Qwen3-0.6B-GGUF",
+        "hf_file": "Qwen3-0.6B-Q4_K_M.gguf",
+        "context": 40960,
     },
     # Llama 3.2 models
     "llama3.2:3b": {
@@ -377,8 +372,7 @@ LLM_GGUF_MODELS: dict[str, LLMGGUFModelSpec | str] = {
     },
     # Aliases
     "qwen3:latest": "qwen3:30b",
-    "qwen3:30b-q4_K_M": "qwen3:30b",
-    "qwen3:30b-q8_0": "qwen3:30b",
+    "qwen3": "qwen3:30b",
     "llama3.2": "llama3.2:3b",
     "llama3.2:latest": "llama3.2:3b",
 }
