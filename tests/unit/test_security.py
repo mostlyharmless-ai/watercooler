@@ -306,3 +306,355 @@ class TestDualWriteErrorHandling:
         graph_dir = storage.get_graph_dir(threads_dir)
         entries = storage.load_thread_entries_dict(graph_dir, "test-topic")
         assert f"entry:{entry_data.entry_id}" in entries
+
+
+# =============================================================================
+# New Security Tests (PR #106 Review Fixes)
+# =============================================================================
+
+
+class TestValidateSafePath:
+    """Tests for validate_safe_path() function."""
+
+    def test_valid_absolute_path(self):
+        """Test that valid absolute paths are accepted."""
+        from watercooler_mcp.validation import validate_safe_path
+
+        error, path = validate_safe_path("/tmp/test")
+        assert error is None
+        assert path is not None
+        assert path == Path("/tmp/test").resolve()
+
+    def test_valid_relative_path(self):
+        """Test that relative paths are resolved correctly."""
+        from watercooler_mcp.validation import validate_safe_path
+
+        error, path = validate_safe_path(".")
+        assert error is None
+        assert path is not None
+        assert path == Path.cwd()
+
+    def test_null_byte_rejected(self):
+        """Test that paths with null bytes are rejected."""
+        from watercooler_mcp.validation import validate_safe_path
+
+        error, path = validate_safe_path("/tmp/test\x00malicious")
+        assert error is not None
+        assert "null bytes" in error.lower()
+        assert path is None
+
+    def test_suspicious_pattern_rejected(self):
+        """Test that suspicious patterns like ... are rejected."""
+        from watercooler_mcp.validation import validate_safe_path
+
+        error, path = validate_safe_path("/tmp/.../etc/passwd")
+        assert error is not None
+        assert "suspicious" in error.lower()
+        assert path is None
+
+    def test_traversal_resolved(self):
+        """Test that .. sequences are resolved (not rejected)."""
+        from watercooler_mcp.validation import validate_safe_path
+
+        # This should resolve to /etc/passwd, which is valid
+        error, path = validate_safe_path("/tmp/../etc/passwd")
+        assert error is None
+        assert path is not None
+        # Path should be resolved (no .. in result)
+        assert ".." not in str(path)
+
+    def test_allowed_bases_enforced(self, tmp_path):
+        """Test that allowed_bases constraint is enforced."""
+        from watercooler_mcp.validation import validate_safe_path
+
+        allowed = [tmp_path]
+
+        # Path within allowed base should work
+        subdir = tmp_path / "subdir"
+        subdir.mkdir()
+        error, path = validate_safe_path(str(subdir), allowed_bases=allowed)
+        assert error is None
+        assert path == subdir
+
+        # Path outside allowed base should fail
+        error, path = validate_safe_path("/etc/passwd", allowed_bases=allowed)
+        assert error is not None
+        assert "escapes allowed" in error.lower()
+        assert path is None
+
+    def test_must_exist_enforced(self, tmp_path):
+        """Test that must_exist=True requires path to exist."""
+        from watercooler_mcp.validation import validate_safe_path
+
+        # Existing path should work
+        existing = tmp_path / "existing.txt"
+        existing.write_text("test")
+        error, path = validate_safe_path(str(existing), must_exist=True)
+        assert error is None
+        assert path == existing
+
+        # Non-existing path should fail
+        error, path = validate_safe_path(str(tmp_path / "nonexistent"), must_exist=True)
+        assert error is not None
+        assert "does not exist" in error.lower()
+        assert path is None
+
+
+class TestValidateLimit:
+    """Tests for _validate_limit() function."""
+
+    def test_valid_limit(self):
+        """Test that valid limits pass through."""
+        from watercooler_mcp.tools.graph import _validate_limit
+
+        assert _validate_limit(10) == 10
+        assert _validate_limit(50) == 50
+        assert _validate_limit(1) == 1
+
+    def test_exceeds_max(self):
+        """Test that limits exceeding max are clamped."""
+        from watercooler_mcp.tools.graph import _validate_limit
+
+        assert _validate_limit(200) == 100
+        assert _validate_limit(1000) == 100
+
+    def test_negative_returns_default(self):
+        """Test that negative values return default."""
+        from watercooler_mcp.tools.graph import _validate_limit
+
+        assert _validate_limit(-5) == 10
+        assert _validate_limit(-1) == 10
+
+    def test_zero_returns_default(self):
+        """Test that zero returns default."""
+        from watercooler_mcp.tools.graph import _validate_limit
+
+        assert _validate_limit(0) == 10
+
+    def test_custom_default(self):
+        """Test custom default value."""
+        from watercooler_mcp.tools.graph import _validate_limit
+
+        assert _validate_limit(-1, default=5) == 5
+
+    def test_custom_max(self):
+        """Test custom max value."""
+        from watercooler_mcp.tools.graph import _validate_limit
+
+        assert _validate_limit(100, max_value=50) == 50
+
+
+class TestValidateThreshold:
+    """Tests for _validate_threshold() function."""
+
+    def test_valid_threshold(self):
+        """Test that valid thresholds pass through."""
+        from watercooler_mcp.tools.graph import _validate_threshold
+
+        assert _validate_threshold(0.5) == 0.5
+        assert _validate_threshold(0.0) == 0.0
+        assert _validate_threshold(1.0) == 1.0
+
+    def test_exceeds_max(self):
+        """Test that thresholds > 1.0 are clamped."""
+        from watercooler_mcp.tools.graph import _validate_threshold
+
+        assert _validate_threshold(1.5) == 1.0
+        assert _validate_threshold(2.0) == 1.0
+
+    def test_below_min(self):
+        """Test that thresholds < 0.0 are clamped."""
+        from watercooler_mcp.tools.graph import _validate_threshold
+
+        assert _validate_threshold(-0.5) == 0.0
+        assert _validate_threshold(-1.0) == 0.0
+
+
+class TestChecksumVerification:
+    """Tests for checksum verification functions."""
+
+    def test_compute_sha256(self, tmp_path):
+        """Test SHA256 computation."""
+        import hashlib
+        from watercooler_mcp.startup import _compute_sha256
+
+        # Create a test file with known content
+        test_file = tmp_path / "test.bin"
+        test_content = b"Hello, World!"
+        test_file.write_bytes(test_content)
+
+        # Compute expected hash
+        expected = hashlib.sha256(test_content).hexdigest()
+
+        # Verify our function matches
+        actual = _compute_sha256(test_file)
+        assert actual == expected
+
+    def test_verify_checksum_match(self, tmp_path):
+        """Test checksum verification when checksums match."""
+        import hashlib
+        from watercooler_mcp.startup import _verify_checksum
+
+        # Create test file
+        test_file = tmp_path / "test.bin"
+        test_content = b"Test content"
+        test_file.write_bytes(test_content)
+        expected = hashlib.sha256(test_content).hexdigest()
+
+        # Should pass with matching checksum
+        result = _verify_checksum(test_file, expected, "test-release", "test-asset")
+        assert result is True
+        assert test_file.exists()  # File not deleted
+
+    def test_verify_checksum_mismatch(self, tmp_path):
+        """Test checksum verification when checksums don't match."""
+        from watercooler_mcp.startup import _verify_checksum
+
+        # Create test file
+        test_file = tmp_path / "test.bin"
+        test_file.write_bytes(b"Test content")
+        wrong_checksum = "0" * 64
+
+        # Should fail and delete the file
+        result = _verify_checksum(test_file, wrong_checksum, "test-release", "test-asset")
+        assert result is False
+        assert not test_file.exists()  # File should be deleted
+
+    def test_verify_checksum_unknown_warn_mode(self, tmp_path, monkeypatch):
+        """Test that unknown checksum in warn mode logs warning but passes."""
+        from watercooler_mcp.startup import _verify_checksum
+
+        monkeypatch.setenv("WATERCOOLER_LLAMA_SERVER_VERIFY", "warn")
+
+        test_file = tmp_path / "test.bin"
+        test_file.write_bytes(b"Test content")
+
+        # Unknown checksum (None) in warn mode should pass
+        result = _verify_checksum(test_file, None, "test-release", "test-asset")
+        assert result is True
+        assert test_file.exists()
+
+    def test_verify_checksum_unknown_strict_mode(self, tmp_path, monkeypatch):
+        """Test that unknown checksum in strict mode raises error."""
+        from watercooler_mcp.startup import _verify_checksum
+
+        monkeypatch.setenv("WATERCOOLER_LLAMA_SERVER_VERIFY", "strict")
+
+        test_file = tmp_path / "test.bin"
+        test_file.write_bytes(b"Test content")
+
+        # Unknown checksum (None) in strict mode should raise
+        with pytest.raises(RuntimeError) as exc_info:
+            _verify_checksum(test_file, None, "test-release", "test-asset")
+
+        assert "No known checksum" in str(exc_info.value)
+
+    def test_verify_checksum_skip_mode(self, tmp_path, monkeypatch):
+        """Test that skip mode bypasses verification entirely."""
+        from watercooler_mcp.startup import _verify_checksum
+
+        monkeypatch.setenv("WATERCOOLER_LLAMA_SERVER_VERIFY", "skip")
+
+        test_file = tmp_path / "test.bin"
+        test_file.write_bytes(b"Test content")
+
+        # Should pass regardless of checksum
+        result = _verify_checksum(test_file, "wrong-checksum", "test-release", "test-asset")
+        assert result is True
+
+    def test_get_expected_checksum_user_override(self, monkeypatch):
+        """Test that user-provided checksum via env var takes precedence."""
+        from watercooler_mcp.startup import _get_expected_checksum
+
+        user_checksum = "abc123def456"
+        monkeypatch.setenv("WATERCOOLER_LLAMA_SERVER_SHA256", user_checksum)
+
+        result = _get_expected_checksum("any-release", "any-asset")
+        assert result == user_checksum.lower()
+
+
+class TestDockerPathVerification:
+    """Tests for Docker path verification."""
+
+    def test_get_docker_path_from_which(self, monkeypatch):
+        """Test finding Docker via shutil.which."""
+        from watercooler_mcp.startup import _get_docker_path
+
+        # Mock shutil.which to return a path
+        monkeypatch.setattr("shutil.which", lambda x: "/usr/bin/docker" if x == "docker" else None)
+
+        path = _get_docker_path()
+        assert path is not None
+        assert str(path) == "/usr/bin/docker"
+
+    def test_get_docker_path_override(self, tmp_path, monkeypatch):
+        """Test WATERCOOLER_DOCKER_PATH override."""
+        from watercooler_mcp.startup import _get_docker_path
+
+        # Create a fake docker binary
+        fake_docker = tmp_path / "fake-docker"
+        fake_docker.write_text("#!/bin/sh\necho docker")
+        fake_docker.chmod(0o755)
+
+        monkeypatch.setenv("WATERCOOLER_DOCKER_PATH", str(fake_docker))
+
+        path = _get_docker_path()
+        assert path is not None
+        assert path == fake_docker.resolve()
+
+    def test_get_docker_path_invalid_override(self, monkeypatch):
+        """Test that invalid override falls back to None."""
+        from watercooler_mcp.startup import _get_docker_path
+
+        monkeypatch.setenv("WATERCOOLER_DOCKER_PATH", "/nonexistent/docker")
+        monkeypatch.setattr("shutil.which", lambda x: None)
+
+        path = _get_docker_path()
+        assert path is None
+
+    def test_get_docker_path_not_found(self, monkeypatch):
+        """Test when Docker is not found."""
+        from watercooler_mcp.startup import _get_docker_path
+
+        monkeypatch.delenv("WATERCOOLER_DOCKER_PATH", raising=False)
+        monkeypatch.setattr("shutil.which", lambda x: None)
+
+        path = _get_docker_path()
+        assert path is None
+
+
+class TestProcessCleanup:
+    """Tests for spawned process cleanup."""
+
+    def test_register_and_cleanup(self, monkeypatch):
+        """Test PID registration and cleanup."""
+        from watercooler_mcp import startup
+
+        # Clear any existing PIDs
+        with startup._pids_lock:
+            startup._spawned_pids.clear()
+
+        # Register some PIDs
+        startup._register_spawned_pid(1234)
+        startup._register_spawned_pid(5678)
+
+        assert 1234 in startup._spawned_pids
+        assert 5678 in startup._spawned_pids
+
+        # Mock os.kill to track calls
+        killed = []
+        def mock_kill(pid, sig):
+            killed.append(pid)
+            raise ProcessLookupError()  # Simulate process already exited
+
+        monkeypatch.setattr("os.kill", mock_kill)
+
+        # Run cleanup
+        startup._cleanup_spawned_processes()
+
+        # All PIDs should have been attempted
+        assert 1234 in killed
+        assert 5678 in killed
+
+        # PID list should be cleared
+        assert len(startup._spawned_pids) == 0

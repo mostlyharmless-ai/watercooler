@@ -88,6 +88,40 @@ _service_status: dict[str, ServiceStatus] = {
 }
 _status_lock = threading.Lock()
 
+# Track spawned process PIDs for cleanup
+_spawned_pids: list[int] = []
+_pids_lock = threading.Lock()
+
+
+def _register_spawned_pid(pid: int) -> None:
+    """Register a spawned process PID for cleanup tracking."""
+    with _pids_lock:
+        _spawned_pids.append(pid)
+
+
+def _cleanup_spawned_processes() -> None:
+    """Terminate all tracked spawned processes.
+
+    Called on module exit via atexit to clean up llama-server processes.
+    """
+    import signal
+
+    with _pids_lock:
+        for pid in _spawned_pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                log_debug(f"Sent SIGTERM to spawned process {pid}")
+            except ProcessLookupError:
+                pass  # Process already exited
+            except OSError as e:
+                log_debug(f"Failed to terminate process {pid}: {e}")
+        _spawned_pids.clear()
+
+
+# Register cleanup handler
+import atexit
+atexit.register(_cleanup_spawned_processes)
+
 
 def get_service_status() -> dict[str, dict]:
     """Get current status of all services.
@@ -302,13 +336,16 @@ def _start_llama_server(
             env["LD_LIBRARY_PATH"] = lib_dir
         log_debug(f"Setting LD_LIBRARY_PATH={env['LD_LIBRARY_PATH']}")
 
-        subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,  # Detach from parent process
             env=env,
         )
+        # Track PID for cleanup on exit
+        _register_spawned_pid(proc.pid)
+        log_debug(f"Started llama-server with PID {proc.pid}")
         return True
     except Exception as e:
         log_debug(f"Failed to start llama-server: {e}")
@@ -1289,15 +1326,46 @@ def ensure_embedding_running() -> None:
 # ============================================================================
 
 
+def _get_docker_path() -> Optional[Path]:
+    """Get the absolute path to the Docker binary.
+
+    Uses shutil.which to find Docker, then resolves to absolute path.
+    This prevents PATH manipulation attacks.
+
+    Can be overridden via WATERCOOLER_DOCKER_PATH environment variable.
+
+    Returns:
+        Absolute path to Docker binary, or None if not found.
+    """
+    # Allow user override
+    override = os.environ.get("WATERCOOLER_DOCKER_PATH", "").strip()
+    if override:
+        path = Path(override)
+        if path.exists() and path.is_file():
+            return path.resolve()
+        log_debug(f"WATERCOOLER_DOCKER_PATH set but invalid: {override}")
+        return None
+
+    # Find docker in PATH
+    docker = shutil.which("docker")
+    if docker:
+        return Path(docker).resolve()
+    return None
+
+
 def _is_docker_daemon_running() -> bool:
     """Check if Docker daemon is running (not just if binary exists).
 
     Returns:
         True if Docker daemon is responsive.
     """
+    docker_path = _get_docker_path()
+    if not docker_path:
+        return False
+
     try:
         result = subprocess.run(
-            ["docker", "info"],
+            [str(docker_path), "info"],
             capture_output=True,
             timeout=10,
         )
@@ -1432,9 +1500,19 @@ def _falkordb_startup_worker(host: str, port: int) -> None:
 
         log_debug(f"Docker check: {docker_message}")
 
+        # Get verified Docker path
+        docker_path = _get_docker_path()
+        if not docker_path:
+            _update_service_status(
+                "falkordb", ServiceState.FAILED,
+                message="Docker binary not found"
+            )
+            return
+        docker_cmd = str(docker_path)
+
         try:
             result = subprocess.run(
-                ["docker", "ps", "-a", "--filter", "name=falkordb", "--format", "{{.Status}}"],
+                [docker_cmd, "ps", "-a", "--filter", "name=falkordb", "--format", "{{.Status}}"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -1446,7 +1524,7 @@ def _falkordb_startup_worker(host: str, port: int) -> None:
                 if "Exited" in container_status or "Created" in container_status:
                     log_debug("Starting existing FalkorDB container...")
                     result = subprocess.run(
-                        ["docker", "start", "falkordb"],
+                        [docker_cmd, "start", "falkordb"],
                         capture_output=True,
                         timeout=30,
                     )
@@ -1475,7 +1553,7 @@ def _falkordb_startup_worker(host: str, port: int) -> None:
                 log_debug("Creating new FalkorDB container...")
                 result = subprocess.run(
                     [
-                        "docker", "run", "-d",
+                        docker_cmd, "run", "-d",
                         "-p", f"{port}:6379",
                         "-p", "3000:3000",
                         "--name", "falkordb",
