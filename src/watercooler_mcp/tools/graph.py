@@ -80,6 +80,12 @@ def _validate_threshold(threshold: float, default: float = 0.5) -> float:
 def get_search_backend(backend: str) -> str:
     """Determine which search backend to use.
 
+    Priority (highest first):
+        1. Explicit backend parameter ("baseline", "graphiti", "leanrag")
+        2. WATERCOOLER_MEMORY_BACKEND env var
+        3. TOML config (memory.backend)
+        4. Default: "baseline"
+
     Args:
         backend: Requested backend - "auto", "baseline", "graphiti", or "leanrag"
 
@@ -90,11 +96,22 @@ def get_search_backend(backend: str) -> str:
     if backend in ("baseline", "graphiti", "leanrag"):
         return backend
 
-    # Auto mode: check WATERCOOLER_MEMORY_BACKEND env var
+    # Auto mode: check env var first, then TOML config
     if backend == "auto":
+        # Check env var
         memory_backend = os.environ.get("WATERCOOLER_MEMORY_BACKEND", "").lower().strip()
         if memory_backend in ("graphiti", "leanrag"):
             return memory_backend
+
+        # Check TOML config
+        try:
+            from watercooler.memory_config import get_memory_backend
+            toml_backend = get_memory_backend()
+            if toml_backend in ("graphiti", "leanrag"):
+                return toml_backend
+        except ImportError:
+            pass
+
         return "baseline"
 
     # Unknown backend falls back to baseline
