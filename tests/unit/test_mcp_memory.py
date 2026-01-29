@@ -87,11 +87,13 @@ class TestLoadGraphitiConfig:
     def test_load_config_openai_api_key_fallback(self, monkeypatch):
         """Test deprecated OPENAI_API_KEY fallback works with warning."""
         import warnings
+        from watercooler.config_facade import config as cfg
 
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.delenv("LLM_API_KEY", raising=False)
         monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-legacy")
+        cfg.reset()  # Force reload with new env vars
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")

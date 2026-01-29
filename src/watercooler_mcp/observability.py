@@ -64,6 +64,7 @@ def _reset_logging_state() -> None:
         for namespace in LOGGER_NAMESPACES:
             ns_logger = logging.getLogger(namespace)
             ns_logger.handlers.clear()
+            ns_logger.propagate = True  # Re-enable propagation for pytest caplog
 
 
 def _get_logging_config_safe() -> Dict[str, Any]:
