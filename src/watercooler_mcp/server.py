@@ -250,7 +250,7 @@ def _warm_cache() -> None:
         resolve_baseline_graph_llm_config,
         resolve_baseline_graph_embedding_config,
     )
-    from watercooler.models import ensure_gguf_model_available, ensure_embedding_model_available
+    from watercooler.models import ensure_llm_model_available, ensure_model_available
 
     print("Warming watercooler cache...", file=sys.stderr)
 
@@ -271,7 +271,7 @@ def _warm_cache() -> None:
         llm_config = resolve_baseline_graph_llm_config()
         if _is_localhost_url(llm_config.api_base):
             print(f"  LLM model ({llm_config.model}): checking...", file=sys.stderr)
-            model_path = ensure_gguf_model_available(llm_config.model)
+            model_path = ensure_llm_model_available(llm_config.model)
             if model_path:
                 print(f"  LLM model: {model_path}", file=sys.stderr)
             else:
@@ -286,7 +286,7 @@ def _warm_cache() -> None:
         emb_config = resolve_baseline_graph_embedding_config()
         if _is_localhost_url(emb_config.api_base):
             print(f"  Embedding model ({emb_config.model}): checking...", file=sys.stderr)
-            model_path = ensure_embedding_model_available(emb_config.model)
+            model_path = ensure_model_available(emb_config.model)
             if model_path:
                 print(f"  Embedding model: {model_path}", file=sys.stderr)
             else:
