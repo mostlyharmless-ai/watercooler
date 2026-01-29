@@ -1426,8 +1426,8 @@ def _verify_graph_parity(
             continue
 
         try:
-            # Parse the thread file
-            parsed = parse_thread_file(thread_file)
+            # Parse the thread file (no summaries needed for parity check)
+            parsed = parse_thread_file(thread_file, generate_summaries=False)
 
             # Compare entry_count
             graph_count = graph_node.get("entry_count", 0)
