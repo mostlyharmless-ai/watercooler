@@ -124,7 +124,12 @@ def load_tier_config(
     threads_dir: Optional[Path] = None,
     code_path: Optional[Path] = None,
 ) -> TierConfig:
-    """Load tier configuration from environment.
+    """Load tier configuration from environment and TOML config.
+
+    Priority (highest first):
+        1. Environment variables (WATERCOOLER_TIER_T*_ENABLED)
+        2. TOML config (memory.backend = "graphiti" enables T2)
+        3. Built-in defaults
 
     Environment Variables:
         WATERCOOLER_TIER_T1_ENABLED: "1" to enable T1 (default: "1")
@@ -140,8 +145,19 @@ def load_tier_config(
     Returns:
         TierConfig instance
     """
-    # Check if Graphiti is enabled (T2 depends on it)
-    graphiti_enabled = os.getenv("WATERCOOLER_GRAPHITI_ENABLED", "0") == "1"
+    # Check if Graphiti is enabled via env var
+    graphiti_env = os.getenv("WATERCOOLER_GRAPHITI_ENABLED", "0") == "1"
+
+    # Also check TOML config: memory.backend = "graphiti"
+    graphiti_toml = False
+    try:
+        from watercooler.memory_config import get_memory_backend
+        graphiti_toml = get_memory_backend() == "graphiti"
+    except ImportError:
+        pass
+
+    # T2 is enabled if either env var or TOML config enables Graphiti
+    graphiti_enabled = graphiti_env or graphiti_toml
 
     return TierConfig(
         t1_enabled=os.getenv("WATERCOOLER_TIER_T1_ENABLED", "1") == "1",
