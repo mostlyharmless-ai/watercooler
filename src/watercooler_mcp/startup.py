@@ -36,6 +36,13 @@ ENV_LLAMA_SERVER_SHA256 = "WATERCOOLER_LLAMA_SERVER_SHA256"  # User-provided SHA
 ENV_AUTO_PROVISION_MODELS = "WATERCOOLER_AUTO_PROVISION_MODELS"
 ENV_AUTO_PROVISION_LLAMA_SERVER = "WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER"
 
+# Service configuration constants
+DEFAULT_LLM_PORT = 8000  # Default port for llama-server (LLM completion)
+DEFAULT_EMBEDDING_PORT = 8080  # Default port for llama-server (embeddings)
+DEFAULT_CONTEXT_SIZE = 8192  # Default context window size (tokens)
+DEFAULT_SERVICE_WAIT_TIMEOUT = 60.0  # Seconds to wait for service to become ready
+DOWNLOAD_CHUNK_SIZE = 8192  # Bytes per chunk when downloading files
+
 # Known-good SHA256 checksums for verified llama.cpp releases
 # Format: {release_tag: {asset_pattern: sha256}}
 # These are checksums we've verified - update when testing new releases
@@ -253,7 +260,7 @@ def _is_localhost_url(url: str) -> bool:
         return False
 
 
-def _extract_port(url: str, default: int = 8000) -> int:
+def _extract_port(url: str, default: int = DEFAULT_LLM_PORT) -> int:
     """Extract port from a URL.
 
     Args:
@@ -300,7 +307,7 @@ def _check_llm_health(api_base: str, timeout: float = 2.0) -> bool:
 
 def _wait_for_llm_ready(
     api_base: str,
-    max_wait: float = 60.0,
+    max_wait: float = DEFAULT_SERVICE_WAIT_TIMEOUT,
     poll_interval: float = 1.0,
 ) -> bool:
     """Wait for LLM server to become ready.
@@ -326,7 +333,7 @@ def _start_llama_server(
     model_path: Path,
     port: int,
     mode: str,
-    context_size: int = 8192,
+    context_size: int = DEFAULT_CONTEXT_SIZE,
     host: str = "127.0.0.1",
 ) -> bool:
     """Start llama-server for either embedding or LLM completion.
@@ -445,7 +452,7 @@ def _llm_startup_worker(model_name: str, api_base: str, context_size: int) -> No
     )
 
     start_time = time.time()
-    port = _extract_port(api_base, default=8000)
+    port = _extract_port(api_base, default=DEFAULT_LLM_PORT)
     endpoint = f"http://127.0.0.1:{port}/v1"
 
     _update_service_status("llm", ServiceState.STARTING, endpoint=endpoint, started_at=start_time)
@@ -486,7 +493,7 @@ def _llm_startup_worker(model_name: str, api_base: str, context_size: int) -> No
             return
 
         # Wait for server to be ready
-        if _wait_for_llm_ready(endpoint, max_wait=60.0):
+        if _wait_for_llm_ready(endpoint, max_wait=DEFAULT_SERVICE_WAIT_TIMEOUT):
             _update_service_status(
                 "llm", ServiceState.RUNNING,
                 message=f"Model: {model_name}",
@@ -496,7 +503,7 @@ def _llm_startup_worker(model_name: str, api_base: str, context_size: int) -> No
         else:
             _update_service_status(
                 "llm", ServiceState.FAILED,
-                message="Server started but not responding after 60s"
+                message=f"Server started but not responding after {DEFAULT_SERVICE_WAIT_TIMEOUT}s"
             )
             log_debug("LLM server started but health check timed out")
 
@@ -559,7 +566,7 @@ def ensure_llm_running() -> None:
 
         # Get context size from model spec or use default
         from watercooler.models import get_llm_context_size
-        context_size = get_llm_context_size(model_name, default=8192)
+        context_size = get_llm_context_size(model_name, default=DEFAULT_CONTEXT_SIZE)
 
         thread = threading.Thread(
             target=_llm_startup_worker,
@@ -1167,13 +1174,13 @@ def _start_embedding_direct(
     model_path: Path,
     host: str,
     port: int,
-    n_ctx: int = 8192,
+    n_ctx: int = DEFAULT_CONTEXT_SIZE,
 ) -> bool:
     """Start embedding server as a detached background process.
 
     Uses llama-server with batch-optimized configuration for embeddings:
     - --parallel 8: Allow 8 concurrent requests
-    - -c 8192: Context window (matches bge-m3)
+    - -c: Context window (default 8192, matches bge-m3)
     - -b 4096: Batch size for prompt processing
     - -ub 4096: Micro-batch size for prompt processing
     - --embedding: Enable embedding mode
@@ -1220,7 +1227,7 @@ def _start_embedding_windows(
     model_path: Path,
     host: str,
     port: int,
-    n_ctx: int = 8192,
+    n_ctx: int = DEFAULT_CONTEXT_SIZE,
 ) -> bool:
     """Start embedding server on Windows.
 
@@ -1298,7 +1305,7 @@ def _start_embedding_windows(
 def _ensure_embedding_service_available(
     model_name: str,
     api_base: str,
-    context_size: int = 8192,
+    context_size: int = DEFAULT_CONTEXT_SIZE,
 ) -> bool:
     """Ensure embedding service is running, starting it if needed.
 
@@ -1356,7 +1363,7 @@ def _ensure_embedding_service_available(
     # Parse API base to get host/port
     parsed = urlparse(api_base)
     host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or 8080
+    port = parsed.port or DEFAULT_EMBEDDING_PORT
 
     # Start server (platform-aware)
     system = platform.system().lower()
@@ -1695,7 +1702,7 @@ def _falkordb_startup_worker(host: str, port: int) -> None:
                         timeout=30,
                     )
                     if result.returncode == 0:
-                        if _wait_for_falkordb_ready(host, port, max_wait=60.0):
+                        if _wait_for_falkordb_ready(host, port, max_wait=DEFAULT_SERVICE_WAIT_TIMEOUT):
                             _update_service_status(
                                 "falkordb", ServiceState.RUNNING,
                                 message="Container started",
@@ -1706,7 +1713,7 @@ def _falkordb_startup_worker(host: str, port: int) -> None:
                 elif "Up" in container_status:
                     # Container is running but not responding - might be loading
                     log_debug("FalkorDB container is up, waiting for it to be ready...")
-                    if _wait_for_falkordb_ready(host, port, max_wait=60.0):
+                    if _wait_for_falkordb_ready(host, port, max_wait=DEFAULT_SERVICE_WAIT_TIMEOUT):
                         _update_service_status(
                             "falkordb", ServiceState.RUNNING,
                             message="Container ready",
@@ -1732,7 +1739,7 @@ def _falkordb_startup_worker(host: str, port: int) -> None:
                     timeout=60,
                 )
                 if result.returncode == 0:
-                    if _wait_for_falkordb_ready(host, port, max_wait=60.0):
+                    if _wait_for_falkordb_ready(host, port, max_wait=DEFAULT_SERVICE_WAIT_TIMEOUT):
                         _update_service_status(
                             "falkordb", ServiceState.RUNNING,
                             message="Container created",

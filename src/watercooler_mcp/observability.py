@@ -1,3 +1,43 @@
+"""Observability utilities for watercooler MCP server.
+
+Logging Level Guidelines
+------------------------
+Use the following guidelines when choosing log levels:
+
+DEBUG (log_debug):
+    - Detailed diagnostic information for troubleshooting
+    - Service startup/shutdown steps and timing
+    - Configuration resolution details
+    - Network request/response details
+    - Model download progress
+    - Only visible when WATERCOOLER_LOG_LEVEL=DEBUG
+
+INFO (log_action):
+    - Structured action records (tool calls, operations)
+    - Successful service transitions
+    - Key milestones in workflows
+    - Default level - visible in normal operation
+
+WARNING (log_warning):
+    - Recoverable issues that may need attention
+    - Configuration mismatches (e.g., EMBEDDING_DIM mismatch)
+    - Deprecated features being used
+    - Fallback behavior activated
+    - Security policy violations (e.g., checksum mismatch)
+
+ERROR (log_error):
+    - Operation failures that affect functionality
+    - Unrecoverable errors
+    - Service startup failures
+    - Data corruption or integrity issues
+
+Best Practices:
+    - Always include context: what was happening, what failed, what to do
+    - Use structured fields for machine-parseable data
+    - Avoid logging sensitive data (credentials, tokens, user content)
+    - For long-running operations, log start at DEBUG, completion at INFO
+"""
+
 from __future__ import annotations
 
 import json
