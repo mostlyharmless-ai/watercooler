@@ -230,11 +230,16 @@ def _get_logger() -> logging.Logger:
                 # Configure ALL watercooler logger namespaces with shared handlers
                 # This ensures logging from watercooler, watercooler_mcp, and
                 # watercooler_memory all go to the same place with the same format
+                #
+                # When file logging is enabled, we disable propagation to prevent
+                # duplicate logs. When file logging is disabled (test mode), we
+                # allow propagation so pytest's caplog fixture can capture logs.
+                disable_propagation = log_file is not None
                 for namespace in LOGGER_NAMESPACES:
                     ns_logger = logging.getLogger(namespace)
                     ns_logger.handlers.clear()  # Remove any existing handlers
                     ns_logger.setLevel(log_level)
-                    ns_logger.propagate = False  # Don't propagate to root logger
+                    ns_logger.propagate = not disable_propagation
                     for handler in handlers:
                         ns_logger.addHandler(handler)
 

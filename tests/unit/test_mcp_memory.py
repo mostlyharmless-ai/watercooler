@@ -85,30 +85,32 @@ class TestLoadGraphitiConfig:
         assert config.embedding_model == "bge-m3"
 
     def test_load_config_openai_api_key_fallback(self, monkeypatch):
-        """Test deprecated OPENAI_API_KEY fallback works with warning."""
-        import warnings
+        """Test OPENAI_API_KEY is used when api_base points to OpenAI.
+
+        The config resolution uses provider-specific env vars based on api_base.
+        When api_base is openai.com and LLM_API_KEY/EMBEDDING_API_KEY are not set,
+        it falls back to OPENAI_API_KEY.
+
+        Note: The default api_base is localhost (for llama-server), so we need to
+        explicitly set it to OpenAI for the OPENAI_API_KEY lookup to work.
+        """
         from watercooler.config_facade import config as cfg
 
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.delenv("LLM_API_KEY", raising=False)
         monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+        # Set api_base to OpenAI so the OPENAI_API_KEY lookup is triggered
+        monkeypatch.setenv("LLM_API_BASE", "https://api.openai.com/v1")
+        monkeypatch.setenv("EMBEDDING_API_BASE", "https://api.openai.com/v1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-legacy")
         cfg.reset()  # Force reload with new env vars
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            config = memory.load_graphiti_config()
+        config = memory.load_graphiti_config()
 
-            # Should work with fallback
-            assert config is not None
-            assert config.llm_api_key == "sk-openai-legacy"
-            assert config.embedding_api_key == "sk-openai-legacy"
-
-            # Should emit deprecation warning
-            deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(deprecation_warnings) >= 1, "Expected at least one deprecation warning"
-            warning_messages = " ".join(str(x.message) for x in deprecation_warnings).lower()
-            assert "deprecated" in warning_messages
+        # Should use OPENAI_API_KEY when api_base is openai.com
+        assert config is not None
+        assert config.llm_api_key == "sk-openai-legacy"
+        assert config.embedding_api_key == "sk-openai-legacy"
 
     def test_load_config_prefers_explicit_keys_over_fallback(self, monkeypatch):
         """Test that explicit LLM_API_KEY/EMBEDDING_API_KEY take precedence."""
