@@ -108,6 +108,23 @@ _status_lock = threading.Lock()
 _spawned_pids: list[int] = []
 _pids_lock = threading.Lock()
 
+# Per-port startup locks to prevent race conditions
+# Key: port number, Value: Lock for that port
+_port_locks: dict[int, threading.Lock] = {}
+_port_locks_lock = threading.Lock()  # Protects _port_locks dict itself
+
+
+def _get_port_lock(port: int) -> threading.Lock:
+    """Get or create a lock for a specific port.
+
+    Prevents race condition where multiple threads try to start
+    llama-server on the same port simultaneously.
+    """
+    with _port_locks_lock:
+        if port not in _port_locks:
+            _port_locks[port] = threading.Lock()
+        return _port_locks[port]
+
 
 def _register_spawned_pid(pid: int) -> None:
     """Register a spawned process PID for cleanup tracking."""
@@ -340,6 +357,44 @@ def _start_llama_server(
 
     NO FALLBACK - llama-server is required. If not found, we download it.
     If download fails, we raise an error.
+
+    Thread-safe: Uses per-port locking to prevent race conditions when
+    multiple threads try to start llama-server on the same port.
+
+    Args:
+        model_path: Path to GGUF model file
+        port: Port to listen on
+        mode: "embedding" or "completion"
+        context_size: Context window size
+        host: Host to bind to
+
+    Returns:
+        True if server started successfully (or already running)
+
+    Raises:
+        RuntimeError: If llama-server cannot be found or downloaded
+    """
+    # Acquire port-specific lock to prevent race conditions
+    port_lock = _get_port_lock(port)
+    with port_lock:
+        # Re-check if service is already running after acquiring lock
+        # (another thread may have started it while we were waiting)
+        api_base = f"http://{host}:{port}/v1"
+        if _check_llm_health(api_base):
+            log_debug(f"llama-server already running on port {port} (detected after lock)")
+            return True
+
+        return _start_llama_server_unlocked(model_path, port, mode, context_size, host)
+
+
+def _start_llama_server_unlocked(
+    model_path: Path,
+    port: int,
+    mode: str,
+    context_size: int = DEFAULT_CONTEXT_SIZE,
+    host: str = "127.0.0.1",
+) -> bool:
+    """Internal: Start llama-server without locking (caller must hold port lock).
 
     Args:
         model_path: Path to GGUF model file

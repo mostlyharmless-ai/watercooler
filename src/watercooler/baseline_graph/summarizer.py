@@ -439,7 +439,10 @@ Summary:"""
     result = _call_llm(prompt, config)
 
     if result is None:
-        logger.debug("LLM unavailable, no summary generated")
+        logger.warning(
+            "LLM unavailable for entry summarization - returning empty summary. "
+            f"Check LLM service at {config.api_base}"
+        )
         return ""
 
     return result
@@ -508,7 +511,10 @@ Summary:"""
     result = _call_llm(prompt, config)
 
     if result is None:
-        logger.debug("LLM unavailable, no thread summary generated")
+        logger.warning(
+            "LLM unavailable for thread summarization - returning empty summary. "
+            f"Check LLM service at {config.api_base}"
+        )
         return ""
 
     return result
