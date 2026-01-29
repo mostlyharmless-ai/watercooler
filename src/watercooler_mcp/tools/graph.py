@@ -30,6 +30,49 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Input Validation Helpers
+# =============================================================================
+
+
+# Validation bounds
+MAX_LIMIT = 100
+MAX_BATCH_SIZE = 100
+MIN_SIMILARITY_THRESHOLD = 0.0
+MAX_SIMILARITY_THRESHOLD = 1.0
+
+
+def _validate_limit(limit: int, default: int = 10, max_value: int = MAX_LIMIT) -> int:
+    """Validate and constrain a limit parameter.
+
+    Args:
+        limit: The user-provided limit value
+        default: Default value if limit is invalid
+        max_value: Maximum allowed value
+
+    Returns:
+        Validated limit between 1 and max_value
+    """
+    if not isinstance(limit, int) or limit < 1:
+        return default
+    return min(limit, max_value)
+
+
+def _validate_threshold(threshold: float, default: float = 0.5) -> float:
+    """Validate and constrain a similarity threshold.
+
+    Args:
+        threshold: The user-provided threshold value
+        default: Default value if invalid
+
+    Returns:
+        Validated threshold between 0.0 and 1.0
+    """
+    if not isinstance(threshold, (int, float)):
+        return default
+    return max(MIN_SIMILARITY_THRESHOLD, min(float(threshold), MAX_SIMILARITY_THRESHOLD))
+
+
+# =============================================================================
 # Search Routing Helpers (Milestone 6: Tier-Aware Search Routing)
 # =============================================================================
 
@@ -225,14 +268,15 @@ def _search_baseline_impl(
             "count": 0,
         })
 
-    # Validate and constrain limit
-    limit = max(1, min(limit, 100))
+    # Validate parameters
+    limit = _validate_limit(limit, default=10)
+    semantic_threshold = _validate_threshold(semantic_threshold, default=0.5)
 
-    # Build search query
+    # Build search query (parameters already validated above)
     search_query = SearchQuery(
         query=query if query else None,
         semantic=semantic,
-        semantic_threshold=max(0.0, min(1.0, semantic_threshold)),
+        semantic_threshold=semantic_threshold,
         start_time=start_time if start_time else None,
         end_time=end_time if end_time else None,
         thread_status=thread_status if thread_status else None,
@@ -623,6 +667,10 @@ async def _search_graph_impl(
         if not threads_dir.exists():
             return f"Threads directory not found: {threads_dir}"
 
+        # Validate parameters early (before any routing/processing)
+        limit = _validate_limit(limit, default=10)
+        semantic_threshold = _validate_threshold(semantic_threshold, default=0.5)
+
         # Resolve backend and mode
         resolved_backend = get_search_backend(backend)
         resolved_mode = infer_search_mode(mode, query, semantic)
@@ -699,8 +747,8 @@ def _find_similar_entries_impl(
             })
 
         # Validate parameters
-        limit = max(1, min(limit, 50))
-        similarity_threshold = max(0.0, min(1.0, similarity_threshold))
+        limit = _validate_limit(limit, default=5, max_value=50)
+        similarity_threshold = _validate_threshold(similarity_threshold, default=0.5)
 
         # Find similar entries
         similar = find_similar_entries(
@@ -880,11 +928,11 @@ def _access_stats_impl(
                 return f"Invalid node_type: {node_type}. Must be 'thread', 'entry', or empty."
             filter_type = node_type.lower()
 
-        # Get most accessed
+        # Get most accessed (validate limit)
         results = get_most_accessed(
             threads_dir=threads_dir,
             node_type=filter_type,
-            limit=max(1, min(limit, 100)),  # Clamp to 1-100
+            limit=_validate_limit(limit, default=10),
         )
 
         # Format output
@@ -968,6 +1016,9 @@ def _graph_enrich_impl(
         if topics:
             topic_list = [t.strip() for t in topics.split(",") if t.strip()]
 
+        # Validate batch_size parameter
+        validated_batch_size = _validate_limit(batch_size, default=10, max_value=MAX_BATCH_SIZE)
+
         # Define the enrich operation
         def _do_enrich() -> dict:
             result = enrich_graph(
@@ -976,7 +1027,7 @@ def _graph_enrich_impl(
                 embeddings=embeddings,
                 mode=mode,
                 topics=topic_list,
-                batch_size=max(1, min(batch_size, 100)),
+                batch_size=validated_batch_size,
                 dry_run=dry_run,
             )
             return result.to_dict()

@@ -8,6 +8,7 @@ Use get_service_status() to check current status of all services.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import shutil
@@ -22,10 +23,27 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from .helpers import _add_startup_warning
-from .observability import log_debug
+from .observability import log_debug, log_warning
 
 # llama.cpp GitHub releases URL pattern
 LLAMA_CPP_RELEASE_URL = "https://github.com/ggml-org/llama.cpp/releases/latest"
+
+# Environment variables for security configuration
+ENV_LLAMA_SERVER_VERIFY = "WATERCOOLER_LLAMA_SERVER_VERIFY"  # "strict", "warn", or "skip"
+ENV_LLAMA_SERVER_SHA256 = "WATERCOOLER_LLAMA_SERVER_SHA256"  # User-provided SHA256
+
+# Known-good SHA256 checksums for verified llama.cpp releases
+# Format: {release_tag: {asset_pattern: sha256}}
+# These are checksums we've verified - update when testing new releases
+LLAMA_SERVER_CHECKSUMS: dict[str, dict[str, str]] = {
+    # Add verified checksums here as we test releases
+    # Example:
+    # "b5270": {
+    #     "ubuntu-x64": "abc123...",
+    #     "ubuntu-vulkan-x64": "def456...",
+    #     "macos-arm64": "789abc...",
+    # },
+}
 
 
 class ServiceState(Enum):
@@ -305,6 +323,7 @@ def _llm_startup_worker(model_name: str, api_base: str, context_size: int) -> No
         api_base: Target API base URL
         context_size: Context window size
     """
+    import traceback
     from watercooler.models import (
         ModelDownloadError,
         ModelNotFoundError,
@@ -318,54 +337,61 @@ def _llm_startup_worker(model_name: str, api_base: str, context_size: int) -> No
 
     _update_service_status("llm", ServiceState.STARTING, endpoint=endpoint, started_at=start_time)
 
-    # Check if model is in our GGUF registry
-    if not is_known_llm_gguf_model(model_name):
-        _update_service_status(
-            "llm", ServiceState.FAILED,
-            message=f"Model '{model_name}' not in GGUF registry. Add to models.py or use a cloud endpoint."
-        )
-        log_debug(f"LLM model {model_name} not in GGUF registry")
-        return
-
-    # Download model if needed
-    _update_service_status("llm", ServiceState.STARTING, message=f"Downloading model: {model_name}")
     try:
-        model_path = ensure_llm_model_available(model_name, verbose=False)
-    except (ModelNotFoundError, ModelDownloadError) as e:
-        _update_service_status("llm", ServiceState.FAILED, message=f"Model download failed: {e}")
-        log_debug(f"Failed to download LLM model {model_name}: {e}")
-        return
-
-    log_debug(f"LLM model available at: {model_path}")
-
-    # Start llama-server in completion mode
-    _update_service_status("llm", ServiceState.STARTING, message="Starting llama-server...")
-    try:
-        if not _start_llama_server(model_path, port, mode="completion", context_size=context_size):
+        # Check if model is in our GGUF registry
+        if not is_known_llm_gguf_model(model_name):
             _update_service_status(
                 "llm", ServiceState.FAILED,
-                message="Failed to start llama-server process"
+                message=f"Model '{model_name}' not in GGUF registry. Add to models.py or use a cloud endpoint."
             )
+            log_debug(f"LLM model {model_name} not in GGUF registry")
             return
-    except RuntimeError as e:
-        _update_service_status("llm", ServiceState.FAILED, message=str(e))
-        log_debug(f"llama-server startup error: {e}")
-        return
 
-    # Wait for server to be ready
-    if _wait_for_llm_ready(endpoint, max_wait=60.0):
-        _update_service_status(
-            "llm", ServiceState.RUNNING,
-            message=f"Model: {model_name}",
-            ready_at=time.time()
-        )
-        log_debug(f"LLM service started successfully at {endpoint}")
-    else:
-        _update_service_status(
-            "llm", ServiceState.FAILED,
-            message="Server started but not responding after 60s"
-        )
-        log_debug("LLM server started but health check timed out")
+        # Download model if needed
+        _update_service_status("llm", ServiceState.STARTING, message=f"Downloading model: {model_name}")
+        try:
+            model_path = ensure_llm_model_available(model_name, verbose=False)
+        except (ModelNotFoundError, ModelDownloadError) as e:
+            _update_service_status("llm", ServiceState.FAILED, message=f"Model download failed: {e}")
+            log_debug(f"Failed to download LLM model {model_name}: {e}")
+            return
+
+        log_debug(f"LLM model available at: {model_path}")
+
+        # Start llama-server in completion mode
+        _update_service_status("llm", ServiceState.STARTING, message="Starting llama-server...")
+        try:
+            if not _start_llama_server(model_path, port, mode="completion", context_size=context_size):
+                _update_service_status(
+                    "llm", ServiceState.FAILED,
+                    message="Failed to start llama-server process"
+                )
+                return
+        except RuntimeError as e:
+            _update_service_status("llm", ServiceState.FAILED, message=str(e))
+            log_debug(f"llama-server startup error: {e}")
+            return
+
+        # Wait for server to be ready
+        if _wait_for_llm_ready(endpoint, max_wait=60.0):
+            _update_service_status(
+                "llm", ServiceState.RUNNING,
+                message=f"Model: {model_name}",
+                ready_at=time.time()
+            )
+            log_debug(f"LLM service started successfully at {endpoint}")
+        else:
+            _update_service_status(
+                "llm", ServiceState.FAILED,
+                message="Server started but not responding after 60s"
+            )
+            log_debug("LLM server started but health check timed out")
+
+    except Exception as e:
+        # Catch-all for any unexpected errors to prevent silent failures
+        error_msg = f"Unexpected error in LLM startup: {type(e).__name__}: {e}"
+        log_debug(f"{error_msg}\n{traceback.format_exc()}")
+        _update_service_status("llm", ServiceState.FAILED, message=error_msg)
 
 
 def ensure_llm_running() -> None:
@@ -570,6 +596,120 @@ def _has_nvidia_gpu() -> bool:
     return False
 
 
+def _compute_sha256(file_path: Path) -> str:
+    """Compute SHA256 hash of a file.
+
+    Args:
+        file_path: Path to file to hash
+
+    Returns:
+        Hex-encoded SHA256 hash
+    """
+    sha256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
+def _get_expected_checksum(release_tag: str, asset_pattern: str) -> Optional[str]:
+    """Get expected SHA256 checksum for a release asset.
+
+    Checks in order:
+    1. User-provided checksum via WATERCOOLER_LLAMA_SERVER_SHA256
+    2. Known-good checksums from LLAMA_SERVER_CHECKSUMS registry
+
+    Args:
+        release_tag: Release version tag (e.g., "b5270")
+        asset_pattern: Asset pattern (e.g., "ubuntu-x64")
+
+    Returns:
+        Expected SHA256 hex string, or None if unknown
+    """
+    # Check user-provided checksum first
+    user_checksum = os.environ.get(ENV_LLAMA_SERVER_SHA256, "").strip().lower()
+    if user_checksum:
+        log_debug(f"Using user-provided checksum: {user_checksum[:16]}...")
+        return user_checksum
+
+    # Check our known-good checksums registry
+    release_checksums = LLAMA_SERVER_CHECKSUMS.get(release_tag, {})
+    if asset_pattern in release_checksums:
+        return release_checksums[asset_pattern]
+
+    return None
+
+
+def _verify_checksum(
+    file_path: Path,
+    expected: Optional[str],
+    release_tag: str,
+    asset_pattern: str,
+) -> bool:
+    """Verify file checksum and handle verification policy.
+
+    Verification policy (WATERCOOLER_LLAMA_SERVER_VERIFY):
+    - "strict": Fail if checksum unknown or mismatched
+    - "warn" (default): Warn if checksum unknown, fail if mismatched
+    - "skip": Skip verification entirely
+
+    Args:
+        file_path: Path to downloaded file
+        expected: Expected SHA256 (None if unknown)
+        release_tag: Release tag for error messages
+        asset_pattern: Asset pattern for error messages
+
+    Returns:
+        True if verification passed (or skipped), False if failed
+
+    Raises:
+        RuntimeError: In strict mode when checksum is unknown
+    """
+    verify_mode = os.environ.get(ENV_LLAMA_SERVER_VERIFY, "warn").lower().strip()
+
+    if verify_mode == "skip":
+        log_debug("Checksum verification skipped (WATERCOOLER_LLAMA_SERVER_VERIFY=skip)")
+        return True
+
+    actual = _compute_sha256(file_path)
+    log_debug(f"Downloaded file SHA256: {actual}")
+
+    if expected is None:
+        # Checksum unknown for this release
+        if verify_mode == "strict":
+            raise RuntimeError(
+                f"Checksum verification failed: No known checksum for llama-server "
+                f"release {release_tag} ({asset_pattern}).\n"
+                f"Actual SHA256: {actual}\n"
+                f"To proceed, either:\n"
+                f"  1. Set WATERCOOLER_LLAMA_SERVER_SHA256={actual} after manual verification\n"
+                f"  2. Set WATERCOOLER_LLAMA_SERVER_VERIFY=warn to allow with warning\n"
+                f"  3. Download llama-server manually from https://github.com/ggml-org/llama.cpp/releases"
+            )
+        else:
+            # warn mode
+            log_warning(
+                f"Downloaded llama-server ({release_tag}) without checksum verification. "
+                f"SHA256: {actual}. Set WATERCOOLER_LLAMA_SERVER_VERIFY=strict for mandatory verification."
+            )
+            return True
+
+    # Have expected checksum - verify it matches
+    if actual != expected:
+        log_warning(
+            f"SECURITY: Checksum mismatch for llama-server download!\n"
+            f"Expected: {expected}\n"
+            f"Actual:   {actual}\n"
+            f"This could indicate tampering or a corrupted download."
+        )
+        # Delete the suspicious file
+        file_path.unlink(missing_ok=True)
+        return False
+
+    log_debug(f"Checksum verified: {actual[:16]}...")
+    return True
+
+
 def _download_with_progress(url: str, dest_path: Path, desc: str = "Downloading") -> bool:
     """Download a file with progress indication.
 
@@ -697,6 +837,9 @@ def _download_llama_server() -> Optional[Path]:
             log_debug(f"No matching release asset found for patterns: {patterns_tried}")
             return None
 
+        # Extract release tag from asset name or release info
+        release_tag = release_info.get("tag_name", "unknown")
+
         # Download the archive with progress
         archive_path = bin_dir / f"llama-cpp-download{archive_ext}"
         log_debug(f"Downloading llama-server from: {download_url}")
@@ -705,6 +848,25 @@ def _download_llama_server() -> Optional[Path]:
             return None
 
         log_debug(f"Downloaded archive to: {archive_path}")
+
+        # Verify checksum before extraction
+        # Find which pattern matched for checksum lookup
+        matched_pattern = None
+        for pattern, _ in asset_patterns:
+            if pattern in (asset_name or ""):
+                matched_pattern = pattern
+                break
+
+        expected_checksum = _get_expected_checksum(release_tag, matched_pattern or "")
+        try:
+            if not _verify_checksum(archive_path, expected_checksum, release_tag, matched_pattern or "unknown"):
+                log_debug("Checksum verification failed, aborting download")
+                return None
+        except RuntimeError as e:
+            # Strict mode failure
+            log_debug(f"Checksum verification error: {e}")
+            archive_path.unlink(missing_ok=True)
+            raise
 
         # Extract llama-server AND shared libraries from archive
         # The llama.cpp releases include .so files that llama-server depends on:
@@ -1020,6 +1182,8 @@ def _ensure_embedding_service_available(
 
 def _embedding_startup_worker(model_name: str, api_base: str, context_size: int) -> None:
     """Background worker to start embedding service (llama-server) and wait for it to be ready."""
+    import traceback
+
     start_time = time.time()
     _update_service_status("embedding", ServiceState.STARTING, endpoint=api_base, started_at=start_time)
 
@@ -1043,6 +1207,11 @@ def _embedding_startup_worker(model_name: str, api_base: str, context_size: int)
             message=str(e)
         )
         log_debug(f"Embedding startup error: {e}")
+    except Exception as e:
+        # Catch-all for any unexpected errors to prevent silent failures
+        error_msg = f"Unexpected error in embedding startup: {type(e).__name__}: {e}"
+        log_debug(f"{error_msg}\n{traceback.format_exc()}")
+        _update_service_status("embedding", ServiceState.FAILED, message=error_msg)
 
 
 def ensure_embedding_running() -> None:
@@ -1137,77 +1306,11 @@ def _is_docker_daemon_running() -> bool:
         return False
 
 
-def _install_docker_linux() -> bool:
-    """Attempt to install Docker on Linux using get.docker.com convenience script.
-
-    This requires sudo/root access. If the user doesn't have sudo, this will fail
-    and we'll provide manual instructions.
-
-    Returns:
-        True if Docker was installed successfully.
-    """
-    log_debug("Attempting to install Docker via get.docker.com...")
-
-    try:
-        # Download the convenience script
-        script_path = Path("/tmp/get-docker.sh")
-        result = subprocess.run(
-            ["curl", "-fsSL", "https://get.docker.com", "-o", str(script_path)],
-            capture_output=True,
-            timeout=60,
-        )
-        if result.returncode != 0:
-            log_debug(f"Failed to download Docker install script: {result.stderr.decode()}")
-            return False
-
-        # Make executable and run with sudo
-        script_path.chmod(0o755)
-
-        log_debug("Running Docker install script (requires sudo)...")
-        result = subprocess.run(
-            ["sudo", "sh", str(script_path)],
-            capture_output=True,
-            timeout=300,  # 5 minutes for install
-        )
-
-        if result.returncode != 0:
-            log_debug(f"Docker install failed: {result.stderr.decode()}")
-            return False
-
-        # Add current user to docker group (so future commands don't need sudo)
-        import getpass
-        username = getpass.getuser()
-        subprocess.run(
-            ["sudo", "usermod", "-aG", "docker", username],
-            capture_output=True,
-            timeout=10,
-        )
-        log_debug(f"Added {username} to docker group (may need re-login)")
-
-        # Clean up
-        script_path.unlink(missing_ok=True)
-
-        # Verify installation
-        docker_path = shutil.which("docker")
-        if docker_path:
-            log_debug(f"Docker installed successfully: {docker_path}")
-            return True
-
-        return False
-
-    except subprocess.TimeoutExpired:
-        log_debug("Docker installation timed out")
-        return False
-    except Exception as e:
-        log_debug(f"Docker installation failed: {e}")
-        return False
-
-
 def _ensure_docker_available() -> tuple[bool, str]:
     """Ensure Docker is available and daemon is running.
 
-    Attempts auto-install on Linux if Docker is not found.
-    Provides clear instructions on macOS.
+    Provides clear instructions if Docker is not available.
+    Does NOT attempt auto-install (security: avoids running sudo).
 
     Returns:
         Tuple of (success, message). If success is False, message contains
@@ -1219,57 +1322,37 @@ def _ensure_docker_available() -> tuple[bool, str]:
     # Step 1: Check if Docker binary exists
     if not docker_path:
         if system == "linux":
-            log_debug("Docker not found on Linux, attempting auto-install...")
-            if _install_docker_linux():
-                # Re-check after install
-                docker_path = shutil.which("docker")
-                if docker_path:
-                    log_debug("Docker installed, checking daemon...")
-                else:
-                    return False, (
-                        "Docker installed but not in PATH. "
-                        "Please restart your shell or run: source ~/.bashrc"
-                    )
-            else:
-                return False, (
-                    "Docker auto-install failed (requires sudo). "
-                    "Install manually: curl -fsSL https://get.docker.com | sh"
-                )
+            return False, (
+                "Docker not found. Install options:\n"
+                "  • Standard: curl -fsSL https://get.docker.com | sh\n"
+                "  • Rootless: curl -fsSL https://get.docker.com/rootless | sh\n"
+                "  • Package:  sudo apt install docker.io  (Ubuntu/Debian)\n"
+                "After install, add yourself to docker group: sudo usermod -aG docker $USER"
+            )
         elif system == "darwin":
             return False, (
-                "Docker not found. Install Docker Desktop: "
-                "https://docs.docker.com/desktop/install/mac-install/"
+                "Docker not found. Install Docker Desktop:\n"
+                "  https://docs.docker.com/desktop/install/mac-install/"
             )
         else:
-            return False, "Docker not found. Please install Docker for your platform."
+            return False, (
+                "Docker not found. Please install Docker for your platform:\n"
+                "  https://docs.docker.com/get-docker/"
+            )
 
     # Step 2: Check if Docker daemon is running
     if not _is_docker_daemon_running():
         if system == "darwin":
             return False, (
-                "Docker Desktop is installed but not running. "
+                "Docker Desktop is installed but not running.\n"
                 "Please start Docker Desktop from Applications."
             )
         elif system == "linux":
-            # Try to start Docker daemon
-            log_debug("Docker daemon not running, attempting to start...")
-            try:
-                result = subprocess.run(
-                    ["sudo", "systemctl", "start", "docker"],
-                    capture_output=True,
-                    timeout=30,
-                )
-                if result.returncode == 0:
-                    # Wait a moment for daemon to be ready
-                    time.sleep(2)
-                    if _is_docker_daemon_running():
-                        log_debug("Docker daemon started successfully")
-                        return True, "Docker daemon started"
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                pass
-
             return False, (
-                "Docker daemon not running. Start it with: sudo systemctl start docker"
+                "Docker daemon not running. Start it with one of:\n"
+                "  • sudo systemctl start docker\n"
+                "  • dockerd-rootless-setuptool.sh install  (for rootless)\n"
+                "  • Start Docker Desktop if installed"
             )
         else:
             return False, "Docker daemon not running. Please start Docker."
@@ -1331,100 +1414,112 @@ def _wait_for_falkordb_ready(
 
 def _falkordb_startup_worker(host: str, port: int) -> None:
     """Background worker to start FalkorDB and wait for it to be ready."""
+    import traceback
+
     start_time = time.time()
     endpoint = f"{host}:{port}"
     _update_service_status("falkordb", ServiceState.STARTING, endpoint=endpoint, started_at=start_time)
 
-    # Ensure Docker is available (installs on Linux if needed, checks daemon)
-    docker_available, docker_message = _ensure_docker_available()
-    if not docker_available:
-        _update_service_status(
-            "falkordb", ServiceState.FAILED,
-            message=docker_message
-        )
-        return
-
-    log_debug(f"Docker check: {docker_message}")
-
     try:
-        result = subprocess.run(
-            ["docker", "ps", "-a", "--filter", "name=falkordb", "--format", "{{.Status}}"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        container_status = result.stdout.strip()
+        # Ensure Docker is available (provides instructions if not)
+        docker_available, docker_message = _ensure_docker_available()
+        if not docker_available:
+            _update_service_status(
+                "falkordb", ServiceState.FAILED,
+                message=docker_message
+            )
+            return
 
-        if container_status:
-            # Container exists - try to start it
-            if "Exited" in container_status or "Created" in container_status:
-                log_debug("Starting existing FalkorDB container...")
+        log_debug(f"Docker check: {docker_message}")
+
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "-a", "--filter", "name=falkordb", "--format", "{{.Status}}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            container_status = result.stdout.strip()
+
+            if container_status:
+                # Container exists - try to start it
+                if "Exited" in container_status or "Created" in container_status:
+                    log_debug("Starting existing FalkorDB container...")
+                    result = subprocess.run(
+                        ["docker", "start", "falkordb"],
+                        capture_output=True,
+                        timeout=30,
+                    )
+                    if result.returncode == 0:
+                        if _wait_for_falkordb_ready(host, port, max_wait=60.0):
+                            _update_service_status(
+                                "falkordb", ServiceState.RUNNING,
+                                message="Container started",
+                                ready_at=time.time()
+                            )
+                            log_debug("FalkorDB container started successfully")
+                            return
+                elif "Up" in container_status:
+                    # Container is running but not responding - might be loading
+                    log_debug("FalkorDB container is up, waiting for it to be ready...")
+                    if _wait_for_falkordb_ready(host, port, max_wait=60.0):
+                        _update_service_status(
+                            "falkordb", ServiceState.RUNNING,
+                            message="Container ready",
+                            ready_at=time.time()
+                        )
+                        log_debug("FalkorDB is now ready")
+                        return
+            else:
+                # Container doesn't exist - create and start it
+                log_debug("Creating new FalkorDB container...")
                 result = subprocess.run(
-                    ["docker", "start", "falkordb"],
+                    [
+                        "docker", "run", "-d",
+                        "-p", f"{port}:6379",
+                        "-p", "3000:3000",
+                        "--name", "falkordb",
+                        "-v", "falkordb_data:/var/lib/falkordb/data",
+                        "-e", "FALKORDB_ARGS=TIMEOUT 120000",
+                        "falkordb/falkordb:latest",
+                    ],
                     capture_output=True,
-                    timeout=30,
+                    text=True,
+                    timeout=60,
                 )
                 if result.returncode == 0:
                     if _wait_for_falkordb_ready(host, port, max_wait=60.0):
                         _update_service_status(
                             "falkordb", ServiceState.RUNNING,
-                            message="Container started",
+                            message="Container created",
                             ready_at=time.time()
                         )
-                        log_debug("FalkorDB container started successfully")
+                        log_debug("FalkorDB container created and started successfully")
                         return
-            elif "Up" in container_status:
-                # Container is running but not responding - might be loading
-                log_debug("FalkorDB container is up, waiting for it to be ready...")
-                if _wait_for_falkordb_ready(host, port, max_wait=60.0):
-                    _update_service_status(
-                        "falkordb", ServiceState.RUNNING,
-                        message="Container ready",
-                        ready_at=time.time()
-                    )
-                    log_debug("FalkorDB is now ready")
-                    return
-        else:
-            # Container doesn't exist - create and start it
-            log_debug("Creating new FalkorDB container...")
-            result = subprocess.run(
-                [
-                    "docker", "run", "-d",
-                    "-p", f"{port}:6379",
-                    "-p", "3000:3000",
-                    "--name", "falkordb",
-                    "-v", "falkordb_data:/var/lib/falkordb/data",
-                    "-e", "FALKORDB_ARGS=TIMEOUT 120000",
-                    "falkordb/falkordb:latest",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode == 0:
-                if _wait_for_falkordb_ready(host, port, max_wait=60.0):
-                    _update_service_status(
-                        "falkordb", ServiceState.RUNNING,
-                        message="Container created",
-                        ready_at=time.time()
-                    )
-                    log_debug("FalkorDB container created and started successfully")
-                    return
+                    else:
+                        log_debug("FalkorDB container created but not responding")
                 else:
-                    log_debug("FalkorDB container created but not responding")
-            else:
-                log_debug(f"Failed to create FalkorDB container: {result.stderr}")
+                    log_debug(f"Failed to create FalkorDB container: {result.stderr}")
 
-    except subprocess.TimeoutExpired:
-        log_debug("Docker command timed out")
+        except subprocess.TimeoutExpired as e:
+            log_debug(f"Docker command timed out: {e}")
+            _update_service_status(
+                "falkordb", ServiceState.FAILED,
+                message="Docker command timed out"
+            )
+            return
+
+        # If we get here, auto-start failed
+        _update_service_status(
+            "falkordb", ServiceState.FAILED,
+            message="Could not start. Run: docker start falkordb"
+        )
+
     except Exception as e:
-        log_debug(f"Docker command failed: {e}")
-
-    # If we get here, auto-start failed
-    _update_service_status(
-        "falkordb", ServiceState.FAILED,
-        message="Could not start. Run: docker start falkordb"
-    )
+        # Catch-all for any unexpected errors to prevent silent failures
+        error_msg = f"Unexpected error in FalkorDB startup: {type(e).__name__}: {e}"
+        log_debug(f"{error_msg}\n{traceback.format_exc()}")
+        _update_service_status("falkordb", ServiceState.FAILED, message=error_msg)
 
 
 def ensure_falkordb_running() -> None:
