@@ -857,6 +857,7 @@ class TierOrchestrator:
                 query,
                 self.config.threads_dir,
                 limit=self.config.t1_limit,
+                semantic=True,  # Use semantic search for natural language queries
             )
         elif tier == Tier.T2:
             if not self.config.code_path:
