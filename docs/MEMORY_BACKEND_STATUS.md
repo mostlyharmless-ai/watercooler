@@ -185,9 +185,9 @@ docs/
    # Start FalkorDB
    docker run -p 6379:6379 -p 3000:3000 -it --rm falkordb/falkordb:latest
 
-   # Configure LLM (OpenAI or local)
-   export LLM_API_KEY="sk-..."  # or "local" for Ollama
-   export LLM_API_BASE="http://localhost:11434/v1"  # for Ollama
+   # Configure LLM (OpenAI or local llama-server)
+   export LLM_API_KEY="sk-..."  # or "local" for llama-server
+   export LLM_API_BASE="http://localhost:8000/v1"  # for llama-server
    ```
 
 2. Run full test suite:

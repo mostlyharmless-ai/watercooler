@@ -220,6 +220,28 @@ default_spec = "general-purpose"
 
 
 # -----------------------------------------------------------------------------
+# Service Auto-Provisioning
+# Controls automatic download of binaries and models
+#
+# SECURITY NOTE: Auto-downloading executables (llama_server) fetches binaries
+# from GitHub releases. Checksums are verified when available. Set to false
+# and install manually if this is a concern for your environment.
+# -----------------------------------------------------------------------------
+[mcp.service_provision]
+
+# Auto-download GGUF models from HuggingFace when needed
+# Env: WATERCOOLER_AUTO_PROVISION_MODELS
+# Models are data files (not executables) - lower security risk
+models = true
+
+# Auto-download llama-server binary from GitHub releases when needed
+# Env: WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER
+# Downloads executable from: https://github.com/ggml-org/llama.cpp/releases
+# Checksum verification: Set WATERCOOLER_LLAMA_SERVER_VERIFY=strict for mandatory
+llama_server = true
+
+
+# -----------------------------------------------------------------------------
 # Graph Settings
 # Baseline graph construction with summaries and embeddings for semantic search
 # -----------------------------------------------------------------------------
@@ -687,6 +709,8 @@ auto_detect_services = true
 # mcp.logging.max_bytes          WATERCOOLER_LOG_MAX_BYTES
 # mcp.logging.backup_count       WATERCOOLER_LOG_BACKUP_COUNT
 # mcp.logging.disable_file       WATERCOOLER_LOG_DISABLE_FILE
+# mcp.service_provision.models   WATERCOOLER_AUTO_PROVISION_MODELS
+# mcp.service_provision.llama_server WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER
 # mcp.graph.generate_summaries   WATERCOOLER_GRAPH_SUMMARIES
 # mcp.graph.generate_embeddings  WATERCOOLER_GRAPH_EMBEDDINGS
 # mcp.graph.auto_detect_services WATERCOOLER_GRAPH_AUTO_DETECT

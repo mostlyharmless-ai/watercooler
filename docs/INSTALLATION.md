@@ -8,6 +8,69 @@ Complete setup instructions for watercooler-cloud.
 - **Git** (authentication handled automatically via credentials file)
 - Basic GitHub permissions to push to threads repositories
 
+## System Requirements
+
+### Memory Graph Features (Optional)
+
+The memory graph features require local model inference via llama-server. Below are the resource requirements for different configurations.
+
+#### Embedding Models
+
+| Model | Quantization | Disk | RAM | Use Case |
+|-------|--------------|------|-----|----------|
+| bge-m3 | Q8_0 | ~700 MB | ~1 GB | Default, multilingual, high quality |
+| nomic-embed-text | Q8_0 | ~550 MB | ~800 MB | Lightweight alternative |
+| e5-mistral-7b | Q4_K_M | ~4.5 GB | ~6 GB | Highest quality, instruction-aware |
+
+#### LLM Models (for summarization and extraction)
+
+| Model | Quantization | Disk | RAM | Notes |
+|-------|--------------|------|-----|-------|
+| llama3.2:1b | Q8_0 | ~1.2 GB | ~2 GB | Minimal, basic summarization |
+| llama3.2:3b | Q8_0 | ~3.2 GB | ~5 GB | Default, good balance |
+| qwen3:0.6b | Q4_K_M | ~400 MB | ~1 GB | Ultra-light, basic extraction |
+| qwen3:1.7b | Q4_K_M | ~1.1 GB | ~2 GB | Light with thinking mode |
+| qwen3:4b | Q4_K_M | ~2.5 GB | ~4 GB | Balanced with thinking mode |
+| qwen3:8b | Q4_K_M | ~5 GB | ~7 GB | Quality with thinking mode |
+| qwen3:30b | Q4_K_M | ~17 GB | ~20 GB | Best quality (MoE, 3B active) |
+
+#### Hardware Profiles
+
+**Minimal (8 GB RAM):**
+```toml
+[memory.embedding]
+model = "bge-m3"
+
+[memory.llm]
+model = "llama3.2:1b"
+```
+- Total disk: ~2 GB
+- Total RAM: ~3 GB (models can share if run sequentially)
+
+**Recommended (16 GB RAM):**
+```toml
+[memory.embedding]
+model = "bge-m3"
+
+[memory.llm]
+model = "llama3.2:3b"
+```
+- Total disk: ~4 GB
+- Total RAM: ~6 GB (allows concurrent operation)
+
+**High Quality (32+ GB RAM):**
+```toml
+[memory.embedding]
+model = "bge-m3"
+
+[memory.llm]
+model = "qwen3:8b"
+```
+- Total disk: ~6 GB
+- Total RAM: ~8 GB (thinking mode improves extraction quality)
+
+**Note:** Memory requirements are additive when running embedding and LLM servers concurrently. The llama-server binary itself (~200 MB) is auto-downloaded on first use if enabled in config.
+
 ## Installation Methods
 
 ### Option 1: Install from Source (Recommended for Development)

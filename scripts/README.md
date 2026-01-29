@@ -5,7 +5,7 @@ Utility scripts for watercooler-cloud development and deployment.
 ## Baseline Graph Tools
 
 The baseline graph is a lightweight knowledge graph built from threads using locally-hosted
-LLMs (Ollama, llama.cpp). These scripts provide maintenance and recovery operations.
+LLMs (llama-server). These scripts provide maintenance and recovery operations.
 
 ### enrich_baseline_graph.py
 

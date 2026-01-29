@@ -223,9 +223,9 @@ Settings for the baseline graph module (free-tier knowledge graph generation):
 prefer_extractive = false    # Force extractive mode (skip LLM)
 
 [baseline_graph.llm]
-api_base = "http://localhost:11434/v1"  # Ollama default
+api_base = "http://localhost:8000/v1"   # llama-server default
 model = "llama3.2:3b"                   # Small local model
-api_key = "ollama"                      # Ollama doesn't require key
+api_key = "local"                       # Local server doesn't require key
 timeout = 30.0                          # Request timeout (seconds)
 max_tokens = 256                        # Max response tokens
 
@@ -268,12 +268,12 @@ This is intentional - each backend has its own config system, and env vars provi
 # Enable Graphiti with local services
 export WATERCOOLER_GRAPHITI_ENABLED=1
 
-# LLM via Ollama
-export LLM_API_KEY="ollama"  # Ollama doesn't require a real key
-export LLM_API_BASE="http://localhost:11434/v1"
+# LLM via llama-server
+export LLM_API_KEY="local"  # Local server doesn't require a real key
+export LLM_API_BASE="http://localhost:8000/v1"
 export LLM_MODEL="llama3.2:3b"
 
-# Embeddings via llama.cpp server
+# Embeddings via llama-server
 export EMBEDDING_API_KEY="local"  # Local server doesn't require a real key
 export EMBEDDING_API_BASE="http://localhost:8080/v1"
 export EMBEDDING_MODEL="bge-m3"

@@ -351,7 +351,7 @@ def _call_llm(
         "Content-Type": "application/json",
     }
     # Add authorization header for non-local endpoints (local llama-server doesn't need it)
-    if config.api_key and config.api_key not in ("", "local", "ollama"):
+    if config.api_key and config.api_key not in ("", "local"):
         headers["Authorization"] = f"Bearer {config.api_key}"
 
     try:

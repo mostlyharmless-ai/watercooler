@@ -639,7 +639,7 @@ Variables for the baseline graph module (free-tier knowledge graph generation).
 
 **Required:** No
 
-**Default:** `"http://localhost:11434/v1"` (Ollama default)
+**Default:** `"http://localhost:8000/v1"` (llama-server default)
 
 **Format:** URL string
 
@@ -653,11 +653,11 @@ The baseline graph module uses local LLMs for generating summaries. This variabl
 
 **Shell:**
 ```bash
-# Ollama (default)
-export BASELINE_GRAPH_API_BASE="http://localhost:11434/v1"
+# llama-server (default)
+export BASELINE_GRAPH_API_BASE="http://localhost:8000/v1"
 
-# llama.cpp server
-export BASELINE_GRAPH_API_BASE="http://localhost:8080/v1"
+# OpenAI
+export BASELINE_GRAPH_API_BASE="https://api.openai.com/v1"
 ```
 
 ---
@@ -693,7 +693,7 @@ export BASELINE_GRAPH_MODEL="llama3.2:3b"
 
 **Required:** No
 
-**Default:** `"ollama"` (Ollama doesn't require authentication)
+**Default:** `"local"` (local llama-server doesn't require authentication)
 
 **Format:** API key string
 
@@ -701,7 +701,7 @@ export BASELINE_GRAPH_MODEL="llama3.2:3b"
 
 **Details:**
 
-Most local LLM servers (Ollama, llama.cpp) don't require authentication. Set this if your endpoint requires an API key.
+Local llama-server doesn't require authentication. Set this if your endpoint requires an API key (e.g., OpenAI).
 
 ---
 
@@ -809,7 +809,7 @@ backend = "graphiti"
 
 [memory.llm]
 api_key = "local"  # or your API key
-api_base = "http://localhost:11434/v1"  # Ollama
+api_base = "http://localhost:8000/v1"  # llama-server
 model = "qwen3:30b"
 ```
 

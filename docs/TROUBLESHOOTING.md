@@ -27,6 +27,7 @@ Common issues and solutions for the watercooler MCP server.
 - [Ball Not Flipping](#ball-not-flipping)
 - [Server Crashes or Hangs](#server-crashes-or-hangs)
 - [Cache Management](#cache-management)
+- [llama-server Architecture (Breaking Changes)](#llama-server-architecture-breaking-changes)
 - [llama-server Issues](#llama-server-issues)
 - [Format Parameter Errors](#format-parameter-errors)
 - [401 Unauthorized (Remote MCP)](#401-unauthorized-remote-mcp)
@@ -1007,6 +1008,56 @@ Reset caches when you experience:
 - Old version of code running despite pulling updates
 - Model download failures or corrupted models
 - Unexplained behavior after updating watercooler
+
+## llama-server Architecture (Breaking Changes)
+
+### What Changed
+
+The memory graph features use a **unified llama-server architecture**:
+
+| Component | Port | Purpose |
+|-----------|------|---------|
+| llama-server (LLM) | 8000 | Text generation, summarization |
+| llama-server (embedding) | 8080 | Vector embeddings for semantic search |
+
+**Key features:**
+- Single service provider (llama-server) for all local inference
+- Auto-downloads llama-server binary from GitHub releases
+- Auto-downloads GGUF models from HuggingFace
+- Explicit errors with actionable instructions when services fail
+
+### Default Behavior
+
+No config needed for local inference. llama-server auto-starts on first use.
+
+To disable auto-download of the llama-server binary:
+
+```toml
+[mcp.service_provision]
+llama_server = false
+```
+
+To disable auto-download of models:
+
+```toml
+[mcp.service_provision]
+models = false
+```
+
+### Health Check
+
+Run `watercooler_health` to see service status:
+
+```
+Services:
+  LLM:       running (http://localhost:8000/v1)
+  Embedding: running (http://localhost:8080/v1)
+  FalkorDB:  not_configured
+```
+
+If a service shows `failed`, the health output includes instructions on how to resolve (e.g., enable auto-provisioning or install manually).
+
+---
 
 ## llama-server Issues
 

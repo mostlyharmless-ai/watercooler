@@ -9,7 +9,6 @@ from watercooler.models import (
     get_model_dimension,
     get_model_path,
     get_models_dir,
-    is_ollama_embedding_model as is_ollama_model,
     resolve_embedding_model,
 )
 
@@ -112,26 +111,6 @@ class TestGetModelPath:
         path = get_model_path("e5-mistral-7b")
         # Could be None (not cached) or Path (cached) - both are valid
         assert path is None or path.exists()
-
-
-class TestIsOllamaModel:
-    """Test is_ollama_model function."""
-
-    def test_known_llama_cpp_models_not_ollama(self):
-        """Test that known llama.cpp models are not detected as Ollama."""
-        assert is_ollama_model("bge-m3") is False
-        assert is_ollama_model("nomic-embed-text") is False
-        assert is_ollama_model("e5-mistral-7b") is False
-
-    def test_nomic_pattern_detected(self):
-        """Test that nomic patterns in unknown models are detected."""
-        # Unknown model with nomic pattern
-        assert is_ollama_model("nomic-embed-text-custom") is True
-
-    def test_other_ollama_patterns(self):
-        """Test other Ollama model patterns."""
-        assert is_ollama_model("all-minilm") is True
-        assert is_ollama_model("mxbai-embed-large") is True
 
 
 class TestEmbeddingModelsRegistry:

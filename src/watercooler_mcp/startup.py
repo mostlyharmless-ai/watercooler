@@ -32,17 +32,26 @@ LLAMA_CPP_RELEASE_URL = "https://github.com/ggml-org/llama.cpp/releases/latest"
 ENV_LLAMA_SERVER_VERIFY = "WATERCOOLER_LLAMA_SERVER_VERIFY"  # "strict", "warn", or "skip"
 ENV_LLAMA_SERVER_SHA256 = "WATERCOOLER_LLAMA_SERVER_SHA256"  # User-provided SHA256
 
+# Environment variables for auto-provisioning (override config)
+ENV_AUTO_PROVISION_MODELS = "WATERCOOLER_AUTO_PROVISION_MODELS"
+ENV_AUTO_PROVISION_LLAMA_SERVER = "WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER"
+
 # Known-good SHA256 checksums for verified llama.cpp releases
 # Format: {release_tag: {asset_pattern: sha256}}
 # These are checksums we've verified - update when testing new releases
+#
+# To add a new release:
+#   1. gh release download <tag> --repo ggml-org/llama.cpp --pattern "llama-*-bin-*.tar.gz"
+#   2. sha256sum *.tar.gz
+#   3. Add entries below
 LLAMA_SERVER_CHECKSUMS: dict[str, dict[str, str]] = {
-    # Add verified checksums here as we test releases
-    # Example:
-    # "b5270": {
-    #     "ubuntu-x64": "abc123...",
-    #     "ubuntu-vulkan-x64": "def456...",
-    #     "macos-arm64": "789abc...",
-    # },
+    # Release b7869 (2026-01-28) - verified checksums
+    "b7869": {
+        "ubuntu-x64": "d35419ff41d6438338fb9942d2250e9c21ea02424e422617650bcab950575d78",
+        "ubuntu-vulkan-x64": "45b73da74307eb11463e042253a506f1ccc4a714ad73b1de19630cfba876d2b8",
+        "macos-arm64": "45ecd82ead1574c45ae19738e9d890c2c19bd2944b645eaf3619980d87621b51",
+        "macos-x64": "d65e43f4ffb1890bc694f417871dba56374a011011da1bc4c4e8e99768d56f20",
+    },
 }
 
 
@@ -182,6 +191,48 @@ def check_first_run() -> None:
         pass
 
 
+def _is_auto_provision_enabled(resource: str) -> bool:
+    """Check if auto-provisioning is enabled for a resource type.
+
+    Checks environment variable first (for override), then config file.
+
+    Args:
+        resource: "models" or "llama_server"
+
+    Returns:
+        True if auto-provisioning is enabled for this resource
+    """
+    # Environment variable overrides (case-insensitive true/false/1/0)
+    env_var = {
+        "models": ENV_AUTO_PROVISION_MODELS,
+        "llama_server": ENV_AUTO_PROVISION_LLAMA_SERVER,
+    }.get(resource)
+
+    if env_var:
+        env_value = os.environ.get(env_var, "").lower().strip()
+        if env_value in ("true", "1", "yes"):
+            return True
+        if env_value in ("false", "0", "no"):
+            return False
+        # Empty or unset - fall through to config
+
+    # Check config file
+    try:
+        from .config import get_watercooler_config
+        config = get_watercooler_config()
+        provision_config = config.mcp.service_provision
+
+        if resource == "models":
+            return provision_config.models
+        elif resource == "llama_server":
+            return provision_config.llama_server
+    except Exception:
+        pass
+
+    # Default to True (current behavior)
+    return True
+
+
 def _is_localhost_url(url: str) -> bool:
     """Check if URL points to localhost."""
     from urllib.parse import urlparse
@@ -289,15 +340,31 @@ def _start_llama_server(
     """
     llama_server = _find_llama_server()
     if not llama_server:
-        log_debug("llama-server not found, attempting download from GitHub releases...")
-        llama_server = _download_llama_server()
+        if _is_auto_provision_enabled("llama_server"):
+            log_debug("llama-server not found, attempting download from GitHub releases...")
+            llama_server = _download_llama_server()
+        else:
+            log_debug("llama-server not found and auto-provision disabled")
 
     if not llama_server:
-        # No fallback - fail with clear error
-        raise RuntimeError(
-            "llama-server binary required but could not be found or downloaded. "
-            "Install manually from: https://github.com/ggml-org/llama.cpp/releases"
-        )
+        # Provide clear instructions based on auto-provision setting
+        if _is_auto_provision_enabled("llama_server"):
+            raise RuntimeError(
+                "llama-server binary required but could not be downloaded. "
+                "Install manually from: https://github.com/ggml-org/llama.cpp/releases"
+            )
+        else:
+            raise RuntimeError(
+                "llama-server binary not found and auto-provisioning is disabled.\n\n"
+                "To enable auto-download, set in config.toml:\n"
+                "  [mcp.service_provision]\n"
+                "  llama_server = true\n\n"
+                "Or set environment variable:\n"
+                "  WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER=true\n\n"
+                "To install manually:\n"
+                "  https://github.com/ggml-org/llama.cpp/releases\n"
+                "  Extract llama-server to ~/.watercooler/bin/ or add to PATH"
+            )
 
     cmd = [
         str(llama_server),
@@ -612,6 +679,32 @@ def _find_llama_server() -> Optional[Path]:
     return None
 
 
+def _is_shared_library(filename: str) -> bool:
+    """Check if a filename is a shared library based on extension.
+
+    Handles platform-specific library extensions:
+    - Linux: .so (including versioned like .so.0, .so.0.0.123)
+    - macOS: .dylib (including versioned like .0.dylib)
+    - Windows: .dll
+
+    Args:
+        filename: The filename to check
+
+    Returns:
+        True if the file appears to be a shared library
+    """
+    # Linux .so files (libfoo.so, libfoo.so.0, libfoo.so.0.0.123)
+    if ".so" in filename:
+        return True
+    # macOS .dylib files (libfoo.dylib, libfoo.0.dylib)
+    if ".dylib" in filename:
+        return True
+    # Windows .dll files
+    if filename.lower().endswith(".dll"):
+        return True
+    return False
+
+
 def _has_nvidia_gpu() -> bool:
     """Check if NVIDIA GPU is available via nvidia-smi.
 
@@ -747,45 +840,100 @@ def _verify_checksum(
     return True
 
 
-def _download_with_progress(url: str, dest_path: Path, desc: str = "Downloading") -> bool:
-    """Download a file with progress indication.
+def _download_with_progress(
+    url: str,
+    dest_path: Path,
+    desc: str = "Downloading",
+    max_retries: int = 3,
+    initial_backoff: float = 1.0,
+    max_backoff: float = 30.0,
+) -> bool:
+    """Download a file with progress indication and retry logic.
+
+    Uses exponential backoff for transient failures (network errors, rate limits).
 
     Args:
         url: URL to download
         dest_path: Destination file path
         desc: Description for progress display
+        max_retries: Maximum number of retry attempts (default: 3)
+        initial_backoff: Initial backoff delay in seconds (default: 1.0)
+        max_backoff: Maximum backoff delay in seconds (default: 30.0)
 
     Returns:
         True if download succeeded
     """
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "watercooler-cloud"})
-        with urllib.request.urlopen(req, timeout=600) as resp:  # 10 min timeout
-            total_size = int(resp.headers.get("Content-Length", 0))
-            downloaded = 0
-            chunk_size = 1024 * 1024  # 1MB chunks
+    import random
 
-            with open(dest_path, "wb") as f:
-                while True:
-                    chunk = resp.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
+    backoff = initial_backoff
+    last_error = None
 
-                    # Show progress
-                    if total_size > 0:
-                        pct = (downloaded / total_size) * 100
-                        mb_down = downloaded / (1024 * 1024)
-                        mb_total = total_size / (1024 * 1024)
-                        log_debug(f"{desc}: {mb_down:.1f}/{mb_total:.1f} MB ({pct:.0f}%)")
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            # Add jitter to avoid thundering herd
+            jitter = random.uniform(0, backoff * 0.1)
+            sleep_time = min(backoff + jitter, max_backoff)
+            log_debug(f"Retry {attempt}/{max_retries} after {sleep_time:.1f}s backoff...")
+            time.sleep(sleep_time)
+            backoff = min(backoff * 2, max_backoff)
 
-        return True
-    except Exception as e:
-        log_debug(f"Download failed: {e}")
-        if dest_path.exists():
-            dest_path.unlink()
-        return False
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "watercooler-cloud"})
+            with urllib.request.urlopen(req, timeout=600) as resp:  # 10 min timeout
+                # Check for rate limiting
+                if resp.status == 429:
+                    retry_after = resp.headers.get("Retry-After", "60")
+                    try:
+                        wait_time = int(retry_after)
+                    except ValueError:
+                        wait_time = 60
+                    log_debug(f"Rate limited, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+
+                total_size = int(resp.headers.get("Content-Length", 0))
+                downloaded = 0
+                chunk_size = 1024 * 1024  # 1MB chunks
+
+                with open(dest_path, "wb") as f:
+                    while True:
+                        chunk = resp.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        # Show progress
+                        if total_size > 0:
+                            pct = (downloaded / total_size) * 100
+                            mb_down = downloaded / (1024 * 1024)
+                            mb_total = total_size / (1024 * 1024)
+                            log_debug(f"{desc}: {mb_down:.1f}/{mb_total:.1f} MB ({pct:.0f}%)")
+
+            return True
+
+        except urllib.error.HTTPError as e:
+            last_error = e
+            # Don't retry on client errors (4xx) except rate limiting
+            if 400 <= e.code < 500 and e.code != 429:
+                log_debug(f"Download failed with HTTP {e.code}: {e.reason}")
+                break
+            log_debug(f"Download attempt {attempt + 1} failed: HTTP {e.code}")
+
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last_error = e
+            log_debug(f"Download attempt {attempt + 1} failed: {e}")
+
+        except Exception as e:
+            last_error = e
+            log_debug(f"Download attempt {attempt + 1} failed unexpectedly: {e}")
+            break  # Don't retry unknown errors
+
+    # All retries exhausted
+    log_debug(f"Download failed after {max_retries + 1} attempts: {last_error}")
+    if dest_path.exists():
+        dest_path.unlink()
+    return False
 
 
 def _download_llama_server() -> Optional[Path]:
@@ -925,10 +1073,11 @@ def _download_llama_server() -> Optional[Path]:
                                 target_binary.unlink()
                             extracted_path.rename(target_binary)
                         found_binary = True
-                    # Extract shared libraries (.so files) - both regular files and symlinks
-                    # The tarball contains versioned files (libfoo.so.0.0.123) and symlinks
-                    # (libfoo.so.0 -> libfoo.so.0.0.123) that llama-server needs
-                    elif ".so" in basename and (member.isfile() or member.issym()):
+                    # Extract shared libraries - both regular files and symlinks
+                    # Linux: .so files (libfoo.so.0.0.123, libfoo.so.0)
+                    # macOS: .dylib files (libfoo.dylib, libfoo.0.dylib)
+                    # The tarball contains versioned files and symlinks that llama-server needs
+                    elif _is_shared_library(basename) and (member.isfile() or member.issym()):
                         log_debug(f"Extracting library: {member.name} (symlink={member.issym()})")
                         tf.extract(member, bin_dir)
                         extracted_path = bin_dir / member.name
@@ -959,8 +1108,8 @@ def _download_llama_server() -> Optional[Path]:
                                 target_binary.unlink()
                             extracted_path.rename(target_binary)
                         found_binary = True
-                    # Extract shared libraries (.dll on Windows, .so on Linux)
-                    elif (".so" in basename or basename.endswith(".dll")) and not name.endswith("/"):
+                    # Extract shared libraries (.dll on Windows, .so on Linux, .dylib on macOS)
+                    elif _is_shared_library(basename) and not name.endswith("/"):
                         log_debug(f"Extracting library: {name}")
                         extracted = zf.extract(name, bin_dir)
                         extracted_path = Path(extracted)
@@ -1174,9 +1323,17 @@ def _ensure_embedding_service_available(
     # Auto-set EMBEDDING_DIM before any graphiti-core imports
     # This prevents index dimension mismatch errors
     dim = model_spec.get("dim", 1024)
-    if "EMBEDDING_DIM" not in os.environ:
+    existing_dim = os.environ.get("EMBEDDING_DIM", "")
+    if not existing_dim:
         os.environ["EMBEDDING_DIM"] = str(dim)
         log_debug(f"Auto-set EMBEDDING_DIM={dim} for model {model_name}")
+    elif existing_dim != str(dim):
+        # Warn about dimension mismatch - could cause FalkorDB index errors
+        log_warning(
+            f"EMBEDDING_DIM mismatch: env has {existing_dim} but model '{model_name}' "
+            f"has dim={dim}. This may cause FalkorDB index dimension errors. "
+            f"To fix: unset EMBEDDING_DIM or set it to {dim}, then recreate the index."
+        )
 
     # Ensure model is downloaded
     try:

@@ -190,14 +190,12 @@ Graphiti requires an LLM for entity extraction and fact generation. Options:
 export OPENAI_API_KEY=your_openai_api_key
 ```
 
-**Option 2: OpenAI-compatible Local LLM (Ollama)**
+**Option 2: OpenAI-compatible Local LLM (llama-server)**
 ```bash
-# Start Ollama with a model
-ollama run llama2
-
+# llama-server auto-starts when configured for localhost
 # Configure Graphiti to use local endpoint
-export OPENAI_API_BASE=http://localhost:11434/v1
-export OPENAI_API_KEY=dummy  # Still required, but not validated
+export OPENAI_API_BASE=http://localhost:8000/v1
+export OPENAI_API_KEY=local  # Still required, but not validated
 ```
 
 **Option 3: DeepSeek API (Cost-effective)**
@@ -248,9 +246,9 @@ OPENAI_API_KEY=your_openai_api_key
 # OPENAI_API_KEY=your_deepseek_api_key
 # OPENAI_API_BASE=https://api.deepseek.com/v1
 
-## Option 3: Local LLM (Ollama)
-# OPENAI_API_BASE=http://localhost:11434/v1
-# OPENAI_API_KEY=dummy
+## Option 3: Local LLM (llama-server)
+# OPENAI_API_BASE=http://localhost:8000/v1
+# OPENAI_API_KEY=local
 
 # Embeddings (built-in, uses same LLM API)
 # EMBEDDING_MODEL=text-embedding-3-small  # OpenAI default

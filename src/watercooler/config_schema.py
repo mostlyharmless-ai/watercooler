@@ -316,6 +316,26 @@ class GraphConfig(BaseModel):
     )
 
 
+class ServiceProvisionConfig(BaseModel):
+    """Auto-provisioning configuration for external services.
+
+    Controls whether watercooler automatically downloads binaries and models
+    when they are needed but not found locally.
+
+    Security note: Downloading executables (llama_server=true) fetches binaries
+    from GitHub releases. Set to false and install manually if this is a concern.
+    """
+
+    models: bool = Field(
+        default=True,
+        description="Auto-download GGUF models from HuggingFace when needed",
+    )
+    llama_server: bool = Field(
+        default=True,
+        description="Auto-download llama-server binary from GitHub releases when needed",
+    )
+
+
 class McpConfig(BaseModel):
     """MCP server configuration."""
 
@@ -371,6 +391,10 @@ class McpConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     graph: GraphConfig = Field(default_factory=GraphConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
+    service_provision: ServiceProvisionConfig = Field(
+        default_factory=ServiceProvisionConfig,
+        description="Auto-provisioning settings for external services (llama-server, models)",
+    )
 
     # Agent-specific overrides (keyed by platform slug)
     agents: Dict[str, AgentConfig] = Field(

@@ -21,7 +21,7 @@ Feature Configuration:
     LLM Summaries (generate_summaries):
         - When enabled: Generates semantic summaries via LLM for entries/threads
         - When disabled: Falls back to extractive summaries (truncated body text)
-        - Requires: LLM server at [servers.llm] endpoint (e.g., Ollama)
+        - Requires: LLM server at [servers.llm] endpoint (e.g., llama-server)
         - Config: mcp.graph.generate_summaries (default: false)
         - Env: WATERCOOLER_GRAPH_SUMMARIES
 

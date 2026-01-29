@@ -22,8 +22,8 @@ Usage:
 
 Requirements:
     - Markdown thread files (.md) must exist
-    - For summaries: Ollama or compatible LLM server at localhost:11434
-    - For embeddings: llama.cpp server or compatible at localhost:8080
+    - For summaries: llama-server at localhost:8000 (auto-starts when configured)
+    - For embeddings: llama-server at localhost:8080 (auto-starts when configured)
 """
 
 import argparse

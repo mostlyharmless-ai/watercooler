@@ -658,3 +658,77 @@ class TestProcessCleanup:
 
         # PID list should be cleared
         assert len(startup._spawned_pids) == 0
+
+
+class TestAutoProvisionConfig:
+    """Tests for auto-provisioning configuration."""
+
+    def test_is_auto_provision_enabled_default(self, monkeypatch):
+        """Test that auto-provision defaults to True."""
+        from watercooler_mcp.startup import _is_auto_provision_enabled
+
+        # Clear env vars
+        monkeypatch.delenv("WATERCOOLER_AUTO_PROVISION_MODELS", raising=False)
+        monkeypatch.delenv("WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER", raising=False)
+
+        # Default should be True
+        assert _is_auto_provision_enabled("models") is True
+        assert _is_auto_provision_enabled("llama_server") is True
+
+    def test_is_auto_provision_enabled_env_override_true(self, monkeypatch):
+        """Test enabling auto-provision via env var."""
+        from watercooler_mcp.startup import _is_auto_provision_enabled
+
+        monkeypatch.setenv("WATERCOOLER_AUTO_PROVISION_MODELS", "true")
+        assert _is_auto_provision_enabled("models") is True
+
+        monkeypatch.setenv("WATERCOOLER_AUTO_PROVISION_MODELS", "1")
+        assert _is_auto_provision_enabled("models") is True
+
+        monkeypatch.setenv("WATERCOOLER_AUTO_PROVISION_MODELS", "yes")
+        assert _is_auto_provision_enabled("models") is True
+
+    def test_is_auto_provision_enabled_env_override_false(self, monkeypatch):
+        """Test disabling auto-provision via env var."""
+        from watercooler_mcp.startup import _is_auto_provision_enabled
+
+        monkeypatch.setenv("WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER", "false")
+        assert _is_auto_provision_enabled("llama_server") is False
+
+        monkeypatch.setenv("WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER", "0")
+        assert _is_auto_provision_enabled("llama_server") is False
+
+        monkeypatch.setenv("WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER", "no")
+        assert _is_auto_provision_enabled("llama_server") is False
+
+    def test_model_auto_provision_check(self, monkeypatch):
+        """Test model auto-provision check function."""
+        from watercooler.models import is_model_auto_provision_enabled
+
+        # Test env var override - enabled
+        monkeypatch.setenv("WATERCOOLER_AUTO_PROVISION_MODELS", "true")
+        assert is_model_auto_provision_enabled() is True
+
+        # Test env var override - disabled
+        monkeypatch.setenv("WATERCOOLER_AUTO_PROVISION_MODELS", "false")
+        assert is_model_auto_provision_enabled() is False
+
+        # Test default (env var unset)
+        monkeypatch.delenv("WATERCOOLER_AUTO_PROVISION_MODELS", raising=False)
+        assert is_model_auto_provision_enabled() is True  # Default
+
+    def test_service_provision_config_defaults(self):
+        """Test ServiceProvisionConfig default values."""
+        from watercooler.config_schema import ServiceProvisionConfig
+
+        config = ServiceProvisionConfig()
+        assert config.models is True
+        assert config.llama_server is True
+
+    def test_service_provision_config_custom(self):
+        """Test ServiceProvisionConfig with custom values."""
+        from watercooler.config_schema import ServiceProvisionConfig
+
+        config = ServiceProvisionConfig(models=False, llama_server=False)
+        assert config.models is False
+        assert config.llama_server is False

@@ -94,9 +94,9 @@ DEEPSEEK_API_KEY=your_deepseek_api_key
 LLM_API_BASE=https://api.deepseek.com/v1
 LLM_MODEL=deepseek-chat
 
-## Option 2: Local LLM (Ollama)
-# LLM_API_BASE=http://localhost:11434/v1
-# LLM_MODEL=llama2
+## Option 2: Local LLM (llama-server)
+# LLM_API_BASE=http://localhost:8000/v1
+# LLM_MODEL=llama3.2:3b
 
 # Embeddings (optional, for vector search)
 EMBEDDING_API_BASE=http://localhost:8080/v1
@@ -328,9 +328,9 @@ redis-cli ping
 
 **Fix:** Ensure `DEEPSEEK_API_KEY` is set in `.env.local`, or switch to local LLM:
 ```bash
-# Use Ollama instead
-export LLM_API_BASE=http://localhost:11434/v1
-export LLM_MODEL=llama2
+# Use local llama-server instead
+export LLM_API_BASE=http://localhost:8000/v1
+export LLM_MODEL=llama3.2:3b
 ```
 
 ### Out of Memory During Clustering

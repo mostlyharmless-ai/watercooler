@@ -34,6 +34,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional, TypedDict
 
@@ -44,6 +45,9 @@ from typing import Optional, TypedDict
 
 # Default models directory
 DEFAULT_MODELS_DIR = Path.home() / ".watercooler" / "models"
+
+# Environment variable for auto-provisioning models
+ENV_AUTO_PROVISION_MODELS = "WATERCOOLER_AUTO_PROVISION_MODELS"
 
 
 class ModelNotFoundError(Exception):
@@ -56,6 +60,34 @@ class ModelDownloadError(Exception):
     """Raised when a model cannot be downloaded."""
 
     pass
+
+
+def is_model_auto_provision_enabled() -> bool:
+    """Check if model auto-provisioning is enabled.
+
+    Checks environment variable first, then config file if available.
+    Defaults to True (auto-download models when needed).
+
+    Returns:
+        True if model downloads are allowed
+    """
+    # Check environment variable override
+    env_value = os.environ.get(ENV_AUTO_PROVISION_MODELS, "").lower().strip()
+    if env_value in ("true", "1", "yes"):
+        return True
+    if env_value in ("false", "0", "no"):
+        return False
+
+    # Try to check config file (optional - may not have MCP dependencies)
+    try:
+        from watercooler_mcp.config import get_watercooler_config
+        config = get_watercooler_config()
+        return config.mcp.service_provision.models
+    except Exception:
+        pass
+
+    # Default: allow model downloads
+    return True
 
 
 # =============================================================================
@@ -98,7 +130,7 @@ EMBEDDING_MODELS: dict[str, EmbeddingModelSpec | str] = {
     "bge-m3:latest": "bge-m3",
     "nomic-embed-text:latest": "nomic-embed-text",
     "e5-mistral-7b:latest": "e5-mistral-7b",
-    # Ollama-compatible names
+    # Version tag aliases
     "nomic-embed-text:v1.5": "nomic-embed-text",
 }
 
@@ -245,6 +277,20 @@ def ensure_model_available(
             print(f"Using cached model: {model_path}")
         return model_path
 
+    # Check if auto-provisioning is enabled
+    if not is_model_auto_provision_enabled():
+        raise ModelDownloadError(
+            f"Model '{name}' not found and auto-provisioning is disabled.\n\n"
+            f"To enable auto-download, set in config.toml:\n"
+            f"  [mcp.service_provision]\n"
+            f"  models = true\n\n"
+            f"Or set environment variable:\n"
+            f"  WATERCOOLER_AUTO_PROVISION_MODELS=true\n\n"
+            f"To download manually:\n"
+            f"  pip install huggingface_hub\n"
+            f"  huggingface-cli download {hf_repo} {hf_file} --local-dir {models_dir}"
+        )
+
     # Download from HuggingFace
     try:
         from huggingface_hub import hf_hub_download
@@ -277,46 +323,6 @@ def ensure_model_available(
         raise ModelDownloadError(f"Failed to download model {name}: {e}") from e
 
 
-def is_ollama_embedding_model(name: str) -> bool:
-    """Check if a model name refers to an Ollama embedding model.
-
-    Ollama models are identified by:
-    - Not being in our registry (custom Ollama model)
-    - Having certain naming patterns (e.g., contains "/" without "GGUF")
-
-    Args:
-        name: Model name to check
-
-    Returns:
-        True if this appears to be an Ollama model name
-    """
-    normalized = name.strip().lower()
-
-    # If it's in our registry, it's a llama.cpp model
-    try:
-        resolve_embedding_model(normalized)
-        return False
-    except ModelNotFoundError:
-        pass
-
-    # Common Ollama model patterns
-    ollama_patterns = [
-        "nomic-embed-text",  # Ollama's native embedding model
-        "all-minilm",
-        "mxbai-embed",
-    ]
-
-    for pattern in ollama_patterns:
-        if pattern in normalized:
-            return True
-
-    return False
-
-
-# Backwards compatibility alias
-is_ollama_model = is_ollama_embedding_model
-
-
 # =============================================================================
 # LLM GGUF Models (for llama-server)
 # =============================================================================
@@ -331,7 +337,7 @@ class LLMGGUFModelSpec(TypedDict, total=False):
 
 
 # Registry of known LLM GGUF models for llama-server
-# Maps friendly names (Ollama-style) to HuggingFace GGUF specs
+# Maps friendly names to HuggingFace GGUF specs
 LLM_GGUF_MODELS: dict[str, LLMGGUFModelSpec | str] = {
     # Qwen3 models (MoE architecture with thinking mode support)
     "qwen3:30b": {
@@ -490,6 +496,20 @@ def ensure_llm_model_available(
         if verbose:
             print(f"Using cached LLM model: {model_path}")
         return model_path
+
+    # Check if auto-provisioning is enabled
+    if not is_model_auto_provision_enabled():
+        raise ModelDownloadError(
+            f"LLM model '{name}' not found and auto-provisioning is disabled.\n\n"
+            f"To enable auto-download, set in config.toml:\n"
+            f"  [mcp.service_provision]\n"
+            f"  models = true\n\n"
+            f"Or set environment variable:\n"
+            f"  WATERCOOLER_AUTO_PROVISION_MODELS=true\n\n"
+            f"To download manually:\n"
+            f"  pip install huggingface_hub\n"
+            f"  huggingface-cli download {hf_repo} {hf_file} --local-dir {models_dir}"
+        )
 
     # Download from HuggingFace
     try:

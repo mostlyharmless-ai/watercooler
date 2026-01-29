@@ -305,16 +305,12 @@ def resolve_jsonl_merge_conflict(path: Path) -> bool:
 | `generate_summaries` | `false` | Summaries are truncated body text (~200 chars) |
 | `generate_embeddings` | `false` | Semantic search falls back to keyword matching |
 
-**Why disabled?** These features require external services (Ollama, llama.cpp, etc.) that may not be available in all environments. Enabling them without the services running would cause errors.
+**Why disabled?** These features require llama-server to be running. Enabling them without the service running would cause errors.
 
 **To enable LLM features:**
 
-1. Install and start Ollama: `ollama serve`
-2. Pull required models:
-   ```bash
-   ollama pull llama3.2:3b          # For summaries
-   ollama pull nomic-embed-text     # For embeddings
-   ```
+1. llama-server auto-starts when configured for localhost endpoints
+2. Models auto-download from HuggingFace on first use
 3. Update your config (`~/.watercooler/config.toml`):
    ```toml
    [mcp.graph]
