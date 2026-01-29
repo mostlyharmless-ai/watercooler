@@ -145,19 +145,28 @@ def get_service_status() -> dict[str, dict]:
 def _update_service_status(
     name: str,
     state: ServiceState,
-    message: str = "",
-    endpoint: str = "",
+    message: Optional[str] = None,
+    endpoint: Optional[str] = None,
     started_at: Optional[float] = None,
     ready_at: Optional[float] = None,
 ) -> None:
-    """Update status for a service."""
+    """Update status for a service.
+
+    Args:
+        name: Service name (llm, embedding, falkordb)
+        state: New service state
+        message: Status message (None = keep existing, "" = clear)
+        endpoint: Service endpoint URL (None = keep existing, "" = clear)
+        started_at: Timestamp when service started
+        ready_at: Timestamp when service became ready
+    """
     with _status_lock:
         if name in _service_status:
             status = _service_status[name]
             status.state = state
-            if message:
+            if message is not None:
                 status.message = message
-            if endpoint:
+            if endpoint is not None:
                 status.endpoint = endpoint
             if started_at is not None:
                 status.started_at = started_at

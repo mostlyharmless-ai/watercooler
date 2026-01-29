@@ -1111,6 +1111,71 @@ If llama-server download takes too long or times out:
    rm -rf llama-*/
    ```
 
+### Symptom: Checksum Verification Failed
+
+If you see a checksum verification error:
+
+```
+SECURITY: Checksum mismatch for llama-server download!
+```
+
+**Causes:**
+- Corrupted download
+- Network tampering (unlikely but possible)
+- Unknown release version (checksum not in registry)
+
+**Solutions:**
+
+1. **Retry the download** - transient network issues can cause corruption:
+   ```bash
+   rm -rf ~/.watercooler/bin/llama-server*
+   # Restart MCP server to trigger fresh download
+   ```
+
+2. **Verify checksums manually:**
+   ```bash
+   cd ~/.watercooler/bin/
+   sha256sum llama-server-*.tar.gz
+   # Compare with official release checksums at:
+   # https://github.com/ggml-org/llama.cpp/releases
+   ```
+
+3. **Skip verification (not recommended):**
+   ```bash
+   export WATERCOOLER_LLAMA_SERVER_VERIFY=skip
+   ```
+
+### Symptom: LD_LIBRARY_PATH Issues (Linux)
+
+If llama-server can't find libraries even though they're extracted:
+
+```bash
+# Check current LD_LIBRARY_PATH
+echo $LD_LIBRARY_PATH
+
+# Manually set it to include watercooler bin directory
+export LD_LIBRARY_PATH="$HOME/.watercooler/bin:$LD_LIBRARY_PATH"
+
+# Verify libraries are found
+ldd ~/.watercooler/bin/llama-server
+```
+
+**Note:** Watercooler automatically sets `LD_LIBRARY_PATH` when spawning llama-server, but if you're running it manually, you may need to set this.
+
+### Symptom: dylib Issues (macOS)
+
+On macOS, shared libraries use `.dylib` extension. If you see errors like:
+
+```
+dyld: Library not loaded: @rpath/libllama.dylib
+```
+
+**Solution:**
+```bash
+# Set DYLD_LIBRARY_PATH for manual runs
+export DYLD_LIBRARY_PATH="$HOME/.watercooler/bin:$DYLD_LIBRARY_PATH"
+```
+
 ## Format Parameter Errors
 
 ### Symptom

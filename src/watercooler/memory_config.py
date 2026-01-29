@@ -33,6 +33,48 @@ def _redact_key(key: str) -> str:
     return "***"
 
 
+def _safe_float(value: Optional[str], default: float, min_val: float, max_val: float) -> float:
+    """Parse string to float with bounds validation.
+
+    Args:
+        value: String to parse (None or empty returns default)
+        default: Default value if parsing fails or value is empty
+        min_val: Minimum allowed value
+        max_val: Maximum allowed value
+
+    Returns:
+        Parsed and bounded float value
+    """
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+        return max(min_val, min(max_val, parsed))
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(value: Optional[str], default: int, min_val: int, max_val: int) -> int:
+    """Parse string to int with bounds validation.
+
+    Args:
+        value: String to parse (None or empty returns default)
+        default: Default value if parsing fails or value is empty
+        min_val: Minimum allowed value
+        max_val: Maximum allowed value
+
+    Returns:
+        Parsed and bounded int value
+    """
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+        return max(min_val, min(max_val, parsed))
+    except (ValueError, TypeError):
+        return default
+
+
 @dataclass(frozen=True)
 class ResolvedLLMConfig:
     """Resolved LLM configuration after applying all overrides.
@@ -526,11 +568,9 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
     )
 
     # Resolve timeout and max_tokens from env/TOML (use shared defaults)
-    timeout_str = os.getenv("LLM_TIMEOUT")
-    timeout = float(timeout_str) if timeout_str else mem.llm.timeout
-
-    max_tokens_str = os.getenv("LLM_MAX_TOKENS")
-    max_tokens = int(max_tokens_str) if max_tokens_str else mem.llm.max_tokens
+    # Bounds: timeout 1-600s, max_tokens 1-32768
+    timeout = _safe_float(os.getenv("LLM_TIMEOUT"), mem.llm.timeout, 1.0, 600.0)
+    max_tokens = _safe_int(os.getenv("LLM_MAX_TOKENS"), mem.llm.max_tokens, 1, 32768)
 
     # Resolve summary prompts from env/TOML
     summary_prompt = os.getenv("LLM_SUMMARY_PROMPT") or mem.llm.summary_prompt
@@ -586,25 +626,12 @@ def resolve_baseline_graph_embedding_config() -> ResolvedEmbeddingConfig:
         or _BASELINE_GRAPH_DEFAULT_EMBEDDING_MODEL
     )
 
-    # Resolve dim
-    dim_str = os.getenv("EMBEDDING_DIM")
-    if dim_str:
-        try:
-            dim = int(dim_str)
-        except ValueError:
-            dim = mem.embedding.dim
-    else:
-        dim = mem.embedding.dim
-
-    # Resolve timeout, batch_size, and context_size from env/TOML
-    timeout_str = os.getenv("EMBEDDING_TIMEOUT")
-    timeout = float(timeout_str) if timeout_str else mem.embedding.timeout
-
-    batch_size_str = os.getenv("EMBEDDING_BATCH_SIZE")
-    batch_size = int(batch_size_str) if batch_size_str else mem.embedding.batch_size
-
-    context_size_str = os.getenv("EMBEDDING_CONTEXT_SIZE")
-    context_size = int(context_size_str) if context_size_str else mem.embedding.context_size
+    # Resolve dim, timeout, batch_size, context_size with bounds validation
+    # Bounds: dim 64-8192, timeout 1-300s, batch_size 1-256, context_size 128-32768
+    dim = _safe_int(os.getenv("EMBEDDING_DIM"), mem.embedding.dim, 64, 8192)
+    timeout = _safe_float(os.getenv("EMBEDDING_TIMEOUT"), mem.embedding.timeout, 1.0, 300.0)
+    batch_size = _safe_int(os.getenv("EMBEDDING_BATCH_SIZE"), mem.embedding.batch_size, 1, 256)
+    context_size = _safe_int(os.getenv("EMBEDDING_CONTEXT_SIZE"), mem.embedding.context_size, 128, 32768)
 
     return ResolvedEmbeddingConfig(
         api_key=api_key,
