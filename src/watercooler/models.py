@@ -62,6 +62,52 @@ class ModelDownloadError(Exception):
     pass
 
 
+class InsufficientDiskSpaceError(ModelDownloadError):
+    """Raised when there isn't enough disk space for a model download."""
+
+    pass
+
+
+def check_disk_space(target_dir: Path, required_mb: int, buffer_mb: int = 500) -> None:
+    """Check if there's enough disk space for a download.
+
+    Args:
+        target_dir: Directory where download will be saved
+        required_mb: Required space in megabytes
+        buffer_mb: Additional buffer space in MB (default: 500 MB)
+
+    Raises:
+        InsufficientDiskSpaceError: If not enough disk space is available
+    """
+    import shutil
+
+    # Ensure directory exists for statvfs
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Get free space in bytes
+        free_bytes = shutil.disk_usage(target_dir).free
+        free_mb = free_bytes // (1024 * 1024)
+
+        total_required = required_mb + buffer_mb
+
+        if free_mb < total_required:
+            raise InsufficientDiskSpaceError(
+                f"Insufficient disk space for model download.\n"
+                f"  Required: {required_mb:,} MB (+ {buffer_mb} MB buffer)\n"
+                f"  Available: {free_mb:,} MB\n"
+                f"  Location: {target_dir}\n\n"
+                f"Free up at least {total_required - free_mb:,} MB of disk space and retry."
+            )
+    except OSError as e:
+        # If we can't check disk space, log a warning but don't fail
+        # (e.g., on some network filesystems)
+        import logging
+        logging.getLogger(__name__).warning(
+            f"Could not check disk space at {target_dir}: {e}. Proceeding with download."
+        )
+
+
 def is_model_auto_provision_enabled() -> bool:
     """Check if model auto-provisioning is enabled.
 
@@ -102,6 +148,7 @@ class EmbeddingModelSpec(TypedDict, total=False):
     hf_file: str  # Filename within the repo
     dim: int  # Embedding dimension
     context: int  # Context window size
+    size_mb: int  # Approximate file size in MB (for disk space checks)
 
 
 # Registry of known embedding models
@@ -113,18 +160,21 @@ EMBEDDING_MODELS: dict[str, EmbeddingModelSpec | str] = {
         "hf_file": "bge-m3-q8_0.gguf",
         "dim": 1024,
         "context": 8192,
+        "size_mb": 1200,  # ~1.2 GB
     },
     "nomic-embed-text": {
         "hf_repo": "nomic-ai/nomic-embed-text-v1.5-GGUF",
         "hf_file": "nomic-embed-text-v1.5.Q8_0.gguf",
         "dim": 768,
         "context": 8192,
+        "size_mb": 150,  # ~150 MB
     },
     "e5-mistral-7b": {
         "hf_repo": "lm-kit/e5-mistral-7b-instruct-GGUF",
         "hf_file": "e5-mistral-7b-instruct-Q4_K_M.gguf",
         "dim": 4096,
         "context": 4096,
+        "size_mb": 4400,  # ~4.4 GB
     },
     # Aliases (resolve to primary names)
     "bge-m3:latest": "bge-m3",
@@ -291,6 +341,11 @@ def ensure_model_available(
             f"  huggingface-cli download {hf_repo} {hf_file} --local-dir {models_dir}"
         )
 
+    # Check disk space before downloading
+    size_mb = spec.get("size_mb", 0)
+    if size_mb > 0:
+        check_disk_space(models_dir, size_mb)
+
     # Download from HuggingFace
     try:
         from huggingface_hub import hf_hub_download
@@ -304,6 +359,8 @@ def ensure_model_available(
         print(f"Downloading embedding model: {hf_repo}/{hf_file}")
         dim = spec.get("dim", "unknown")
         print(f"  Dimension: {dim}")
+        if size_mb > 0:
+            print(f"  Size: ~{size_mb:,} MB")
         print("  This may take a few minutes...")
 
     try:
@@ -334,6 +391,7 @@ class LLMGGUFModelSpec(TypedDict, total=False):
     hf_repo: str  # HuggingFace repository ID
     hf_file: str  # Filename within the repo
     context: int  # Context window size
+    size_mb: int  # Approximate file size in MB (for disk space checks)
 
 
 # Registry of known LLM GGUF models for llama-server
@@ -344,37 +402,44 @@ LLM_GGUF_MODELS: dict[str, LLMGGUFModelSpec | str] = {
         "hf_repo": "Qwen/Qwen3-30B-A3B-GGUF",
         "hf_file": "Qwen3-30B-A3B-Q4_K_M.gguf",
         "context": 40960,
+        "size_mb": 18000,  # ~18 GB
     },
     "qwen3:8b": {
         "hf_repo": "Qwen/Qwen3-8B-GGUF",
         "hf_file": "Qwen3-8B-Q4_K_M.gguf",
         "context": 40960,
+        "size_mb": 5000,  # ~5 GB
     },
     "qwen3:4b": {
         "hf_repo": "Qwen/Qwen3-4B-GGUF",
         "hf_file": "Qwen3-4B-Q4_K_M.gguf",
         "context": 40960,
+        "size_mb": 2700,  # ~2.7 GB
     },
     "qwen3:1.7b": {
         "hf_repo": "Qwen/Qwen3-1.7B-GGUF",
         "hf_file": "Qwen3-1.7B-Q4_K_M.gguf",
         "context": 40960,
+        "size_mb": 1200,  # ~1.2 GB
     },
     "qwen3:0.6b": {
         "hf_repo": "Qwen/Qwen3-0.6B-GGUF",
         "hf_file": "Qwen3-0.6B-Q4_K_M.gguf",
         "context": 40960,
+        "size_mb": 500,  # ~500 MB
     },
     # Llama 3.2 models
     "llama3.2:3b": {
         "hf_repo": "hugging-quants/Llama-3.2-3B-Instruct-Q8_0-GGUF",
         "hf_file": "llama-3.2-3b-instruct-q8_0.gguf",
         "context": 8192,
+        "size_mb": 3400,  # ~3.4 GB
     },
     "llama3.2:1b": {
         "hf_repo": "hugging-quants/Llama-3.2-1B-Instruct-Q8_0-GGUF",
         "hf_file": "llama-3.2-1b-instruct-q8_0.gguf",
         "context": 8192,
+        "size_mb": 1300,  # ~1.3 GB
     },
     # Aliases
     "qwen3:latest": "qwen3:30b",
@@ -511,6 +576,11 @@ def ensure_llm_model_available(
             f"  huggingface-cli download {hf_repo} {hf_file} --local-dir {models_dir}"
         )
 
+    # Check disk space before downloading
+    size_mb = spec.get("size_mb", 0)
+    if size_mb > 0:
+        check_disk_space(models_dir, size_mb)
+
     # Download from HuggingFace
     try:
         from huggingface_hub import hf_hub_download
@@ -524,6 +594,8 @@ def ensure_llm_model_available(
         print(f"Downloading LLM model: {hf_repo}/{hf_file}")
         context = spec.get("context", "unknown")
         print(f"  Context window: {context}")
+        if size_mb > 0:
+            print(f"  Size: ~{size_mb:,} MB")
         print("  This may take a while for large models...")
 
     try:
