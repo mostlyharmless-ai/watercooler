@@ -332,14 +332,22 @@ _falkordb_available: bool = False
 def _get_group_id_for_threads_dir(threads_dir: Path) -> str:
     """Derive group_id from threads directory path.
 
-    Uses the repository name (parent of threads_dir for typical layouts).
+    Handles two layouts:
+    1. Paired repos: /path/to/watercooler-site-threads → watercooler_site
+    2. Embedded dirs: /path/to/repo/threads/ → repo
+
     Sanitizes to be FalkorDB-compatible (underscores, lowercase).
     """
-    # Typical layout: /path/to/repo/<threads-dir>
-    # We want the repo name as group_id
-    repo_dir = threads_dir.parent
-    name = repo_dir.name.replace("-", "_").lower()
-    return name or "watercooler"
+    dir_name = threads_dir.name
+
+    # Paired repo pattern: name ends with -threads (e.g., watercooler-site-threads)
+    if dir_name.endswith("-threads"):
+        name = dir_name[:-8]  # Strip "-threads" suffix
+    else:
+        # Embedded threads dir: use parent repo name
+        name = threads_dir.parent.name
+
+    return name.replace("-", "_").lower() or "watercooler"
 
 
 def store_entry_embedding_to_falkordb(
@@ -431,6 +439,41 @@ def delete_entry_embedding_from_falkordb(
 
     except Exception as e:
         logger.debug(f"Failed to delete embedding from FalkorDB: {e}")
+        return False
+
+
+def has_embedding_in_falkordb(
+    threads_dir: Path,
+    entry_id: str,
+) -> bool:
+    """Check if entry has an embedding in FalkorDB.
+
+    Args:
+        threads_dir: Threads directory
+        entry_id: Entry ULID
+
+    Returns:
+        True if embedding exists in FalkorDB, False otherwise
+    """
+    global _falkordb_checked, _falkordb_available
+
+    if _falkordb_checked and not _falkordb_available:
+        return False
+
+    try:
+        from .falkordb_entries import get_falkordb_entry_store
+
+        group_id = _get_group_id_for_threads_dir(threads_dir)
+        store = get_falkordb_entry_store(group_id)
+
+        if store is None:
+            return False
+
+        embedding = store.get_embedding(entry_id)
+        return embedding is not None
+
+    except Exception as e:
+        logger.debug(f"Failed to check embedding in FalkorDB: {e}")
         return False
 
 
@@ -1976,7 +2019,8 @@ def enrich_graph(
 
                 # Check if we should process this entry
                 has_summary = bool(entry.get("summary"))
-                has_embedding = bool(entry.get("embedding"))
+                # Check FalkorDB for embeddings (no longer stored in JSONL)
+                has_embedding = has_embedding_in_falkordb(threads_dir, entry_raw_id)
 
                 should_do_summary = summaries and (
                     mode == "all" or

@@ -79,9 +79,18 @@ def get_graph_dir(threads_dir: Path) -> Path:
 
 
 def get_group_id(threads_dir: Path) -> str:
-    """Derive group_id from threads directory."""
-    repo_dir = threads_dir.parent
-    return repo_dir.name.replace("-", "_").lower() or "watercooler"
+    """Derive group_id from threads directory.
+
+    Handles two layouts:
+    1. Paired repos: /path/to/watercooler-site-threads → watercooler_site
+    2. Embedded dirs: /path/to/repo/threads/ → repo
+    """
+    dir_name = threads_dir.name
+    if dir_name.endswith("-threads"):
+        name = dir_name[:-8]  # Strip "-threads" suffix
+    else:
+        name = threads_dir.parent.name
+    return name.replace("-", "_").lower() or "watercooler"
 
 
 def load_search_index(graph_dir: Path) -> Iterator[dict]:

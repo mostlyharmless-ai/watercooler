@@ -423,9 +423,13 @@ def delete_entry_node(
         try:
             from .falkordb_entries import get_falkordb_entry_store
 
-            # Derive group_id from threads_dir
-            repo_dir = threads_dir.parent
-            group_id = repo_dir.name.replace("-", "_").lower() or "watercooler"
+            # Derive group_id from threads_dir (handles paired repos like foo-threads)
+            dir_name = threads_dir.name
+            if dir_name.endswith("-threads"):
+                group_id = dir_name[:-8].replace("-", "_").lower()
+            else:
+                group_id = threads_dir.parent.name.replace("-", "_").lower()
+            group_id = group_id or "watercooler"
 
             store = get_falkordb_entry_store(group_id)
             if store:
