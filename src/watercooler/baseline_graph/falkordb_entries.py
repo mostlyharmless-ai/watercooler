@@ -33,6 +33,7 @@ Usage:
 
 from __future__ import annotations
 
+import atexit
 import asyncio
 import logging
 from dataclasses import dataclass
@@ -711,6 +712,18 @@ class _AsyncLoopRunner:
 
 # Module-level async loop runner (singleton)
 _async_runner: _AsyncLoopRunner | None = None
+
+
+def _cleanup_async_runner() -> None:
+    """Cleanup handler for module exit."""
+    global _async_runner
+    if _async_runner is not None:
+        _async_runner.stop()
+        _async_runner = None
+
+
+# Register cleanup on module unload
+atexit.register(_cleanup_async_runner)
 
 
 def _get_async_runner() -> _AsyncLoopRunner:
