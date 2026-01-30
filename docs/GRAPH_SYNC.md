@@ -318,12 +318,12 @@ def resolve_jsonl_merge_conflict(path: Path) -> bool:
    generate_embeddings = true
 
    [memory.llm]
-   api_base = "http://localhost:11434/v1"
+   api_base = "http://localhost:8000/v1"
    model = "llama3.2:3b"
 
    [memory.embedding]
-   api_base = "http://localhost:11434/v1"
-   model = "nomic-embed-text"
+   api_base = "http://localhost:8080/v1"
+   model = "bge-m3"
    ```
 
 **Service availability is checked automatically** before each enrichment attempt:

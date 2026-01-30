@@ -1,8 +1,8 @@
 # Memory Backend Implementation Status
 
-**Last Updated:** 2025-12-11
-**Current Phase:** Phase 3 (Testing) - 100% Complete ✅
-**Overall Progress:** ~100% (Phase 3 Complete, Ready for Phase 4)
+**Last Updated:** 2026-01-30
+**Current Phase:** Phase 4 (Documentation & Polish) - In Progress
+**Overall Progress:** ~95% (Core complete, documentation updates ongoing)
 
 ## ✅ Completed (Phases 1-2)
 
@@ -86,12 +86,15 @@ Graphiti Full Pipeline:
 
 ## 📋 Remaining Work (Phase 4)
 
-### Phase 4: Documentation & Polish - 30% Complete
+### Phase 4: Documentation & Polish - 70% Complete
 
 **Completed:**
 - [x] ADR 0001 written
 - [x] Smoke test documentation
 - [x] Environment setup guides
+- [x] Graphiti dependency updated to `@main` branch (fixes episode/entries search timeout)
+- [x] Episode search troubleshooting documented in GRAPHITI_SETUP.md and TROUBLESHOOTING.md
+- [x] Port references updated from Ollama (11434) to llama-server (8000)
 
 **Pending:**
 - [ ] Update MEMORY.md with backend architecture
@@ -100,6 +103,14 @@ Graphiti Full Pipeline:
 - [ ] Add docstring examples to protocol methods
 - [ ] Performance optimization if needed
 - [ ] Final code review and cleanup
+
+### Recent Fixes (January 2026)
+
+**Episode/Entries Search Timeout Fix:**
+- **Problem:** Episode search (`mode="episodes"`) and entries search with Graphiti backend failed via MCP with socket disconnection
+- **Root Cause:** Graphiti dependency was pinned to `@feature/hnsw-entity-index` branch, missing 5 commits from `@main` that fix FalkorDB fulltext query timeouts
+- **Fix:** Updated `pyproject.toml` to track `graphiti-core@main` instead of feature branch
+- **PR:** #106
 
 ## Implementation Summary
 
@@ -260,12 +271,13 @@ docs/
 - Documentation (LEANRAG_SETUP.md, GRAPHITI_SETUP.md, SMOKE_TESTS.md)
 - Status tracking and coordination
 
-**Current Status (2025-12-11):**
+**Current Status (2026-01-30):**
 - Phase 2: 100% Complete ✅
 - Phase 3: 100% Complete ✅ (Both backends validated end-to-end)
+- Phase 4: 70% Complete ⏳ (Documentation updates in progress)
 - LeanRAG: End-to-end tested with 66-entry thread (21.67s)
-- Graphiti: End-to-end tested with 15-entry thread (46:45, sanitization workaround applied)
-- Ready for: Phase 4 documentation and final polish
+- Graphiti: End-to-end tested, episode/entries search timeout fixed (tracks @main branch)
+- Recent: Episode search fix shipped in PR #106
 
 ## References
 

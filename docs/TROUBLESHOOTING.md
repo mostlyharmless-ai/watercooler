@@ -27,6 +27,7 @@ Common issues and solutions for the watercooler MCP server.
 - [Ball Not Flipping](#ball-not-flipping)
 - [Server Crashes or Hangs](#server-crashes-or-hangs)
 - [Cache Management](#cache-management)
+- [Episode/Entries Search Fails via MCP](#episodeentries-search-fails-via-mcp)
 - [llama-server Architecture (Breaking Changes)](#llama-server-architecture-breaking-changes)
 - [llama-server Issues](#llama-server-issues)
 - [Format Parameter Errors](#format-parameter-errors)
@@ -1008,6 +1009,51 @@ Reset caches when you experience:
 - Old version of code running despite pulling updates
 - Model download failures or corrupted models
 - Unexplained behavior after updating watercooler
+
+## Episode/Entries Search Fails via MCP
+
+### Symptom
+Episode search (`watercooler_search mode="episodes"`) or entries search with Graphiti backend fails with "socket connection was closed unexpectedly" error. Entity search (`mode="entities"`) works fine.
+
+### Root Cause
+The graphiti dependency was tracking a feature branch missing critical FalkorDB fulltext query timeout fixes. Episode and entries searches use `COMBINED_HYBRID_SEARCH_RRF` which triggers complex queries that timeout without these fixes.
+
+### Why Entities Work but Episodes/Entries Fail
+
+| Search Mode | Graphiti Config | Behavior |
+|-------------|-----------------|----------|
+| `entities` | `NODE_HYBRID_SEARCH_RRF` | Simple node-only search - not affected |
+| `episodes` | `COMBINED_HYBRID_SEARCH_RRF` | Includes edge + episode + community searches - triggers timeout |
+| `entries` (graphiti) | `COMBINED_HYBRID_SEARCH_RRF` | Same as episodes - triggers timeout |
+
+### Solution
+
+Update to the latest watercooler-cloud version:
+
+```bash
+# If using pip
+pip install --upgrade 'watercooler-cloud[graphiti]'
+
+# If using uvx, restart Claude Code to pick up the latest version
+```
+
+The fix updates graphiti from `@feature/hnsw-entity-index` to `@main` branch which includes the timeout fixes.
+
+### Verification
+
+```bash
+# Test episode search
+mcp-cli call watercooler-cloud/watercooler_search \
+  '{"query": "memory", "mode": "episodes", "limit": 3, "code_path": "."}'
+```
+
+Should return episode results without disconnection.
+
+### See Also
+
+- [GRAPHITI_SETUP.md](./GRAPHITI_SETUP.md#episodeentries-search-timeout-via-mcp) - Graphiti-specific troubleshooting
+
+---
 
 ## llama-server Architecture (Breaking Changes)
 

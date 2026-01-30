@@ -23,7 +23,7 @@
 | [`WATERCOOLER_GIT_EMAIL`](#watercooler_git_email) | No | `"mcp@watercooler.dev"` | MCP Server | Git commit author email |
 | [`WATERCOOLER_TEMPLATES`](#watercooler_templates) | No | Built-in | MCP & CLI | Custom templates directory |
 | [`WATERCOOLER_USER`](#watercooler_user) | No | OS username | Lock System | Override username in lock files |
-| [`BASELINE_GRAPH_API_BASE`](#baseline_graph_api_base) | No | `http://localhost:11434/v1` | Baseline Graph | LLM API endpoint |
+| [`BASELINE_GRAPH_API_BASE`](#baseline_graph_api_base) | No | `http://localhost:8000/v1` | Baseline Graph | LLM API endpoint |
 | [`BASELINE_GRAPH_MODEL`](#baseline_graph_model) | No | `llama3.2:3b` | Baseline Graph | LLM model name |
 | [`BASELINE_GRAPH_EXTRACTIVE_ONLY`](#baseline_graph_extractive_only) | No | `false` | Baseline Graph | Force extractive mode |
 | [`WATERCOOLER_GRAPHITI_ENABLED`](#watercooler_graphiti_enabled) | No | `"0"` | MCP Memory | Enable Graphiti memory queries |

@@ -169,7 +169,7 @@ The memory module supports multiple backend implementations through a pluggable 
 #### Graphiti - Episodic Memory + Hybrid Search
 
 **Type:** Episodic memory + Temporal graph
-**Version:** Pinned to commit `1de752646a9557682c762b83a679d46ffc67e821`
+**Branch:** `@main` (tracks upstream fixes for FalkorDB fulltext query timeouts)
 **License:** Apache-2.0
 **Graph DB:** FalkorDB or Neo4j
 **Vector DB:** Built-in (embeddings in graph nodes)

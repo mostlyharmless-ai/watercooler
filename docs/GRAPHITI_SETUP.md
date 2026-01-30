@@ -61,7 +61,7 @@ Add to your MCP config (`.mcp.json` for Claude Code):
 }
 ```
 
-Or for local LLM/embedding servers:
+Or for local LLM/embedding servers (llama-server):
 
 ```json
 {
@@ -69,7 +69,7 @@ Or for local LLM/embedding servers:
     "watercooler-cloud": {
       "env": {
         "WATERCOOLER_GRAPHITI_ENABLED": "1",
-        "LLM_API_BASE": "http://localhost:11434/v1",
+        "LLM_API_BASE": "http://localhost:8000/v1",
         "LLM_API_KEY": "not-needed-for-local",
         "LLM_MODEL": "llama3.2:3b",
         "EMBEDDING_API_BASE": "http://localhost:8080/v1",
@@ -137,10 +137,12 @@ You should see the test episode returned with extracted entities and facts.
 
 ## Version & License
 
-**Pinned commit:** `1de752646a9557682c762b83a679d46ffc67e821`
+**Branch:** `@main` (tracks upstream fixes including FalkorDB fulltext query timeouts)
 **License:** Apache-2.0
 **Repository:** https://github.com/mostlyharmless-ai/graphiti
 **Submodule location:** `external/graphiti/`
+
+> **Note:** As of January 2026, the graphiti dependency tracks `@main` instead of a pinned commit. This ensures we receive upstream fixes for FalkorDB fulltext query timeouts that affect episode and entries search via MCP.
 
 ---
 
@@ -470,6 +472,35 @@ watercooler_smart_query(
 ---
 
 ## Troubleshooting
+
+### Episode/Entries Search Timeout via MCP
+
+**Error:** `socket connection was closed unexpectedly` when searching episodes or entries
+
+**Symptom:** Entity search (`mode="entities"`) works, but episode search (`mode="episodes"`) and entries search with Graphiti backend fail via MCP.
+
+**Cause:** The graphiti dependency was pinned to a feature branch that was missing upstream fixes for FalkorDB fulltext query timeouts. Episode and entries searches use `COMBINED_HYBRID_SEARCH_RRF` which includes edge, episode, and community searches that trigger the timeout bug.
+
+**Fix:** Update to watercooler-cloud version that uses `graphiti-core@main`:
+
+```bash
+# Check your graphiti version
+pip show graphiti-core | grep -i version
+
+# Update watercooler-cloud
+pip install --upgrade 'watercooler-cloud[graphiti]'
+```
+
+If using uvx, ensure your MCP config points to the latest version.
+
+**Verification:**
+```bash
+# Test episode search
+mcp-cli call watercooler-cloud/watercooler_search \
+  '{"query": "test", "mode": "episodes", "limit": 3}'
+```
+
+---
 
 ### FalkorDB Query Timeout
 

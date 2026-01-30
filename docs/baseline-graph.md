@@ -401,7 +401,7 @@ watercooler_health
 # Output includes:
 # Graph Services:
 #   Summaries Enabled: True
-#   LLM Service: available (http://localhost:11434/v1)
+#   LLM Service: available (http://localhost:8000/v1)
 #   Embeddings Enabled: True
 #   Embedding Service: unavailable (http://localhost:8080/v1)
 #   Auto-Detect Services: True
