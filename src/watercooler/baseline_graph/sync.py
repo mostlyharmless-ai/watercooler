@@ -1084,6 +1084,20 @@ def enrich_graph_entry(
 
             logger.debug(f"Enrichment complete for {topic}/{entry_id}")
 
+        # Call memory backend hook (non-blocking - errors logged, never raise)
+        # This enables Graphiti/LeanRAG indexing after entry enrichment
+        sync_to_memory_backend(
+            threads_dir=threads_dir,
+            topic=topic,
+            entry_id=entry_id,
+            entry_body=body,
+            entry_title=title,
+            timestamp=entry_node.get("timestamp"),
+            agent=entry_node.get("agent"),
+            role=entry_node.get("role"),
+            entry_type=entry_type,
+        )
+
         return EnrichmentResult(
             success=True,
             summary_generated=summary_generated,
