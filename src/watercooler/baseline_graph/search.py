@@ -151,6 +151,9 @@ def _load_nodes(graph_dir: Path) -> Iterator[dict[str, Any]]:
 def _cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
     """Compute cosine similarity between two vectors.
 
+    NOTE: This function is kept for fallback when FalkorDB is unavailable.
+    For production semantic search, use FalkorDB vector queries instead.
+
     Args:
         vec_a: First embedding vector
         vec_b: Second embedding vector
@@ -174,6 +177,143 @@ def _cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
         return 0.0
 
     return dot_product / (math.sqrt(norm_a) * math.sqrt(norm_b))
+
+
+def _get_falkordb_store(threads_dir: Path):
+    """Get FalkorDB store for semantic search.
+
+    Returns:
+        FalkorDBEntryStoreSync instance or None if unavailable
+    """
+    try:
+        from .falkordb_entries import get_falkordb_entry_store
+
+        # Derive group_id from threads_dir
+        repo_dir = threads_dir.parent
+        group_id = repo_dir.name.replace("-", "_").lower() or "watercooler"
+
+        return get_falkordb_entry_store(group_id)
+    except Exception as e:
+        logger.debug(f"FalkorDB store unavailable: {e}")
+        return None
+
+
+def _search_falkordb_semantic(
+    threads_dir: Path,
+    query_embedding: List[float],
+    limit: int = 10,
+    threshold: float = 0.5,
+    thread_topic: Optional[str] = None,
+) -> Optional[List[SearchResult]]:
+    """Perform semantic search via FalkorDB vector index.
+
+    Args:
+        threads_dir: Path to threads directory
+        query_embedding: Query embedding vector
+        limit: Maximum results
+        threshold: Minimum similarity score (0.0-1.0)
+        thread_topic: Optional thread topic filter
+
+    Returns:
+        List of SearchResult or None if FalkorDB unavailable
+    """
+    store = _get_falkordb_store(threads_dir)
+    if not store:
+        return None
+
+    try:
+        # Use FalkorDB vector search
+        falkordb_results = store.search_similar(
+            query_embedding,
+            limit=limit,
+            threshold=threshold,
+            thread_topic=thread_topic,
+        )
+
+        if not falkordb_results:
+            return []
+
+        # Convert to SearchResult objects
+        graph_dir = get_graph_dir(threads_dir)
+        results = []
+
+        for entry_result in falkordb_results:
+            # Load the full entry from graph storage
+            entries = storage.load_thread_entries_dict(graph_dir, entry_result.thread_topic)
+            entry_node = entries.get(f"entry:{entry_result.entry_id}")
+
+            if entry_node:
+                result = SearchResult(
+                    node_type="entry",
+                    node_id=entry_result.entry_id,
+                    score=entry_result.score,
+                    matched_fields=["embedding"],
+                    entry=_node_to_entry(entry_node),
+                )
+                results.append(result)
+            else:
+                logger.debug(f"Entry {entry_result.entry_id} found in FalkorDB but not in graph storage")
+
+        return results
+
+    except Exception as e:
+        logger.warning(f"FalkorDB semantic search failed, falling back to file-based: {e}")
+        return None
+
+
+def _find_similar_falkordb(
+    threads_dir: Path,
+    entry_id: str,
+    limit: int = 5,
+    threshold: float = 0.5,
+    exclude_same_thread: bool = False,
+) -> Optional[List[GraphEntry]]:
+    """Find similar entries via FalkorDB vector index.
+
+    Args:
+        threads_dir: Path to threads directory
+        entry_id: Entry ID to find similar entries to
+        limit: Maximum results
+        threshold: Minimum similarity score
+        exclude_same_thread: Exclude entries from the same thread
+
+    Returns:
+        List of similar GraphEntry or None if FalkorDB unavailable
+    """
+    store = _get_falkordb_store(threads_dir)
+    if not store:
+        return None
+
+    try:
+        # Use FalkorDB find similar
+        falkordb_results = store.find_similar_to_entry(
+            entry_id,
+            limit=limit,
+            threshold=threshold,
+            exclude_same_thread=exclude_same_thread,
+        )
+
+        if not falkordb_results:
+            return []
+
+        # Convert to GraphEntry objects
+        graph_dir = get_graph_dir(threads_dir)
+        results = []
+
+        for entry_result in falkordb_results:
+            entries = storage.load_thread_entries_dict(graph_dir, entry_result.thread_topic)
+            entry_node = entries.get(f"entry:{entry_result.entry_id}")
+
+            if entry_node:
+                results.append(_node_to_entry(entry_node))
+            else:
+                logger.debug(f"Entry {entry_result.entry_id} found in FalkorDB but not in graph storage")
+
+        return results
+
+    except Exception as e:
+        logger.warning(f"FalkorDB find_similar failed, falling back to file-based: {e}")
+        return None
 
 
 def _get_query_embedding(query: str) -> Optional[List[float]]:
@@ -360,6 +500,44 @@ def search_graph(
         if not query_embedding:
             logger.warning("Semantic search requested but failed to generate query embedding, falling back to keyword")
 
+    # Try FalkorDB vector search first for pure semantic entry search
+    if (
+        search_query.semantic
+        and query_embedding
+        and search_query.include_entries
+        and not search_query.include_threads
+        and not search_query.start_time
+        and not search_query.end_time
+        and not search_query.role
+        and not search_query.entry_type
+        and not search_query.agent
+    ):
+        # Pure semantic entry search - use FalkorDB
+        falkordb_results = _search_falkordb_semantic(
+            threads_dir,
+            query_embedding,
+            limit=search_query.limit,
+            threshold=search_query.semantic_threshold,
+            thread_topic=search_query.thread_topic,
+        )
+        if falkordb_results is not None:
+            # FalkorDB search succeeded
+            results.results = falkordb_results
+            results.total_scanned = len(falkordb_results)  # Only return what matched
+            logger.debug(f"FalkorDB semantic search returned {len(falkordb_results)} results")
+            return results
+        # FalkorDB unavailable, fall through to file-based search
+        logger.debug("FalkorDB unavailable, falling back to file-based semantic search")
+
+    # Load search index for file-based semantic search (embeddings stored separately)
+    # Convert iterator to dict for efficient lookup
+    search_index: dict[str, Any] = {}
+    if search_query.semantic and query_embedding:
+        for index_entry in storage.load_search_index(graph_dir):
+            eid = index_entry.get("entry_id")
+            if eid:
+                search_index[eid] = index_entry
+
     matching_results: List[SearchResult] = []
 
     for node in _load_nodes(graph_dir):
@@ -381,7 +559,10 @@ def search_graph(
 
         # Semantic search with embeddings
         if search_query.semantic and query_embedding and search_query.query:
-            node_embedding = node.get("embedding")
+            # Get embedding from search index (file-based fallback)
+            # Embeddings are no longer stored in entry nodes (Phase 2 migration)
+            entry_id = node.get("entry_id")
+            node_embedding = search_index.get(entry_id, {}).get("embedding") if entry_id else None
             if node_embedding:
                 similarity = _cosine_similarity(query_embedding, node_embedding)
                 if similarity >= search_query.semantic_threshold:
@@ -588,11 +769,12 @@ def find_similar_entries(
     limit: int = 5,
     use_embeddings: bool = True,
     similarity_threshold: float = 0.5,
+    exclude_same_thread: bool = False,
 ) -> List[GraphEntry]:
     """Find entries similar to a given entry.
 
-    Uses embedding cosine similarity when available, falls back to
-    same-thread heuristic when embeddings are not available.
+    Uses FalkorDB vector search when available, falls back to file-based
+    embedding search (search-index.jsonl), then to same-thread heuristic.
 
     Args:
         threads_dir: Path to threads directory
@@ -600,11 +782,27 @@ def find_similar_entries(
         limit: Maximum results
         use_embeddings: Try to use embedding similarity (default True)
         similarity_threshold: Minimum cosine similarity for embedding matches
+        exclude_same_thread: Exclude entries from the same thread
 
     Returns:
         List of similar GraphEntry objects, sorted by similarity
     """
     graph_dir = get_graph_dir(threads_dir)
+
+    # Try FalkorDB first (preferred - uses HNSW vector index)
+    if use_embeddings:
+        falkordb_results = _find_similar_falkordb(
+            threads_dir,
+            entry_id,
+            limit=limit,
+            threshold=similarity_threshold,
+            exclude_same_thread=exclude_same_thread,
+        )
+        if falkordb_results is not None:
+            logger.debug(f"FalkorDB find_similar returned {len(falkordb_results)} results")
+            return falkordb_results
+        # FalkorDB unavailable, fall through to file-based search
+        logger.debug("FalkorDB unavailable, falling back to file-based similarity search")
 
     # First, find the source entry
     source_entry = None
@@ -616,26 +814,46 @@ def find_similar_entries(
     if not source_entry:
         return []
 
-    source_embedding = source_entry.get("embedding") if use_embeddings else None
+    # Try to get embedding from search index (file-based fallback)
+    source_embedding = None
+    search_index_dict: dict[str, Any] = {}
+    if use_embeddings:
+        # Load from search-index.jsonl (fallback when FalkorDB unavailable)
+        # Convert iterator to dict for efficient lookup
+        for index_entry in storage.load_search_index(graph_dir):
+            eid = index_entry.get("entry_id")
+            if eid:
+                search_index_dict[eid] = index_entry
+        source_embedding = search_index_dict.get(entry_id, {}).get("embedding")
 
-    # If we have an embedding, compute similarity against all entries
+    # If we have an embedding, compute similarity against all entries in search index
     if source_embedding:
         similar_entries: List[Tuple[float, GraphEntry]] = []
 
-        for node in _load_nodes(graph_dir):
-            if node.get("type") != "entry":
-                continue
-            if node.get("entry_id") == entry_id:
+        for other_id, index_entry in search_index_dict.items():
+            if other_id == entry_id:
                 continue  # Skip self
 
-            node_embedding = node.get("embedding")
-            if not node_embedding:
+            # Optionally exclude same thread
+            if exclude_same_thread:
+                other_topic = index_entry.get("thread_topic")
+                if other_topic == source_entry.get("thread_topic"):
+                    continue
+
+            other_embedding = index_entry.get("embedding")
+            if not other_embedding:
                 continue
 
-            similarity = _cosine_similarity(source_embedding, node_embedding)
+            similarity = _cosine_similarity(source_embedding, other_embedding)
             if similarity >= similarity_threshold:
-                entry = _node_to_entry(node)
-                similar_entries.append((similarity, entry))
+                # Load full entry from graph storage
+                other_topic = index_entry.get("thread_topic")
+                if other_topic:
+                    entries = storage.load_thread_entries_dict(graph_dir, other_topic)
+                    entry_node = entries.get(f"entry:{other_id}")
+                    if entry_node:
+                        entry = _node_to_entry(entry_node)
+                        similar_entries.append((similarity, entry))
 
         # Sort by similarity descending
         similar_entries.sort(key=lambda x: x[0], reverse=True)

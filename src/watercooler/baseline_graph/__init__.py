@@ -104,6 +104,14 @@ from .search import (
     search_by_time_range,
 )
 
+from .falkordb_entries import (
+    FalkorDBEntryStore,
+    FalkorDBEntryStoreSync,
+    EntrySearchResult,
+    store_entry_embedding,
+    get_falkordb_entry_store,
+)
+
 __all__ = [
     # Summarizer
     "summarize_entry",
@@ -184,4 +192,10 @@ __all__ = [
     "search_threads",
     "find_similar_entries",
     "search_by_time_range",
+    # FalkorDB Entry Store
+    "FalkorDBEntryStore",
+    "FalkorDBEntryStoreSync",
+    "EntrySearchResult",
+    "store_entry_embedding",
+    "get_falkordb_entry_store",
 ]

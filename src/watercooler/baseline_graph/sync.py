@@ -319,6 +319,174 @@ def generate_embedding(
         return None
 
 
+# ============================================================================
+# Embedding Storage (FalkorDB with Fallback)
+# ============================================================================
+
+
+# Module-level flag to track FalkorDB availability (avoids repeated connection attempts)
+_falkordb_checked: bool = False
+_falkordb_available: bool = False
+
+
+def _get_group_id_for_threads_dir(threads_dir: Path) -> str:
+    """Derive group_id from threads directory path.
+
+    Uses the repository name (parent of threads_dir for typical layouts).
+    Sanitizes to be FalkorDB-compatible (underscores, lowercase).
+    """
+    # Typical layout: /path/to/repo/<threads-dir>
+    # We want the repo name as group_id
+    repo_dir = threads_dir.parent
+    name = repo_dir.name.replace("-", "_").lower()
+    return name or "watercooler"
+
+
+def store_entry_embedding_to_falkordb(
+    threads_dir: Path,
+    entry_id: str,
+    topic: str,
+    embedding: List[float],
+) -> bool:
+    """Store entry embedding to FalkorDB if available.
+
+    Attempts to store the embedding in FalkorDB. Returns True if successful,
+    False if FalkorDB is not available or storage failed.
+
+    This function is non-blocking on failure - callers should fall back to
+    file-based storage if this returns False.
+
+    Args:
+        threads_dir: Threads directory (used to derive group_id)
+        entry_id: Entry ULID
+        topic: Thread topic
+        embedding: Embedding vector
+
+    Returns:
+        True if stored successfully, False otherwise
+    """
+    global _falkordb_checked, _falkordb_available
+
+    # Skip if we already know FalkorDB is unavailable
+    if _falkordb_checked and not _falkordb_available:
+        return False
+
+    try:
+        from .falkordb_entries import get_falkordb_entry_store
+
+        group_id = _get_group_id_for_threads_dir(threads_dir)
+        store = get_falkordb_entry_store(group_id)
+
+        if store is None:
+            _falkordb_checked = True
+            _falkordb_available = False
+            logger.debug("FalkorDB not available, using file-based storage")
+            return False
+
+        _falkordb_checked = True
+        _falkordb_available = True
+
+        store.store_embedding(entry_id, topic, embedding)
+        logger.debug(f"Stored embedding in FalkorDB: {entry_id}")
+        return True
+
+    except ImportError:
+        _falkordb_checked = True
+        _falkordb_available = False
+        logger.debug("FalkorDB module not available")
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to store embedding in FalkorDB: {e}")
+        return False
+
+
+def delete_entry_embedding_from_falkordb(
+    threads_dir: Path,
+    entry_id: str,
+) -> bool:
+    """Delete entry embedding from FalkorDB if available.
+
+    Args:
+        threads_dir: Threads directory
+        entry_id: Entry ULID
+
+    Returns:
+        True if deleted successfully, False otherwise
+    """
+    global _falkordb_checked, _falkordb_available
+
+    if _falkordb_checked and not _falkordb_available:
+        return False
+
+    try:
+        from .falkordb_entries import get_falkordb_entry_store
+
+        group_id = _get_group_id_for_threads_dir(threads_dir)
+        store = get_falkordb_entry_store(group_id)
+
+        if store is None:
+            return False
+
+        return store.delete_embedding(entry_id)
+
+    except Exception as e:
+        logger.debug(f"Failed to delete embedding from FalkorDB: {e}")
+        return False
+
+
+def upsert_embedding(
+    threads_dir: Path,
+    graph_dir: Path,
+    entry_id: str,
+    topic: str,
+    embedding: List[float],
+    *,
+    skip_file_storage: bool = False,
+) -> None:
+    """Store entry embedding, preferring FalkorDB with fallback to file storage.
+
+    This is the unified embedding storage function that:
+    1. Attempts to store in FalkorDB first
+    2. Falls back to search-index.jsonl if FalkorDB unavailable
+    3. Can optionally skip file storage entirely (for migration)
+
+    Args:
+        threads_dir: Threads directory
+        graph_dir: Graph directory for file storage
+        entry_id: Entry ULID
+        topic: Thread topic
+        embedding: Embedding vector
+        skip_file_storage: If True, skip file-based storage even if FalkorDB fails
+    """
+    # Try FalkorDB first
+    stored_in_falkordb = store_entry_embedding_to_falkordb(
+        threads_dir, entry_id, topic, embedding
+    )
+
+    # Fall back to file storage if FalkorDB failed and not skipped
+    if not stored_in_falkordb and not skip_file_storage:
+        storage.upsert_search_index_entry(graph_dir, entry_id, topic, embedding)
+
+
+def delete_embedding(
+    threads_dir: Path,
+    graph_dir: Path,
+    entry_id: str,
+) -> None:
+    """Delete entry embedding from both FalkorDB and file storage.
+
+    Args:
+        threads_dir: Threads directory
+        graph_dir: Graph directory for file storage
+        entry_id: Entry ULID
+    """
+    # Delete from FalkorDB
+    delete_entry_embedding_from_falkordb(threads_dir, entry_id)
+
+    # Delete from file storage
+    storage.remove_from_search_index(graph_dir, entry_id)
+
+
 def _should_auto_start_services() -> bool:
     """Check if auto-start services is enabled.
 
@@ -856,19 +1024,20 @@ def enrich_graph_entry(
 
             if new_summary and new_summary != existing_summary:
                 entries[entry_node_id]["summary"] = new_summary
-            if new_embedding:
-                entries[entry_node_id]["embedding"] = new_embedding
 
-            # Load existing meta and edges (we only update entries)
+            # NOTE: Embeddings are no longer stored in entries.jsonl (Phase 2 migration)
+            # They are stored in FalkorDB with fallback to search-index.jsonl
+
+            # Load existing meta and edges (we only update entries for summary)
             meta = storage.load_thread_meta(graph_dir, topic) or {}
             edges = storage.load_thread_edges(graph_dir, topic)
 
-            # Write back atomically
+            # Write back atomically (summary only, not embedding)
             storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-            # Update search index if embedding was generated
+            # Store embedding in FalkorDB (with fallback to search-index.jsonl)
             if new_embedding:
-                storage.upsert_search_index_entry(graph_dir, entry_id, topic, new_embedding)
+                upsert_embedding(threads_dir, graph_dir, entry_id, topic, new_embedding)
 
             logger.debug(f"Enrichment complete for {topic}/{entry_id}")
 
@@ -1112,9 +1281,9 @@ def sync_entry_to_graph(
         # Write all per-thread files atomically
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-        # Update search index if embedding was generated
+        # Store embedding in FalkorDB (with fallback to search-index.jsonl)
         if entry_embedding:
-            storage.upsert_search_index_entry(graph_dir, entry.entry_id, topic, entry_embedding)
+            upsert_embedding(threads_dir, graph_dir, entry.entry_id, topic, entry_embedding)
 
         # Update manifest
         storage.update_manifest(graph_dir, topic, entry.entry_id)
@@ -1250,9 +1419,9 @@ def sync_thread_to_graph(
         # Write all per-thread files atomically
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-        # Update search index for entries with embeddings
+        # Store embeddings in FalkorDB (with fallback to search-index.jsonl)
         for entry_id, embedding in search_index_updates:
-            storage.upsert_search_index_entry(graph_dir, entry_id, topic, embedding)
+            upsert_embedding(threads_dir, graph_dir, entry_id, topic, embedding)
 
         # Update manifest
         last_entry_id = parsed.entries[-1].entry_id if parsed.entries else None
@@ -1640,13 +1809,11 @@ def backfill_missing(
                                 text = f"{entry['title']}\n\n{text}"
                             embedding = generate_embedding(text)
                             if embedding:
-                                entry["embedding"] = embedding
+                                # NOTE: No longer storing embedding in entries.jsonl
+                                # Store in FalkorDB (with fallback to search-index.jsonl)
+                                upsert_embedding(threads_dir, graph_dir, entry_raw_id, topic, embedding)
                                 result.entries_embedding_generated += 1
-                                thread_updated = True
-                                # Also update search index
-                                storage.upsert_search_index_entry(
-                                    graph_dir, entry_raw_id, topic, embedding
-                                )
+                                # Note: thread_updated is for summary changes only now
                         except Exception as e:
                             result.errors.append(f"Entry {entry_raw_id} embedding: {e}")
 
@@ -1867,14 +2034,12 @@ def enrich_graph(
                             text = f"{entry['title']}\n\n{text}"
                         embedding = generate_embedding(text)
                         if embedding:
-                            entry["embedding"] = embedding
+                            # NOTE: No longer storing embedding in entries.jsonl
+                            # Store in FalkorDB (with fallback to search-index.jsonl)
+                            upsert_embedding(threads_dir, graph_dir, entry_raw_id, topic, embedding)
                             result.embeddings_generated += 1
-                            thread_updated = True
                             entry_processed = True
-                            # Also update search index
-                            storage.upsert_search_index_entry(
-                                graph_dir, entry_raw_id, topic, embedding
-                            )
+                            # Note: thread_updated is for summary changes only now
                     except Exception as e:
                         result.errors.append(f"Entry {entry_raw_id} embedding: {e}")
 
