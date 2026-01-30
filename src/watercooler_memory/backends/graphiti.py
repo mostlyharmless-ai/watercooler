@@ -52,16 +52,18 @@ def _is_graphiti_installed() -> bool:
     """
     global _GRAPHITI_INSTALLED_AS_PACKAGE
     if _GRAPHITI_INSTALLED_AS_PACKAGE is not None:
+        logger.debug(f"_is_graphiti_installed: cached result = {_GRAPHITI_INSTALLED_AS_PACKAGE}")
         return _GRAPHITI_INSTALLED_AS_PACKAGE
 
     try:
+        logger.debug("_is_graphiti_installed: attempting import graphiti_core")
         import graphiti_core  # noqa: F401
         _GRAPHITI_INSTALLED_AS_PACKAGE = True
-        logger.debug("graphiti_core found as installed package")
+        logger.debug("_is_graphiti_installed: graphiti_core found as installed package")
         return True
     except ImportError:
         _GRAPHITI_INSTALLED_AS_PACKAGE = False
-        logger.debug("graphiti_core not installed as package, will use submodule")
+        logger.debug("_is_graphiti_installed: graphiti_core not installed as package, will use submodule")
         return False
 
 
@@ -103,6 +105,7 @@ def _ensure_graphiti_available() -> None:
 
     # Already installed as package? Nothing to do.
     if _is_graphiti_installed():
+        logger.debug("_ensure_graphiti_available: graphiti_core already installed as package")
         return
 
     # Get submodule path
@@ -133,7 +136,9 @@ def _ensure_graphiti_available() -> None:
 
     # Verify import works now
     try:
+        logger.debug("_ensure_graphiti_available: importing graphiti_core from submodule")
         import graphiti_core  # noqa: F401
+        logger.debug("_ensure_graphiti_available: graphiti_core import successful")
     except ImportError as e:
         raise ConfigError(
             f"Failed to import graphiti_core after adding to path: {e}"
@@ -322,14 +327,18 @@ class GraphitiBackend(MemoryBackend):
     MAX_COMMUNITIES_RETURNED = 5
 
     def __init__(self, config: GraphitiConfig | None = None) -> None:
+        logger.debug("GraphitiBackend.__init__ starting")
         self.config = config or GraphitiConfig()
+        logger.debug("GraphitiBackend.__init__ calling _validate_config")
         self._validate_config()
+        logger.debug("GraphitiBackend.__init__ calling _init_entry_episode_index")
         self._init_entry_episode_index()
         # Cache for graphiti client to avoid creating new connections per call
         # This is critical for MCP migration which makes many sequential calls
         # Client lifecycle: created on first use, reused until close() or __del__
         self._cached_graphiti_client: Any = None
         self._indices_built: bool = False
+        logger.debug("GraphitiBackend.__init__ complete")
 
     def close(self) -> None:
         """Close the backend and release resources.
@@ -384,7 +393,9 @@ class GraphitiBackend(MemoryBackend):
     def _validate_config(self) -> None:
         """Validate configuration and Graphiti availability."""
         # Ensure graphiti_core is importable (installed package or submodule)
+        logger.debug("_validate_config: calling _ensure_graphiti_available")
         _ensure_graphiti_available()
+        logger.debug("_validate_config: graphiti_core available")
 
         # Validate LLM API key is set (required for Graphiti)
         # Support legacy openai_api_key field for backwards compatibility
@@ -416,14 +427,17 @@ class GraphitiBackend(MemoryBackend):
     def _init_entry_episode_index(self) -> None:
         """Initialize the entry-episode index if enabled."""
         if not self.config.track_entry_episodes:
+            logger.debug("_init_entry_episode_index: tracking disabled, skipping")
             self.entry_episode_index = None
             return
 
+        logger.debug(f"_init_entry_episode_index: loading from {self.config.entry_episode_index_path}")
         index_config = IndexConfig(
             backend="graphiti",
             index_path=self.config.entry_episode_index_path,
         )
         self.entry_episode_index = EntryEpisodeIndex(index_config, auto_load=True)
+        logger.debug(f"_init_entry_episode_index: loaded {len(self.entry_episode_index)} entries")
 
     def index_entry_as_episode(
         self,
@@ -742,12 +756,15 @@ class GraphitiBackend(MemoryBackend):
         except Exception as e:
             logger.debug(f"Error checking embedding service: {e}")
 
-    def _create_graphiti_client(self, use_cache: bool = True) -> Any:
+    def _create_graphiti_client(self, use_cache: bool = False) -> Any:
         """Create and configure Graphiti client with FalkorDB, LLM, and embedder.
 
         Args:
-            use_cache: If True, return cached client if available. Set to False
-                to force creation of a new client (useful for testing).
+            use_cache: If True, return cached client if available. Default is False
+                because caching is incompatible with asyncio.run() creating new
+                event loops - the cached client's asyncio.Lock objects become bound
+                to a stale event loop, causing "Lock is bound to a different event
+                loop" errors on subsequent calls.
 
         Returns:
             Configured Graphiti instance ready for operations.
@@ -756,6 +773,10 @@ class GraphitiBackend(MemoryBackend):
             ConfigError: If required dependencies are not installed.
         """
         # Return cached client if available and caching enabled
+        # WARNING: Caching is disabled by default because each method uses
+        # asyncio.run() which creates a new event loop. The graphiti client
+        # has internal asyncio.Lock objects that become bound to the event loop
+        # from the first call, causing errors on subsequent calls.
         if use_cache and self._cached_graphiti_client is not None:
             logger.debug("Returning cached Graphiti client")
             return self._cached_graphiti_client
