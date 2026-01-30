@@ -68,7 +68,7 @@ memory = [
     "tiktoken>=0.5",
     "httpx>=0.25",
     "openai>=1.0",
-    "graphiti-core[falkordb] @ git+https://github.com/mostlyharmless-ai/graphiti.git@feature/hnsw-entity-index",
+    "graphiti-core[falkordb] @ git+https://github.com/mostlyharmless-ai/graphiti.git@main",
     "leanrag @ git+https://github.com/mostlyharmless-ai/LeanRAG.git@feature/falkordb-vector-backend",
     # Model downloads from HuggingFace (llama-server binary is downloaded separately)
     "huggingface_hub>=0.20",
@@ -79,7 +79,7 @@ graphiti = [
     "tiktoken>=0.5",
     "httpx>=0.25",
     "openai>=1.0",
-    "graphiti-core[falkordb] @ git+https://github.com/mostlyharmless-ai/graphiti.git@feature/hnsw-entity-index",
+    "graphiti-core[falkordb] @ git+https://github.com/mostlyharmless-ai/graphiti.git@main",
     # Model downloads from HuggingFace (llama-server binary is downloaded separately)
     "huggingface_hub>=0.20",
 ]
