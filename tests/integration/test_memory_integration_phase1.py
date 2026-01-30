@@ -196,10 +196,14 @@ class TestMemorySyncHookIntegration:
         """Memory backend config respects environment variable."""
         from watercooler.baseline_graph.sync import get_memory_backend_config
 
-        # Default: disabled
+        # Explicitly disabled (TOML config may have defaults)
+        os.environ["WATERCOOLER_MEMORY_DISABLED"] = "1"
         os.environ.pop("WATERCOOLER_MEMORY_BACKEND", None)
-        config = get_memory_backend_config()
-        assert config is None
+        try:
+            config = get_memory_backend_config()
+            assert config is None
+        finally:
+            os.environ.pop("WATERCOOLER_MEMORY_DISABLED", None)
 
         # With graphiti
         with patch.dict(os.environ, {"WATERCOOLER_MEMORY_BACKEND": "graphiti"}):
@@ -324,10 +328,14 @@ class TestConfigurationIntegration:
         """Memory backend is configured via environment variables."""
         from watercooler.baseline_graph.sync import get_memory_backend_config
 
-        # Default: disabled
+        # Explicitly disabled (TOML config may have defaults)
+        os.environ["WATERCOOLER_MEMORY_DISABLED"] = "1"
         os.environ.pop("WATERCOOLER_MEMORY_BACKEND", None)
-        config = get_memory_backend_config()
-        assert config is None
+        try:
+            config = get_memory_backend_config()
+            assert config is None
+        finally:
+            os.environ.pop("WATERCOOLER_MEMORY_DISABLED", None)
 
         # Enabled via env var
         with patch.dict(os.environ, {"WATERCOOLER_MEMORY_BACKEND": "graphiti"}):
