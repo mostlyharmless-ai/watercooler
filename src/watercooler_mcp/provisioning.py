@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from typing import Dict
@@ -58,6 +59,14 @@ class ProvisioningContext:
             "repo": self.repo,
             "org": self.org,
         }
+
+    def as_shell_safe_dict(self) -> Dict[str, str]:
+        """Return context values quoted for safe shell interpolation.
+
+        All values are passed through shlex.quote() to prevent shell injection
+        when used in command templates executed with shell=True.
+        """
+        return {k: shlex.quote(v) for k, v in self.as_dict().items()}
 
 
 def _split_slug(slug: str) -> tuple[str, str]:
@@ -239,7 +248,8 @@ def provision_threads_repo(
 
     ctx = _build_context(repo_url, slug, code_repo)
     try:
-        command = template.format(**ctx.as_dict())
+        # Use shell-safe quoting to prevent command injection
+        command = template.format(**ctx.as_shell_safe_dict())
     except KeyError as exc:  # pragma: no cover - defensive guard
         raise ProvisioningError(
             f"Unknown placeholder {{{exc.args[0]}}} in WATERCOOLER_THREADS_CREATE_CMD"
