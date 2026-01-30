@@ -609,7 +609,7 @@ wheels = [
 [[package]]
 name = "graphiti-core"
 version = "0.24.3"
-source = { git = "https://github.com/mostlyharmless-ai/graphiti.git?rev=feature%2Fhnsw-entity-index#78b0d5144b170d97c87482aff2b9ee67234dbd4b" }
+source = { git = "https://github.com/mostlyharmless-ai/graphiti.git?rev=main#dea618bd0a4a7b00260c54b803c0f2874cef5f37" }
 dependencies = [
     { name = "diskcache" },
     { name = "neo4j" },
@@ -3183,8 +3183,8 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=2.0" },
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2.0" },
     { name = "gitpython", specifier = ">=3.1.0" },
-    { name = "graphiti-core", extras = ["falkordb"], marker = "extra == 'graphiti'", git = "https://github.com/mostlyharmless-ai/graphiti.git?rev=feature%2Fhnsw-entity-index" },
-    { name = "graphiti-core", extras = ["falkordb"], marker = "extra == 'memory'", git = "https://github.com/mostlyharmless-ai/graphiti.git?rev=feature%2Fhnsw-entity-index" },
+    { name = "graphiti-core", extras = ["falkordb"], marker = "extra == 'graphiti'", git = "https://github.com/mostlyharmless-ai/graphiti.git?rev=main" },
+    { name = "graphiti-core", extras = ["falkordb"], marker = "extra == 'memory'", git = "https://github.com/mostlyharmless-ai/graphiti.git?rev=main" },
     { name = "httpx", marker = "extra == 'baseline'", specifier = ">=0.25" },
     { name = "httpx", marker = "extra == 'graphiti'", specifier = ">=0.25" },
     { name = "httpx", marker = "extra == 'leanrag'", specifier = ">=0.25" },
