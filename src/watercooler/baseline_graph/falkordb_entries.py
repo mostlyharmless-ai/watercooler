@@ -626,29 +626,108 @@ async def store_entry_embedding(
 # =============================================================================
 
 
+class _AsyncLoopRunner:
+    """Manages a dedicated event loop in a background thread.
+
+    This solves the problem where asyncio.run() creates and closes a new
+    event loop on each call, which breaks async clients (like FalkorDB)
+    that maintain connections tied to a specific event loop.
+
+    The runner keeps a single event loop alive in a daemon thread, and all
+    async operations are submitted to this loop, ensuring connection reuse.
+    """
+
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: "threading.Thread | None" = None
+        import threading
+        self._lock = threading.Lock()
+
+    def _start_loop(self) -> None:
+        """Start the event loop in the current thread."""
+        assert self._loop is not None
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def _ensure_started(self) -> asyncio.AbstractEventLoop:
+        """Ensure the background loop is running."""
+        if self._loop is not None and self._loop.is_running():
+            return self._loop
+
+        with self._lock:
+            # Double-check after acquiring lock
+            if self._loop is not None and self._loop.is_running():
+                return self._loop
+
+            import threading
+            self._loop = asyncio.new_event_loop()
+            self._thread = threading.Thread(
+                target=self._start_loop,
+                daemon=True,
+                name="falkordb-async-loop",
+            )
+            self._thread.start()
+
+            # Wait for loop to start
+            import time
+            for _ in range(100):  # Up to 1 second
+                if self._loop.is_running():
+                    break
+                time.sleep(0.01)
+
+            return self._loop
+
+    def run(self, coro: Any, timeout: float = 60.0) -> Any:
+        """Run a coroutine in the dedicated event loop.
+
+        Args:
+            coro: Coroutine to run
+            timeout: Maximum time to wait for result
+
+        Returns:
+            Result from the coroutine
+
+        Raises:
+            TimeoutError: If operation exceeds timeout
+            Exception: Any exception raised by the coroutine
+        """
+        loop = self._ensure_started()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return future.result(timeout=timeout)
+        except Exception:
+            future.cancel()
+            raise
+
+    def stop(self) -> None:
+        """Stop the background event loop."""
+        if self._loop is not None and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._thread is not None:
+                self._thread.join(timeout=5.0)
+            self._loop = None
+            self._thread = None
+
+
+# Module-level async loop runner (singleton)
+_async_runner: _AsyncLoopRunner | None = None
+
+
+def _get_async_runner() -> _AsyncLoopRunner:
+    """Get or create the global async loop runner."""
+    global _async_runner
+    if _async_runner is None:
+        _async_runner = _AsyncLoopRunner()
+    return _async_runner
+
+
 def _run_async(coro: Any) -> Any:
     """Run an async coroutine from sync code.
 
-    Handles the case where we're already in an event loop (e.g., Jupyter, MCP)
-    by using nest_asyncio if available, or creating a new loop.
+    Uses a dedicated background event loop to ensure connection reuse
+    for async clients like FalkorDB that maintain persistent connections.
     """
-    try:
-        loop = asyncio.get_running_loop()
-        # We're inside an async context - this is tricky
-        # Try nest_asyncio if available
-        try:
-            import nest_asyncio
-            nest_asyncio.apply()
-            return loop.run_until_complete(coro)
-        except ImportError:
-            # nest_asyncio not available, run in a new thread
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(asyncio.run, coro)
-                return future.result(timeout=60)
-    except RuntimeError:
-        # No event loop running, safe to use asyncio.run
-        return asyncio.run(coro)
+    return _get_async_runner().run(coro)
 
 
 class FalkorDBEntryStoreSync:
@@ -794,16 +873,25 @@ class FalkorDBEntryStoreSync:
         self.close()
 
 
-# Module-level singleton for reusing connection
-_global_sync_store: FalkorDBEntryStoreSync | None = None
-_global_store_lock = asyncio.Lock()
+# Module-level cache for reusing connections per group_id
+_sync_store_cache: dict[str, FalkorDBEntryStoreSync] = {}
+_sync_store_cache_lock: "threading.Lock | None" = None
+
+
+def _get_store_cache_lock() -> "threading.Lock":
+    """Get or create the store cache lock."""
+    global _sync_store_cache_lock
+    if _sync_store_cache_lock is None:
+        import threading
+        _sync_store_cache_lock = threading.Lock()
+    return _sync_store_cache_lock
 
 
 def get_falkordb_entry_store(group_id: str) -> FalkorDBEntryStoreSync | None:
-    """Get or create a global FalkorDBEntryStoreSync for embedding storage.
+    """Get or create a FalkorDBEntryStoreSync for embedding storage.
 
     Returns None if FalkorDB is not available or connection fails.
-    The store is cached for reuse across calls.
+    Stores are cached per group_id for connection reuse.
 
     Args:
         group_id: Project scope identifier
@@ -811,21 +899,26 @@ def get_falkordb_entry_store(group_id: str) -> FalkorDBEntryStoreSync | None:
     Returns:
         FalkorDBEntryStoreSync or None if unavailable
     """
-    global _global_sync_store
+    # Check cache first (without lock for fast path)
+    if group_id in _sync_store_cache:
+        return _sync_store_cache[group_id]
 
-    if _global_sync_store is not None:
-        return _global_sync_store
+    # Acquire lock for creation
+    with _get_store_cache_lock():
+        # Double-check after acquiring lock
+        if group_id in _sync_store_cache:
+            return _sync_store_cache[group_id]
 
-    try:
-        store = FalkorDBEntryStoreSync.from_config(group_id)
-        store.connect()
-        store.ensure_index()
-        _global_sync_store = store
-        logger.info(f"FalkorDB entry store initialized for group_id={group_id}")
-        return store
-    except ImportError:
-        logger.debug("FalkorDB not installed, embedding storage disabled")
-        return None
-    except Exception as e:
-        logger.warning(f"FalkorDB connection failed, embedding storage disabled: {e}")
-        return None
+        try:
+            store = FalkorDBEntryStoreSync.from_config(group_id)
+            store.connect()
+            store.ensure_index()
+            _sync_store_cache[group_id] = store
+            logger.info(f"FalkorDB entry store initialized for group_id={group_id}")
+            return store
+        except ImportError:
+            logger.debug("FalkorDB not installed, embedding storage disabled")
+            return None
+        except Exception as e:
+            logger.warning(f"FalkorDB connection failed for {group_id}: {e}")
+            return None
