@@ -336,6 +336,71 @@ class ServiceProvisionConfig(BaseModel):
     )
 
 
+class HttpConfig(BaseModel):
+    """HTTP transport configuration (only used when transport = "http")."""
+
+    # CORS settings
+    cors_origins: str = Field(
+        default="",
+        description="Comma-separated list of allowed CORS origins (empty = allow all)",
+    )
+
+    # Request limits
+    max_request_size: int = Field(
+        default=1024 * 1024,  # 1MB
+        ge=1024,
+        description="Maximum request body size in bytes",
+    )
+    request_timeout: int = Field(
+        default=30,
+        ge=1,
+        le=300,
+        description="Request timeout in seconds",
+    )
+
+
+class CacheConfig(BaseModel):
+    """Cache configuration for MCP server."""
+
+    # Backend selection
+    backend: Literal["memory", "database"] = Field(
+        default="memory",
+        description="Cache backend: memory (local) or database (hosted)",
+    )
+
+    # TTL settings
+    default_ttl: float = Field(
+        default=300.0,
+        ge=0,
+        description="Default cache TTL in seconds",
+    )
+
+    # Memory cache limits
+    max_entries: int = Field(
+        default=10000,
+        ge=100,
+        description="Maximum entries in memory cache before LRU eviction",
+    )
+
+    # Database cache settings (only used when backend = "database")
+    api_url: str = Field(
+        default="",
+        description="Base URL for database cache API (hosted mode)",
+    )
+
+
+class HostedConfig(BaseModel):
+    """Hosted service configuration (watercooler.dev integration)."""
+
+    # API endpoints
+    api_url: str = Field(
+        default="",
+        description="Watercooler hosted API URL",
+    )
+
+    # Note: API keys and secrets should remain env-only for security
+
+
 class McpConfig(BaseModel):
     """MCP server configuration."""
 
@@ -394,6 +459,18 @@ class McpConfig(BaseModel):
     service_provision: ServiceProvisionConfig = Field(
         default_factory=ServiceProvisionConfig,
         description="Auto-provisioning settings for external services (llama-server, models)",
+    )
+    http: HttpConfig = Field(
+        default_factory=HttpConfig,
+        description="HTTP transport settings (only used when transport = 'http')",
+    )
+    cache: CacheConfig = Field(
+        default_factory=CacheConfig,
+        description="Cache backend settings",
+    )
+    hosted: HostedConfig = Field(
+        default_factory=HostedConfig,
+        description="Hosted service (watercooler.dev) settings",
     )
 
     # Agent-specific overrides (keyed by platform slug)

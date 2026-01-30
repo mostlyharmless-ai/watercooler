@@ -2383,32 +2383,73 @@ def is_memory_disabled() -> bool:
 
 
 def get_memory_backend_config() -> Optional[Dict[str, Any]]:
-    """Get memory backend configuration from environment.
+    """Get memory backend configuration from unified config system.
 
-    Configuration via WATERCOOLER_MEMORY_BACKEND env var:
+    Resolution priority (highest first):
+    1. WATERCOOLER_MEMORY_DISABLED env var - disables if "1"/"true"/"yes"
+    2. WATERCOOLER_MEMORY_BACKEND env var - explicit backend override
+    3. WATERCOOLER_GRAPHITI_ENABLED env var - legacy auto-detection
+    4. TOML config: [memory].backend setting
+
+    Supported backends:
     - "graphiti": Sync to Graphiti temporal graph
     - "leanrag": Trigger LeanRAG clustering pipeline
-
-    Auto-detection: If WATERCOOLER_GRAPHITI_ENABLED=1 is set but
-    WATERCOOLER_MEMORY_BACKEND is not, defaults to "graphiti".
 
     Returns:
         Config dict with backend name, or None if disabled
     """
-    # Check master disable switch first
+    # Import unified config here to avoid circular imports
+    # memory_config uses the same config facade as MCP server
+    try:
+        from watercooler.memory_config import is_memory_enabled, get_memory_backend
+    except ImportError:
+        # Fallback to env-only mode if memory_config not available
+        # (e.g., running without full watercooler installation)
+        logger.debug("MEMORY: memory_config not available, using env-only mode")
+        return _get_memory_backend_config_env_only()
+
+    # Check master disable switch (env var + TOML)
+    if not is_memory_enabled():
+        logger.debug("MEMORY: Disabled via config or WATERCOOLER_MEMORY_DISABLED=1")
+        return None
+
+    # Get backend from unified config (env var + TOML fallback)
+    backend = get_memory_backend().lower().strip()
+
+    # Legacy auto-detect: if WATERCOOLER_GRAPHITI_ENABLED=1 but no backend specified,
+    # default to graphiti for automatic entry sync
+    if not backend or backend == "null":
+        graphiti_enabled = os.environ.get("WATERCOOLER_GRAPHITI_ENABLED", "").lower()
+        if graphiti_enabled in ("1", "true", "yes"):
+            backend = "graphiti"
+            logger.debug("MEMORY: Auto-detected graphiti backend from WATERCOOLER_GRAPHITI_ENABLED=1")
+
+    if not backend or backend == "null":
+        logger.debug("MEMORY: No backend configured (backend='null' or empty)")
+        return None
+
+    if backend not in ("graphiti", "leanrag"):
+        logger.warning(f"Unknown memory backend: {backend}. Supported: graphiti, leanrag")
+        return None
+
+    return {"backend": backend}
+
+
+def _get_memory_backend_config_env_only() -> Optional[Dict[str, Any]]:
+    """Fallback env-only config for when memory_config is not available.
+
+    This preserves the original env-only behavior for minimal installations.
+    """
     if is_memory_disabled():
         logger.debug("MEMORY: Disabled (WATERCOOLER_MEMORY_DISABLED=1)")
         return None
 
     backend = os.environ.get("WATERCOOLER_MEMORY_BACKEND", "").lower().strip()
 
-    # Auto-detect: if WATERCOOLER_GRAPHITI_ENABLED=1 but no backend specified,
-    # default to graphiti for automatic entry sync
     if not backend:
         graphiti_enabled = os.environ.get("WATERCOOLER_GRAPHITI_ENABLED", "").lower()
         if graphiti_enabled in ("1", "true", "yes"):
             backend = "graphiti"
-            logger.debug("MEMORY: Auto-detected graphiti backend from WATERCOOLER_GRAPHITI_ENABLED=1")
 
     if not backend:
         return None

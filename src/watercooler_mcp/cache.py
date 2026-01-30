@@ -193,7 +193,7 @@ class MemoryCache(CacheBackend):
     - Thread-safe operations
     """
 
-    # Default max entries (configurable via WATERCOOLER_CACHE_MAX_ENTRIES)
+    # Default max entries
     DEFAULT_MAX_ENTRIES = 10000
 
     def __init__(
@@ -206,15 +206,13 @@ class MemoryCache(CacheBackend):
         Args:
             default_ttl: Default TTL for entries without explicit TTL
             max_entries: Maximum number of entries before LRU eviction
-                        (default: 10000, set via WATERCOOLER_CACHE_MAX_ENTRIES)
+                        (default: 10000, configurable via TOML or env var)
         """
         # Use OrderedDict for LRU eviction (most recently used at end)
         self._cache: "OrderedDict[str, CacheEntry[Any]]" = OrderedDict()
         self._lock = threading.RLock()
         self._default_ttl = default_ttl
-        self._max_entries = max_entries or int(
-            os.getenv("WATERCOOLER_CACHE_MAX_ENTRIES", str(self.DEFAULT_MAX_ENTRIES))
-        )
+        self._max_entries = max_entries if max_entries is not None else self.DEFAULT_MAX_ENTRIES
         self._eviction_count = 0  # Track evictions for monitoring
 
     def get(self, key: str) -> Optional[Any]:
@@ -324,9 +322,10 @@ class DatabaseCache(CacheBackend):
     The cache is stored in the watercooler-site PostgreSQL database,
     typically in the ConnectedRepo.graphNodes field or a dedicated cache table.
 
-    Environment variables:
-    - WATERCOOLER_CACHE_API_URL: Base URL for cache API
-    - WATERCOOLER_TOKEN_API_KEY: API key for authentication
+    Configuration:
+    - TOML: [mcp.cache] api_url
+    - Env: WATERCOOLER_CACHE_API_URL (overrides TOML)
+    - Env: WATERCOOLER_TOKEN_API_KEY (API key - env only for security)
     """
 
     def __init__(
@@ -338,11 +337,13 @@ class DatabaseCache(CacheBackend):
         """Initialize database cache.
 
         Args:
-            api_url: Cache API base URL (defaults to env var)
-            api_key: API key (defaults to env var)
+            api_url: Cache API base URL (from unified config or env)
+            api_key: API key (env only for security)
             default_ttl: Default TTL in seconds
         """
-        self._api_url = api_url or os.getenv("WATERCOOLER_CACHE_API_URL", "")
+        # api_url comes from unified config via _create_cache(), with env override
+        # api_key is env-only for security (secrets should not be in TOML)
+        self._api_url = api_url or ""
         self._api_key = api_key or os.getenv("WATERCOOLER_TOKEN_API_KEY", "")
         self._default_ttl = default_ttl
         # Local fallback for when API is unavailable
@@ -429,17 +430,52 @@ class DatabaseCache(CacheBackend):
 # =============================================================================
 
 
+def _get_cache_config() -> tuple[str, float, int, str]:
+    """Get cache configuration from unified config.
+
+    Returns:
+        Tuple of (backend, default_ttl, max_entries, api_url)
+    """
+    # Check env vars first (highest priority)
+    backend = os.getenv("WATERCOOLER_CACHE_BACKEND", "").lower()
+    ttl_str = os.getenv("WATERCOOLER_CACHE_TTL", "")
+    max_entries_str = os.getenv("WATERCOOLER_CACHE_MAX_ENTRIES", "")
+    api_url = os.getenv("WATERCOOLER_CACHE_API_URL", "")
+
+    # Fall back to TOML config
+    try:
+        from watercooler.config_facade import config
+        cache_cfg = config.full().mcp.cache
+
+        if not backend:
+            backend = cache_cfg.backend
+        if not ttl_str:
+            ttl_str = str(cache_cfg.default_ttl)
+        if not max_entries_str:
+            max_entries_str = str(cache_cfg.max_entries)
+        if not api_url:
+            api_url = cache_cfg.api_url
+    except ImportError:
+        pass
+
+    # Apply defaults
+    backend = backend or "memory"
+    default_ttl = float(ttl_str) if ttl_str else 300.0
+    max_entries = int(max_entries_str) if max_entries_str else 10000
+
+    return backend, default_ttl, max_entries, api_url
+
+
 def _create_cache() -> CacheBackend:
     """Create cache backend based on configuration."""
-    backend = os.getenv("WATERCOOLER_CACHE_BACKEND", "memory").lower()
-    default_ttl = float(os.getenv("WATERCOOLER_CACHE_TTL", "300"))
+    backend, default_ttl, max_entries, api_url = _get_cache_config()
 
     if backend == "database":
         logger.info("Using database cache backend")
-        return DatabaseCache(default_ttl=default_ttl)
+        return DatabaseCache(api_url=api_url or None, default_ttl=default_ttl)
     else:
         logger.debug("Using memory cache backend")
-        return MemoryCache(default_ttl=default_ttl)
+        return MemoryCache(default_ttl=default_ttl, max_entries=max_entries)
 
 
 # Global cache instance

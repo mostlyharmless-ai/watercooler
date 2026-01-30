@@ -194,6 +194,67 @@ default_spec = "general-purpose"
 
 
 # -----------------------------------------------------------------------------
+# HTTP Transport Settings
+# Only used when transport = "http"
+# Env overrides: WATERCOOLER_CORS_ORIGINS, WATERCOOLER_MAX_REQUEST_SIZE,
+#                WATERCOOLER_REQUEST_TIMEOUT
+# -----------------------------------------------------------------------------
+[mcp.http]
+
+# CORS allowed origins (comma-separated)
+# Empty = allow all origins (no credentials)
+# Explicit = allow credentials for those origins
+# Env: WATERCOOLER_CORS_ORIGINS
+# cors_origins = ""
+
+# Maximum request body size in bytes (default 1MB)
+# Env: WATERCOOLER_MAX_REQUEST_SIZE
+# max_request_size = 1048576
+
+# Request timeout in seconds
+# Env: WATERCOOLER_REQUEST_TIMEOUT
+# request_timeout = 30
+
+
+# -----------------------------------------------------------------------------
+# Cache Settings
+# Env overrides: WATERCOOLER_CACHE_BACKEND, WATERCOOLER_CACHE_TTL,
+#                WATERCOOLER_CACHE_MAX_ENTRIES, WATERCOOLER_CACHE_API_URL
+# -----------------------------------------------------------------------------
+[mcp.cache]
+
+# Cache backend: "memory" (local) or "database" (hosted)
+# Env: WATERCOOLER_CACHE_BACKEND
+# backend = "memory"
+
+# Default TTL in seconds
+# Env: WATERCOOLER_CACHE_TTL
+# default_ttl = 300.0
+
+# Maximum entries in memory cache before LRU eviction
+# Env: WATERCOOLER_CACHE_MAX_ENTRIES
+# max_entries = 10000
+
+# Database cache API URL (only used when backend = "database")
+# Env: WATERCOOLER_CACHE_API_URL
+# api_url = ""
+
+
+# -----------------------------------------------------------------------------
+# Hosted Service Settings
+# Integration with watercooler.dev hosted services
+# Note: API keys/secrets must be set via env vars for security
+# -----------------------------------------------------------------------------
+[mcp.hosted]
+
+# Watercooler hosted API URL
+# Env: WATERCOOLER_TOKEN_API_URL
+# api_url = ""
+
+# Note: WATERCOOLER_INTERNAL_SECRET must be set via env var (not TOML)
+
+
+# -----------------------------------------------------------------------------
 # Logging Settings
 # -----------------------------------------------------------------------------
 [mcp.logging]
