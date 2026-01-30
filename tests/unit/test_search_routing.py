@@ -25,14 +25,16 @@ class TestSearchBackendSelection:
     """Tests for backend selection logic."""
 
     def test_get_search_backend_default_baseline(self):
-        """Default backend should be baseline when no env var set."""
+        """Default backend should be baseline when no env var set and TOML returns null."""
         from watercooler_mcp.tools.graph import get_search_backend
 
         with patch.dict(os.environ, {}, clear=True):
             # Remove any existing WATERCOOLER_MEMORY_BACKEND
             os.environ.pop("WATERCOOLER_MEMORY_BACKEND", None)
-            backend = get_search_backend("auto")
-            assert backend == "baseline"
+            # Mock TOML config to return "null" (not graphiti/leanrag)
+            with patch("watercooler.memory_config.get_memory_backend", return_value="null"):
+                backend = get_search_backend("auto")
+                assert backend == "baseline"
 
     def test_get_search_backend_explicit_baseline(self):
         """Explicit baseline backend should always use baseline."""

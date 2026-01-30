@@ -54,8 +54,10 @@ class TestSearchRoutingIntegration:
         # Clear any existing env var
         os.environ.pop("WATERCOOLER_MEMORY_BACKEND", None)
 
-        backend = get_search_backend("auto")
-        assert backend == "baseline"
+        # Mock TOML config to return "null" (not graphiti/leanrag)
+        with patch("watercooler.memory_config.get_memory_backend", return_value="null"):
+            backend = get_search_backend("auto")
+            assert backend == "baseline"
 
     def test_search_routing_respects_env_var(self, mock_threads_dir):
         """Search with auto backend respects WATERCOOLER_MEMORY_BACKEND."""
@@ -294,10 +296,11 @@ End-to-end test content about authentication implementation.
 
         threads_dir = complete_setup
 
-        # Step 1: Default search uses baseline
+        # Step 1: Default search uses baseline (mock TOML to return null)
         os.environ.pop("WATERCOOLER_MEMORY_BACKEND", None)
-        backend = get_search_backend("auto")
-        assert backend == "baseline"
+        with patch("watercooler.memory_config.get_memory_backend", return_value="null"):
+            backend = get_search_backend("auto")
+            assert backend == "baseline"
 
         # Step 2: Check no checkpoint exists (empty CheckpointV2)
         checkpoint = _load_checkpoint(threads_dir)
