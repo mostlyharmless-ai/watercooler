@@ -52,6 +52,20 @@ DOWNLOAD_CHUNK_SIZE = 8192  # Bytes per chunk when downloading files
 #   2. sha256sum *.tar.gz
 #   3. Add entries below
 LLAMA_SERVER_CHECKSUMS: dict[str, dict[str, str]] = {
+    # Release b7896 (2026-01-31) - verified checksums
+    "b7896": {
+        "ubuntu-x64": "329a716c5fb216d49d674d3ac7a9aab90d04942d80b08786aeaaae49a4490b93",
+        "ubuntu-vulkan-x64": "85191595f05328f01de8f5852f0679a6dd8cce4271ec52d9d0cf3dca08e1ac74",
+        "macos-arm64": "231f8f7ff3763de2ab1cbeb097e728e4bb442b0bc941f6dacc7ef83d01ae47bb",
+        "macos-x64": "6de178b3f364734e442b4579554f102a6c36c9343cf31cdb8381c02053b2bf11",
+    },
+    # Release b7885 (2026-01-30) - verified checksums
+    "b7885": {
+        "ubuntu-x64": "6e6148e2f8908cbefdf4833e71a8113c71a1a4a14cb155375ad8c1b095d8a5e1",
+        "ubuntu-vulkan-x64": "f21649deb021d7b2942227c12a05915dee476835081b65f2698aed4e93459d37",
+        "macos-arm64": "608760410b9f65f91a0e9f499dc21f95cea298c59b9df1354bd6a31cad059d35",
+        "macos-x64": "4794fd57522f680c17be60dc7c3ef7fb08c89a2524ee2babf3480f9f2c87ffca",
+    },
     # Release b7869 (2026-01-28) - verified checksums
     "b7869": {
         "ubuntu-x64": "d35419ff41d6438338fb9942d2250e9c21ea02424e422617650bcab950575d78",

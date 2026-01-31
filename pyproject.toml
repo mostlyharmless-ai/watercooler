@@ -125,4 +125,6 @@ markers = [
     "integration_leanrag_llm: marks tests requiring LeanRAG with LLM APIs (DeepSeek, GLM embeddings)",
     "integration_graphiti: marks tests requiring Graphiti backend with API key (run with '-m integration_graphiti')",
     "benchmark: marks tests as performance benchmarks (run with '-m benchmark')",
+    "network: marks tests requiring network access (deselect with '-m \"not network\"')",
+    "slow: marks tests as slow running (deselect with '-m \"not slow\"')",
 ]
