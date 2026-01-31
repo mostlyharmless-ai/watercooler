@@ -932,17 +932,25 @@ class TestMultiBackendComparison:
             GraphitiBackend,
             GraphitiConfig,
         )
+        from watercooler_memory.backends import ConfigError
 
         if "OPENAI_API_KEY" not in os.environ:
             pytest.skip("OPENAI_API_KEY required")
 
         # Setup both backends with test_mode enabled
-        leanrag = LeanRAGBackend(
-            LeanRAGConfig(work_dir=tmp_path / "leanrag", test_mode=True)
-        )
-        graphiti = GraphitiBackend(
-            GraphitiConfig(work_dir=tmp_path / "graphiti", test_mode=True)
-        )
+        try:
+            leanrag = LeanRAGBackend(
+                LeanRAGConfig(work_dir=tmp_path / "leanrag", test_mode=True)
+            )
+        except (ConfigError, FileNotFoundError) as e:
+            pytest.skip(f"LeanRAG backend not available: {e}")
+
+        try:
+            graphiti = GraphitiBackend(
+                GraphitiConfig(work_dir=tmp_path / "graphiti", test_mode=True)
+            )
+        except ConfigError as e:
+            pytest.skip(f"Graphiti backend not available: {e}")
 
         # Prepare both
         leanrag.prepare(minimal_corpus)

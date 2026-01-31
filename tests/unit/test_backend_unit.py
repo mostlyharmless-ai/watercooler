@@ -313,14 +313,15 @@ class TestGraphitiConfigMissingKeys:
     def test_missing_llm_api_key_raises_error(self):
         """Test that missing LLM_API_KEY raises ConfigError."""
         from watercooler_memory.backends import ConfigError
+        from watercooler_memory.backends.graphiti import _ensure_graphiti_available
 
         config = GraphitiConfig(
             embedding_api_key="embed-key",
             # No llm_api_key
         )
 
-        # Mock graphiti_path to exist
-        with patch.object(Path, 'exists', return_value=True):
+        # Mock _ensure_graphiti_available to bypass neo4j import check
+        with patch('watercooler_memory.backends.graphiti._ensure_graphiti_available'):
             with pytest.raises(ConfigError) as exc_info:
                 GraphitiBackend(config)
 
@@ -335,8 +336,8 @@ class TestGraphitiConfigMissingKeys:
             # No embedding_api_key
         )
 
-        # Mock graphiti_path to exist
-        with patch.object(Path, 'exists', return_value=True):
+        # Mock _ensure_graphiti_available to bypass neo4j import check
+        with patch('watercooler_memory.backends.graphiti._ensure_graphiti_available'):
             with pytest.raises(ConfigError) as exc_info:
                 GraphitiBackend(config)
 
@@ -350,8 +351,9 @@ class TestGraphitiConfigMissingKeys:
             # No llm_api_key
         )
 
-        # Mock graphiti_path to exist and skip entry episode index init
-        with patch.object(Path, 'exists', return_value=True):
+        # Mock _ensure_graphiti_available to bypass neo4j import check
+        # and skip entry episode index init
+        with patch('watercooler_memory.backends.graphiti._ensure_graphiti_available'):
             with patch.object(GraphitiBackend, '_init_entry_episode_index'):
                 backend = GraphitiBackend(config)
 
