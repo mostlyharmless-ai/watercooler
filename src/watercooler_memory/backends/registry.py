@@ -47,8 +47,29 @@ def list_backends() -> list[str]:
 
 
 def resolve_backend(name: str | None = None) -> MemoryBackend:
-    """Resolve backend by explicit name or WC_MEMORY_BACKEND env (default: null)."""
-    backend_name = name or os.environ.get("WC_MEMORY_BACKEND", "null")
+    """Resolve backend by explicit name or unified config (default: null).
+
+    Resolution priority:
+    1. Explicit name parameter
+    2. WATERCOOLER_MEMORY_BACKEND env var
+    3. TOML config: [memory].backend
+    4. WC_MEMORY_BACKEND env var (legacy)
+    5. Default: "null"
+    """
+    if name:
+        return get_backend(name)
+
+    # Try unified config first
+    try:
+        from watercooler.memory_config import get_memory_backend
+        backend_name = get_memory_backend()
+        if backend_name and backend_name != "null":
+            return get_backend(backend_name)
+    except ImportError:
+        pass
+
+    # Legacy fallback
+    backend_name = os.environ.get("WC_MEMORY_BACKEND", "null")
     return get_backend(backend_name)
 
 
@@ -57,18 +78,34 @@ def auto_register_builtin() -> None:
     # LeanRAG (optional)
     if "leanrag" not in _REGISTRY:
         try:
-            from .leanrag import LeanRAGBackend  # type: ignore
+            from .leanrag import LeanRAGBackend, LeanRAGConfig  # type: ignore
 
-            register_backend("leanrag", lambda: LeanRAGBackend())
+            def _create_leanrag():
+                """Create LeanRAG backend with unified config."""
+                try:
+                    config = LeanRAGConfig.from_unified()
+                except Exception:
+                    config = None  # Fall back to defaults
+                return LeanRAGBackend(config)
+
+            register_backend("leanrag", _create_leanrag)
         except Exception as exc:  # noqa: BLE001
             warnings.warn(f"Skipping LeanRAG backend registration: {exc}")
 
     # Graphiti (optional)
     if "graphiti" not in _REGISTRY:
         try:
-            from .graphiti import GraphitiBackend  # type: ignore
+            from .graphiti import GraphitiBackend, GraphitiConfig  # type: ignore
 
-            register_backend("graphiti", lambda: GraphitiBackend())
+            def _create_graphiti():
+                """Create Graphiti backend with unified config."""
+                try:
+                    config = GraphitiConfig.from_unified()
+                except Exception:
+                    config = None  # Fall back to defaults
+                return GraphitiBackend(config)
+
+            register_backend("graphiti", _create_graphiti)
         except Exception as exc:  # noqa: BLE001
             warnings.warn(f"Skipping Graphiti backend registration: {exc}")
 

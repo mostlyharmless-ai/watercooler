@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from typing import Dict
@@ -58,6 +59,76 @@ class ProvisioningContext:
             "repo": self.repo,
             "org": self.org,
         }
+
+    def as_shell_safe_dict(self) -> Dict[str, str]:
+        """Return context values quoted for safe shell interpolation.
+
+        All values are passed through shlex.quote() to prevent shell injection
+        when used in command templates executed with shell=True.
+        """
+        return {k: shlex.quote(v) for k, v in self.as_dict().items()}
+
+
+# Shell operators that could enable command chaining/injection in templates
+# These are dangerous outside of quoted placeholder values
+_DANGEROUS_SHELL_PATTERNS = [
+    ";",      # Command separator
+    "&&",     # AND operator
+    "||",     # OR operator
+    "|",      # Pipe
+    "`",      # Command substitution (backticks)
+    "$(",     # Command substitution
+    "${",     # Variable expansion (could be used maliciously)
+    ">",      # Redirect output
+    "<",      # Redirect input
+    ">>",     # Append redirect
+    "2>",     # Stderr redirect
+    "&>",     # Combined redirect
+]
+
+# Valid placeholder names that can appear in templates
+_VALID_PLACEHOLDERS = {"slug", "repo_url", "code_repo", "namespace", "repo", "org"}
+
+
+def _validate_provision_template(template: str) -> None:
+    """Validate that a provisioning template doesn't contain dangerous shell operators.
+
+    The template can contain placeholders like {slug}, {repo}, etc., but the static
+    parts of the template must not contain shell operators that could enable
+    command chaining or injection.
+
+    Args:
+        template: The command template string
+
+    Raises:
+        ProvisioningError: If the template contains dangerous patterns
+    """
+    # Remove valid placeholders to check the static parts
+    # Replace {placeholder} with empty string to analyze the rest
+    static_template = template
+    for placeholder in _VALID_PLACEHOLDERS:
+        static_template = static_template.replace(f"{{{placeholder}}}", "")
+
+    # Check for any remaining curly braces (unknown placeholders)
+    if "{" in static_template or "}" in static_template:
+        # Find the unknown placeholder
+        import re
+        unknown = re.findall(r'\{([^}]*)\}', template)
+        invalid = [p for p in unknown if p not in _VALID_PLACEHOLDERS]
+        if invalid:
+            raise ProvisioningError(
+                f"Unknown placeholder(s) in template: {', '.join(invalid)}. "
+                f"Valid placeholders are: {', '.join(sorted(_VALID_PLACEHOLDERS))}"
+            )
+
+    # Check for dangerous shell patterns in the static parts
+    for pattern in _DANGEROUS_SHELL_PATTERNS:
+        if pattern in static_template:
+            raise ProvisioningError(
+                f"Provisioning template contains dangerous shell operator '{pattern}'. "
+                "Templates must be simple commands without chaining operators. "
+                f"Template: {template}"
+            )
 
 
 def _split_slug(slug: str) -> tuple[str, str]:
@@ -237,9 +308,13 @@ def provision_threads_repo(
             "Auto-provisioning requested but WATERCOOLER_THREADS_CREATE_CMD is not set"
         )
 
+    # Security: Validate template doesn't contain dangerous shell operators
+    _validate_provision_template(template)
+
     ctx = _build_context(repo_url, slug, code_repo)
     try:
-        command = template.format(**ctx.as_dict())
+        # Use shell-safe quoting to prevent command injection
+        command = template.format(**ctx.as_shell_safe_dict())
     except KeyError as exc:  # pragma: no cover - defensive guard
         raise ProvisioningError(
             f"Unknown placeholder {{{exc.args[0]}}} in WATERCOOLER_THREADS_CREATE_CMD"

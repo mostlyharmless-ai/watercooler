@@ -19,6 +19,7 @@ from .observability import log_debug, log_warning
 # Import unified config helpers
 from watercooler.memory_config import (
     is_memory_enabled,
+    get_memory_backend,
     resolve_llm_config,
     resolve_embedding_config,
     resolve_database_config,
@@ -84,7 +85,8 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
 
         Environment Variables (override TOML):
             WATERCOOLER_MEMORY_DISABLED: "1" to disable all memory backends
-            WATERCOOLER_GRAPHITI_ENABLED: "1" to enable (default: "0")
+            WATERCOOLER_GRAPHITI_ENABLED: "1" to enable, "0" to disable
+                (if not set, uses [memory].backend from TOML config)
             WATERCOOLER_GRAPHITI_DATABASE: Override derived database name
             LLM_API_KEY, LLM_API_BASE, LLM_MODEL
             EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL
@@ -107,10 +109,22 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
         log_debug("MEMORY: All memory backends disabled (WATERCOOLER_MEMORY_DISABLED=1)")
         return None
 
-    # Check Graphiti-specific switch (default: disabled)
-    enabled = os.getenv("WATERCOOLER_GRAPHITI_ENABLED", "0") == "1"
+    # Check Graphiti-specific switch
+    # Priority: env var > TOML config
+    # - WATERCOOLER_GRAPHITI_ENABLED=1 explicitly enables
+    # - WATERCOOLER_GRAPHITI_ENABLED=0 explicitly disables
+    # - If env var not set, check [memory] backend in TOML
+    env_enabled = os.getenv("WATERCOOLER_GRAPHITI_ENABLED", "").lower()
+    if env_enabled in ("1", "true", "yes"):
+        enabled = True
+    elif env_enabled in ("0", "false", "no"):
+        enabled = False
+    else:
+        # Fall back to TOML config: memory.backend == "graphiti"
+        enabled = get_memory_backend() == "graphiti"
+
     if not enabled:
-        log_debug("MEMORY: Graphiti disabled (WATERCOOLER_GRAPHITI_ENABLED != '1')")
+        log_debug("MEMORY: Graphiti disabled (WATERCOOLER_GRAPHITI_ENABLED != '1' and memory.backend != 'graphiti')")
         return None
 
     # Resolve LLM configuration using unified config

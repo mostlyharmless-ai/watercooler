@@ -1397,12 +1397,32 @@ def _extract_thread_metadata(
 # ============================================================================
 
 
+def _get_hosted_api_url() -> str:
+    """Get hosted API URL from unified config.
+
+    Resolution priority:
+    1. WATERCOOLER_TOKEN_API_URL env var
+    2. TOML config: [mcp.hosted].api_url
+    3. Empty string (disabled)
+    """
+    url = os.getenv("WATERCOOLER_TOKEN_API_URL", "")
+    if url:
+        return url
+
+    try:
+        from watercooler.config_facade import config
+        return config.full().mcp.hosted.api_url or ""
+    except ImportError:
+        return ""
+
+
 def _is_slack_sync_enabled() -> bool:
     """Check if Slack sync via watercooler-site is configured.
 
-    Requires both WATERCOOLER_TOKEN_API_URL and WATERCOOLER_INTERNAL_SECRET.
+    Requires both hosted API URL and WATERCOOLER_INTERNAL_SECRET.
     """
-    site_url = os.getenv("WATERCOOLER_TOKEN_API_URL", "")
+    site_url = _get_hosted_api_url()
+    # Secret must be env-only for security
     secret = os.getenv("WATERCOOLER_INTERNAL_SECRET", "")
     return bool(site_url) and bool(secret)
 
@@ -1441,11 +1461,11 @@ def _sync_entry_to_slack_site(
     """
     if not _is_slack_sync_enabled():
         log_debug(
-            "Slack sync not enabled (missing WATERCOOLER_TOKEN_API_URL or WATERCOOLER_INTERNAL_SECRET)"
+            "Slack sync not enabled (missing hosted API URL or WATERCOOLER_INTERNAL_SECRET)"
         )
         return False
 
-    site_url = os.getenv("WATERCOOLER_TOKEN_API_URL", "").rstrip("/")
+    site_url = _get_hosted_api_url().rstrip("/")
     secret = os.getenv("WATERCOOLER_INTERNAL_SECRET", "")
 
     url = f"{site_url}/api/slack/sync-entry"

@@ -23,7 +23,7 @@
 | [`WATERCOOLER_GIT_EMAIL`](#watercooler_git_email) | No | `"mcp@watercooler.dev"` | MCP Server | Git commit author email |
 | [`WATERCOOLER_TEMPLATES`](#watercooler_templates) | No | Built-in | MCP & CLI | Custom templates directory |
 | [`WATERCOOLER_USER`](#watercooler_user) | No | OS username | Lock System | Override username in lock files |
-| [`BASELINE_GRAPH_API_BASE`](#baseline_graph_api_base) | No | `http://localhost:11434/v1` | Baseline Graph | LLM API endpoint |
+| [`BASELINE_GRAPH_API_BASE`](#baseline_graph_api_base) | No | `http://localhost:8000/v1` | Baseline Graph | LLM API endpoint |
 | [`BASELINE_GRAPH_MODEL`](#baseline_graph_model) | No | `llama3.2:3b` | Baseline Graph | LLM model name |
 | [`BASELINE_GRAPH_EXTRACTIVE_ONLY`](#baseline_graph_extractive_only) | No | `false` | Baseline Graph | Force extractive mode |
 | [`WATERCOOLER_GRAPHITI_ENABLED`](#watercooler_graphiti_enabled) | No | `"0"` | MCP Memory | Enable Graphiti memory queries |
@@ -639,7 +639,7 @@ Variables for the baseline graph module (free-tier knowledge graph generation).
 
 **Required:** No
 
-**Default:** `"http://localhost:11434/v1"` (Ollama default)
+**Default:** `"http://localhost:8000/v1"` (llama-server default)
 
 **Format:** URL string
 
@@ -653,11 +653,11 @@ The baseline graph module uses local LLMs for generating summaries. This variabl
 
 **Shell:**
 ```bash
-# Ollama (default)
-export BASELINE_GRAPH_API_BASE="http://localhost:11434/v1"
+# llama-server (default)
+export BASELINE_GRAPH_API_BASE="http://localhost:8000/v1"
 
-# llama.cpp server
-export BASELINE_GRAPH_API_BASE="http://localhost:8080/v1"
+# OpenAI
+export BASELINE_GRAPH_API_BASE="https://api.openai.com/v1"
 ```
 
 ---
@@ -693,7 +693,7 @@ export BASELINE_GRAPH_MODEL="llama3.2:3b"
 
 **Required:** No
 
-**Default:** `"ollama"` (Ollama doesn't require authentication)
+**Default:** `"local"` (local llama-server doesn't require authentication)
 
 **Format:** API key string
 
@@ -701,7 +701,7 @@ export BASELINE_GRAPH_MODEL="llama3.2:3b"
 
 **Details:**
 
-Most local LLM servers (Ollama, llama.cpp) don't require authentication. Set this if your endpoint requires an API key.
+Local llama-server doesn't require authentication. Set this if your endpoint requires an API key (e.g., OpenAI).
 
 ---
 
@@ -795,17 +795,30 @@ Variables for querying thread history via Graphiti temporal graph memory. These 
 Enables the memory query tools (`watercooler_smart_query`, `watercooler_search`) for asking questions about thread history using Graphiti's temporal graph memory. When disabled, the tools return an error message directing users to enable it.
 
 **Prerequisites** (when enabled):
-- `OPENAI_API_KEY` environment variable set
+- LLM API key configured (via `LLM_API_KEY` env var or `[memory.llm].api_key` in TOML)
 - FalkorDB running locally: `docker run -d -p 6379:6379 falkordb/falkordb:latest`
-- Memory extras installed: `pip install watercooler-cloud[memory]`
+- Memory extras installed: `pip install 'watercooler-cloud[memory]'`
 - Index built via CLI: `python -m watercooler_memory.pipeline run --backend graphiti --threads /path/to/threads`
 
-**Hardcoded defaults:**
-- Graphiti path: `external/graphiti`
+**Configuration (TOML recommended):**
+```toml
+# ~/.watercooler/config.toml
+[memory]
+enabled = true
+backend = "graphiti"
+
+[memory.llm]
+api_key = "local"  # or your API key
+api_base = "http://localhost:8000/v1"  # llama-server
+model = "qwen3:30b"
+```
+
+**Defaults:**
+- Graphiti path: Installed as package (or `WATERCOOLER_GRAPHITI_PATH` for submodule dev)
 - Work directory: `~/.watercooler/graphiti`
 - FalkorDB host: `localhost`
 - FalkorDB port: `6379`
-- OpenAI model: `gpt-4o-mini`
+- LLM model: `gpt-4o-mini`
 
 **Configuration examples:**
 

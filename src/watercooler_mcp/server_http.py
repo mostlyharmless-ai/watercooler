@@ -120,12 +120,40 @@ def create_http_app():
         lifespan=mcp_asgi.lifespan,
     )
 
+    # Get HTTP config from unified config system
+    def _get_http_config() -> tuple[str, int, int]:
+        """Get HTTP config (cors_origins, max_request_size, request_timeout)."""
+        cors = os.getenv("WATERCOOLER_CORS_ORIGINS", "")
+        max_size_str = os.getenv("WATERCOOLER_MAX_REQUEST_SIZE", "")
+        timeout_str = os.getenv("WATERCOOLER_REQUEST_TIMEOUT", "")
+
+        # Fall back to TOML config
+        try:
+            from watercooler.config_facade import config
+            http_cfg = config.full().mcp.http
+
+            if not cors:
+                cors = http_cfg.cors_origins
+            if not max_size_str:
+                max_size_str = str(http_cfg.max_request_size)
+            if not timeout_str:
+                timeout_str = str(http_cfg.request_timeout)
+        except ImportError:
+            pass
+
+        # Apply defaults
+        max_size = int(max_size_str) if max_size_str else 1024 * 1024
+        timeout = int(timeout_str) if timeout_str else 30
+
+        return cors, max_size, timeout
+
+    cors_origins_config, MAX_REQUEST_SIZE, REQUEST_TIMEOUT = _get_http_config()
+
     # Configure CORS for browser-based clients
     # Security: When allow_credentials=True, origins must be explicit (not "*")
-    cors_origins_env = os.getenv("WATERCOOLER_CORS_ORIGINS", "")
-    if cors_origins_env and cors_origins_env != "*":
+    if cors_origins_config and cors_origins_config != "*":
         # Explicit origins configured - safe to use credentials
-        cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+        cors_origins = [o.strip() for o in cors_origins_config.split(",") if o.strip()]
         allow_credentials = True
     else:
         # No explicit origins or wildcard - disable credentials for security
@@ -162,11 +190,6 @@ def create_http_app():
             },
             "auth_mode": "hosted" if is_hosted_mode() else "local",
         }
-
-    # Request size limit (default 1MB)
-    MAX_REQUEST_SIZE = int(os.getenv("WATERCOOLER_MAX_REQUEST_SIZE", str(1024 * 1024)))
-    # Request timeout (default 30 seconds)
-    REQUEST_TIMEOUT = int(os.getenv("WATERCOOLER_REQUEST_TIMEOUT", "30"))
 
     @app.middleware("http")
     async def add_request_context(request: Request, call_next):

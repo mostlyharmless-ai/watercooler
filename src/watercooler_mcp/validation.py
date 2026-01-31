@@ -12,11 +12,90 @@ Functions:
 - _dynamic_context_missing: Check if dynamic context env vars are set but unresolved
 - _refresh_threads: Validate branch pairing and pull latest changes
 - _validate_thread_context: Combined validation helper for tool implementations
+- validate_safe_path: Check for path traversal attacks
 """
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
+
+
+# ============================================================================
+# Path Security Helpers
+# ============================================================================
+
+
+def validate_safe_path(
+    user_path: Union[str, Path],
+    allowed_bases: Optional[list[Path]] = None,
+    must_exist: bool = False,
+) -> tuple[Optional[str], Optional[Path]]:
+    """Validate a user-supplied path for safety.
+
+    Checks for:
+    - Path traversal attempts (.. sequences after resolution)
+    - Absolute paths escaping allowed directories
+    - Null bytes and other injection attempts
+
+    Args:
+        user_path: The user-supplied path to validate
+        allowed_bases: Optional list of allowed base directories. If provided,
+            the resolved path must be under one of these directories.
+        must_exist: If True, also verify the path exists.
+
+    Returns:
+        Tuple of (error_message, resolved_path). If error_message is not None,
+        resolved_path will be None.
+
+    Example:
+        error, safe_path = validate_safe_path(user_input, allowed_bases=[threads_dir])
+        if error:
+            return f"Invalid path: {error}"
+        # Use safe_path
+    """
+    # Convert to string for initial checks
+    path_str = str(user_path)
+
+    # Check for null bytes (injection attack)
+    if "\x00" in path_str:
+        return "Path contains null bytes", None
+
+    # Check for obviously suspicious patterns before resolution
+    # These could indicate attempted traversal even if resolve() handles them
+    suspicious_patterns = ["...", "...."]
+    for pattern in suspicious_patterns:
+        if pattern in path_str:
+            return f"Path contains suspicious pattern: {pattern}", None
+
+    try:
+        # Resolve to absolute path (handles .. and symlinks)
+        resolved = Path(user_path).resolve()
+    except (OSError, ValueError) as e:
+        return f"Invalid path: {e}", None
+
+    # Check existence if required
+    if must_exist and not resolved.exists():
+        return f"Path does not exist: {resolved}", None
+
+    # Check against allowed bases if provided
+    if allowed_bases:
+        is_allowed = False
+        for base in allowed_bases:
+            try:
+                resolved_base = base.resolve()
+                # Check if resolved path is under the allowed base
+                resolved.relative_to(resolved_base)
+                is_allowed = True
+                break
+            except ValueError:
+                # Not under this base, try next
+                continue
+
+        if not is_allowed:
+            bases_str = ", ".join(str(b) for b in allowed_bases)
+            return f"Path escapes allowed directories: {bases_str}", None
+
+    return None, resolved
 
 # Local application imports
 from watercooler.config_facade import config
@@ -189,8 +268,14 @@ def _require_context(code_path: str) -> tuple[str | None, ThreadContext | None]:
         if drive.isalpha() and code_path[2] == "/":
             code_path = f"{drive}:{code_path[2:].replace('/', os.sep)}"
 
+    # Validate path for security (null bytes, suspicious patterns)
+    path_error, code_path_obj = validate_safe_path(code_path)
+    if path_error:
+        return (f"Invalid code_path: {path_error}", None)
+    if code_path_obj is None:
+        return ("Invalid code_path: could not resolve path", None)
+
     # Detect if a threads repo was passed instead of a code repo
-    code_path_obj = Path(code_path).resolve()
     if code_path_obj.name.endswith("-threads"):
         # Check if a matching code repo exists (same path without -threads suffix)
         potential_code_repo = code_path_obj.parent / code_path_obj.name[:-8]  # Remove "-threads"

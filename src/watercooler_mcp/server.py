@@ -22,7 +22,7 @@ from fastmcp import FastMCP
 # Local application imports
 from watercooler.config_facade import config
 from .config import ThreadContext
-from .startup import check_first_run, ensure_ollama_running
+from .startup import check_first_run, ensure_llm_running, ensure_embedding_running, ensure_falkordb_running
 
 # Import validation functions (extracted to break circular imports)
 from .validation import (
@@ -167,12 +167,14 @@ set_status = _thread_write_tools.set_status
 force_sync = _sync_tools.force_sync
 reindex = _sync_tools.reindex
 baseline_graph_stats = _graph_tools.baseline_graph_stats
-baseline_graph_build = _graph_tools.baseline_graph_build
 search_graph_tool = _graph_tools.search_graph_tool
 find_similar_entries_tool = _graph_tools.find_similar_entries_tool
 graph_health_tool = _graph_tools.graph_health_tool
-reconcile_graph_tool = _graph_tools.reconcile_graph_tool
 access_stats_tool = _graph_tools.access_stats_tool
+# New graph tooling suite
+graph_enrich_tool = _graph_tools.graph_enrich_tool
+graph_recover_tool = _graph_tools.graph_recover_tool
+graph_project_tool = _graph_tools.graph_project_tool
 validate_branch_pairing_tool = _branch_parity_tools.validate_branch_pairing_tool
 sync_branch_state = _branch_parity_tools.sync_branch_state_tool
 audit_branch_pairing = _branch_parity_tools.audit_branch_pairing_tool
@@ -187,13 +189,168 @@ diagnose_memory = _memory_tools.diagnose_memory
 # ============================================================================
 
 
+def _reset_cache() -> None:
+    """Clear watercooler caches (binaries and models).
+
+    Clears:
+    - ~/.watercooler/bin/ (llama-server and shared libraries)
+    - ~/.watercooler/models/ (downloaded GGUF models)
+
+    Also prints instructions for clearing uvx caches if needed.
+    """
+    import shutil
+    from pathlib import Path
+
+    watercooler_dir = Path.home() / ".watercooler"
+    cleared = []
+
+    # Clear binaries (llama-server, .so files)
+    bin_dir = watercooler_dir / "bin"
+    if bin_dir.exists():
+        shutil.rmtree(bin_dir)
+        cleared.append(f"  - {bin_dir}")
+
+    # Clear downloaded models
+    models_dir = watercooler_dir / "models"
+    if models_dir.exists():
+        shutil.rmtree(models_dir)
+        cleared.append(f"  - {models_dir}")
+
+    if cleared:
+        print("Cleared watercooler caches:", file=sys.stderr)
+        for path in cleared:
+            print(path, file=sys.stderr)
+    else:
+        print("No watercooler caches to clear.", file=sys.stderr)
+
+    # Print uvx cache instructions
+    print("\nTo fully reset (including uvx package cache), also run:", file=sys.stderr)
+    print("  rm -rf ~/.cache/uv/archive-v0/*watercooler* ~/.cache/uv/git-v0/checkouts/*/watercooler*", file=sys.stderr)
+    print("\nOr for a complete uvx reset:", file=sys.stderr)
+    print("  uv cache clean", file=sys.stderr)
+
+
+def _warm_cache() -> None:
+    """Pre-download llama-server binary and configured models.
+
+    Downloads:
+    - llama-server binary from GitHub releases (if not present)
+    - LLM model GGUF file (if configured for local inference)
+    - Embedding model GGUF file (if configured for local inference)
+
+    This allows pre-warming the cache before starting the MCP server,
+    avoiding download delays during first connection.
+    """
+    from .startup import (
+        _find_llama_server,
+        _download_llama_server,
+        _is_localhost_url,
+    )
+    from watercooler.memory_config import (
+        resolve_baseline_graph_llm_config,
+        resolve_baseline_graph_embedding_config,
+    )
+    from watercooler.models import ensure_llm_model_available, ensure_model_available
+
+    print("Warming watercooler cache...", file=sys.stderr)
+
+    # 1. Download llama-server binary
+    llama_server = _find_llama_server()
+    if llama_server:
+        print(f"  llama-server: {llama_server} (already installed)", file=sys.stderr)
+    else:
+        print("  llama-server: downloading from GitHub releases...", file=sys.stderr)
+        llama_server = _download_llama_server()
+        if llama_server:
+            print(f"  llama-server: {llama_server} (downloaded)", file=sys.stderr)
+        else:
+            print("  llama-server: FAILED to download", file=sys.stderr)
+
+    # 2. Download LLM model if configured for localhost
+    try:
+        llm_config = resolve_baseline_graph_llm_config()
+        if _is_localhost_url(llm_config.api_base):
+            print(f"  LLM model ({llm_config.model}): checking...", file=sys.stderr)
+            model_path = ensure_llm_model_available(llm_config.model)
+            if model_path:
+                print(f"  LLM model: {model_path}", file=sys.stderr)
+            else:
+                print(f"  LLM model: not found in registry", file=sys.stderr)
+        else:
+            print(f"  LLM model: skipped (remote API: {llm_config.api_base})", file=sys.stderr)
+    except Exception as e:
+        print(f"  LLM model: error - {e}", file=sys.stderr)
+
+    # 3. Download embedding model if configured for localhost
+    try:
+        emb_config = resolve_baseline_graph_embedding_config()
+        if _is_localhost_url(emb_config.api_base):
+            print(f"  Embedding model ({emb_config.model}): checking...", file=sys.stderr)
+            model_path = ensure_model_available(emb_config.model)
+            if model_path:
+                print(f"  Embedding model: {model_path}", file=sys.stderr)
+            else:
+                print(f"  Embedding model: not found in registry", file=sys.stderr)
+        else:
+            print(f"  Embedding model: skipped (remote API: {emb_config.api_base})", file=sys.stderr)
+    except Exception as e:
+        print(f"  Embedding model: error - {e}", file=sys.stderr)
+
+    print("\nCache warm complete. Ready to start server.", file=sys.stderr)
+
+
 def main():
     """Entry point for watercooler-mcp command."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Watercooler MCP Server - AI agent collaboration tools",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  watercooler-mcp              Start MCP server (stdio transport)
+  watercooler-mcp --warm       Pre-download binaries and models, then exit
+  watercooler-mcp --reset-cache  Clear downloaded binaries and models
+
+Environment variables:
+  WATERCOOLER_DIR              Path to threads directory
+  WATERCOOLER_AGENT            Default agent identity
+  WATERCOOLER_TRANSPORT        Transport type (stdio or http)
+  WATERCOOLER_HOST             HTTP host (default: 127.0.0.1)
+  WATERCOOLER_PORT             HTTP port (default: 8765)
+"""
+    )
+    parser.add_argument(
+        "--reset-cache",
+        action="store_true",
+        help="Clear watercooler caches (binaries, models) and exit"
+    )
+    parser.add_argument(
+        "--warm",
+        action="store_true",
+        help="Pre-download llama-server and models, then exit (use for cache warming)"
+    )
+    args = parser.parse_args()
+
+    if args.reset_cache:
+        _reset_cache()
+        sys.exit(0)
+
+    if args.warm:
+        _warm_cache()
+        sys.exit(0)
+
     # Check for first-run and suggest config initialization
     check_first_run()
 
-    # Auto-start Ollama if graph features are enabled
-    ensure_ollama_running()
+    # Auto-start llama-server for LLM if graph features are enabled
+    ensure_llm_running()
+
+    # Auto-start llama-server for embeddings if needed
+    ensure_embedding_running()
+
+    # Auto-start FalkorDB if Graphiti backend is enabled
+    ensure_falkordb_running()
 
     # Get transport configuration from unified config system
     from .config import get_mcp_transport_config

@@ -108,7 +108,11 @@ def _build_entry_node(
     pr_refs: Optional[List[int]] = None,
     commit_refs: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Build entry node dict from EntryData."""
+    """Build entry node dict from EntryData.
+
+    NOTE: Embeddings are no longer stored in entry nodes (Phase 2 migration).
+    They are stored separately in FalkorDB with fallback to search-index.jsonl.
+    """
     node = {
         "id": f"entry:{data.entry_id}",
         "type": "entry",
@@ -126,8 +130,9 @@ def _build_entry_node(
         "pr_refs": pr_refs or [],
         "commit_refs": commit_refs or [],
     }
-    if data.embedding:
-        node["embedding"] = data.embedding
+    # NOTE: Embeddings are NOT stored in entry nodes anymore.
+    # They are stored in FalkorDB (with fallback to search-index.jsonl).
+    # See sync.py:upsert_embedding() for embedding storage.
     return node
 
 
@@ -291,10 +296,9 @@ def upsert_entry_node(
                 f"{dual_write_err}. Per-thread format is canonical; continuing."
             )
 
-        # Update search index with new entry (if has embedding)
-        embedding = entries[entry_id].get("embedding")
-        if embedding:
-            storage.upsert_search_index_entry(graph_dir, data.entry_id, topic, embedding)
+        # NOTE: Embeddings are handled separately by sync.py enrichment.
+        # They are stored in FalkorDB (with fallback to search-index.jsonl).
+        # See sync.py:upsert_embedding() for embedding storage.
 
         # Update manifest
         storage.update_manifest(graph_dir, topic, data.entry_id)
@@ -415,7 +419,25 @@ def delete_entry_node(
         if meta:
             storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-        # Remove from search index
+        # Remove embedding from FalkorDB (if available)
+        try:
+            from .falkordb_entries import get_falkordb_entry_store
+
+            # Derive group_id from threads_dir (handles paired repos like foo-threads)
+            dir_name = threads_dir.name
+            if dir_name.endswith("-threads"):
+                group_id = dir_name[:-8].replace("-", "_").lower()
+            else:
+                group_id = threads_dir.parent.name.replace("-", "_").lower()
+            group_id = group_id or "watercooler"
+
+            store = get_falkordb_entry_store(group_id)
+            if store:
+                store.delete_embedding(entry_id)
+        except Exception as e:
+            logger.debug(f"FalkorDB embedding deletion skipped: {e}")
+
+        # Remove from file-based search index
         storage.remove_from_search_index(graph_dir, entry_id)
 
         logger.debug(f"Deleted entry node: {topic}/{entry_id}")

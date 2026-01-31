@@ -316,6 +316,91 @@ class GraphConfig(BaseModel):
     )
 
 
+class ServiceProvisionConfig(BaseModel):
+    """Auto-provisioning configuration for external services.
+
+    Controls whether watercooler automatically downloads binaries and models
+    when they are needed but not found locally.
+
+    Security note: Downloading executables (llama_server=true) fetches binaries
+    from GitHub releases. Set to false and install manually if this is a concern.
+    """
+
+    models: bool = Field(
+        default=True,
+        description="Auto-download GGUF models from HuggingFace when needed",
+    )
+    llama_server: bool = Field(
+        default=True,
+        description="Auto-download llama-server binary from GitHub releases when needed",
+    )
+
+
+class HttpConfig(BaseModel):
+    """HTTP transport configuration (only used when transport = "http")."""
+
+    # CORS settings
+    cors_origins: str = Field(
+        default="",
+        description="Comma-separated list of allowed CORS origins (empty = allow all)",
+    )
+
+    # Request limits
+    max_request_size: int = Field(
+        default=1024 * 1024,  # 1MB
+        ge=1024,
+        description="Maximum request body size in bytes",
+    )
+    request_timeout: int = Field(
+        default=30,
+        ge=1,
+        le=300,
+        description="Request timeout in seconds",
+    )
+
+
+class CacheConfig(BaseModel):
+    """Cache configuration for MCP server."""
+
+    # Backend selection
+    backend: Literal["memory", "database"] = Field(
+        default="memory",
+        description="Cache backend: memory (local) or database (hosted)",
+    )
+
+    # TTL settings
+    default_ttl: float = Field(
+        default=300.0,
+        ge=0,
+        description="Default cache TTL in seconds",
+    )
+
+    # Memory cache limits
+    max_entries: int = Field(
+        default=10000,
+        ge=100,
+        description="Maximum entries in memory cache before LRU eviction",
+    )
+
+    # Database cache settings (only used when backend = "database")
+    api_url: str = Field(
+        default="",
+        description="Base URL for database cache API (hosted mode)",
+    )
+
+
+class HostedConfig(BaseModel):
+    """Hosted service configuration (watercooler.dev integration)."""
+
+    # API endpoints
+    api_url: str = Field(
+        default="",
+        description="Watercooler hosted API URL",
+    )
+
+    # Note: API keys and secrets should remain env-only for security
+
+
 class McpConfig(BaseModel):
     """MCP server configuration."""
 
@@ -371,6 +456,22 @@ class McpConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     graph: GraphConfig = Field(default_factory=GraphConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
+    service_provision: ServiceProvisionConfig = Field(
+        default_factory=ServiceProvisionConfig,
+        description="Auto-provisioning settings for external services (llama-server, models)",
+    )
+    http: HttpConfig = Field(
+        default_factory=HttpConfig,
+        description="HTTP transport settings (only used when transport = 'http')",
+    )
+    cache: CacheConfig = Field(
+        default_factory=CacheConfig,
+        description="Cache backend settings",
+    )
+    hosted: HostedConfig = Field(
+        default_factory=HostedConfig,
+        description="Hosted service (watercooler.dev) settings",
+    )
 
     # Agent-specific overrides (keyed by platform slug)
     agents: Dict[str, AgentConfig] = Field(
@@ -503,7 +604,7 @@ class ValidationConfig(BaseModel):
 class LLMServiceConfig(BaseModel):
     """LLM service configuration for memory backends.
 
-    Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+    Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT, LLM_MAX_TOKENS
     """
 
     api_key: str = Field(
@@ -518,12 +619,31 @@ class LLMServiceConfig(BaseModel):
         default="gpt-4o-mini",
         description="LLM model name",
     )
+    timeout: float = Field(
+        default=60.0,
+        ge=1.0,
+        description="Request timeout in seconds",
+    )
+    max_tokens: int = Field(
+        default=512,
+        ge=1,
+        description="Maximum tokens for LLM response",
+    )
+    summary_prompt: str = Field(
+        default="Summarize this thread entry in 1-2 sentences. Be concise and factual.",
+        description="Prompt template for entry summarization. Use {context} and {content} placeholders.",
+    )
+    thread_summary_prompt: str = Field(
+        default="Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any.",
+        description="Prompt template for thread summarization. Use {title} and {entries} placeholders.",
+    )
 
 
 class EmbeddingServiceConfig(BaseModel):
     """Embedding service configuration for memory backends.
 
-    Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM
+    Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM,
+                   EMBEDDING_TIMEOUT, EMBEDDING_BATCH_SIZE, EMBEDDING_CONTEXT_SIZE
     """
 
     api_key: str = Field(
@@ -542,6 +662,21 @@ class EmbeddingServiceConfig(BaseModel):
         default=1024,
         ge=1,
         description="Embedding dimension",
+    )
+    context_size: int = Field(
+        default=8192,
+        ge=128,
+        description="Context window size for embedding server (tokens). Env: EMBEDDING_CONTEXT_SIZE",
+    )
+    timeout: float = Field(
+        default=60.0,
+        ge=1.0,
+        description="Request timeout in seconds",
+    )
+    batch_size: int = Field(
+        default=32,
+        ge=1,
+        description="Batch size for embedding requests",
     )
 
 
@@ -578,6 +713,10 @@ class GraphitiBackendConfig(BaseModel):
     """
 
     # LLM overrides (empty = use shared)
+    llm_api_key: str = Field(
+        default="",
+        description="Override LLM API key for Graphiti (e.g., OpenAI key when shared uses local)",
+    )
     llm_model: str = Field(
         default="",
         description="Override LLM model for Graphiti",
@@ -588,6 +727,10 @@ class GraphitiBackendConfig(BaseModel):
     )
 
     # Embedding overrides (empty = use shared)
+    embedding_api_key: str = Field(
+        default="",
+        description="Override embedding API key for Graphiti",
+    )
     embedding_model: str = Field(
         default="",
         description="Override embedding model for Graphiti",
@@ -633,6 +776,10 @@ class LeanRAGBackendConfig(BaseModel):
     """
 
     # LLM overrides (empty = use shared)
+    llm_api_key: str = Field(
+        default="",
+        description="Override LLM API key for LeanRAG (e.g., OpenAI key when shared uses local)",
+    )
     llm_model: str = Field(
         default="",
         description="Override LLM model for LeanRAG",
@@ -643,6 +790,10 @@ class LeanRAGBackendConfig(BaseModel):
     )
 
     # Embedding overrides (empty = use shared)
+    embedding_api_key: str = Field(
+        default="",
+        description="Override embedding API key for LeanRAG",
+    )
     embedding_model: str = Field(
         default="",
         description="Override embedding model for LeanRAG",

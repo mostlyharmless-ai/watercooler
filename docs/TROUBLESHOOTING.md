@@ -26,6 +26,10 @@ Common issues and solutions for the watercooler MCP server.
 - [Thread folder inside code repo](#thread-folder-inside-code-repo)
 - [Ball Not Flipping](#ball-not-flipping)
 - [Server Crashes or Hangs](#server-crashes-or-hangs)
+- [Cache Management](#cache-management)
+- [Episode/Entries Search Fails via MCP](#episodeentries-search-fails-via-mcp)
+- [llama-server Architecture (Breaking Changes)](#llama-server-architecture-breaking-changes)
+- [llama-server Issues](#llama-server-issues)
 - [Format Parameter Errors](#format-parameter-errors)
 - [401 Unauthorized (Remote MCP)](#401-unauthorized-remote-mcp)
 - [Getting More Help](#getting-more-help)
@@ -938,6 +942,285 @@ MCP server stops responding or crashes.
    python3 -m watercooler_mcp
    ```
    Should start without errors.
+
+## Cache Management
+
+The watercooler MCP server uses multiple caches that can sometimes get out of sync,
+especially during rapid development or when troubleshooting installation issues.
+
+### Understanding the Caches
+
+There are three separate caches involved:
+
+| Cache | Location | Contains |
+|-------|----------|----------|
+| **Watercooler binaries** | `~/.watercooler/bin/` | llama-server binary and shared libraries (.so files) |
+| **Watercooler models** | `~/.watercooler/models/` | Downloaded GGUF model files |
+| **uvx package cache** | `~/.cache/uv/archive-v0/` | Built Python packages |
+| **uvx git cache** | `~/.cache/uv/git-v0/` | Git repository checkouts |
+
+### Pre-Warming the Cache
+
+Before connecting an MCP client, pre-download binaries and models:
+
+```bash
+uvx --from "git+https://github.com/mostlyharmless-ai/watercooler-cloud@main" watercooler-mcp --warm
+```
+
+This downloads:
+- llama-server binary from GitHub releases
+- LLM model GGUF (if configured for localhost)
+- Embedding model GGUF (if configured for localhost)
+
+The `--warm` flag ensures everything is ready before the MCP client connects,
+avoiding timeouts and race conditions during startup.
+
+### Quick Reset
+
+Use the built-in reset command to clear watercooler caches:
+
+```bash
+watercooler-mcp --reset-cache
+```
+
+This clears:
+- `~/.watercooler/bin/` (llama-server and shared libraries)
+- `~/.watercooler/models/` (downloaded GGUF models)
+
+### Full Reset (Including uvx)
+
+For a complete reset including the uvx package cache:
+
+```bash
+# Clear watercooler caches
+watercooler-mcp --reset-cache
+
+# Clear uvx caches
+uv cache clean
+
+# Or selectively clear watercooler-related uvx caches:
+rm -rf ~/.cache/uv/archive-v0/*watercooler*
+```
+
+### When to Reset Caches
+
+Reset caches when you experience:
+- llama-server fails to start with "shared library not found" errors
+- Old version of code running despite pulling updates
+- Model download failures or corrupted models
+- Unexplained behavior after updating watercooler
+
+## Episode/Entries Search Fails via MCP
+
+### Symptom
+Episode search (`watercooler_search mode="episodes"`) or entries search with Graphiti backend fails with "socket connection was closed unexpectedly" error. Entity search (`mode="entities"`) works fine.
+
+### Root Cause
+The graphiti dependency was tracking a feature branch missing critical FalkorDB fulltext query timeout fixes. Episode and entries searches use `COMBINED_HYBRID_SEARCH_RRF` which triggers complex queries that timeout without these fixes.
+
+### Why Entities Work but Episodes/Entries Fail
+
+| Search Mode | Graphiti Config | Behavior |
+|-------------|-----------------|----------|
+| `entities` | `NODE_HYBRID_SEARCH_RRF` | Simple node-only search - not affected |
+| `episodes` | `COMBINED_HYBRID_SEARCH_RRF` | Includes edge + episode + community searches - triggers timeout |
+| `entries` (graphiti) | `COMBINED_HYBRID_SEARCH_RRF` | Same as episodes - triggers timeout |
+
+### Solution
+
+Update to the latest watercooler-cloud version:
+
+```bash
+# If using pip
+pip install --upgrade 'watercooler-cloud[graphiti]'
+
+# If using uvx, restart Claude Code to pick up the latest version
+```
+
+The fix updates graphiti from `@feature/hnsw-entity-index` to `@main` branch which includes the timeout fixes.
+
+### Verification
+
+```bash
+# Test episode search
+mcp-cli call watercooler-cloud/watercooler_search \
+  '{"query": "memory", "mode": "episodes", "limit": 3, "code_path": "."}'
+```
+
+Should return episode results without disconnection.
+
+### See Also
+
+- [GRAPHITI_SETUP.md](./GRAPHITI_SETUP.md#episodeentries-search-timeout-via-mcp) - Graphiti-specific troubleshooting
+
+---
+
+## llama-server Architecture (Breaking Changes)
+
+### What Changed
+
+The memory graph features use a **unified llama-server architecture**:
+
+| Component | Port | Purpose |
+|-----------|------|---------|
+| llama-server (LLM) | 8000 | Text generation, summarization |
+| llama-server (embedding) | 8080 | Vector embeddings for semantic search |
+
+**Key features:**
+- Single service provider (llama-server) for all local inference
+- Auto-downloads llama-server binary from GitHub releases
+- Auto-downloads GGUF models from HuggingFace
+- Explicit errors with actionable instructions when services fail
+
+### Default Behavior
+
+No config needed for local inference. llama-server auto-starts on first use.
+
+To disable auto-download of the llama-server binary:
+
+```toml
+[mcp.service_provision]
+llama_server = false
+```
+
+To disable auto-download of models:
+
+```toml
+[mcp.service_provision]
+models = false
+```
+
+### Health Check
+
+Run `watercooler_health` to see service status:
+
+```
+Services:
+  LLM:       running (http://localhost:8000/v1)
+  Embedding: running (http://localhost:8080/v1)
+  FalkorDB:  not_configured
+```
+
+If a service shows `failed`, the health output includes instructions on how to resolve (e.g., enable auto-provisioning or install manually).
+
+---
+
+## llama-server Issues
+
+### Symptom: Missing Shared Libraries
+
+```
+error while loading shared libraries: libllama.so.0: cannot open shared object file
+```
+
+### Cause
+
+The llama-server binary requires shared libraries (.so files) that should be
+extracted alongside it. This can happen if:
+- An old version extracted only the binary without libraries
+- The extraction was interrupted
+- Cache contains stale binaries
+
+### Solution
+
+```bash
+# Reset watercooler caches and restart
+watercooler-mcp --reset-cache
+
+# Then restart your MCP client to trigger fresh download
+```
+
+The server will automatically download llama-server and extract all required
+shared libraries to `~/.watercooler/bin/`.
+
+### Symptom: llama-server Download Timeout
+
+If llama-server download takes too long or times out:
+
+1. Check your internet connection
+2. Try downloading manually:
+   ```bash
+   # Find the latest release
+   gh release view --repo ggml-org/llama.cpp
+
+   # Download the appropriate build for your platform
+   gh release download --repo ggml-org/llama.cpp --pattern "*ubuntu-vulkan*" -D ~/.watercooler/bin/
+   ```
+
+3. Extract and set permissions:
+   ```bash
+   cd ~/.watercooler/bin/
+   tar -xzf *.tar.gz
+   mv llama-*/llama-server .
+   mv llama-*/*.so* .
+   chmod +x llama-server
+   rm -rf llama-*/
+   ```
+
+### Symptom: Checksum Verification Failed
+
+If you see a checksum verification error:
+
+```
+SECURITY: Checksum mismatch for llama-server download!
+```
+
+**Causes:**
+- Corrupted download
+- Network tampering (unlikely but possible)
+- Unknown release version (checksum not in registry)
+
+**Solutions:**
+
+1. **Retry the download** - transient network issues can cause corruption:
+   ```bash
+   rm -rf ~/.watercooler/bin/llama-server*
+   # Restart MCP server to trigger fresh download
+   ```
+
+2. **Verify checksums manually:**
+   ```bash
+   cd ~/.watercooler/bin/
+   sha256sum llama-server-*.tar.gz
+   # Compare with official release checksums at:
+   # https://github.com/ggml-org/llama.cpp/releases
+   ```
+
+3. **Skip verification (not recommended):**
+   ```bash
+   export WATERCOOLER_LLAMA_SERVER_VERIFY=skip
+   ```
+
+### Symptom: LD_LIBRARY_PATH Issues (Linux)
+
+If llama-server can't find libraries even though they're extracted:
+
+```bash
+# Check current LD_LIBRARY_PATH
+echo $LD_LIBRARY_PATH
+
+# Manually set it to include watercooler bin directory
+export LD_LIBRARY_PATH="$HOME/.watercooler/bin:$LD_LIBRARY_PATH"
+
+# Verify libraries are found
+ldd ~/.watercooler/bin/llama-server
+```
+
+**Note:** Watercooler automatically sets `LD_LIBRARY_PATH` when spawning llama-server, but if you're running it manually, you may need to set this.
+
+### Symptom: dylib Issues (macOS)
+
+On macOS, shared libraries use `.dylib` extension. If you see errors like:
+
+```
+dyld: Library not loaded: @rpath/libllama.dylib
+```
+
+**Solution:**
+```bash
+# Set DYLD_LIBRARY_PATH for manual runs
+export DYLD_LIBRARY_PATH="$HOME/.watercooler/bin:$DYLD_LIBRARY_PATH"
+```
 
 ## Format Parameter Errors
 

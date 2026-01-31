@@ -23,7 +23,9 @@ jobs:
         python-version: ${{ matrix.python-version }}
 
     - name: Install package with all extras
-      run: pip install -e ".[dev,memory]"
+      # Note: Using graphiti instead of memory to avoid private LeanRAG dependency
+      # LeanRAG tests are skipped anyway (integration_leanrag_llm marker)
+      run: pip install -e ".[dev,graphiti]"
 
     - name: Test import
       run: python -c "import watercooler; print(f'watercooler {watercooler.__version__}')"
