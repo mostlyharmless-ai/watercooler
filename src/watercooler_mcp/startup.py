@@ -776,6 +776,40 @@ def _is_shared_library(filename: str) -> bool:
     return False
 
 
+def _is_safe_archive_path(member_name: str, dest_dir: Path) -> bool:
+    """Validate that an archive member path doesn't escape the destination directory.
+
+    Prevents path traversal attacks (e.g., ../../../etc/passwd) in archive extraction.
+
+    Args:
+        member_name: The path from the archive member
+        dest_dir: The destination directory for extraction
+
+    Returns:
+        True if the path is safe (resolves within dest_dir), False otherwise
+    """
+    # Reject absolute paths
+    if Path(member_name).is_absolute():
+        log_warning(f"Rejecting absolute path in archive: {member_name}")
+        return False
+
+    # Resolve the full path and check it's within dest_dir
+    try:
+        full_path = (dest_dir / member_name).resolve()
+        dest_resolved = dest_dir.resolve()
+
+        # Check that the resolved path is within the destination directory
+        # Using is_relative_to (Python 3.9+) for clean comparison
+        if not full_path.is_relative_to(dest_resolved):
+            log_warning(f"Path traversal detected in archive: {member_name}")
+            return False
+
+        return True
+    except (ValueError, RuntimeError) as e:
+        log_warning(f"Invalid path in archive: {member_name} - {e}")
+        return False
+
+
 def _has_nvidia_gpu() -> bool:
     """Check if NVIDIA GPU is available via nvidia-smi.
 
@@ -1133,6 +1167,10 @@ def _download_llama_server() -> Optional[Path]:
             with tarfile.open(archive_path, "r:gz") as tf:
                 found_binary = False
                 for member in tf.getmembers():
+                    # Security: Validate path doesn't escape destination directory
+                    if not _is_safe_archive_path(member.name, bin_dir):
+                        continue
+
                     basename = Path(member.name).name
                     # Extract llama-server binary
                     if basename == "llama-server":
@@ -1168,6 +1206,10 @@ def _download_llama_server() -> Optional[Path]:
             with zipfile.ZipFile(archive_path, "r") as zf:
                 found_binary = False
                 for name in zf.namelist():
+                    # Security: Validate path doesn't escape destination directory
+                    if not _is_safe_archive_path(name, bin_dir):
+                        continue
+
                     basename = Path(name).name
                     # Extract llama-server binary
                     if basename in ("llama-server", "llama-server.exe"):

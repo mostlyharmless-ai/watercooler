@@ -773,6 +773,109 @@ class TestThreadsProvisioningShellSafety:
         assert safe_dict["slug"] == shlex.quote("org/repo")
 
 
+class TestProvisioningTemplateValidation:
+    """Tests for provisioning template validation."""
+
+    def test_valid_template_passes(self):
+        """Test that valid templates pass validation."""
+        from watercooler_mcp.provisioning import _validate_provision_template
+
+        # Default template should pass
+        _validate_provision_template("gh repo create {slug} --private")
+
+        # Template with multiple placeholders
+        _validate_provision_template("mycmd --repo={repo} --org={org} --url={repo_url}")
+
+    def test_semicolon_rejected(self):
+        """Test that semicolon command separator is rejected."""
+        from watercooler_mcp.provisioning import _validate_provision_template, ProvisioningError
+
+        with pytest.raises(ProvisioningError, match="dangerous shell operator"):
+            _validate_provision_template("gh repo create {slug}; rm -rf /")
+
+    def test_and_operator_rejected(self):
+        """Test that && operator is rejected."""
+        from watercooler_mcp.provisioning import _validate_provision_template, ProvisioningError
+
+        with pytest.raises(ProvisioningError, match="dangerous shell operator"):
+            _validate_provision_template("gh repo create {slug} && cat /etc/passwd")
+
+    def test_pipe_rejected(self):
+        """Test that pipe operator is rejected."""
+        from watercooler_mcp.provisioning import _validate_provision_template, ProvisioningError
+
+        with pytest.raises(ProvisioningError, match="dangerous shell operator"):
+            _validate_provision_template("gh repo create {slug} | tee /tmp/log")
+
+    def test_command_substitution_rejected(self):
+        """Test that command substitution is rejected."""
+        from watercooler_mcp.provisioning import _validate_provision_template, ProvisioningError
+
+        # $() style
+        with pytest.raises(ProvisioningError, match="dangerous shell operator"):
+            _validate_provision_template("gh repo create $(whoami)/{slug}")
+
+        # backtick style
+        with pytest.raises(ProvisioningError, match="dangerous shell operator"):
+            _validate_provision_template("gh repo create `id`-{slug}")
+
+    def test_redirect_rejected(self):
+        """Test that redirect operators are rejected."""
+        from watercooler_mcp.provisioning import _validate_provision_template, ProvisioningError
+
+        with pytest.raises(ProvisioningError, match="dangerous shell operator"):
+            _validate_provision_template("gh repo create {slug} > /tmp/out")
+
+        with pytest.raises(ProvisioningError, match="dangerous shell operator"):
+            _validate_provision_template("gh repo create {slug} 2>/dev/null")
+
+    def test_unknown_placeholder_rejected(self):
+        """Test that unknown placeholders are rejected."""
+        from watercooler_mcp.provisioning import _validate_provision_template, ProvisioningError
+
+        with pytest.raises(ProvisioningError, match="Unknown placeholder"):
+            _validate_provision_template("gh repo create {slug} --desc={unknown}")
+
+
+class TestArchivePathTraversal:
+    """Tests for path traversal prevention in archive extraction."""
+
+    def test_safe_path_accepted(self, tmp_path):
+        """Test that safe paths are accepted."""
+        from watercooler_mcp.startup import _is_safe_archive_path
+
+        assert _is_safe_archive_path("llama-server", tmp_path) is True
+        assert _is_safe_archive_path("lib/libfoo.so", tmp_path) is True
+        assert _is_safe_archive_path("bin/llama-server", tmp_path) is True
+
+    def test_absolute_path_rejected(self, tmp_path):
+        """Test that absolute paths are rejected."""
+        from watercooler_mcp.startup import _is_safe_archive_path
+
+        assert _is_safe_archive_path("/etc/passwd", tmp_path) is False
+        assert _is_safe_archive_path("/usr/bin/malware", tmp_path) is False
+
+    def test_parent_traversal_rejected(self, tmp_path):
+        """Test that parent directory traversal is rejected."""
+        from watercooler_mcp.startup import _is_safe_archive_path
+
+        assert _is_safe_archive_path("../etc/passwd", tmp_path) is False
+        assert _is_safe_archive_path("foo/../../etc/passwd", tmp_path) is False
+        assert _is_safe_archive_path("foo/../../../root/.ssh/id_rsa", tmp_path) is False
+
+    def test_dot_dot_in_middle_resolved(self, tmp_path):
+        """Test that .. in middle of path is resolved and checked."""
+        from watercooler_mcp.startup import _is_safe_archive_path
+
+        # This should be safe - resolves to tmp_path/bar
+        subdir = tmp_path / "foo"
+        subdir.mkdir()
+        assert _is_safe_archive_path("foo/../bar", tmp_path) is True
+
+        # This escapes the directory
+        assert _is_safe_archive_path("foo/../../etc", tmp_path) is False
+
+
 class TestAutoProvisionConfig:
     """Tests for auto-provisioning configuration."""
 
