@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
+from watercooler_memory.backends.graphiti import _derive_database_name
 from watercooler_memory.backends import CorpusPayload, ChunkPayload
 from watercooler_memory.graph import MemoryGraph
 from watercooler_memory.chunker import ChunkerConfig
@@ -182,6 +183,8 @@ Examples:
     )
     parser.add_argument("--threads-dir",
                         help="Path to threads directory")
+    parser.add_argument("--code-path",
+                        help="Path to code repository (for database name derivation, defaults to threads-dir without -threads suffix)")
     parser.add_argument("--thread-list", help="Path to file with thread list (one per line)")
     parser.add_argument("--threads", nargs="+", help="List of thread topics (without .md)")
     parser.add_argument("--all", action="store_true",
@@ -190,7 +193,7 @@ Examples:
                         help="Path to documents directory (white papers, reference docs)")
     parser.add_argument("--docs-pattern", default="*.md",
                         help="Glob pattern for documents (default: *.md)")
-    parser.add_argument("--work-dir", help="Work directory for LeanRAG (default: ~/.watercooler/leanrag)")
+    parser.add_argument("--work-dir", help="Work directory for LeanRAG (default: ~/.watercooler/<database>)")
     parser.add_argument("--leanrag-dir", help="Path to LeanRAG repository (default: $LEANRAG_DIR or ./external/LeanRAG)")
 
     args = parser.parse_args()
@@ -245,6 +248,25 @@ Examples:
         print(f"Error: Documents directory not found: {docs_dir}", file=sys.stderr)
         return 1
 
+    # Resolve code_path for database name derivation (consistent with index_graphiti.py)
+    if args.code_path:
+        code_path = Path(args.code_path)
+    elif threads_dir:
+        # Derive code_path from threads_dir by removing -threads suffix
+        threads_dir_str = str(threads_dir.resolve())
+        if threads_dir_str.endswith("-threads"):
+            code_path = Path(threads_dir_str.removesuffix("-threads"))
+        else:
+            code_path = threads_dir
+    elif docs_dir:
+        # Use docs_dir parent as code_path
+        code_path = docs_dir.parent
+    else:
+        code_path = Path.cwd()
+
+    database_name = _derive_database_name(code_path)
+    print(f"Database: {database_name} (derived from {code_path.name})")
+
     # Determine LeanRAG directory
     if args.leanrag_dir:
         leanrag_dir = Path(args.leanrag_dir)
@@ -258,8 +280,8 @@ Examples:
         print("Specify with --leanrag-dir or set LEANRAG_DIR environment variable", file=sys.stderr)
         return 1
 
-    # Set up LeanRAG backend
-    work_dir = Path(args.work_dir) if args.work_dir else Path.home() / ".watercooler" / "leanrag"
+    # Set up LeanRAG backend (work_dir basename = database name)
+    work_dir = Path(args.work_dir) if args.work_dir else Path.home() / ".watercooler" / database_name
     work_dir.mkdir(parents=True, exist_ok=True)
 
     config = LeanRAGConfig(work_dir=work_dir, leanrag_path=leanrag_dir)
