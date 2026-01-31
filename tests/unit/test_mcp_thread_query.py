@@ -336,3 +336,93 @@ class TestThreadClassification:
         # Note: The agent name comparison is case-insensitive, so threads with
         # ball matching agent should appear in "Your Turn" section
         assert "Your Turn" in text or "Waiting on Others" in text
+
+
+# ============================================================================
+# Test Edge Cases and Error Handling
+# ============================================================================
+
+
+class TestMalformedContent:
+    """Tests for handling malformed or corrupted thread files."""
+
+    def test_list_threads_handles_malformed_thread(self, patched_context, threads_dir, mcp_ctx):
+        """Test that list_threads handles malformed thread files gracefully."""
+        # Create a malformed thread file (no proper headers)
+        malformed = threads_dir / "broken.md"
+        malformed.write_text("Not a valid thread\nNo proper headers\nJust plain text")
+
+        # Should not crash - either skips or uses defaults
+        result = server.list_threads.fn(
+            mcp_ctx,
+            code_path=".",
+        )
+
+        text = result.content[0].text
+        # Should either include it with defaults or handle gracefully
+        assert "Watercooler" in text or "No" in text
+
+    def test_list_threads_handles_empty_file(self, patched_context, threads_dir, mcp_ctx):
+        """Test that list_threads handles empty thread files."""
+        empty_file = threads_dir / "empty.md"
+        empty_file.write_text("")
+
+        result = server.list_threads.fn(
+            mcp_ctx,
+            code_path=".",
+        )
+
+        # Should not crash
+        text = result.content[0].text
+        assert isinstance(text, str)
+
+    def test_list_threads_handles_special_characters(self, patched_context, threads_dir, mcp_ctx):
+        """Test that list_threads handles files with special characters in content."""
+        special_file = threads_dir / "special.md"
+        # Write content with special but valid UTF-8 characters
+        special_file.write_text("# special-thread\nStatus: OPEN\nBall: Agent\n\n---\nSpecial: <>&\"'")
+
+        result = server.list_threads.fn(
+            mcp_ctx,
+            code_path=".",
+        )
+
+        # Should handle gracefully
+        assert result.content is not None
+
+
+class TestPathTraversalSecurity:
+    """Tests for path traversal prevention in topic names."""
+
+    def test_topic_with_path_traversal_stays_in_threads_dir(self, threads_dir):
+        """Test that path traversal attempts in topics stay within threads_dir."""
+        from watercooler.fs import thread_path
+
+        # Attempt path traversal
+        malicious_topic = "../../../etc/passwd"
+        result_path = thread_path(malicious_topic, threads_dir)
+
+        # Key security check: file must be within threads_dir
+        assert result_path.parent == threads_dir, "File must stay in threads_dir"
+        # Path traversal characters should be sanitized out
+        assert ".." not in result_path.name, ".. should be removed from filename"
+
+    def test_topic_with_absolute_path_stays_in_threads_dir(self, threads_dir):
+        """Test that absolute paths in topics stay within threads_dir."""
+        from watercooler.fs import thread_path
+
+        malicious_topic = "/etc/passwd"
+        result_path = thread_path(malicious_topic, threads_dir)
+
+        # Key security check: file must be within threads_dir
+        assert result_path.parent == threads_dir, "File must stay in threads_dir"
+
+    def test_topic_with_null_bytes_is_sanitized(self, threads_dir):
+        """Test that null bytes in topics are handled."""
+        from watercooler.fs import thread_path
+
+        malicious_topic = "test\x00topic"
+        result_path = thread_path(malicious_topic, threads_dir)
+
+        # Should not contain null bytes in path
+        assert "\x00" not in str(result_path)

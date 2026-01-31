@@ -570,3 +570,247 @@ class TestEntryContent:
         content = (threads_dir / "unicode-test.md").read_text()
         assert "世界" in content
         assert "αβγδ" in content
+
+
+# ============================================================================
+# Test Sync Integration
+# ============================================================================
+
+
+class TestSyncIntegration:
+    """Tests for sync integration verification."""
+
+    def test_say_calls_run_with_sync(self, mock_context, sample_thread, mcp_ctx, monkeypatch):
+        """Test that say calls run_with_sync with correct parameters."""
+        sync_calls = []
+
+        def tracking_run_with_sync(context, msg, operation, **kwargs):
+            sync_calls.append({
+                "context": context,
+                "msg": msg,
+                "topic": kwargs.get("topic"),
+                "entry_id": kwargs.get("entry_id"),
+                "agent_spec": kwargs.get("agent_spec"),
+                "priority_flush": kwargs.get("priority_flush"),
+            })
+            operation()
+
+        def fake_require_context(code_path: str):
+            return (None, mock_context)
+
+        monkeypatch.setattr(validation, "_require_context", fake_require_context)
+        monkeypatch.setattr(validation, "_dynamic_context_missing", lambda ctx: False)
+        monkeypatch.setattr(
+            "watercooler_mcp.tools.thread_write.run_with_sync",
+            tracking_run_with_sync
+        )
+        monkeypatch.setattr("watercooler_mcp.tools.thread_write.is_slack_enabled", lambda: False)
+        monkeypatch.setattr("watercooler_mcp.tools.thread_write.is_slack_bot_enabled", lambda: False)
+        monkeypatch.setattr("watercooler_mcp.tools.thread_write.is_hosted_context", lambda ctx: False)
+
+        server.say.fn(
+            topic="test-topic",
+            title="Sync Test",
+            body="Testing sync integration.",
+            ctx=mcp_ctx,
+            code_path=".",
+            agent_func="Claude Code:sonnet-4:implementer",
+        )
+
+        # Verify sync was called
+        assert len(sync_calls) == 1
+        call = sync_calls[0]
+        assert call["topic"] == "test-topic"
+        assert call["agent_spec"] == "sonnet-4:implementer"
+        assert call["priority_flush"] is True
+        assert call["entry_id"] is not None
+
+
+# ============================================================================
+# Test Invalid Inputs
+# ============================================================================
+
+
+class TestInvalidInputs:
+    """Tests for handling invalid input values."""
+
+    def test_say_with_empty_title(self, patched_context, threads_dir, mcp_ctx):
+        """Test say with empty title."""
+        # Empty title should still work - the function handles it
+        result = server.say.fn(
+            topic="empty-title-test",
+            title="",  # Empty title
+            body="Body content here.",
+            ctx=mcp_ctx,
+            code_path=".",
+            agent_func="Claude Code:sonnet-4:implementer",
+        )
+
+        # Should succeed (empty title is allowed)
+        assert "Entry added" in result
+
+    def test_say_with_empty_body(self, patched_context, threads_dir, mcp_ctx):
+        """Test say with empty body."""
+        result = server.say.fn(
+            topic="empty-body-test",
+            title="Valid Title",
+            body="",  # Empty body
+            ctx=mcp_ctx,
+            code_path=".",
+            agent_func="Claude Code:sonnet-4:implementer",
+        )
+
+        # Should succeed (empty body is allowed)
+        assert "Entry added" in result
+
+    def test_say_with_whitespace_only_topic(self, patched_context, threads_dir, mcp_ctx):
+        """Test say with whitespace-only topic gets sanitized."""
+        result = server.say.fn(
+            topic="   ",  # Whitespace only
+            title="Test",
+            body="Body",
+            ctx=mcp_ctx,
+            code_path=".",
+            agent_func="Claude Code:sonnet-4:implementer",
+        )
+
+        # Should succeed - topic gets sanitized to default
+        assert "Entry added" in result
+
+    def test_say_with_very_long_title(self, patched_context, threads_dir, mcp_ctx):
+        """Test say with very long title."""
+        long_title = "A" * 1000  # 1000 character title
+
+        result = server.say.fn(
+            topic="long-title-test",
+            title=long_title,
+            body="Body content.",
+            ctx=mcp_ctx,
+            code_path=".",
+            agent_func="Claude Code:sonnet-4:implementer",
+        )
+
+        # Should succeed
+        assert "Entry added" in result
+        content = (threads_dir / "long-title-test.md").read_text()
+        assert long_title in content
+
+    def test_say_with_very_long_body(self, patched_context, threads_dir, mcp_ctx):
+        """Test say with very long body content."""
+        long_body = "Line of text.\n" * 1000  # ~14KB of content
+
+        result = server.say.fn(
+            topic="long-body-test",
+            title="Long Body Test",
+            body=long_body,
+            ctx=mcp_ctx,
+            code_path=".",
+            agent_func="Claude Code:sonnet-4:implementer",
+        )
+
+        # Should succeed
+        assert "Entry added" in result
+        content = (threads_dir / "long-body-test.md").read_text()
+        assert "Line of text." in content
+
+
+# ============================================================================
+# Test Path Traversal Security (via fs module)
+# ============================================================================
+
+
+class TestWritePathTraversalSecurity:
+    """Tests for path traversal prevention via the fs module."""
+
+    def test_thread_path_sanitizes_traversal(self, threads_dir):
+        """Test that thread_path sanitizes path traversal attempts."""
+        from watercooler.fs import thread_path
+
+        # Path traversal attempt
+        malicious_topic = "../../../etc/passwd"
+        result = thread_path(malicious_topic, threads_dir)
+
+        # Key check: result must be within threads_dir
+        assert result.parent == threads_dir, "Path must stay in threads_dir"
+        assert ".." not in result.name, ".. should be sanitized"
+
+    def test_thread_path_sanitizes_absolute_paths(self, threads_dir):
+        """Test that thread_path sanitizes absolute paths."""
+        from watercooler.fs import thread_path
+
+        # Absolute path attempt
+        malicious_topic = "/etc/passwd"
+        result = thread_path(malicious_topic, threads_dir)
+
+        # Key check: result must be within threads_dir
+        assert result.parent == threads_dir, "Path must stay in threads_dir"
+
+    def test_thread_path_handles_special_characters(self, threads_dir):
+        """Test that thread_path handles special characters safely."""
+        from watercooler.fs import thread_path
+
+        # Topic with special characters
+        special_topic = "test<>:\"\\|?*topic"
+        result = thread_path(special_topic, threads_dir)
+
+        # Should create valid filename in threads_dir
+        assert result.parent == threads_dir
+        # Filename should be sanitized (no invalid chars)
+        assert "<" not in result.name
+        assert ">" not in result.name
+
+
+# ============================================================================
+# Test Assertion Specificity Improvements
+# ============================================================================
+
+
+class TestDetailedAssertions:
+    """Tests with more specific assertions for better debugging."""
+
+    def test_say_response_contains_all_expected_fields(self, patched_context, threads_dir, mcp_ctx):
+        """Test that say response contains all expected information."""
+        result = server.say.fn(
+            topic="detailed-test",
+            title="Detailed Title",
+            body="Detailed body content.",
+            role="planner",
+            entry_type="Plan",
+            ctx=mcp_ctx,
+            code_path=".",
+            agent_func="Claude Code:sonnet-4:planner",
+        )
+
+        # Verify all expected fields in response
+        assert "Entry added" in result, "Response should confirm entry was added"
+        assert "detailed-test" in result, "Response should include topic name"
+        assert "Detailed Title" in result, "Response should include entry title"
+        assert "planner" in result.lower(), "Response should include role"
+        assert "Plan" in result, "Response should include entry type"
+        assert "Ball" in result, "Response should include ball status"
+
+    def test_say_creates_properly_formatted_thread_file(self, patched_context, threads_dir, mcp_ctx):
+        """Test that say creates a properly formatted thread file."""
+        server.say.fn(
+            topic="format-test",
+            title="Format Test Entry",
+            body="Testing file format.",
+            role="implementer",
+            entry_type="Note",
+            ctx=mcp_ctx,
+            code_path=".",
+            agent_func="Claude Code:sonnet-4:implementer",
+        )
+
+        content = (threads_dir / "format-test.md").read_text()
+
+        # Verify thread structure
+        assert content.startswith("#"), "Thread should start with markdown heading"
+        assert "Status:" in content, "Thread should have Status header"
+        assert "Ball:" in content, "Thread should have Ball header"
+        assert "---" in content, "Thread should have entry separator"
+        assert "Entry:" in content, "Thread should have Entry line"
+        assert "Role: implementer" in content, "Entry should have correct role"
+        assert "Type: Note" in content, "Entry should have correct type"
+        assert "Title: Format Test Entry" in content, "Entry should have correct title"
+        assert "Testing file format." in content, "Entry should have body content"
