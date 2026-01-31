@@ -198,10 +198,13 @@ Examples:
 
     args = parser.parse_args()
 
-    # Check for DeepSeek API key (or other LLM)
-    if "DEEPSEEK_API_KEY" not in os.environ:
-        print("Error: DEEPSEEK_API_KEY environment variable not set", file=sys.stderr)
-        print("Export your DeepSeek API key: export DEEPSEEK_API_KEY=sk-...", file=sys.stderr)
+    # Load config from unified config system (config.toml + env vars)
+    try:
+        config = LeanRAGConfig.from_unified()
+    except Exception as e:
+        print(f"Error loading config: {e}", file=sys.stderr)
+        print("\nEnsure ~/.watercooler/config.toml exists with [memory.llm] section,", file=sys.stderr)
+        print("or set environment variables (e.g., DEEPSEEK_API_KEY)", file=sys.stderr)
         return 1
 
     # Determine thread list
@@ -280,11 +283,14 @@ Examples:
         print("Specify with --leanrag-dir or set LEANRAG_DIR environment variable", file=sys.stderr)
         return 1
 
-    # Set up LeanRAG backend (work_dir basename = database name)
+    # Update config with work_dir and leanrag_path (work_dir basename = database name)
     work_dir = Path(args.work_dir) if args.work_dir else Path.home() / ".watercooler" / database_name
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    config = LeanRAGConfig(work_dir=work_dir, leanrag_path=leanrag_dir)
+    config.work_dir = work_dir
+    config.leanrag_path = leanrag_dir
+
+    print(f"Config: LLM={config.llm_model}, Embedding={config.embedding_model}")
     backend = LeanRAGBackend(config)
 
     # Check health
