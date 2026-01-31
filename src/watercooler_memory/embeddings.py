@@ -81,6 +81,24 @@ def _get_default_dim() -> int:
             return 1024
 
 
+def _get_default_timeout() -> float:
+    """Get default embedding timeout from unified config."""
+    try:
+        from watercooler.memory_config import resolve_embedding_config
+        return resolve_embedding_config().timeout
+    except ImportError:
+        return float(os.environ.get("EMBEDDING_TIMEOUT", DEFAULT_TIMEOUT))
+
+
+def _get_default_batch_size() -> int:
+    """Get default embedding batch_size from unified config."""
+    try:
+        from watercooler.memory_config import resolve_embedding_config
+        return resolve_embedding_config().batch_size
+    except ImportError:
+        return int(os.environ.get("EMBEDDING_BATCH_SIZE", DEFAULT_BATCH_SIZE))
+
+
 @dataclass
 class EmbeddingConfig:
     """Configuration for embedding generation.
@@ -130,8 +148,8 @@ class EmbeddingConfig:
         return cls(
             api_base=api_base,
             model=model,
-            batch_size=int(os.environ.get("EMBEDDING_BATCH_SIZE", DEFAULT_BATCH_SIZE)),
-            timeout=float(os.environ.get("EMBEDDING_TIMEOUT", DEFAULT_TIMEOUT)),
+            batch_size=_get_default_batch_size(),
+            timeout=_get_default_timeout(),
             max_retries=int(os.environ.get("EMBEDDING_MAX_RETRIES", DEFAULT_MAX_RETRIES)),
             api_key=api_key,
         )

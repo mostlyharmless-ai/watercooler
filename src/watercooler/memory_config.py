@@ -33,6 +33,48 @@ def _redact_key(key: str) -> str:
     return "***"
 
 
+def _safe_float(value: Optional[str], default: float, min_val: float, max_val: float) -> float:
+    """Parse string to float with bounds validation.
+
+    Args:
+        value: String to parse (None or empty returns default)
+        default: Default value if parsing fails or value is empty
+        min_val: Minimum allowed value
+        max_val: Maximum allowed value
+
+    Returns:
+        Parsed and bounded float value
+    """
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+        return max(min_val, min(max_val, parsed))
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(value: Optional[str], default: int, min_val: int, max_val: int) -> int:
+    """Parse string to int with bounds validation.
+
+    Args:
+        value: String to parse (None or empty returns default)
+        default: Default value if parsing fails or value is empty
+        min_val: Minimum allowed value
+        max_val: Maximum allowed value
+
+    Returns:
+        Parsed and bounded int value
+    """
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+        return max(min_val, min(max_val, parsed))
+    except (ValueError, TypeError):
+        return default
+
+
 @dataclass(frozen=True)
 class ResolvedLLMConfig:
     """Resolved LLM configuration after applying all overrides.
@@ -43,12 +85,17 @@ class ResolvedLLMConfig:
     api_key: str
     api_base: str
     model: str
+    timeout: float
+    max_tokens: int
+    summary_prompt: str = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
+    thread_summary_prompt: str = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
 
     def __repr__(self) -> str:
         """Return string representation with redacted API key."""
         return (
             f"ResolvedLLMConfig(api_key='{_redact_key(self.api_key)}', "
-            f"api_base='{self.api_base}', model='{self.model}')"
+            f"api_base='{self.api_base}', model='{self.model}', "
+            f"timeout={self.timeout}, max_tokens={self.max_tokens})"
         )
 
 
@@ -63,12 +110,17 @@ class ResolvedEmbeddingConfig:
     api_base: str
     model: str
     dim: int
+    context_size: int
+    timeout: float
+    batch_size: int
 
     def __repr__(self) -> str:
         """Return string representation with redacted API key."""
         return (
             f"ResolvedEmbeddingConfig(api_key='{_redact_key(self.api_key)}', "
-            f"api_base='{self.api_base}', model='{self.model}', dim={self.dim})"
+            f"api_base='{self.api_base}', model='{self.model}', dim={self.dim}, "
+            f"context_size={self.context_size}, timeout={self.timeout}, "
+            f"batch_size={self.batch_size})"
         )
 
 
@@ -116,14 +168,42 @@ def get_memory_backend() -> str:
     return os.getenv("WATERCOOLER_MEMORY_BACKEND") or config.full().memory.backend
 
 
+def _get_provider_api_key(api_base: str) -> str | None:
+    """Get provider-specific API key based on api_base URL.
+
+    Checks standard provider environment variables based on the API endpoint.
+    This allows users to use their existing OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.
+
+    Args:
+        api_base: The resolved API base URL
+
+    Returns:
+        API key from provider-specific env var, or None if not found
+    """
+    api_base_lower = api_base.lower() if api_base else ""
+
+    # Map provider domains to their standard env vars
+    if "openai.com" in api_base_lower or "openai.azure.com" in api_base_lower:
+        return os.getenv("OPENAI_API_KEY")
+    if "anthropic.com" in api_base_lower:
+        return os.getenv("ANTHROPIC_API_KEY")
+    if "googleapis.com" in api_base_lower or "generativelanguage" in api_base_lower:
+        return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if "groq.com" in api_base_lower:
+        return os.getenv("GROQ_API_KEY")
+
+    return None
+
+
 def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
     """Resolve LLM config with proper priority chain.
 
     Priority (highest first):
     1. Environment variables (LLM_API_KEY, LLM_API_BASE, LLM_MODEL)
     2. Backend-specific TOML overrides (memory.{backend}.llm_*)
-    3. Shared TOML settings (memory.llm.*)
-    4. Built-in defaults
+    3. Provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+    4. Shared TOML settings (memory.llm.*)
+    5. Built-in defaults
 
     Args:
         backend: Backend name for backend-specific overrides ("graphiti" or "leanrag")
@@ -137,27 +217,22 @@ def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
     # Get backend-specific config if available
     backend_cfg = getattr(mem, backend, None)
 
-    # Resolve api_key with deprecated OPENAI_API_KEY fallback
-    api_key = os.getenv("LLM_API_KEY")
-    if not api_key:
-        # Deprecated fallback - scheduled for removal in v0.5.0
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            warnings.warn(
-                "OPENAI_API_KEY is deprecated and will be removed in v0.5.0. "
-                "Use LLM_API_KEY instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-    if not api_key:
-        api_key = mem.llm.api_key
-
-    # Resolve api_base: env > backend-specific > shared
+    # Resolve api_base FIRST (needed for provider-specific API key lookup)
     api_base = os.getenv("LLM_API_BASE")
     if not api_base and backend_cfg:
         api_base = backend_cfg.llm_api_base or None
     if not api_base:
         api_base = mem.llm.api_base
+
+    # Resolve api_key: env > backend-specific > provider-specific > shared
+    api_key = os.getenv("LLM_API_KEY")
+    if not api_key and backend_cfg:
+        api_key = backend_cfg.llm_api_key or None
+    if not api_key:
+        # Check provider-specific env vars based on resolved api_base
+        api_key = _get_provider_api_key(api_base)
+    if not api_key:
+        api_key = mem.llm.api_key
 
     # Resolve model: env > backend-specific > shared
     model = os.getenv("LLM_MODEL")
@@ -166,7 +241,58 @@ def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
     if not model:
         model = mem.llm.model
 
-    return ResolvedLLMConfig(api_key=api_key, api_base=api_base, model=model)
+    # Resolve timeout: env > shared
+    timeout_str = os.getenv("LLM_TIMEOUT")
+    if timeout_str:
+        try:
+            timeout = float(timeout_str)
+        except ValueError:
+            timeout = mem.llm.timeout
+    else:
+        timeout = mem.llm.timeout
+
+    # Resolve max_tokens: env > shared
+    max_tokens_str = os.getenv("LLM_MAX_TOKENS")
+    if max_tokens_str:
+        try:
+            max_tokens = int(max_tokens_str)
+        except ValueError:
+            max_tokens = mem.llm.max_tokens
+    else:
+        max_tokens = mem.llm.max_tokens
+
+    return ResolvedLLMConfig(
+        api_key=api_key,
+        api_base=api_base,
+        model=model,
+        timeout=timeout,
+        max_tokens=max_tokens,
+    )
+
+
+def _get_embedding_provider_api_key(api_base: str) -> str | None:
+    """Get provider-specific API key for embeddings based on api_base URL.
+
+    Checks standard provider environment variables based on the API endpoint.
+    This allows users to use their existing OPENAI_API_KEY, VOYAGE_API_KEY, etc.
+
+    Args:
+        api_base: The resolved API base URL
+
+    Returns:
+        API key from provider-specific env var, or None if not found
+    """
+    api_base_lower = api_base.lower() if api_base else ""
+
+    # Map provider domains to their standard env vars
+    if "openai.com" in api_base_lower or "openai.azure.com" in api_base_lower:
+        return os.getenv("OPENAI_API_KEY")
+    if "voyageai.com" in api_base_lower:
+        return os.getenv("VOYAGE_API_KEY")
+    if "googleapis.com" in api_base_lower or "generativelanguage" in api_base_lower:
+        return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+    return None
 
 
 def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConfig:
@@ -175,8 +301,9 @@ def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConf
     Priority (highest first):
     1. Environment variables (EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM)
     2. Backend-specific TOML overrides (memory.{backend}.embedding_*)
-    3. Shared TOML settings (memory.embedding.*)
-    4. Built-in defaults
+    3. Provider-specific env vars (OPENAI_API_KEY, VOYAGE_API_KEY, etc.)
+    4. Shared TOML settings (memory.embedding.*)
+    5. Built-in defaults
 
     Args:
         backend: Backend name for backend-specific overrides ("graphiti" or "leanrag")
@@ -190,27 +317,22 @@ def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConf
     # Get backend-specific config if available
     backend_cfg = getattr(mem, backend, None)
 
-    # Resolve api_key with deprecated OPENAI_API_KEY fallback
-    api_key = os.getenv("EMBEDDING_API_KEY")
-    if not api_key:
-        # Deprecated fallback (same as LLM for OpenAI) - scheduled for removal in v0.5.0
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            warnings.warn(
-                "OPENAI_API_KEY is deprecated for embeddings and will be removed in v0.5.0. "
-                "Use EMBEDDING_API_KEY instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-    if not api_key:
-        api_key = mem.embedding.api_key
-
-    # Resolve api_base: env > backend-specific > shared
+    # Resolve api_base FIRST (needed for provider-specific API key lookup)
     api_base = os.getenv("EMBEDDING_API_BASE")
     if not api_base and backend_cfg:
         api_base = backend_cfg.embedding_api_base or None
     if not api_base:
         api_base = mem.embedding.api_base
+
+    # Resolve api_key: env > backend-specific > provider-specific > shared
+    api_key = os.getenv("EMBEDDING_API_KEY")
+    if not api_key and backend_cfg:
+        api_key = backend_cfg.embedding_api_key or None
+    if not api_key:
+        # Check provider-specific env vars based on resolved api_base
+        api_key = _get_embedding_provider_api_key(api_base)
+    if not api_key:
+        api_key = mem.embedding.api_key
 
     # Resolve model: env > backend-specific > shared
     model = os.getenv("EMBEDDING_MODEL")
@@ -229,7 +351,45 @@ def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConf
     else:
         dim = mem.embedding.dim
 
-    return ResolvedEmbeddingConfig(api_key=api_key, api_base=api_base, model=model, dim=dim)
+    # Resolve timeout: env > shared
+    timeout_str = os.getenv("EMBEDDING_TIMEOUT")
+    if timeout_str:
+        try:
+            timeout = float(timeout_str)
+        except ValueError:
+            timeout = mem.embedding.timeout
+    else:
+        timeout = mem.embedding.timeout
+
+    # Resolve batch_size: env > shared
+    batch_size_str = os.getenv("EMBEDDING_BATCH_SIZE")
+    if batch_size_str:
+        try:
+            batch_size = int(batch_size_str)
+        except ValueError:
+            batch_size = mem.embedding.batch_size
+    else:
+        batch_size = mem.embedding.batch_size
+
+    # Resolve context_size: env > shared
+    context_size_str = os.getenv("EMBEDDING_CONTEXT_SIZE")
+    if context_size_str:
+        try:
+            context_size = int(context_size_str)
+        except ValueError:
+            context_size = mem.embedding.context_size
+    else:
+        context_size = mem.embedding.context_size
+
+    return ResolvedEmbeddingConfig(
+        api_key=api_key,
+        api_base=api_base,
+        model=model,
+        dim=dim,
+        context_size=context_size,
+        timeout=timeout,
+        batch_size=batch_size,
+    )
 
 
 def resolve_database_config() -> ResolvedDatabaseConfig:
@@ -359,9 +519,11 @@ def get_leanrag_max_workers() -> int:
 # =============================================================================
 
 # Default values for baseline graph (only used when no env vars or config set)
-_BASELINE_GRAPH_DEFAULT_LLM_API_BASE = "http://localhost:11434/v1"
+# llama-server for LLM (completion mode) on port 8000
+_BASELINE_GRAPH_DEFAULT_LLM_API_BASE = "http://localhost:8000/v1"
 _BASELINE_GRAPH_DEFAULT_LLM_MODEL = "llama3.2:3b"
-_BASELINE_GRAPH_DEFAULT_LLM_API_KEY = "ollama"
+_BASELINE_GRAPH_DEFAULT_LLM_API_KEY = ""  # Local llama-server doesn't need a key
+# llama-server for embeddings (embedding mode) on port 8080
 _BASELINE_GRAPH_DEFAULT_EMBEDDING_API_BASE = "http://localhost:8080/v1"
 _BASELINE_GRAPH_DEFAULT_EMBEDDING_MODEL = "bge-m3"
 
@@ -373,7 +535,7 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
     1. Environment variables: LLM_API_* (preferred)
     2. Environment variables: BASELINE_GRAPH_* (legacy, for backward compatibility)
     3. TOML settings: [memory.llm]
-    4. Built-in defaults (localhost:11434 for Ollama)
+    4. Built-in defaults (localhost:8000 for llama-server)
 
     Returns:
         ResolvedLLMConfig with all settings resolved
@@ -405,7 +567,24 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
         or _BASELINE_GRAPH_DEFAULT_LLM_MODEL
     )
 
-    return ResolvedLLMConfig(api_key=api_key, api_base=api_base, model=model)
+    # Resolve timeout and max_tokens from env/TOML (use shared defaults)
+    # Bounds: timeout 1-600s, max_tokens 1-32768
+    timeout = _safe_float(os.getenv("LLM_TIMEOUT"), mem.llm.timeout, 1.0, 600.0)
+    max_tokens = _safe_int(os.getenv("LLM_MAX_TOKENS"), mem.llm.max_tokens, 1, 32768)
+
+    # Resolve summary prompts from env/TOML
+    summary_prompt = os.getenv("LLM_SUMMARY_PROMPT") or mem.llm.summary_prompt
+    thread_summary_prompt = os.getenv("LLM_THREAD_SUMMARY_PROMPT") or mem.llm.thread_summary_prompt
+
+    return ResolvedLLMConfig(
+        api_key=api_key,
+        api_base=api_base,
+        model=model,
+        timeout=timeout,
+        max_tokens=max_tokens,
+        summary_prompt=summary_prompt,
+        thread_summary_prompt=thread_summary_prompt,
+    )
 
 
 def resolve_baseline_graph_embedding_config() -> ResolvedEmbeddingConfig:
@@ -447,14 +626,19 @@ def resolve_baseline_graph_embedding_config() -> ResolvedEmbeddingConfig:
         or _BASELINE_GRAPH_DEFAULT_EMBEDDING_MODEL
     )
 
-    # Resolve dim
-    dim_str = os.getenv("EMBEDDING_DIM")
-    if dim_str:
-        try:
-            dim = int(dim_str)
-        except ValueError:
-            dim = mem.embedding.dim
-    else:
-        dim = mem.embedding.dim
+    # Resolve dim, timeout, batch_size, context_size with bounds validation
+    # Bounds: dim 64-8192, timeout 1-300s, batch_size 1-256, context_size 128-32768
+    dim = _safe_int(os.getenv("EMBEDDING_DIM"), mem.embedding.dim, 64, 8192)
+    timeout = _safe_float(os.getenv("EMBEDDING_TIMEOUT"), mem.embedding.timeout, 1.0, 300.0)
+    batch_size = _safe_int(os.getenv("EMBEDDING_BATCH_SIZE"), mem.embedding.batch_size, 1, 256)
+    context_size = _safe_int(os.getenv("EMBEDDING_CONTEXT_SIZE"), mem.embedding.context_size, 128, 32768)
 
-    return ResolvedEmbeddingConfig(api_key=api_key, api_base=api_base, model=model, dim=dim)
+    return ResolvedEmbeddingConfig(
+        api_key=api_key,
+        api_base=api_base,
+        model=model,
+        dim=dim,
+        context_size=context_size,
+        timeout=timeout,
+        batch_size=batch_size,
+    )

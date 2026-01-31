@@ -1,3 +1,43 @@
+"""Observability utilities for watercooler MCP server.
+
+Logging Level Guidelines
+------------------------
+Use the following guidelines when choosing log levels:
+
+DEBUG (log_debug):
+    - Detailed diagnostic information for troubleshooting
+    - Service startup/shutdown steps and timing
+    - Configuration resolution details
+    - Network request/response details
+    - Model download progress
+    - Only visible when WATERCOOLER_LOG_LEVEL=DEBUG
+
+INFO (log_action):
+    - Structured action records (tool calls, operations)
+    - Successful service transitions
+    - Key milestones in workflows
+    - Default level - visible in normal operation
+
+WARNING (log_warning):
+    - Recoverable issues that may need attention
+    - Configuration mismatches (e.g., EMBEDDING_DIM mismatch)
+    - Deprecated features being used
+    - Fallback behavior activated
+    - Security policy violations (e.g., checksum mismatch)
+
+ERROR (log_error):
+    - Operation failures that affect functionality
+    - Unrecoverable errors
+    - Service startup failures
+    - Data corruption or integrity issues
+
+Best Practices:
+    - Always include context: what was happening, what failed, what to do
+    - Use structured fields for machine-parseable data
+    - Avoid logging sensitive data (credentials, tokens, user content)
+    - For long-running operations, log start at DEBUG, completion at INFO
+"""
+
 from __future__ import annotations
 
 import json
@@ -15,6 +55,14 @@ from watercooler.config_facade import config
 
 
 LOGGER_NAME = "watercooler_mcp"
+
+# All logger namespaces that should share the same configuration
+# This ensures consistent logging across all watercooler modules
+LOGGER_NAMESPACES = [
+    "watercooler_mcp",    # MCP server and tools
+    "watercooler",        # Core library (baseline_graph, config, etc.)
+    "watercooler_memory", # Memory backends (graphiti, leanrag, etc.)
+]
 
 # Environment variables for configuration (env vars override config file)
 ENV_LOG_DIR = "WATERCOOLER_LOG_DIR"
@@ -50,11 +98,13 @@ def _reset_logging_state() -> None:
     _cached_logging_config = None
     _session_start = None
 
-    # Reset logger handlers if already initialized
+    # Reset logger handlers for ALL namespaces if already initialized
     if _logger_initialized:
         _logger_initialized = False
-        logger = logging.getLogger(LOGGER_NAME)
-        logger.handlers.clear()
+        for namespace in LOGGER_NAMESPACES:
+            ns_logger = logging.getLogger(namespace)
+            ns_logger.handlers.clear()
+            ns_logger.propagate = True  # Re-enable propagation for pytest caplog
 
 
 def _get_logging_config_safe() -> Dict[str, Any]:
@@ -169,6 +219,10 @@ def _get_logger() -> logging.Logger:
     - WATERCOOLER_LOG_DISABLE_FILE: Set to 1 to disable file logging (stderr only)
 
     Environment variables override config file values.
+
+    Note: This configures ALL watercooler logger namespaces (watercooler_mcp,
+    watercooler, watercooler_memory) to share the same handlers and format.
+    This ensures consistent logging across the entire codebase.
     """
     global _logger_initialized
     logger = logging.getLogger(LOGGER_NAME)
@@ -178,16 +232,17 @@ def _get_logger() -> logging.Logger:
             # Double-check pattern for thread safety
             if not _logger_initialized:
                 _logger_initialized = True
-                logger.handlers.clear()  # Remove any existing handlers
 
                 log_level = _get_log_level()
-                logger.setLevel(log_level)
 
-                # Human-readable formatter
+                # Human-readable formatter with logger name for traceability
                 formatter = logging.Formatter(
-                    "[%(levelname)s %(asctime)s] %(message)s",
+                    "[%(levelname)s %(asctime)s] [%(name)s] %(message)s",
                     datefmt="%Y-%m-%dT%H:%M:%S"
                 )
+
+                # Create handlers (shared across all loggers)
+                handlers = []
 
                 # File handler (enabled by default)
                 log_file = _get_log_file_path()
@@ -204,13 +259,29 @@ def _get_logger() -> logging.Logger:
                     )
                     file_handler.setFormatter(formatter)
                     file_handler.setLevel(log_level)
-                    logger.addHandler(file_handler)
+                    handlers.append(file_handler)
 
                 # Also log to stderr for visibility (only warnings and above by default)
                 stream_handler = logging.StreamHandler()
                 stream_handler.setFormatter(formatter)
                 stream_handler.setLevel(max(log_level, logging.WARNING))
-                logger.addHandler(stream_handler)
+                handlers.append(stream_handler)
+
+                # Configure ALL watercooler logger namespaces with shared handlers
+                # This ensures logging from watercooler, watercooler_mcp, and
+                # watercooler_memory all go to the same place with the same format
+                #
+                # When file logging is enabled, we disable propagation to prevent
+                # duplicate logs. When file logging is disabled (test mode), we
+                # allow propagation so pytest's caplog fixture can capture logs.
+                disable_propagation = log_file is not None
+                for namespace in LOGGER_NAMESPACES:
+                    ns_logger = logging.getLogger(namespace)
+                    ns_logger.handlers.clear()  # Remove any existing handlers
+                    ns_logger.setLevel(log_level)
+                    ns_logger.propagate = not disable_propagation
+                    for handler in handlers:
+                        ns_logger.addHandler(handler)
 
     return logger
 

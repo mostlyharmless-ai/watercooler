@@ -317,10 +317,11 @@ class TestTierConfig:
 
     def test_t2_requires_graphiti(self, monkeypatch) -> None:
         """T2 should only be enabled if Graphiti is configured."""
-        # Without WATERCOOLER_GRAPHITI_ENABLED, T2 should be disabled
+        # Without WATERCOOLER_GRAPHITI_ENABLED (and TOML returning null), T2 should be disabled
         monkeypatch.delenv("WATERCOOLER_GRAPHITI_ENABLED", raising=False)
-        config = load_tier_config()
-        assert config.t2_enabled is False
+        with patch("watercooler.memory_config.get_memory_backend", return_value="null"):
+            config = load_tier_config()
+            assert config.t2_enabled is False
 
         # With WATERCOOLER_GRAPHITI_ENABLED=1, T2 should be enabled
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")

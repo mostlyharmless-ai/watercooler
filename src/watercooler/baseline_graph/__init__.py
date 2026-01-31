@@ -1,10 +1,10 @@
 """Baseline graph module for free-tier knowledge graphs.
 
 This module provides a lightweight knowledge graph built from threads
-using locally-hosted LLMs (Ollama, llama.cpp) - no API costs required.
+using locally-hosted LLMs (llama-server, OpenAI) - no API costs required for local.
 
 Key components:
-- summarizer: LLM-based summarization with extractive fallback
+- summarizer: LLM-based summarization
 - parser: Thread parsing and entity extraction
 - export: JSONL export for graph storage
 """
@@ -57,6 +57,11 @@ from .sync import (
     reconcile_graph,
     backfill_missing,
     BackfillResult,
+    # New tool suite (Fresh Suite Design)
+    EnrichResult,
+    RecoverResult,
+    enrich_graph,
+    recover_graph,
 )
 
 from .writer import (
@@ -83,6 +88,9 @@ from .projector import (
     append_entry_and_project,
     update_header_and_write,
     create_thread_file,
+    # New tool suite
+    ProjectResult,
+    project_graph,
 )
 
 from .search import (
@@ -94,6 +102,14 @@ from .search import (
     search_threads,
     find_similar_entries,
     search_by_time_range,
+)
+
+from .falkordb_entries import (
+    FalkorDBEntryStore,
+    FalkorDBEntryStoreSync,
+    EntrySearchResult,
+    store_entry_embedding,
+    get_falkordb_entry_store,
 )
 
 __all__ = [
@@ -138,6 +154,13 @@ __all__ = [
     "reconcile_graph",
     "backfill_missing",
     "BackfillResult",
+    # New tool suite (Fresh Suite Design)
+    "EnrichResult",
+    "RecoverResult",
+    "ProjectResult",
+    "enrich_graph",
+    "recover_graph",
+    "project_graph",
     # Writer (graph-first mutations)
     "ThreadData",
     "EntryData",
@@ -169,4 +192,10 @@ __all__ = [
     "search_threads",
     "find_similar_entries",
     "search_by_time_range",
+    # FalkorDB Entry Store
+    "FalkorDBEntryStore",
+    "FalkorDBEntryStoreSync",
+    "EntrySearchResult",
+    "store_entry_embedding",
+    "get_falkordb_entry_store",
 ]

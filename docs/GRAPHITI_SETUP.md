@@ -23,13 +23,24 @@ docker exec falkordb redis-cli PING  # Should return: PONG
 
 ### 2. Install Graphiti Dependencies
 
-```bash
-# From watercooler-cloud root directory
-# Use uv (recommended for this project)
-uv pip install -e "external/graphiti[falkordb]"
+**Option A: Install as package (recommended for users)**
 
-# Or if using pip directly
-pip install -e "external/graphiti[falkordb]"
+```bash
+# Using uvx (self-contained, nothing to install locally)
+uvx --from 'watercooler-cloud[graphiti]' watercooler-mcp
+
+# Or using pip (includes graphiti-core[falkordb] automatically)
+pip install 'watercooler-cloud[graphiti]'
+```
+
+**Option B: Development with submodules (for contributors)**
+
+```bash
+# Clone with submodules
+git clone --recurse-submodules https://github.com/mostlyharmless-ai/watercooler-cloud
+
+# Install graphiti from submodule (editable, with FalkorDB support)
+uv pip install -e "external/graphiti[falkordb]"
 ```
 
 ### 3. Configure Environment Variables
@@ -50,7 +61,7 @@ Add to your MCP config (`.mcp.json` for Claude Code):
 }
 ```
 
-Or for local LLM/embedding servers:
+Or for local LLM/embedding servers (llama-server):
 
 ```json
 {
@@ -58,7 +69,7 @@ Or for local LLM/embedding servers:
     "watercooler-cloud": {
       "env": {
         "WATERCOOLER_GRAPHITI_ENABLED": "1",
-        "LLM_API_BASE": "http://localhost:11434/v1",
+        "LLM_API_BASE": "http://localhost:8000/v1",
         "LLM_API_KEY": "not-needed-for-local",
         "LLM_MODEL": "llama3.2:3b",
         "EMBEDDING_API_BASE": "http://localhost:8080/v1",
@@ -126,10 +137,12 @@ You should see the test episode returned with extracted entities and facts.
 
 ## Version & License
 
-**Pinned commit:** `1de752646a9557682c762b83a679d46ffc67e821`
+**Branch:** `@main` (tracks upstream fixes including FalkorDB fulltext query timeouts)
 **License:** Apache-2.0
 **Repository:** https://github.com/mostlyharmless-ai/graphiti
 **Submodule location:** `external/graphiti/`
+
+> **Note:** As of January 2026, the graphiti dependency tracks `@main` instead of a pinned commit. This ensures we receive upstream fixes for FalkorDB fulltext query timeouts that affect episode and entries search via MCP.
 
 ---
 
@@ -179,14 +192,12 @@ Graphiti requires an LLM for entity extraction and fact generation. Options:
 export OPENAI_API_KEY=your_openai_api_key
 ```
 
-**Option 2: OpenAI-compatible Local LLM (Ollama)**
+**Option 2: OpenAI-compatible Local LLM (llama-server)**
 ```bash
-# Start Ollama with a model
-ollama run llama2
-
+# llama-server auto-starts when configured for localhost
 # Configure Graphiti to use local endpoint
-export OPENAI_API_BASE=http://localhost:11434/v1
-export OPENAI_API_KEY=dummy  # Still required, but not validated
+export OPENAI_API_BASE=http://localhost:8000/v1
+export OPENAI_API_KEY=local  # Still required, but not validated
 ```
 
 **Option 3: DeepSeek API (Cost-effective)**
@@ -237,9 +248,9 @@ OPENAI_API_KEY=your_openai_api_key
 # OPENAI_API_KEY=your_deepseek_api_key
 # OPENAI_API_BASE=https://api.deepseek.com/v1
 
-## Option 3: Local LLM (Ollama)
-# OPENAI_API_BASE=http://localhost:11434/v1
-# OPENAI_API_KEY=dummy
+## Option 3: Local LLM (llama-server)
+# OPENAI_API_BASE=http://localhost:8000/v1
+# OPENAI_API_KEY=local
 
 # Embeddings (built-in, uses same LLM API)
 # EMBEDDING_MODEL=text-embedding-3-small  # OpenAI default
@@ -461,6 +472,35 @@ watercooler_smart_query(
 ---
 
 ## Troubleshooting
+
+### Episode/Entries Search Timeout via MCP
+
+**Error:** `socket connection was closed unexpectedly` when searching episodes or entries
+
+**Symptom:** Entity search (`mode="entities"`) works, but episode search (`mode="episodes"`) and entries search with Graphiti backend fail via MCP.
+
+**Cause:** The graphiti dependency was pinned to a feature branch that was missing upstream fixes for FalkorDB fulltext query timeouts. Episode and entries searches use `COMBINED_HYBRID_SEARCH_RRF` which includes edge, episode, and community searches that trigger the timeout bug.
+
+**Fix:** Update to watercooler-cloud version that uses `graphiti-core@main`:
+
+```bash
+# Check your graphiti version
+pip show graphiti-core | grep -i version
+
+# Update watercooler-cloud
+pip install --upgrade 'watercooler-cloud[graphiti]'
+```
+
+If using uvx, ensure your MCP config points to the latest version.
+
+**Verification:**
+```bash
+# Test episode search
+mcp-cli call watercooler-cloud/watercooler_search \
+  '{"query": "test", "mode": "episodes", "limit": 3}'
+```
+
+---
 
 ### FalkorDB Query Timeout
 

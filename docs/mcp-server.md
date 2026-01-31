@@ -248,9 +248,9 @@ fastmcp: 2.14.0
 
 Graph Services:
   Summaries Enabled: True
-  LLM Service: available (http://localhost:11434/v1)
+  LLM Service: available (http://localhost:8000/v1)
   Embeddings Enabled: True
-  Embedding Service: available (http://localhost:11434/v1)
+  Embedding Service: available (http://localhost:8080/v1)
 
 Branch Parity:
   Status: clean

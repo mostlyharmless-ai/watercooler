@@ -193,7 +193,7 @@ Examples:
     parser.add_argument(
         "--use-llm",
         action="store_true",
-        help="Use LLM for summaries (requires local Ollama or compatible API)",
+        help="Use LLM for summaries (requires local llama-server or compatible API)",
     )
     parser.add_argument(
         "-v", "--verbose",

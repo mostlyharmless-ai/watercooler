@@ -283,8 +283,8 @@ GLM_MODEL=bge-m3
 GLM_EMBEDDING_MODEL=bge-m3
 
 # === LLM Server ===
-# Uses llama-cpp-python with OpenAI-compatible API, Ollama, or cloud provider
-# Example: http://localhost:11434/v1 (Ollama) or cloud endpoint
+# Uses llama-server with OpenAI-compatible API, or cloud provider
+# Example: http://localhost:8000/v1 (llama-server) or cloud endpoint
 # Default: http://localhost:8000/v1
 LLM_API_BASE=http://localhost:8000/v1
 LLM_API_KEY=not-needed-for-local

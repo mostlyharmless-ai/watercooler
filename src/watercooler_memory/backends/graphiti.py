@@ -39,27 +39,110 @@ import os
 _PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _DEFAULT_GRAPHITI_PATH = _PACKAGE_ROOT / "external" / "graphiti"
 
+# Track whether graphiti is available as installed package vs submodule
+_GRAPHITI_INSTALLED_AS_PACKAGE: bool | None = None
 
-def _get_graphiti_path() -> Path:
-    """Get graphiti path from env or package default.
 
-    This resolves the graphiti submodule path in a way that works for both:
-    - Editable installs (pip install -e .)
-    - Regular installs (pip install watercooler-cloud)
+def _is_graphiti_installed() -> bool:
+    """Check if graphiti_core is installed as a Python package.
 
-    The path is resolved relative to this package's installation location,
-    not the current working directory.
+    Returns:
+        True if graphiti_core can be imported directly (installed via pip/uv),
+        False if it needs to be loaded from submodule path.
+    """
+    global _GRAPHITI_INSTALLED_AS_PACKAGE
+    if _GRAPHITI_INSTALLED_AS_PACKAGE is not None:
+        logger.debug(f"_is_graphiti_installed: cached result = {_GRAPHITI_INSTALLED_AS_PACKAGE}")
+        return _GRAPHITI_INSTALLED_AS_PACKAGE
+
+    try:
+        logger.debug("_is_graphiti_installed: attempting import graphiti_core")
+        import graphiti_core  # noqa: F401
+        _GRAPHITI_INSTALLED_AS_PACKAGE = True
+        logger.debug("_is_graphiti_installed: graphiti_core found as installed package")
+        return True
+    except ImportError:
+        _GRAPHITI_INSTALLED_AS_PACKAGE = False
+        logger.debug("_is_graphiti_installed: graphiti_core not installed as package, will use submodule")
+        return False
+
+
+def _get_graphiti_path() -> Path | None:
+    """Get graphiti submodule path (only needed if not installed as package).
+
+    This resolves the graphiti submodule path for development setups where
+    graphiti is checked out as a git submodule rather than installed as a package.
 
     Environment Variables:
         WATERCOOLER_GRAPHITI_PATH: Override the default graphiti path
 
     Returns:
-        Path to the graphiti submodule directory
+        Path to the graphiti submodule directory, or None if installed as package
     """
+    # If installed as package, no path needed
+    if _is_graphiti_installed():
+        return None
+
     env_path = os.environ.get("WATERCOOLER_GRAPHITI_PATH")
     if env_path:
         return Path(env_path)
     return _DEFAULT_GRAPHITI_PATH
+
+
+def _ensure_graphiti_available() -> None:
+    """Ensure graphiti_core is importable, either as package or via submodule.
+
+    For installed packages (uvx --from "watercooler-cloud[memory]"):
+        graphiti_core is already in site-packages, nothing to do.
+
+    For development (git submodule):
+        Add the submodule path to sys.path so imports work.
+
+    Raises:
+        ConfigError: If graphiti cannot be made available.
+    """
+    import sys
+
+    # Already installed as package? Nothing to do.
+    if _is_graphiti_installed():
+        logger.debug("_ensure_graphiti_available: graphiti_core already installed as package")
+        return
+
+    # Get submodule path
+    graphiti_path = _get_graphiti_path()
+    if graphiti_path is None:
+        # Shouldn't happen, but handle gracefully
+        raise ConfigError("graphiti_core not installed and no submodule path available")
+
+    if not graphiti_path.exists():
+        raise ConfigError(
+            f"Graphiti not found at {graphiti_path}. "
+            "Either install with: pip install 'watercooler-cloud[memory]' "
+            "or run: git submodule update --init external/graphiti"
+        )
+
+    graphiti_core_dir = graphiti_path / "graphiti_core"
+    if not graphiti_core_dir.exists():
+        raise ConfigError(
+            f"Graphiti core not found at {graphiti_core_dir}. "
+            "Ensure Graphiti submodule is properly initialized."
+        )
+
+    # Add to sys.path if not already there
+    graphiti_path_str = str(graphiti_path)
+    if graphiti_path_str not in sys.path:
+        sys.path.insert(0, graphiti_path_str)
+        logger.debug(f"Added graphiti submodule to sys.path: {graphiti_path_str}")
+
+    # Verify import works now
+    try:
+        logger.debug("_ensure_graphiti_available: importing graphiti_core from submodule")
+        import graphiti_core  # noqa: F401
+        logger.debug("_ensure_graphiti_available: graphiti_core import successful")
+    except ImportError as e:
+        raise ConfigError(
+            f"Failed to import graphiti_core after adding to path: {e}"
+        ) from e
 
 
 def _derive_database_name(code_path: Path | str | None) -> str:
@@ -92,8 +175,10 @@ def _derive_database_name(code_path: Path | str | None) -> str:
 class GraphitiConfig:
     """Configuration for Graphiti backend."""
 
-    # Graphiti submodule location (resolved from package installation, not cwd)
-    graphiti_path: Path = field(default_factory=_get_graphiti_path)
+    # Graphiti submodule location (None if installed as package, Path if using submodule)
+    # For installed packages: graphiti_core is in site-packages, no path needed
+    # For development: points to external/graphiti submodule
+    graphiti_path: Path | None = field(default_factory=_get_graphiti_path)
 
     # Database configuration (FalkorDB)
     falkordb_host: str = "localhost"
@@ -114,6 +199,7 @@ class GraphitiConfig:
     embedding_api_base: str | None = None  # e.g., "http://localhost:8080/v1" for local
     embedding_api_key: str | None = None   # Required for all providers
     embedding_model: str = "text-embedding-3-small"
+    embedding_dim: int = 1024  # Vector dimension (must match your embedding model)
 
     # Legacy fields (deprecated, use llm_* and embedding_* instead)
     openai_api_key: str | None = None      # DEPRECATED: use llm_api_key
@@ -184,6 +270,7 @@ class GraphitiConfig:
             embedding_api_key=embedding.api_key,
             embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
             embedding_model=embedding.model,
+            embedding_dim=embedding.dim,
             falkordb_host=db.host,
             falkordb_port=db.port,
             falkordb_username=db.username if db.username else None,
@@ -240,14 +327,18 @@ class GraphitiBackend(MemoryBackend):
     MAX_COMMUNITIES_RETURNED = 5
 
     def __init__(self, config: GraphitiConfig | None = None) -> None:
+        logger.debug("GraphitiBackend.__init__ starting")
         self.config = config or GraphitiConfig()
+        logger.debug("GraphitiBackend.__init__ calling _validate_config")
         self._validate_config()
+        logger.debug("GraphitiBackend.__init__ calling _init_entry_episode_index")
         self._init_entry_episode_index()
         # Cache for graphiti client to avoid creating new connections per call
         # This is critical for MCP migration which makes many sequential calls
         # Client lifecycle: created on first use, reused until close() or __del__
         self._cached_graphiti_client: Any = None
         self._indices_built: bool = False
+        logger.debug("GraphitiBackend.__init__ complete")
 
     def close(self) -> None:
         """Close the backend and release resources.
@@ -301,19 +392,10 @@ class GraphitiBackend(MemoryBackend):
 
     def _validate_config(self) -> None:
         """Validate configuration and Graphiti availability."""
-        if not self.config.graphiti_path.exists():
-            raise ConfigError(
-                f"Graphiti not found at {self.config.graphiti_path}. "
-                "Run: git submodule update --init external/graphiti"
-            )
-
-        # Check for required Graphiti module
-        graphiti_core = self.config.graphiti_path / "graphiti_core"
-        if not graphiti_core.exists():
-            raise ConfigError(
-                f"Graphiti core not found at {graphiti_core}. "
-                "Ensure Graphiti submodule is properly initialized."
-            )
+        # Ensure graphiti_core is importable (installed package or submodule)
+        logger.debug("_validate_config: calling _ensure_graphiti_available")
+        _ensure_graphiti_available()
+        logger.debug("_validate_config: graphiti_core available")
 
         # Validate LLM API key is set (required for Graphiti)
         # Support legacy openai_api_key field for backwards compatibility
@@ -345,14 +427,17 @@ class GraphitiBackend(MemoryBackend):
     def _init_entry_episode_index(self) -> None:
         """Initialize the entry-episode index if enabled."""
         if not self.config.track_entry_episodes:
+            logger.debug("_init_entry_episode_index: tracking disabled, skipping")
             self.entry_episode_index = None
             return
 
+        logger.debug(f"_init_entry_episode_index: loading from {self.config.entry_episode_index_path}")
         index_config = IndexConfig(
             backend="graphiti",
             index_path=self.config.entry_episode_index_path,
         )
         self.entry_episode_index = EntryEpisodeIndex(index_config, auto_load=True)
+        logger.debug(f"_init_entry_episode_index: loaded {len(self.entry_episode_index)} entries")
 
     def index_entry_as_episode(
         self,
@@ -434,6 +519,9 @@ class GraphitiBackend(MemoryBackend):
             BackendError: If Graphiti client creation or episode addition fails
             TransientError: If database connection fails
         """
+        import time
+        logger.debug(f"add_episode_direct called, group_id={group_id}")
+        logger.debug(f"add_episode_direct LLM config: api_base={self.config.llm_api_base}, model={self.config.llm_model}, key_set={bool(self.config.llm_api_key)}")
         try:
             # Use cached client with indices already built to avoid per-call overhead
             graphiti = await self._get_graphiti_client_with_indices()
@@ -450,6 +538,8 @@ class GraphitiBackend(MemoryBackend):
             # entity deduplication (same as _map_entries_to_episodes does for index())
             sanitized_body = self._sanitize_redisearch_operators(episode_body)
 
+            logger.debug(f"add_episode_direct calling graphiti.add_episode (LLM entity extraction starts)")
+            start_time = time.time()
             result = await graphiti.add_episode(
                 name=name,
                 episode_body=sanitized_body,
@@ -458,6 +548,8 @@ class GraphitiBackend(MemoryBackend):
                 group_id=group_id,
                 previous_episode_uuids=previous_episode_uuids,
             )
+            elapsed = time.time() - start_time
+            logger.debug(f"add_episode_direct graphiti.add_episode completed in {elapsed:.2f}s")
 
             # Extract episode UUID from result - fail if missing
             # AddEpisodeResults has an 'episode' field containing the EpisodicNode
@@ -476,6 +568,10 @@ class GraphitiBackend(MemoryBackend):
                 entities = [getattr(n, "name", str(n)) for n in result.nodes]
             if hasattr(result, "edges"):
                 facts_count = len(result.edges)
+
+            logger.debug(f"add_episode_direct extracted {len(entities)} entities, {facts_count} facts")
+            if entities:
+                logger.debug(f"add_episode_direct entities: {entities[:5]}{'...' if len(entities) > 5 else ''}")
 
             return {
                 "episode_uuid": episode_uuid,
@@ -605,12 +701,70 @@ class GraphitiBackend(MemoryBackend):
 
         return result.strip()
 
-    def _create_graphiti_client(self, use_cache: bool = True) -> Any:
+    def _ensure_embedding_service_available(self) -> None:
+        """Ensure embedding service is available, auto-starting if configured.
+
+        Checks if the embedding service is reachable and attempts to auto-start
+        it if mcp.graph.auto_start_services is enabled in config.
+
+        This uses the same auto-start logic as the baseline graph module,
+        ensuring consistent behavior across both systems.
+        """
+        logger.debug(f"Checking embedding service availability at {self.config.embedding_api_base}")
+        try:
+            from watercooler.baseline_graph.sync import (
+                is_embedding_available,
+                EmbeddingConfig,
+                _should_auto_start_services,
+                _try_auto_start_service,
+            )
+
+            # Create config matching our embedder settings
+            embed_config = EmbeddingConfig(
+                api_base=self.config.embedding_api_base,
+                model=self.config.embedding_model,
+            )
+
+            # Check if already available
+            if is_embedding_available(embed_config):
+                logger.debug("Embedding service is available")
+                return
+
+            # Try auto-start if enabled
+            if _should_auto_start_services():
+                logger.debug(
+                    f"Embedding service not available at {self.config.embedding_api_base}, "
+                    "attempting auto-start..."
+                )
+                if _try_auto_start_service("embedding", self.config.embedding_api_base):
+                    # Verify it's now available
+                    if is_embedding_available(embed_config):
+                        logger.debug("Embedding service auto-started successfully")
+                        return
+                    else:
+                        logger.warning("Embedding service started but not responding")
+                else:
+                    logger.warning("Failed to auto-start embedding service")
+            else:
+                logger.debug(
+                    f"Embedding service not available at {self.config.embedding_api_base} "
+                    "and auto_start_services is disabled"
+                )
+
+        except ImportError as e:
+            logger.debug(f"Could not import auto-start utilities: {e}")
+        except Exception as e:
+            logger.debug(f"Error checking embedding service: {e}")
+
+    def _create_graphiti_client(self, use_cache: bool = False) -> Any:
         """Create and configure Graphiti client with FalkorDB, LLM, and embedder.
 
         Args:
-            use_cache: If True, return cached client if available. Set to False
-                to force creation of a new client (useful for testing).
+            use_cache: If True, return cached client if available. Default is False
+                because caching is incompatible with asyncio.run() creating new
+                event loops - the cached client's asyncio.Lock objects become bound
+                to a stale event loop, causing "Lock is bound to a different event
+                loop" errors on subsequent calls.
 
         Returns:
             Configured Graphiti instance ready for operations.
@@ -619,7 +773,12 @@ class GraphitiBackend(MemoryBackend):
             ConfigError: If required dependencies are not installed.
         """
         # Return cached client if available and caching enabled
+        # WARNING: Caching is disabled by default because each method uses
+        # asyncio.run() which creates a new event loop. The graphiti client
+        # has internal asyncio.Lock objects that become bound to the event loop
+        # from the first call, causing errors on subsequent calls.
         if use_cache and self._cached_graphiti_client is not None:
+            logger.debug("Returning cached Graphiti client")
             return self._cached_graphiti_client
 
         try:
@@ -667,10 +826,14 @@ class GraphitiBackend(MemoryBackend):
         llm_client = OpenAIGenericClient(config=llm_config)
 
         # Configure embedder (supports OpenAI, local llama.cpp, etc.)
+        # Check if embedding service needs auto-start
+        self._ensure_embedding_service_available()
+
         embedder_config = OpenAIEmbedderConfig(
             embedding_model=self.config.embedding_model,
             api_key=self.config.embedding_api_key,
             base_url=self.config.embedding_api_base,
+            embedding_dim=self.config.embedding_dim,
         )
         embedder = OpenAIEmbedder(config=embedder_config)
 
@@ -704,8 +867,10 @@ class GraphitiBackend(MemoryBackend):
 
         # Build indices once per client instance
         if not self._indices_built:
+            logger.debug("Building Graphiti indices and constraints...")
             await graphiti.build_indices_and_constraints()
             self._indices_built = True
+            logger.debug("Graphiti indices built successfully")
 
         return graphiti
 

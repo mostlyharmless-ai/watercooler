@@ -158,8 +158,9 @@ class TestSyncToMemoryBackend:
         """Test that sync returns False when backend is disabled."""
         from watercooler.baseline_graph.sync import sync_to_memory_backend
 
+        # Explicitly disable memory backend (TOML config may have defaults)
+        monkeypatch.setenv("WATERCOOLER_MEMORY_DISABLED", "1")
         monkeypatch.delenv("WATERCOOLER_MEMORY_BACKEND", raising=False)
-        monkeypatch.delenv("WATERCOOLER_MEMORY_DISABLED", raising=False)
 
         result = sync_to_memory_backend(
             threads_dir=Path("/tmp"),

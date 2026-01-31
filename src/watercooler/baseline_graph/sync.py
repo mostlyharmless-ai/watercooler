@@ -21,7 +21,7 @@ Feature Configuration:
     LLM Summaries (generate_summaries):
         - When enabled: Generates semantic summaries via LLM for entries/threads
         - When disabled: Falls back to extractive summaries (truncated body text)
-        - Requires: LLM server at [servers.llm] endpoint (e.g., Ollama)
+        - Requires: LLM server at [servers.llm] endpoint (e.g., llama-server)
         - Config: mcp.graph.generate_summaries (default: false)
         - Env: WATERCOOLER_GRAPH_SUMMARIES
 
@@ -132,6 +132,94 @@ class EnrichmentResult:
 
 
 # ============================================================================
+# New Tool Suite Result Types (Milestone: Fresh Suite Design)
+# ============================================================================
+
+
+@dataclass
+class EnrichResult:
+    """Result of bulk enrichment operation.
+
+    Used by enrich_graph() - the new unified enrichment function.
+    Provides detailed statistics for all enrichment operations.
+    """
+
+    threads_processed: int = 0
+    entries_processed: int = 0
+    summaries_generated: int = 0  # Entry summaries
+    thread_summaries_generated: int = 0  # Thread summaries
+    embeddings_generated: int = 0
+    skipped: int = 0
+    errors: List[str] = field(default_factory=list)
+    dry_run: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "threads_processed": self.threads_processed,
+            "entries_processed": self.entries_processed,
+            "summaries_generated": self.summaries_generated,
+            "embeddings_generated": self.embeddings_generated,
+            "skipped": self.skipped,
+            "errors": self.errors[:20],  # Limit errors in output
+            "error_count": len(self.errors),
+            "dry_run": self.dry_run,
+        }
+
+
+@dataclass
+class RecoverResult:
+    """Result of graph recovery operation.
+
+    Used by recover_graph() - rebuilds graph from markdown.
+    """
+
+    threads_recovered: int = 0
+    entries_parsed: int = 0
+    summaries_generated: int = 0
+    embeddings_generated: int = 0
+    errors: List[str] = field(default_factory=list)
+    dry_run: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "threads_recovered": self.threads_recovered,
+            "entries_parsed": self.entries_parsed,
+            "summaries_generated": self.summaries_generated,
+            "embeddings_generated": self.embeddings_generated,
+            "errors": self.errors[:20],
+            "error_count": len(self.errors),
+            "dry_run": self.dry_run,
+        }
+
+
+@dataclass
+class ProjectResult:
+    """Result of graph projection operation.
+
+    Used by project_graph() - generates markdown from graph.
+    """
+
+    files_created: int = 0
+    files_updated: int = 0
+    files_skipped: int = 0
+    errors: List[str] = field(default_factory=list)
+    dry_run: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "files_created": self.files_created,
+            "files_updated": self.files_updated,
+            "files_skipped": self.files_skipped,
+            "errors": self.errors[:20],
+            "error_count": len(self.errors),
+            "dry_run": self.dry_run,
+        }
+
+
+# ============================================================================
 # Embedding Configuration & Generation
 # ============================================================================
 
@@ -231,58 +319,282 @@ def generate_embedding(
         return None
 
 
-def _should_auto_start_services() -> bool:
-    """Check if auto-start services is enabled via env var.
+# ============================================================================
+# Embedding Storage (FalkorDB with Fallback)
+# ============================================================================
+
+
+# Module-level flag to track FalkorDB availability (avoids repeated connection attempts)
+_falkordb_checked: bool = False
+_falkordb_available: bool = False
+
+
+def _get_group_id_for_threads_dir(threads_dir: Path) -> str:
+    """Derive group_id from threads directory path.
+
+    Handles two layouts:
+    1. Paired repos: /path/to/watercooler-site-threads → watercooler_site
+    2. Embedded dirs: /path/to/repo/threads/ → repo
+
+    Sanitizes to be FalkorDB-compatible (underscores, lowercase).
+    """
+    dir_name = threads_dir.name
+
+    # Paired repo pattern: name ends with -threads (e.g., watercooler-site-threads)
+    if dir_name.endswith("-threads"):
+        name = dir_name[:-8]  # Strip "-threads" suffix
+    else:
+        # Embedded threads dir: use parent repo name
+        name = threads_dir.parent.name
+
+    return name.replace("-", "_").lower() or "watercooler"
+
+
+def store_entry_embedding_to_falkordb(
+    threads_dir: Path,
+    entry_id: str,
+    topic: str,
+    embedding: List[float],
+) -> bool:
+    """Store entry embedding to FalkorDB if available.
+
+    Attempts to store the embedding in FalkorDB. Returns True if successful,
+    False if FalkorDB is not available or storage failed.
+
+    This function is non-blocking on failure - callers should fall back to
+    file-based storage if this returns False.
+
+    Args:
+        threads_dir: Threads directory (used to derive group_id)
+        entry_id: Entry ULID
+        topic: Thread topic
+        embedding: Embedding vector
 
     Returns:
-        True if WATERCOOLER_AUTO_START_SERVICES is set to a truthy value
+        True if stored successfully, False otherwise
     """
-    return os.environ.get("WATERCOOLER_AUTO_START_SERVICES", "").lower() in ("1", "true", "yes")
+    global _falkordb_checked, _falkordb_available
+
+    # Skip if we already know FalkorDB is unavailable
+    if _falkordb_checked and not _falkordb_available:
+        return False
+
+    try:
+        from .falkordb_entries import get_falkordb_entry_store
+
+        group_id = _get_group_id_for_threads_dir(threads_dir)
+        store = get_falkordb_entry_store(group_id)
+
+        if store is None:
+            _falkordb_checked = True
+            _falkordb_available = False
+            logger.debug("FalkorDB not available, using file-based storage")
+            return False
+
+        _falkordb_checked = True
+        _falkordb_available = True
+
+        store.store_embedding(entry_id, topic, embedding)
+        logger.debug(f"Stored embedding in FalkorDB: {entry_id}")
+        return True
+
+    except ImportError:
+        _falkordb_checked = True
+        _falkordb_available = False
+        logger.debug("FalkorDB module not available")
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to store embedding in FalkorDB: {e}")
+        return False
+
+
+def delete_entry_embedding_from_falkordb(
+    threads_dir: Path,
+    entry_id: str,
+) -> bool:
+    """Delete entry embedding from FalkorDB if available.
+
+    Args:
+        threads_dir: Threads directory
+        entry_id: Entry ULID
+
+    Returns:
+        True if deleted successfully, False otherwise
+    """
+    global _falkordb_checked, _falkordb_available
+
+    if _falkordb_checked and not _falkordb_available:
+        return False
+
+    try:
+        from .falkordb_entries import get_falkordb_entry_store
+
+        group_id = _get_group_id_for_threads_dir(threads_dir)
+        store = get_falkordb_entry_store(group_id)
+
+        if store is None:
+            return False
+
+        return store.delete_embedding(entry_id)
+
+    except Exception as e:
+        logger.debug(f"Failed to delete embedding from FalkorDB: {e}")
+        return False
+
+
+def has_embedding_in_falkordb(
+    threads_dir: Path,
+    entry_id: str,
+) -> bool:
+    """Check if entry has an embedding in FalkorDB.
+
+    Args:
+        threads_dir: Threads directory
+        entry_id: Entry ULID
+
+    Returns:
+        True if embedding exists in FalkorDB, False otherwise
+    """
+    global _falkordb_checked, _falkordb_available
+
+    if _falkordb_checked and not _falkordb_available:
+        return False
+
+    try:
+        from .falkordb_entries import get_falkordb_entry_store
+
+        group_id = _get_group_id_for_threads_dir(threads_dir)
+        store = get_falkordb_entry_store(group_id)
+
+        if store is None:
+            return False
+
+        embedding = store.get_embedding(entry_id)
+        return embedding is not None
+
+    except Exception as e:
+        logger.debug(f"Failed to check embedding in FalkorDB: {e}")
+        return False
+
+
+def upsert_embedding(
+    threads_dir: Path,
+    graph_dir: Path,
+    entry_id: str,
+    topic: str,
+    embedding: List[float],
+    *,
+    skip_file_storage: bool = False,
+) -> None:
+    """Store entry embedding, preferring FalkorDB with fallback to file storage.
+
+    This is the unified embedding storage function that:
+    1. Attempts to store in FalkorDB first
+    2. Falls back to search-index.jsonl if FalkorDB unavailable
+    3. Can optionally skip file storage entirely (for migration)
+
+    Args:
+        threads_dir: Threads directory
+        graph_dir: Graph directory for file storage
+        entry_id: Entry ULID
+        topic: Thread topic
+        embedding: Embedding vector
+        skip_file_storage: If True, skip file-based storage even if FalkorDB fails
+    """
+    # Try FalkorDB first
+    stored_in_falkordb = store_entry_embedding_to_falkordb(
+        threads_dir, entry_id, topic, embedding
+    )
+
+    # Fall back to file storage if FalkorDB failed and not skipped
+    if not stored_in_falkordb and not skip_file_storage:
+        storage.upsert_search_index_entry(graph_dir, entry_id, topic, embedding)
+
+
+def delete_embedding(
+    threads_dir: Path,
+    graph_dir: Path,
+    entry_id: str,
+) -> None:
+    """Delete entry embedding from both FalkorDB and file storage.
+
+    Args:
+        threads_dir: Threads directory
+        graph_dir: Graph directory for file storage
+        entry_id: Entry ULID
+    """
+    # Delete from FalkorDB
+    delete_entry_embedding_from_falkordb(threads_dir, entry_id)
+
+    # Delete from file storage
+    storage.remove_from_search_index(graph_dir, entry_id)
+
+
+def _should_auto_start_services() -> bool:
+    """Check if auto-start services is enabled.
+
+    Priority (highest first):
+    1. Environment variable: WATERCOOLER_AUTO_START_SERVICES
+    2. TOML config: mcp.graph.auto_start_services
+
+    Returns:
+        True if auto-start is enabled via env var or config
+    """
+    # Check env var first (takes priority)
+    env_val = os.environ.get("WATERCOOLER_AUTO_START_SERVICES", "").lower()
+    if env_val:
+        return env_val in ("1", "true", "yes")
+
+    # Fall back to TOML config
+    try:
+        from watercooler.config_facade import config
+        cfg = config.full()
+        result = cfg.mcp.graph.auto_start_services
+        logger.debug(f"auto_start_services from TOML config: {result}")
+        return result
+    except Exception as e:
+        # Log at ERROR level so we can see what's failing
+        logger.error(f"Failed to load config for auto_start_services: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return False
 
 
 def _try_auto_start_service(service_type: str, api_base: str) -> bool:
-    """Attempt to auto-start a service using ServerManager.
+    """Attempt to auto-start a service using MCP startup utilities.
+
+    Uses ensure_llm_running() for LLM and ensure_embedding_running() for embeddings.
+    These functions are in watercooler_mcp.startup and handle platform-specific startup.
 
     Args:
         service_type: "llm" or "embedding"
         api_base: API base URL for the service
 
     Returns:
-        True if service was started or already running, False otherwise
+        True if service is now available, False otherwise
     """
     if not _should_auto_start_services():
         return False
 
     try:
-        from watercooler.memory_config import (
-            resolve_baseline_graph_llm_config,
-            resolve_baseline_graph_embedding_config,
-        )
-        from watercooler_memory.pipeline.server_manager import ServerManager
-
-        # Use unified config for URLs instead of hardcoded defaults
-        llm_config = resolve_baseline_graph_llm_config()
-        embedding_config = resolve_baseline_graph_embedding_config()
-
-        manager = ServerManager(
-            llm_api_base=api_base if service_type == "llm" else llm_config.api_base,
-            embedding_api_base=api_base if service_type == "embedding" else embedding_config.api_base,
-            interactive=False,
-            auto_approve=True,
-            verbose=False,
-        )
+        # Try to use the MCP startup utilities
         if service_type == "llm":
-            if manager.check_llm_server():
-                return True
-            return manager.start_llm_server()
+            from watercooler_mcp.startup import ensure_llm_running
+            ensure_llm_running()
         else:
-            if manager.check_embedding_server():
-                return True
-            return manager.start_embedding_server()
+            from watercooler_mcp.startup import ensure_embedding_running
+            ensure_embedding_running()
+
+        # Check if service is now available
+        if service_type == "embedding":
+            return is_embedding_available(EmbeddingConfig(api_base=api_base))
+        else:
+            return is_llm_service_available()
+
     except ImportError:
         logger.debug(
-            f"WATERCOOLER_AUTO_START_SERVICES is enabled but ServerManager not available. "
-            f"Cannot auto-start {service_type} service."
+            f"WATERCOOLER_AUTO_START_SERVICES is enabled but startup module not available. "
+            f"Cannot auto-start {service_type} service (running outside MCP context?)."
         )
         return False
     except Exception as e:
@@ -755,21 +1067,36 @@ def enrich_graph_entry(
 
             if new_summary and new_summary != existing_summary:
                 entries[entry_node_id]["summary"] = new_summary
-            if new_embedding:
-                entries[entry_node_id]["embedding"] = new_embedding
 
-            # Load existing meta and edges (we only update entries)
+            # NOTE: Embeddings are no longer stored in entries.jsonl (Phase 2 migration)
+            # They are stored in FalkorDB with fallback to search-index.jsonl
+
+            # Load existing meta and edges (we only update entries for summary)
             meta = storage.load_thread_meta(graph_dir, topic) or {}
             edges = storage.load_thread_edges(graph_dir, topic)
 
-            # Write back atomically
+            # Write back atomically (summary only, not embedding)
             storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-            # Update search index if embedding was generated
+            # Store embedding in FalkorDB (with fallback to search-index.jsonl)
             if new_embedding:
-                storage.upsert_search_index_entry(graph_dir, entry_id, topic, new_embedding)
+                upsert_embedding(threads_dir, graph_dir, entry_id, topic, new_embedding)
 
             logger.debug(f"Enrichment complete for {topic}/{entry_id}")
+
+        # Call memory backend hook (non-blocking - errors logged, never raise)
+        # This enables Graphiti/LeanRAG indexing after entry enrichment
+        sync_to_memory_backend(
+            threads_dir=threads_dir,
+            topic=topic,
+            entry_id=entry_id,
+            entry_body=body,
+            entry_title=title,
+            timestamp=entry_node.get("timestamp"),
+            agent=entry_node.get("agent"),
+            role=entry_node.get("role"),
+            entry_type=entry_type,
+        )
 
         return EnrichmentResult(
             success=True,
@@ -890,7 +1217,7 @@ def sync_entry_to_graph(
                 logger.warning(
                     f"LLM service unavailable at {summarizer_config.api_base}. "
                     "Skipping summary generation. To enable summaries: "
-                    "1) Start Ollama: 'ollama serve' "
+                    "1) Start llama-server on port 8000 "
                     "2) Or set WATERCOOLER_AUTO_START_SERVICES=true"
                 )
 
@@ -1011,9 +1338,9 @@ def sync_entry_to_graph(
         # Write all per-thread files atomically
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-        # Update search index if embedding was generated
+        # Store embedding in FalkorDB (with fallback to search-index.jsonl)
         if entry_embedding:
-            storage.upsert_search_index_entry(graph_dir, entry.entry_id, topic, entry_embedding)
+            upsert_embedding(threads_dir, graph_dir, entry.entry_id, topic, entry_embedding)
 
         # Update manifest
         storage.update_manifest(graph_dir, topic, entry.entry_id)
@@ -1149,9 +1476,9 @@ def sync_thread_to_graph(
         # Write all per-thread files atomically
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-        # Update search index for entries with embeddings
+        # Store embeddings in FalkorDB (with fallback to search-index.jsonl)
         for entry_id, embedding in search_index_updates:
-            storage.upsert_search_index_entry(graph_dir, entry_id, topic, embedding)
+            upsert_embedding(threads_dir, graph_dir, entry_id, topic, embedding)
 
         # Update manifest
         last_entry_id = parsed.entries[-1].entry_id if parsed.entries else None
@@ -1325,8 +1652,8 @@ def _verify_graph_parity(
             continue
 
         try:
-            # Parse the thread file
-            parsed = parse_thread_file(thread_file)
+            # Parse the thread file (no summaries needed for parity check)
+            parsed = parse_thread_file(thread_file, generate_summaries=False)
 
             # Compare entry_count
             graph_count = graph_node.get("entry_count", 0)
@@ -1539,13 +1866,11 @@ def backfill_missing(
                                 text = f"{entry['title']}\n\n{text}"
                             embedding = generate_embedding(text)
                             if embedding:
-                                entry["embedding"] = embedding
+                                # NOTE: No longer storing embedding in entries.jsonl
+                                # Store in FalkorDB (with fallback to search-index.jsonl)
+                                upsert_embedding(threads_dir, graph_dir, entry_raw_id, topic, embedding)
                                 result.entries_embedding_generated += 1
-                                thread_updated = True
-                                # Also update search index
-                                storage.upsert_search_index_entry(
-                                    graph_dir, entry_raw_id, topic, embedding
-                                )
+                                # Note: thread_updated is for summary changes only now
                         except Exception as e:
                             result.errors.append(f"Entry {entry_raw_id} embedding: {e}")
 
@@ -1562,6 +1887,388 @@ def backfill_missing(
         f"Backfill complete: {result.threads_summary_generated} thread summaries, "
         f"{result.entries_summary_generated} entry summaries, "
         f"{result.entries_embedding_generated} embeddings"
+    )
+
+    return result
+
+
+# ============================================================================
+# New Tool Suite Core Functions (Milestone: Fresh Suite Design)
+# ============================================================================
+
+
+def enrich_graph(
+    threads_dir: Path,
+    summaries: bool = True,
+    embeddings: bool = True,
+    mode: str = "missing",  # "missing" | "selective" | "all"
+    topics: Optional[List[str]] = None,
+    batch_size: int = 10,
+    limit: Optional[int] = None,
+    dry_run: bool = False,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> EnrichResult:
+    """Generate or regenerate summaries and embeddings.
+
+    This is the unified enrichment function that replaces backfill_missing
+    with a cleaner, more consistent API.
+
+    Modes:
+    - "missing": Only fill missing values (default, safe)
+    - "selective": Process only specified topics (force regenerate)
+    - "all": Regenerate everything (global refresh, use with caution)
+
+    Args:
+        threads_dir: Threads directory
+        summaries: Whether to generate/regenerate summaries
+        embeddings: Whether to generate/regenerate embeddings
+        mode: Processing mode - "missing", "selective", or "all"
+        topics: Topics to process (required for "selective" mode)
+        batch_size: Number of items to process before writing
+        limit: Maximum number of entries to process (None = no limit)
+        dry_run: If True, return what would be processed without making changes
+        progress_callback: Optional callback(current, total, description) for progress
+
+    Returns:
+        EnrichResult with counts of processed/generated items
+
+    Examples:
+        # Fill missing embeddings only
+        enrich_graph(threads_dir, embeddings=True, summaries=False, mode="missing")
+
+        # Regenerate embeddings for specific topics
+        enrich_graph(threads_dir, embeddings=True, mode="selective", topics=["topic-a"])
+
+        # Full refresh of all embeddings
+        enrich_graph(threads_dir, embeddings=True, summaries=False, mode="all")
+
+        # Process only 5 entries (for testing)
+        enrich_graph(threads_dir, summaries=True, embeddings=True, limit=5)
+    """
+    result = EnrichResult(dry_run=dry_run)
+    graph_dir = storage.get_graph_dir(threads_dir)
+
+    if not storage.is_per_thread_format(graph_dir):
+        result.errors.append(f"No per-thread graph format found at {graph_dir}")
+        return result
+
+    # Validate mode
+    if mode not in ("missing", "selective", "all"):
+        result.errors.append(f"Invalid mode: {mode}. Use 'missing', 'selective', or 'all'")
+        return result
+
+    if mode == "selective" and not topics:
+        result.errors.append("Mode 'selective' requires topics list")
+        return result
+
+    # Check service availability (skip for dry run)
+    llm_available = False
+    embedding_available = False
+
+    if not dry_run:
+        if summaries:
+            llm_available = is_llm_service_available()
+            if not llm_available:
+                logger.warning("LLM service not available, skipping summary enrichment")
+
+        if embeddings:
+            embedding_available = is_embedding_available()
+            if not embedding_available:
+                logger.warning("Embedding service not available, skipping embedding enrichment")
+
+        if not llm_available and not embedding_available:
+            result.errors.append("No services available for enrichment")
+            return result
+
+    # Get summarizer config
+    config = create_summarizer_config() if summaries else None
+
+    # Determine which topics to process
+    all_topics = storage.list_thread_topics(graph_dir)
+    if mode == "selective":
+        target_topics = [t for t in topics if t in all_topics]
+        if not target_topics:
+            result.errors.append(f"No matching topics found. Available: {all_topics[:10]}")
+            return result
+    else:
+        target_topics = all_topics
+
+    # Count total entries for progress reporting
+    total_entries = 0
+    if progress_callback:
+        for topic in target_topics:
+            try:
+                entries = storage.load_thread_entries_dict(graph_dir, topic)
+                total_entries += len(entries)
+            except Exception:
+                pass
+        progress_callback(0, total_entries, "Starting enrichment...")
+
+    # Track progress
+    entries_seen = 0
+    entries_actually_processed = 0
+    limit_reached = False
+
+    # Process each thread
+    for topic in target_topics:
+        if limit_reached:
+            break
+        try:
+            meta = storage.load_thread_meta(graph_dir, topic)
+            entries = storage.load_thread_entries_dict(graph_dir, topic)
+            edges = storage.load_thread_edges(graph_dir, topic)
+
+            if not meta:
+                continue
+
+            result.threads_processed += 1
+            thread_updated = False
+            entry_list = list(entries.values())
+            result.entries_processed += len(entry_list)
+
+            # Process entries
+            for entry_id, entry in entries.items():
+                entries_seen += 1
+                entry_raw_id = entry.get("entry_id", entry_id)
+
+                # Check if we should process this entry
+                has_summary = bool(entry.get("summary"))
+                # Check FalkorDB for embeddings (no longer stored in JSONL)
+                has_embedding = has_embedding_in_falkordb(threads_dir, entry_raw_id)
+
+                should_do_summary = summaries and (
+                    mode == "all" or
+                    mode == "selective" or
+                    (mode == "missing" and not has_summary)
+                )
+                should_do_embedding = embeddings and (
+                    mode == "all" or
+                    mode == "selective" or
+                    (mode == "missing" and not has_embedding)
+                )
+
+                if not should_do_summary and not should_do_embedding:
+                    result.skipped += 1
+                    continue
+
+                if dry_run:
+                    # Just count what would be processed
+                    if should_do_summary:
+                        result.summaries_generated += 1
+                    if should_do_embedding:
+                        result.embeddings_generated += 1
+                    entries_actually_processed += 1
+                    # Check limit even in dry run
+                    if limit and entries_actually_processed >= limit:
+                        limit_reached = True
+                        break
+                    continue
+
+                # Track if this entry gets processed
+                entry_processed = False
+
+                # Generate summary
+                if should_do_summary and llm_available:
+                    try:
+                        summary = summarize_entry(
+                            entry_body=entry.get("body", ""),
+                            entry_title=entry.get("title", ""),
+                            entry_type=entry.get("entry_type", "Note"),
+                            config=config,
+                        )
+                        if summary:
+                            entry["summary"] = summary
+                            result.summaries_generated += 1
+                            thread_updated = True
+                            entry_processed = True
+                    except Exception as e:
+                        result.errors.append(f"Entry {entry_raw_id} summary: {e}")
+
+                # Generate embedding
+                if should_do_embedding and embedding_available:
+                    try:
+                        text = entry.get("summary") or entry.get("body", "")
+                        if entry.get("title"):
+                            text = f"{entry['title']}\n\n{text}"
+                        embedding = generate_embedding(text)
+                        if embedding:
+                            # NOTE: No longer storing embedding in entries.jsonl
+                            # Store in FalkorDB (with fallback to search-index.jsonl)
+                            upsert_embedding(threads_dir, graph_dir, entry_raw_id, topic, embedding)
+                            result.embeddings_generated += 1
+                            entry_processed = True
+                            # Note: thread_updated is for summary changes only now
+                    except Exception as e:
+                        result.errors.append(f"Entry {entry_raw_id} embedding: {e}")
+
+                # Track actual processing and check limit
+                if entry_processed:
+                    entries_actually_processed += 1
+                    if limit and entries_actually_processed >= limit:
+                        limit_reached = True
+                        # Report progress before breaking
+                        if progress_callback:
+                            progress_callback(entries_seen, total_entries, f"{topic}/{entry_raw_id}")
+                        break
+
+                # Report progress
+                if progress_callback:
+                    progress_callback(entries_seen, total_entries, f"{topic}/{entry_raw_id}")
+
+            # Generate thread summary if enabled (summaries flag controls both entry and thread)
+            if summaries:
+                has_thread_summary = bool(meta.get("summary"))
+                should_do_thread_summary = (
+                    mode == "all" or
+                    mode == "selective" or
+                    (mode == "missing" and not has_thread_summary)
+                )
+
+                if should_do_thread_summary:
+                    if dry_run:
+                        result.thread_summaries_generated += 1
+                    elif llm_available:
+                        try:
+                            thread_summary = summarize_thread(
+                                entries=entry_list,
+                                thread_title=meta.get("title", topic),
+                                config=config,
+                            )
+                            if thread_summary:
+                                meta["summary"] = thread_summary
+                                result.thread_summaries_generated += 1
+                                thread_updated = True
+                                logger.debug(f"Generated thread summary for {topic}")
+                        except Exception as e:
+                            result.errors.append(f"Thread {topic} summary: {e}")
+
+            # Write updated thread data if changed
+            if thread_updated and not dry_run:
+                storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+                logger.debug(f"Updated graph files for thread {topic}")
+
+        except Exception as e:
+            result.errors.append(f"Thread {topic}: {e}")
+            continue
+
+    if not dry_run:
+        logger.info(
+            f"Enrichment complete: {result.summaries_generated} entry summaries, "
+            f"{result.thread_summaries_generated} thread summaries, "
+            f"{result.embeddings_generated} embeddings"
+        )
+
+    return result
+
+
+def recover_graph(
+    threads_dir: Path,
+    mode: str = "stale",  # "stale" | "selective" | "all"
+    topics: Optional[List[str]] = None,
+    generate_summaries: bool = True,
+    generate_embeddings: bool = True,
+    dry_run: bool = False,
+) -> RecoverResult:
+    """Rebuild graph from markdown (emergency recovery).
+
+    WARNING: This parses markdown to rebuild graph nodes. Use only when:
+    - Graph data is corrupted or lost
+    - Manual edits were made to markdown
+    - Migrating from old format
+    - Recovering stale/error threads
+
+    Modes:
+    - "stale": Recover only stale/error threads (auto-detected)
+    - "selective": Recover specific topics only
+    - "all": Full rebuild from all markdown (slow, destructive)
+
+    Note: In normal operation, graph is source of truth.
+    This tool is the exception for recovery scenarios.
+
+    Args:
+        threads_dir: Threads directory
+        mode: Recovery mode - "stale", "selective", or "all"
+        topics: Topics to recover (required for "selective" mode)
+        generate_summaries: Generate summaries during recovery
+        generate_embeddings: Generate embeddings during recovery
+        dry_run: If True, return what would be recovered without making changes
+
+    Returns:
+        RecoverResult with recovery statistics
+    """
+    result = RecoverResult(dry_run=dry_run)
+
+    # Validate mode
+    if mode not in ("stale", "selective", "all"):
+        result.errors.append(f"Invalid mode: {mode}. Use 'stale', 'selective', or 'all'")
+        return result
+
+    if mode == "selective" and not topics:
+        result.errors.append("Mode 'selective' requires topics list")
+        return result
+
+    # Determine which topics to process
+    thread_files = list(threads_dir.glob("*.md"))
+    available_topics = [f.stem for f in thread_files]
+
+    if mode == "stale":
+        # Get stale/error topics from health check
+        health = check_graph_health(threads_dir)
+        target_topics = health.stale_threads + list(health.error_details.keys())
+        if not target_topics:
+            logger.info("No stale or error threads found, nothing to recover")
+            return result
+    elif mode == "selective":
+        target_topics = [t for t in topics if t in available_topics]
+        if not target_topics:
+            result.errors.append(f"No matching topics found in markdown files")
+            return result
+    else:  # mode == "all"
+        target_topics = available_topics
+
+    # Count for dry run
+    if dry_run:
+        for topic in target_topics:
+            thread_path = threads_dir / f"{topic}.md"
+            if thread_path.exists():
+                try:
+                    parsed = parse_thread_file(thread_path, generate_summaries=False)
+                    if parsed:
+                        result.threads_recovered += 1
+                        result.entries_parsed += len(parsed.entries)
+                        if generate_summaries:
+                            result.summaries_generated += len(parsed.entries) + 1  # entries + thread
+                        if generate_embeddings:
+                            result.embeddings_generated += len(parsed.entries)
+                except Exception as e:
+                    result.errors.append(f"Thread {topic}: {e}")
+        return result
+
+    # Actual recovery - use sync_thread_to_graph for each topic
+    for topic in target_topics:
+        try:
+            success = sync_thread_to_graph(
+                threads_dir=threads_dir,
+                topic=topic,
+                generate_summaries=generate_summaries,
+                generate_embeddings=generate_embeddings,
+            )
+            if success:
+                result.threads_recovered += 1
+                # Count entries from the thread
+                thread_path = threads_dir / f"{topic}.md"
+                if thread_path.exists():
+                    parsed = parse_thread_file(thread_path, generate_summaries=False)
+                    if parsed:
+                        result.entries_parsed += len(parsed.entries)
+            else:
+                result.errors.append(f"Thread {topic}: sync failed")
+        except Exception as e:
+            result.errors.append(f"Thread {topic}: {e}")
+
+    logger.info(
+        f"Recovery complete: {result.threads_recovered} threads, "
+        f"{result.entries_parsed} entries"
     )
 
     return result
@@ -1690,32 +2397,73 @@ def is_memory_disabled() -> bool:
 
 
 def get_memory_backend_config() -> Optional[Dict[str, Any]]:
-    """Get memory backend configuration from environment.
+    """Get memory backend configuration from unified config system.
 
-    Configuration via WATERCOOLER_MEMORY_BACKEND env var:
+    Resolution priority (highest first):
+    1. WATERCOOLER_MEMORY_DISABLED env var - disables if "1"/"true"/"yes"
+    2. WATERCOOLER_MEMORY_BACKEND env var - explicit backend override
+    3. WATERCOOLER_GRAPHITI_ENABLED env var - legacy auto-detection
+    4. TOML config: [memory].backend setting
+
+    Supported backends:
     - "graphiti": Sync to Graphiti temporal graph
     - "leanrag": Trigger LeanRAG clustering pipeline
-
-    Auto-detection: If WATERCOOLER_GRAPHITI_ENABLED=1 is set but
-    WATERCOOLER_MEMORY_BACKEND is not, defaults to "graphiti".
 
     Returns:
         Config dict with backend name, or None if disabled
     """
-    # Check master disable switch first
+    # Import unified config here to avoid circular imports
+    # memory_config uses the same config facade as MCP server
+    try:
+        from watercooler.memory_config import is_memory_enabled, get_memory_backend
+    except ImportError:
+        # Fallback to env-only mode if memory_config not available
+        # (e.g., running without full watercooler installation)
+        logger.debug("MEMORY: memory_config not available, using env-only mode")
+        return _get_memory_backend_config_env_only()
+
+    # Check master disable switch (env var + TOML)
+    if not is_memory_enabled():
+        logger.debug("MEMORY: Disabled via config or WATERCOOLER_MEMORY_DISABLED=1")
+        return None
+
+    # Get backend from unified config (env var + TOML fallback)
+    backend = get_memory_backend().lower().strip()
+
+    # Legacy auto-detect: if WATERCOOLER_GRAPHITI_ENABLED=1 but no backend specified,
+    # default to graphiti for automatic entry sync
+    if not backend or backend == "null":
+        graphiti_enabled = os.environ.get("WATERCOOLER_GRAPHITI_ENABLED", "").lower()
+        if graphiti_enabled in ("1", "true", "yes"):
+            backend = "graphiti"
+            logger.debug("MEMORY: Auto-detected graphiti backend from WATERCOOLER_GRAPHITI_ENABLED=1")
+
+    if not backend or backend == "null":
+        logger.debug("MEMORY: No backend configured (backend='null' or empty)")
+        return None
+
+    if backend not in ("graphiti", "leanrag"):
+        logger.warning(f"Unknown memory backend: {backend}. Supported: graphiti, leanrag")
+        return None
+
+    return {"backend": backend}
+
+
+def _get_memory_backend_config_env_only() -> Optional[Dict[str, Any]]:
+    """Fallback env-only config for when memory_config is not available.
+
+    This preserves the original env-only behavior for minimal installations.
+    """
     if is_memory_disabled():
         logger.debug("MEMORY: Disabled (WATERCOOLER_MEMORY_DISABLED=1)")
         return None
 
     backend = os.environ.get("WATERCOOLER_MEMORY_BACKEND", "").lower().strip()
 
-    # Auto-detect: if WATERCOOLER_GRAPHITI_ENABLED=1 but no backend specified,
-    # default to graphiti for automatic entry sync
     if not backend:
         graphiti_enabled = os.environ.get("WATERCOOLER_GRAPHITI_ENABLED", "").lower()
         if graphiti_enabled in ("1", "true", "yes"):
             backend = "graphiti"
-            logger.debug("MEMORY: Auto-detected graphiti backend from WATERCOOLER_GRAPHITI_ENABLED=1")
 
     if not backend:
         return None

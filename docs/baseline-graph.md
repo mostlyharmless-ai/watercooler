@@ -66,14 +66,14 @@ print(f"Exported {manifest['threads_exported']} threads")
 print(f"Generated {manifest['nodes_written']} nodes, {manifest['edges_written']} edges")
 ```
 
-### With Local LLM (Ollama)
+### With Local LLM (llama-server)
 
 ```python
 from watercooler.baseline_graph import export_all_threads, SummarizerConfig
 
-# Configure for local Ollama instance
+# Configure for local llama-server instance
 config = SummarizerConfig(
-    api_base="http://localhost:11434/v1",
+    api_base="http://localhost:8000/v1",
     model="llama3.2:3b",
     timeout=30.0,
 )
@@ -91,9 +91,9 @@ manifest = export_all_threads(
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `api_base` | `http://localhost:11434/v1` | OpenAI-compatible API endpoint |
+| `api_base` | `http://localhost:8000/v1` | OpenAI-compatible API endpoint |
 | `model` | `llama3.2:3b` | Model name for LLM summarization |
-| `api_key` | `ollama` | API key (Ollama doesn't require one) |
+| `api_key` | `local` | API key (local llama-server doesn't require one) |
 | `timeout` | `30.0` | Request timeout in seconds |
 | `max_tokens` | `256` | Maximum tokens for LLM response |
 | `extractive_max_chars` | `200` | Max chars for extractive summaries |
@@ -106,9 +106,9 @@ manifest = export_all_threads(
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BASELINE_GRAPH_API_BASE` | `http://localhost:11434/v1` | LLM API endpoint |
+| `BASELINE_GRAPH_API_BASE` | `http://localhost:8000/v1` | LLM API endpoint |
 | `BASELINE_GRAPH_MODEL` | `llama3.2:3b` | LLM model name |
-| `BASELINE_GRAPH_API_KEY` | `ollama` | API key for LLM |
+| `BASELINE_GRAPH_API_KEY` | `local` | API key for LLM |
 | `BASELINE_GRAPH_TIMEOUT` | `30.0` | Request timeout (seconds) |
 | `BASELINE_GRAPH_MAX_TOKENS` | `256` | Max response tokens |
 | `BASELINE_GRAPH_EXTRACTIVE_ONLY` | `false` | Force extractive mode (`1`, `true`, `yes`) |
@@ -120,9 +120,9 @@ manifest = export_all_threads(
 prefer_extractive = false
 
 [baseline_graph.llm]
-api_base = "http://localhost:11434/v1"
+api_base = "http://localhost:8000/v1"
 model = "llama3.2:3b"
-api_key = "ollama"
+api_key = "local"
 timeout = 30.0
 max_tokens = 256
 
@@ -307,35 +307,22 @@ for node in nodes:
 
 ## LLM Backend Options
 
-### Ollama (Recommended)
+### llama-server (Default)
 
-```bash
-# Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull a small model
-ollama pull llama3.2:3b
-
-# Ollama serves on http://localhost:11434 by default
-```
+llama-server auto-starts when configured for localhost endpoints. Models auto-download from HuggingFace on first use.
 
 ```toml
 [baseline_graph.llm]
-api_base = "http://localhost:11434/v1"
+api_base = "http://localhost:8000/v1"
 model = "llama3.2:3b"
 ```
 
-### llama.cpp Server
-
-```bash
-# Start llama.cpp server
-./server -m model.gguf --host 0.0.0.0 --port 8080
-```
+To disable auto-provisioning:
 
 ```toml
-[baseline_graph.llm]
-api_base = "http://localhost:8080/v1"
-model = "local"
+[mcp.service_provision]
+llama_server = false  # Don't auto-download llama-server binary
+models = false        # Don't auto-download GGUF models
 ```
 
 ### Any OpenAI-Compatible API
@@ -392,9 +379,9 @@ generate_embeddings = true
 auto_detect_services = true
 
 # Service endpoints
-summarizer_api_base = "http://localhost:11434/v1"  # Ollama
+summarizer_api_base = "http://localhost:8000/v1"  # llama-server (LLM)
 summarizer_model = "llama3.2:3b"
-embedding_api_base = "http://localhost:8080/v1"    # llama.cpp
+embedding_api_base = "http://localhost:8080/v1"   # llama-server (embeddings)
 embedding_model = "bge-m3"
 ```
 
@@ -414,7 +401,7 @@ watercooler_health
 # Output includes:
 # Graph Services:
 #   Summaries Enabled: True
-#   LLM Service: available (http://localhost:11434/v1)
+#   LLM Service: available (http://localhost:8000/v1)
 #   Embeddings Enabled: True
 #   Embedding Service: unavailable (http://localhost:8080/v1)
 #   Auto-Detect Services: True
@@ -439,15 +426,15 @@ When enabled, the MCP server will attempt to start local LLM/embedding services 
 
 **Problem: "LLM service unavailable" warning**
 
-1. Start Ollama: `ollama serve`
-2. Verify model is pulled: `ollama list`
-3. Check endpoint: `curl http://localhost:11434/v1/models`
+1. Run `watercooler_health` to check service status
+2. Verify llama-server is running: `curl http://localhost:8000/v1/models`
+3. Check auto-provisioning config if services fail to start
 
 **Problem: "Embedding service unavailable" warning**
 
-1. Start llama.cpp server with embedding model
-2. Or use llama-cpp-python: `python -m llama_cpp.server --model bge-m3.gguf --port 8080`
-3. Check endpoint: `curl http://localhost:8080/v1/embeddings`
+1. Run `watercooler_health` to check service status
+2. Verify llama-server (embedding) is running: `curl http://localhost:8080/v1/embeddings`
+3. Check auto-provisioning config if services fail to start
 
 **Problem: Summaries/embeddings not generating**
 

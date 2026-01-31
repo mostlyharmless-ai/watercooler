@@ -46,6 +46,7 @@ dev = [
     "pytest>=7.0",
     "mypy>=1.0",
     "jsonschema>=4.0",
+    "tqdm>=4.0",
 ]
 mcp = [
     "fastmcp>=2.0",
@@ -60,33 +61,42 @@ http = [
 baseline = [
     "httpx>=0.25",
 ]
+# Memory backends - includes graphiti-core and leanrag from MostlyHarmless forks
+# Usage: uvx --from "watercooler-cloud[memory]" watercooler-mcp
+# For development with submodules, omit [memory] and use WATERCOOLER_GRAPHITI_PATH
 memory = [
     "tiktoken>=0.5",
     "httpx>=0.25",
     "openai>=1.0",
+    "graphiti-core[falkordb] @ git+https://github.com/mostlyharmless-ai/graphiti.git@main",
+    "leanrag @ git+https://github.com/mostlyharmless-ai/LeanRAG.git@feature/falkordb-vector-backend",
+    # Model downloads from HuggingFace (llama-server binary is downloaded separately)
+    "huggingface_hub>=0.20",
 ]
-# Graphiti temporal graph memory backend
-# NOTE: graphiti-core must be installed separately from the git submodule:
-#   pip install -e external/graphiti[falkordb]
-# This extra only installs the supporting dependencies
+# Graphiti temporal graph memory backend (without leanrag)
+# For production deployments that only need Graphiti
 graphiti = [
     "tiktoken>=0.5",
     "httpx>=0.25",
     "openai>=1.0",
-]
-# Local LLM inference - provides OpenAI-compatible server for offline summarization
-# Usage: pip install watercooler-cloud[local]
-#        python -m watercooler_memory.local_server  (auto-downloads default model)
-local = [
-    "llama-cpp-python[server]>=0.2.50",
+    "graphiti-core[falkordb] @ git+https://github.com/mostlyharmless-ai/graphiti.git@main",
+    # Model downloads from HuggingFace (llama-server binary is downloaded separately)
     "huggingface_hub>=0.20",
-    "httpx>=0.25",
 ]
-# Full graph building with local models
-graph-local = [
+# LeanRAG hierarchical graph memory backend (without graphiti)
+leanrag = [
     "tiktoken>=0.5",
     "httpx>=0.25",
-    "llama-cpp-python[server]>=0.2.50",
+    "openai>=1.0",
+    "leanrag @ git+https://github.com/mostlyharmless-ai/LeanRAG.git@feature/falkordb-vector-backend",
+    # Model downloads from HuggingFace (llama-server binary is downloaded separately)
+    "huggingface_hub>=0.20",
+]
+# Local model support - downloads GGUF models, llama-server binary auto-downloaded at runtime
+# Usage: pip install watercooler-cloud[local]
+local = [
+    "huggingface_hub>=0.20",
+    "httpx>=0.25",
 ]
 # Interactive graph visualization for baseline graphs (scripts/visualize_graph.py)
 # See docs/visualization.md for usage
@@ -115,4 +125,6 @@ markers = [
     "integration_leanrag_llm: marks tests requiring LeanRAG with LLM APIs (DeepSeek, GLM embeddings)",
     "integration_graphiti: marks tests requiring Graphiti backend with API key (run with '-m integration_graphiti')",
     "benchmark: marks tests as performance benchmarks (run with '-m benchmark')",
+    "network: marks tests requiring network access (deselect with '-m \"not network\"')",
+    "slow: marks tests as slow running (deselect with '-m \"not slow\"')",
 ]

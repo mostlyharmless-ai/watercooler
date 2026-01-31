@@ -28,8 +28,13 @@ _reset_logging_state = obs._reset_logging_state
 
 
 @pytest.fixture(autouse=True)
-def reset_logger():
-    """Reset logger state between tests."""
+def reset_logger(monkeypatch):
+    """Reset logger state between tests.
+
+    Disables file logging so propagation is enabled for pytest caplog.
+    """
+    # Disable file logging to enable log propagation (for caplog to work)
+    monkeypatch.setenv("WATERCOOLER_LOG_DISABLE_FILE", "1")
     # Use the module's reset function to clear all cached state
     _reset_logging_state()
     yield

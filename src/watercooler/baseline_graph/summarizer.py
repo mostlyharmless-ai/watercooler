@@ -1,7 +1,7 @@
-"""Summarizer for baseline graph using local LLM or extractive fallback.
+"""Summarizer for baseline graph using local LLM.
 
-Uses OpenAI-compatible API for local LLM inference (Ollama, llama.cpp).
-Falls back to extractive summarization when LLM is unavailable.
+Uses OpenAI-compatible API for local LLM inference (llama-server, OpenAI, etc.).
+Returns empty string when LLM is unavailable (no fallback to extractive).
 """
 
 import logging
@@ -31,6 +31,18 @@ def _get_default_api_key() -> str:
     return resolve_baseline_graph_llm_config().api_key
 
 
+def _get_default_summary_prompt() -> str:
+    """Get default summary prompt from unified config (checks env vars first)."""
+    from watercooler.memory_config import resolve_baseline_graph_llm_config
+    return resolve_baseline_graph_llm_config().summary_prompt
+
+
+def _get_default_thread_summary_prompt() -> str:
+    """Get default thread summary prompt from unified config (checks env vars first)."""
+    from watercooler.memory_config import resolve_baseline_graph_llm_config
+    return resolve_baseline_graph_llm_config().thread_summary_prompt
+
+
 @dataclass
 class SummarizerConfig:
     """Configuration for the summarizer.
@@ -39,7 +51,7 @@ class SummarizerConfig:
     1. Environment variables (LLM_API_BASE, LLM_MODEL, LLM_API_KEY)
     2. Legacy env vars (BASELINE_GRAPH_API_BASE, etc.)
     3. TOML config ([memory.llm])
-    4. Built-in defaults (localhost:11434 for Ollama)
+    4. Built-in defaults (localhost:8000 for llama-server)
     """
 
     # LLM settings (resolved via unified config by default)
@@ -48,6 +60,10 @@ class SummarizerConfig:
     api_key: str = field(default_factory=_get_default_api_key)
     timeout: float = 30.0
     max_tokens: int = 256
+
+    # Summary prompts (configurable via [memory.llm])
+    summary_prompt: str = field(default_factory=_get_default_summary_prompt)
+    thread_summary_prompt: str = field(default_factory=_get_default_thread_summary_prompt)
 
     # Extractive fallback settings
     extractive_max_chars: int = 200
@@ -76,6 +92,8 @@ class SummarizerConfig:
             api_key=llm.get("api_key", llm_defaults.api_key),
             timeout=llm.get("timeout", cls.timeout),
             max_tokens=llm.get("max_tokens", cls.max_tokens),
+            summary_prompt=llm.get("summary_prompt", llm_defaults.summary_prompt),
+            thread_summary_prompt=llm.get("thread_summary_prompt", llm_defaults.thread_summary_prompt),
             extractive_max_chars=extractive.get("max_chars", cls.extractive_max_chars),
             include_headers=extractive.get("include_headers", cls.include_headers),
             max_headers=extractive.get("max_headers", cls.max_headers),
@@ -117,6 +135,8 @@ class SummarizerConfig:
             api_key=llm_config.api_key,
             timeout=timeout,
             max_tokens=max_tokens,
+            summary_prompt=llm_config.summary_prompt,
+            thread_summary_prompt=llm_config.thread_summary_prompt,
             prefer_extractive=os.environ.get("BASELINE_GRAPH_EXTRACTIVE_ONLY", "").lower() in ("1", "true", "yes"),
         )
 
@@ -316,17 +336,22 @@ def _call_llm(
 
     url = f"{config.api_base.rstrip('/')}/chat/completions"
 
+    # Ensure max_tokens is sufficient for thinking models
+    from watercooler.models import get_min_max_tokens
+    max_tokens = max(config.max_tokens, get_min_max_tokens(config.model, config.max_tokens))
+
     payload = {
         "model": config.model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": config.max_tokens,
+        "max_tokens": max_tokens,
         "temperature": 0.3,  # Low temp for factual summaries
     }
 
     headers = {
         "Content-Type": "application/json",
     }
-    if config.api_key and config.api_key != "ollama":
+    # Add authorization header for non-local endpoints (local llama-server doesn't need it)
+    if config.api_key and config.api_key not in ("", "local"):
         headers["Authorization"] = f"Bearer {config.api_key}"
 
     try:
@@ -334,7 +359,18 @@ def _call_llm(
             response = client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
+            message = data["choices"][0]["message"]
+
+            # Get response field based on model (e.g., "reasoning" for qwen3)
+            from watercooler.models import get_response_field
+            response_field = get_response_field(config.model)
+
+            # Try configured field first, fall back to content
+            content = message.get(response_field, "").strip()
+            if not content and response_field != "content":
+                content = message.get("content", "").strip()
+
+            return content
     except httpx.ConnectError:
         logger.warning(f"Cannot connect to LLM at {config.api_base}")
         return None
@@ -354,7 +390,7 @@ def summarize_entry(
 ) -> str:
     """Summarize a single thread entry.
 
-    Uses LLM if available, falls back to extractive summary.
+    Uses LLM for summarization. Returns empty string if LLM unavailable.
 
     Args:
         entry_body: Entry body text
@@ -383,25 +419,31 @@ def summarize_entry(
     if entry_type:
         context += f"Type: {entry_type}\n"
 
-    prompt = f"""Summarize this thread entry in 1-2 sentences. Be concise and factual.
+    content = _truncate_text(entry_body, 2000)
+
+    # Use configurable prompt with {context} and {content} placeholders
+    base_prompt = config.summary_prompt
+    if "{context}" in base_prompt or "{content}" in base_prompt:
+        # Template-style prompt
+        prompt = base_prompt.format(context=context, content=content)
+    else:
+        # Simple instruction prompt - wrap with context and content
+        prompt = f"""{base_prompt}
 
 {context}
 Content:
-{_truncate_text(entry_body, 2000)}
+{content}
 
 Summary:"""
 
     result = _call_llm(prompt, config)
 
-    # Fall back to extractive if LLM fails
     if result is None:
-        logger.debug("Falling back to extractive summary")
-        return extractive_summary(
-            entry_body,
-            max_chars=config.extractive_max_chars,
-            include_headers=config.include_headers,
-            max_headers=config.max_headers,
+        logger.warning(
+            "LLM unavailable for entry summarization - returning empty summary. "
+            f"Check LLM service at {config.api_base}"
         )
+        return ""
 
     return result
 
@@ -448,10 +490,18 @@ def summarize_thread(
             include_headers=False,
         )
 
-    # Build LLM prompt
-    prompt = f"""Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any.
+    # Build LLM prompt using configurable template
+    title = thread_title or "Development Discussion"
 
-Thread: {thread_title or 'Development Discussion'}
+    base_prompt = config.thread_summary_prompt
+    if "{title}" in base_prompt or "{entries}" in base_prompt:
+        # Template-style prompt
+        prompt = base_prompt.format(title=title, entries=combined)
+    else:
+        # Simple instruction prompt - wrap with context
+        prompt = f"""{base_prompt}
+
+Thread: {title}
 
 Entries:
 {combined}
@@ -461,12 +511,11 @@ Summary:"""
     result = _call_llm(prompt, config)
 
     if result is None:
-        # Fall back to extractive
-        return extractive_summary(
-            combined,
-            max_chars=config.extractive_max_chars * 2,
-            include_headers=False,
+        logger.warning(
+            "LLM unavailable for thread summarization - returning empty summary. "
+            f"Check LLM service at {config.api_base}"
         )
+        return ""
 
     return result
 

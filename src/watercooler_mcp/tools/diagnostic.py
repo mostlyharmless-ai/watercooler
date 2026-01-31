@@ -43,6 +43,78 @@ reconcile_parity = None
 RATE_LIMIT_WARNING_THRESHOLD = 0.1
 
 
+def _get_service_gap_instructions(service_status: dict) -> list[str]:
+    """Generate actionable instructions for missing or failed services.
+
+    Args:
+        service_status: Dictionary of service statuses from get_service_status()
+
+    Returns:
+        List of instruction lines for resolving service gaps
+    """
+    instructions = []
+    has_gaps = False
+
+    for name, status in service_status.items():
+        state = status["state"]
+        msg = status.get("message", "")
+
+        if state == "failed":
+            has_gaps = True
+            instructions.append("")
+            instructions.append(f"  ⚠️  {name.upper()} - SETUP REQUIRED:")
+
+            if name == "llm":
+                instructions.extend([
+                    "    llama-server not found or failed to start.",
+                    "",
+                    "    Option 1: Enable auto-download (config.toml):",
+                    "      [mcp.service_provision]",
+                    "      llama_server = true",
+                    "",
+                    "    Option 2: Set environment variable:",
+                    "      WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER=true",
+                    "",
+                    "    Option 3: Manual install:",
+                    "      Download from: https://github.com/ggml-org/llama.cpp/releases",
+                    "      Extract llama-server to ~/.watercooler/bin/ or add to PATH",
+                ])
+
+            elif name == "embedding":
+                instructions.extend([
+                    "    Embedding service (llama-server) not available.",
+                    "",
+                    "    Same setup as LLM above - llama-server handles both.",
+                    "    Embedding model will auto-download when service starts.",
+                ])
+
+            elif name == "falkordb":
+                instructions.extend([
+                    "    FalkorDB (graph database) not running.",
+                    "",
+                    "    Requires Docker. Install Docker first:",
+                    "      Linux: curl -fsSL https://get.docker.com | sh",
+                    "      macOS: Install Docker Desktop from docker.com",
+                    "",
+                    "    Then start FalkorDB:",
+                    "      docker run -d -p 6379:6379 -p 3000:3000 \\",
+                    "        --name falkordb \\",
+                    "        -v falkordb_data:/var/lib/falkordb/data \\",
+                    "        falkordb/falkordb:latest",
+                ])
+
+            if msg and "not found" not in msg.lower():
+                instructions.append(f"    Details: {msg}")
+
+    if has_gaps:
+        instructions.insert(0, "")
+        instructions.insert(1, "Service Setup Instructions:")
+        instructions.append("")
+        instructions.append("  For full setup guide: https://github.com/MostlyHarmless-AI/watercooler-cloud/docs/SETUP.md")
+
+    return instructions
+
+
 def _check_git_auth_health(threads_dir: Path) -> dict[str, Any]:
     """Check git authentication configuration and connectivity.
 
@@ -489,6 +561,54 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
             ])
         except Exception as e:
             status_lines.append(f"\nGraph Services: Error - {e}")
+
+        # Add backend service auto-start status
+        try:
+            from watercooler_mcp.startup import get_service_status, ServiceState
+
+            service_status = get_service_status()
+            status_lines.extend([
+                "",
+                "Backend Services (Auto-Start):",
+            ])
+
+            state_icons = {
+                "running": "✓",
+                "starting": "⏳",
+                "failed": "✗",
+                "disabled": "○",
+                "not_configured": "○",
+                "unknown": "?",
+            }
+
+            for name, status in service_status.items():
+                state = status["state"]
+                icon = state_icons.get(state, "?")
+                msg = status.get("message", "")
+                endpoint = status.get("endpoint", "")
+
+                if state == "running":
+                    startup_ms = status.get("startup_time_ms")
+                    if startup_ms:
+                        status_lines.append(f"  {icon} {name}: {state} ({startup_ms}ms) {endpoint}")
+                    else:
+                        status_lines.append(f"  {icon} {name}: {state} {endpoint}")
+                elif state in ("disabled", "not_configured"):
+                    status_lines.append(f"  {icon} {name}: {state} - {msg}")
+                elif state == "starting":
+                    status_lines.append(f"  {icon} {name}: {state}... {endpoint}")
+                elif state == "failed":
+                    status_lines.append(f"  {icon} {name}: {state} - {msg}")
+                else:
+                    status_lines.append(f"  {icon} {name}: {state}")
+
+            # Add actionable instructions for service gaps
+            gap_instructions = _get_service_gap_instructions(service_status)
+            if gap_instructions:
+                status_lines.extend(gap_instructions)
+
+        except Exception as e:
+            status_lines.append(f"\nBackend Services: Error - {e}")
 
         # Add branch parity health if code and threads repos are available
         if context.code_root and context.threads_dir:
