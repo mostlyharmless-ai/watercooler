@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from watercooler.commands import (
     init_thread,
@@ -350,8 +350,12 @@ class TestAck:
             user_tag="user",
         )
         content = result.read_text()
-        # Ball should still be on Claude (not flipped)
-        # Note: ack behavior depends on whether ball was explicitly set or not
+        # Ball should still be on Claude (not flipped to Codex's counterpart)
+        # Check header has Claude in ball line
+        lines = content.split("\n")
+        header_ball = [l for l in lines[:10] if l.startswith("Ball:")]
+        assert len(header_ball) > 0, "Ball line not found in header"
+        assert "Claude" in header_ball[0], f"Expected ball to remain on Claude, got: {header_ball[0]}"
 
     def test_ack_default_title(self, threads_dir, mock_graph):
         """Test that ack uses default title 'Ack' if not provided."""
@@ -506,19 +510,8 @@ class TestSetBall:
         header_ball = [l for l in lines[:10] if l.startswith("Ball:")]
         assert any("Codex (user)" in l for l in header_ball), f"Header ball not updated: {header_ball}"
 
-    @pytest.mark.skip(reason="Known limitation: set_ball calls init_thread within lock context causing deadlock")
     def test_set_ball_creates_thread_if_missing(self, tmp_path):
-        """Test that set_ball creates thread if it doesn't exist.
-
-        NOTE: This test is skipped because set_ball() has a re-entrant lock issue:
-        - set_ball acquires lock
-        - calls init_thread() if thread doesn't exist
-        - init_thread also tries to acquire the same lock
-        - Deadlock occurs
-
-        This is a known limitation that should be fixed by calling init_thread
-        BEFORE acquiring the lock in set_ball.
-        """
+        """Test that set_ball creates thread if it doesn't exist."""
         # Use a fresh threads_dir to avoid lock contention
         threads_dir = tmp_path / "fresh_threads"
         threads_dir.mkdir()
@@ -627,10 +620,18 @@ class TestErrorConditions:
     """Tests for error handling."""
 
     def test_empty_topic_handling(self, threads_dir):
-        """Test handling of empty topic."""
-        # Empty topic should be handled (creates file with empty name or raises)
-        # Behavior depends on implementation
-        pass  # TODO: Define expected behavior
+        """Test that empty topic falls back to default name 'thread'.
+
+        The _sanitize_component function handles empty topics by returning
+        the default value 'thread', so init_thread("") creates 'thread.md'.
+        """
+        result = init_thread(
+            "",  # Empty topic
+            threads_dir=threads_dir,
+            title="Empty Topic Test",
+        )
+        assert result.exists()
+        assert result.name == "thread.md"  # Fallback to default
 
     def test_special_characters_in_topic(self, threads_dir):
         """Test topics with special characters."""
