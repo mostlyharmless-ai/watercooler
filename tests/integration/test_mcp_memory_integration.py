@@ -13,6 +13,17 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.fixture
+def isolated_config(tmp_path, monkeypatch):
+    """Isolate tests from user config by redirecting HOME to temp dir."""
+    from watercooler.config_facade import config
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    config.reset()
+    yield tmp_path
+    config.reset()
+
+
 @pytest.mark.integration_graphiti
 class TestGraphitiMemoryIntegration:
     """Integration tests for Graphiti memory backend."""
@@ -26,12 +37,14 @@ class TestGraphitiMemoryIntegration:
         assert hasattr(memory, "get_graphiti_backend")
         assert hasattr(memory, "query_memory")
 
-    def test_config_loading_integration(self, monkeypatch):
+    def test_config_loading_integration(self, monkeypatch, isolated_config):
         """Test config loading with real environment."""
         from watercooler_mcp import memory
+        from watercooler.config_facade import config as cfg
 
         # Test with disabled
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
+        cfg.reset()
         config = memory.load_graphiti_config()
         assert config is None
 
@@ -40,6 +53,7 @@ class TestGraphitiMemoryIntegration:
         monkeypatch.delenv("LLM_API_KEY", raising=False)
         monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # Clear fallback too
+        cfg.reset()
         config = memory.load_graphiti_config()
         assert config is None
 
@@ -47,6 +61,7 @@ class TestGraphitiMemoryIntegration:
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
         monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
+        cfg.reset()
         config = memory.load_graphiti_config()
         assert config is not None
 

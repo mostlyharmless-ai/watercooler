@@ -229,13 +229,10 @@ class TestDownloadIntegration:
         monkeypatch.setenv("WATERCOOLER_LLAMA_SERVER_VERIFY", "strict")
         monkeypatch.setenv("WATERCOOLER_LLAMA_SERVER_RELEASE", "b7896")
 
-        # Override bin directory
-        bin_dir = tmp_path / "bin"
-        bin_dir.mkdir()
-        monkeypatch.setattr(
-            "watercooler_mcp.startup._get_bin_dir",
-            lambda: bin_dir,
-        )
+        # Override bin directory by redirecting HOME
+        # The download function uses Path.home() / ".watercooler" / "bin"
+        monkeypatch.setenv("HOME", str(tmp_path))
+        bin_dir = tmp_path / ".watercooler" / "bin"
 
         try:
             result = _download_llama_server()

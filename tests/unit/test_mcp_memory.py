@@ -11,7 +11,23 @@ from watercooler_mcp import memory
 
 
 @pytest.fixture
-def mock_env_disabled(monkeypatch):
+def isolated_config(tmp_path, monkeypatch):
+    """Isolate tests from user config by redirecting HOME to temp dir.
+
+    This prevents user's ~/.watercooler/config.toml from affecting tests.
+    """
+    from watercooler.config_facade import config
+    # Redirect HOME to temp dir so no user config is loaded
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Also clear XDG dirs that might be checked
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    config.reset()
+    yield tmp_path
+    config.reset()
+
+
+@pytest.fixture
+def mock_env_disabled(monkeypatch, isolated_config):
     """Mock environment with Graphiti disabled."""
     from watercooler.config_facade import config
     monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
@@ -21,7 +37,7 @@ def mock_env_disabled(monkeypatch):
 
 
 @pytest.fixture
-def mock_env_enabled(monkeypatch):
+def mock_env_enabled(monkeypatch, isolated_config):
     """Mock environment with Graphiti enabled and required API keys."""
     from watercooler.config_facade import config
     monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
@@ -40,7 +56,7 @@ class TestLoadGraphitiConfig:
         config = memory.load_graphiti_config()
         assert config is None
 
-    def test_load_config_missing_llm_api_key(self, monkeypatch):
+    def test_load_config_missing_llm_api_key(self, monkeypatch, isolated_config):
         """Test config loading fails gracefully without LLM_API_KEY (and no fallback)."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
@@ -51,7 +67,7 @@ class TestLoadGraphitiConfig:
         result = memory.load_graphiti_config()
         assert result is None
 
-    def test_load_config_missing_embedding_api_key(self, monkeypatch):
+    def test_load_config_missing_embedding_api_key(self, monkeypatch, isolated_config):
         """Test config loading fails gracefully without EMBEDDING_API_KEY (and no fallback)."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
@@ -84,7 +100,7 @@ class TestLoadGraphitiConfig:
         assert config.llm_model == "gpt-4"
         assert config.embedding_model == "bge-m3"
 
-    def test_load_config_openai_api_key_fallback(self, monkeypatch):
+    def test_load_config_openai_api_key_fallback(self, monkeypatch, isolated_config):
         """Test OPENAI_API_KEY is used when api_base points to OpenAI.
 
         The config resolution uses provider-specific env vars based on api_base.
@@ -597,7 +613,7 @@ class TestValidateMemoryPrerequisites:
         assert error_dict["operation"] == "test_operation"
         assert "WATERCOOLER_GRAPHITI_ENABLED" in error_dict["message"]
 
-    def test_validate_prerequisites_missing_api_key(self, monkeypatch):
+    def test_validate_prerequisites_missing_api_key(self, monkeypatch, isolated_config):
         """Test validation fails gracefully without API key."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
