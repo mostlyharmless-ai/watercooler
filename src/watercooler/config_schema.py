@@ -629,6 +629,15 @@ class LLMServiceConfig(BaseModel):
         ge=1,
         description="Maximum tokens for LLM response",
     )
+    # Prompt configuration for summarization
+    system_prompt: str = Field(
+        default="",
+        description="System prompt for chat-style LLMs. Empty means auto-detect based on model.",
+    )
+    prompt_prefix: str = Field(
+        default="",
+        description="Prefix added to user prompt (e.g., '/no_think' for Qwen3). Empty means auto-detect.",
+    )
     summary_prompt: str = Field(
         default="Summarize this thread entry in 1-2 sentences. Be concise and factual.",
         description="Prompt template for entry summarization. Use {context} and {content} placeholders.",
@@ -636,6 +645,15 @@ class LLMServiceConfig(BaseModel):
     thread_summary_prompt: str = Field(
         default="Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any.",
         description="Prompt template for thread summarization. Use {title} and {entries} placeholders.",
+    )
+    # Few-shot example for summarization (improves format compliance)
+    summary_example_input: str = Field(
+        default="Implemented OAuth2 authentication with JWT tokens. Added refresh token rotation and secure cookie storage.",
+        description="Example input for few-shot summarization prompt.",
+    )
+    summary_example_output: str = Field(
+        default="OAuth2 authentication implemented with JWT tokens, refresh rotation, and secure cookie storage.\ntags: #authentication #OAuth2 #JWT #security",
+        description="Example output for few-shot summarization prompt.",
     )
 
 

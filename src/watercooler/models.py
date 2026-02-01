@@ -871,3 +871,67 @@ def get_min_max_tokens(model_name: str, default: int = 256) -> int:
     """
     spec = resolve_llm_model(model_name)
     return spec.get("min_max_tokens", default)
+
+
+# Model family detection for prompt configuration
+# These defaults are applied when user doesn't specify system_prompt or prompt_prefix
+
+_MODEL_FAMILY_DEFAULTS: dict[str, dict[str, str]] = {
+    # Qwen3 family needs /no_think to disable reasoning mode
+    "qwen3": {
+        "prompt_prefix": "/no_think ",
+        "system_prompt": "",  # No system prompt needed with /no_think
+    },
+    # Qwen2.5 family works well with system prompt, no prefix needed
+    "qwen2.5": {
+        "prompt_prefix": "",
+        "system_prompt": "You summarize technical entries concisely with relevant tags.",
+    },
+    # Default for unknown models
+    "default": {
+        "prompt_prefix": "",
+        "system_prompt": "You summarize technical entries concisely with relevant tags.",
+    },
+}
+
+
+def get_model_family(model_name: str) -> str:
+    """Detect model family from model name.
+
+    Args:
+        model_name: Model name (e.g., "qwen3:1.7b", "qwen2.5:3b")
+
+    Returns:
+        Model family identifier (e.g., "qwen3", "qwen2.5", "default")
+    """
+    name_lower = model_name.lower()
+
+    # Check known families (order matters - check more specific first)
+    if "qwen3" in name_lower:
+        return "qwen3"
+    if "qwen2.5" in name_lower or "qwen2-5" in name_lower:
+        return "qwen2.5"
+    if "smollm" in name_lower:
+        return "smollm2"
+    if "phi3" in name_lower or "phi-3" in name_lower:
+        return "phi3"
+    if "llama" in name_lower:
+        return "llama"
+
+    return "default"
+
+
+def get_model_prompt_defaults(model_name: str) -> dict[str, str]:
+    """Get prompt configuration defaults for a model.
+
+    Returns appropriate system_prompt and prompt_prefix based on model family.
+    These are used when user doesn't configure explicit values.
+
+    Args:
+        model_name: Model name (e.g., "qwen3:1.7b")
+
+    Returns:
+        Dict with "system_prompt" and "prompt_prefix" keys
+    """
+    family = get_model_family(model_name)
+    return _MODEL_FAMILY_DEFAULTS.get(family, _MODEL_FAMILY_DEFAULTS["default"])
