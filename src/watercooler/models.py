@@ -416,17 +416,18 @@ LLM_GGUF_MODELS: dict[str, LLMGGUFModelSpec | str] = {
         "context": 40960,
         "size_mb": 2700,  # ~2.7 GB
     },
+    # Qwen3 small models - require /no_think prefix to disable reasoning mode
     "qwen3:1.7b": {
-        "hf_repo": "Qwen/Qwen3-1.7B-GGUF",
+        "hf_repo": "unsloth/Qwen3-1.7B-GGUF",  # Community GGUF (official not available)
         "hf_file": "Qwen3-1.7B-Q4_K_M.gguf",
         "context": 40960,
-        "size_mb": 1200,  # ~1.2 GB
+        "size_mb": 1100,  # ~1.1 GB, good quality with /no_think prefix
     },
     "qwen3:0.6b": {
-        "hf_repo": "Qwen/Qwen3-0.6B-GGUF",
+        "hf_repo": "unsloth/Qwen3-0.6B-GGUF",  # Community GGUF (official not available)
         "hf_file": "Qwen3-0.6B-Q4_K_M.gguf",
         "context": 40960,
-        "size_mb": 500,  # ~500 MB
+        "size_mb": 400,  # ~400 MB, smallest viable summarizer with /no_think
     },
     # Llama 3.2 models
     "llama3.2:3b": {
@@ -441,11 +442,45 @@ LLM_GGUF_MODELS: dict[str, LLMGGUFModelSpec | str] = {
         "context": 8192,
         "size_mb": 1300,  # ~1.3 GB
     },
+    # SmolLM2 models - requires two-phase prompting for summarization (extract→synthesize)
+    "smollm2:1.7b": {
+        "hf_repo": "bartowski/SmolLM2-1.7B-Instruct-GGUF",
+        "hf_file": "SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
+        "context": 8192,
+        "size_mb": 1000,  # ~1 GB, needs two-phase prompting for summarization
+    },
+    # Qwen2.5 models - excellent for summarization with few-shot prompting, no special prefix needed
+    "qwen2.5:3b": {
+        "hf_repo": "Qwen/Qwen2.5-3B-Instruct-GGUF",
+        "hf_file": "qwen2.5-3b-instruct-q4_k_m.gguf",
+        "context": 32768,
+        "size_mb": 2000,  # ~2 GB, best quality for summarization
+    },
+    "qwen2.5:1.5b": {
+        "hf_repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+        "hf_file": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "context": 32768,
+        "size_mb": 1100,  # ~1.1 GB, fastest and recommended for summarization
+    },
+    # Phi-3 models (Microsoft, high accuracy but verbose)
+    "phi3:3.8b": {
+        "hf_repo": "microsoft/Phi-3-mini-4k-instruct-gguf",
+        "hf_file": "Phi-3-mini-4k-instruct-q4.gguf",
+        "context": 4096,
+        "size_mb": 2300,  # ~2.3 GB
+    },
     # Aliases
     "qwen3:latest": "qwen3:30b",
     "qwen3": "qwen3:30b",
     "llama3.2": "llama3.2:3b",
     "llama3.2:latest": "llama3.2:3b",
+    "smollm2": "smollm2:1.7b",
+    "smollm2:latest": "smollm2:1.7b",
+    "qwen2.5": "qwen2.5:3b",
+    "qwen2.5:latest": "qwen2.5:3b",
+    "phi3": "phi3:3.8b",
+    "phi3:latest": "phi3:3.8b",
+    "phi3-mini": "phi3:3.8b",
 }
 
 # Default LLM model when none specified
@@ -711,6 +746,28 @@ LLM_MODELS: dict[str, LLMModelSpec | str] = {
         "response_field": "content",
         "supports_thinking": False,
     },
+    # SmolLM2 models - requires two-phase prompting for summarization
+    "smollm2:1.7b": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+    "smollm2": "smollm2:1.7b",
+    # Qwen2.5 models - excellent for summarization with few-shot prompting
+    "qwen2.5:3b": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+    "qwen2.5:1.5b": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+    "qwen2.5": "qwen2.5:3b",
+    # Phi-3 models (clean output)
+    "phi3:3.8b": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+    "phi3": "phi3:3.8b",
     "mistral": {
         "response_field": "content",
         "supports_thinking": False,
