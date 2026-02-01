@@ -472,62 +472,71 @@ auto_detect_services = true
 
 # LLM model name
 # Env: LLM_MODEL
-# For llama-server: model from GGUF registry (llama3.2:3b, qwen3:30b, etc.)
+#
+# For llama-server: model from GGUF registry
+#   Recommended for summarization: qwen3:1.7b (fast, auto /no_think)
+#   Alternatives: qwen2.5:3b (quality), llama3.2:3b (balanced)
 # For OpenAI: gpt-4o-mini, gpt-4o, etc.
-# model = "llama3.2:3b"
+#
+# model = "qwen3:1.7b"
 
 # Request timeout in seconds
 # Env: LLM_TIMEOUT
-# Increase for slow models or thinking models (e.g., qwen3 with /think)
 # timeout = 60.0
 
 # Maximum tokens for LLM response
 # Env: LLM_MAX_TOKENS
-# Increase for thinking models that need extra tokens for reasoning
 # max_tokens = 512
 
-# Summary prompt for baseline graph entry summarization
+# -----------------------------------------------------------------------------
+# Prompt Configuration
+# Model-aware prompting with auto-detection for optimal results
+# -----------------------------------------------------------------------------
+
+# System prompt for chat-style LLMs (empty = auto-detect based on model)
+# Env: LLM_SYSTEM_PROMPT
+#
+# Auto-detection by model family:
+#   - Qwen3: empty (uses /no_think prefix instead)
+#   - Qwen2.5, Llama, others: "You summarize technical entries concisely with relevant tags."
+#
+# Override only if you need custom behavior for your model.
+# system_prompt = ""
+
+# Prefix added to user prompt (empty = auto-detect based on model)
+# Env: LLM_PROMPT_PREFIX
+#
+# Auto-detection by model family:
+#   - Qwen3: "/no_think " (disables thinking mode for direct output)
+#   - Others: empty (not needed)
+#
+# Override only if auto-detection doesn't work for your model.
+# prompt_prefix = ""
+
+# Summary instruction for entry summarization
 # Env: LLM_SUMMARY_PROMPT
 #
-# Two formats supported:
+# This is the core instruction. Entry context (title, type, content) is
+# appended automatically along with any few-shot example.
 #
-# 1. Simple instruction (default) - context and content appended automatically:
-#    summary_prompt = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
-#
-# 2. Template with placeholders - full control over prompt structure:
-#    summary_prompt = """Given this entry:
-#    {context}
-#    {content}
-#
-#    Provide a 1-2 sentence summary focusing on key decisions and outcomes."""
-#
-# Variables available in template mode:
-#   {context} - Entry metadata (Title: ..., Type: ...)
-#   {content} - Entry body text (truncated to 2000 chars)
-#
-# summary_prompt = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
+# summary_prompt = "Summarize this entry in 1-2 sentences, then add relevant tags."
 
-# Thread summary prompt for baseline graph thread summarization
+# Thread summary instruction
 # Env: LLM_THREAD_SUMMARY_PROMPT
 #
-# Two formats supported:
-#
-# 1. Simple instruction (default) - title and entries appended automatically:
-#    thread_summary_prompt = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
-#
-# 2. Template with placeholders - full control over prompt structure:
-#    thread_summary_prompt = """Thread: {title}
-#
-#    Entries:
-#    {entries}
-#
-#    Summarize the above thread in 2-3 sentences."""
-#
-# Variables available in template mode:
-#   {title} - Thread title
-#   {entries} - Bullet list of entry summaries (up to max_thread_entries)
+# For summarizing entire threads. Thread title and entry summaries are
+# appended automatically.
 #
 # thread_summary_prompt = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
+
+# Few-shot example for format compliance (recommended for tags output)
+#
+# Providing an example significantly improves output format consistency,
+# especially for smaller models. The example shows how to structure the
+# summary and format tags.
+#
+# summary_example_input = "Implemented OAuth2 authentication with JWT tokens. Added refresh token rotation and secure cookie storage."
+# summary_example_output = "OAuth2 authentication implemented with JWT tokens, refresh rotation, and secure cookie storage.\ntags: #authentication #OAuth2 #JWT #security"
 
 
 # -----------------------------------------------------------------------------
@@ -795,7 +804,9 @@ auto_detect_services = true
 # memory.llm.model               LLM_MODEL
 # memory.llm.timeout             LLM_TIMEOUT
 # memory.llm.max_tokens          LLM_MAX_TOKENS
-# memory.llm.summary_prompt      LLM_SUMMARY_PROMPT
+# memory.llm.system_prompt        LLM_SYSTEM_PROMPT
+# memory.llm.prompt_prefix         LLM_PROMPT_PREFIX
+# memory.llm.summary_prompt        LLM_SUMMARY_PROMPT
 # memory.llm.thread_summary_prompt LLM_THREAD_SUMMARY_PROMPT
 # memory.embedding.api_key       EMBEDDING_API_KEY
 # memory.embedding.api_base      EMBEDDING_API_BASE
