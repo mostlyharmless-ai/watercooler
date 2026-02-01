@@ -224,16 +224,26 @@ prefer_extractive = false    # Force extractive mode (skip LLM)
 
 [baseline_graph.llm]
 api_base = "http://localhost:8000/v1"   # llama-server default
-model = "llama3.2:3b"                   # Small local model
+model = "qwen3:1.7b"                    # Recommended for summarization
 api_key = "local"                       # Local server doesn't require key
 timeout = 30.0                          # Request timeout (seconds)
 max_tokens = 256                        # Max response tokens
+
+# Prompt configuration (auto-detected from model if empty)
+# system_prompt = ""          # Empty = auto-detect by model family
+# prompt_prefix = ""          # Empty = auto-detect (e.g., /no_think for Qwen3)
+
+# Few-shot example for format compliance (optional)
+# summary_example_input = "Implemented OAuth2 authentication..."
+# summary_example_output = "OAuth2 authentication implemented...\ntags: #auth #OAuth2"
 
 [baseline_graph.extractive]
 max_chars = 200              # Max chars for extractive summary
 include_headers = true       # Include markdown headers
 max_headers = 3              # Max headers to include
 ```
+
+**Recommended models:** `qwen3:1.7b` (fast, auto `/no_think`), `qwen2.5:3b` (quality), `llama3.2:3b` (balanced).
 
 See [Baseline Graph Documentation](baseline-graph.md) for full usage guide.
 
