@@ -148,13 +148,18 @@ class LeanRAGConfig:
     falkordb_host: str = "localhost"
     falkordb_port: int = 6379
 
-    # LLM configuration (optional)
+    # LLM configuration (maps to DEEPSEEK_* env vars)
+    llm_api_key: str | None = None
     llm_api_base: str | None = None
     llm_model: str | None = None
 
-    # Embedding configuration (optional)
+    # Embedding configuration (maps to GLM_* env vars)
+    # Note: LeanRAG's embedding endpoint uses raw HTTP without auth (no API key)
     embedding_api_base: str | None = None
     embedding_model: str | None = None
+
+    # Database password (maps to FALKORDB_PASSWORD)
+    falkordb_password: str | None = None
 
     # Working directory for exports
     work_dir: Path | None = None
@@ -194,12 +199,14 @@ class LeanRAGConfig:
         db = resolve_database_config()
 
         return cls(
+            llm_api_key=llm.api_key,
             llm_api_base=llm.api_base if llm.api_base != "https://api.openai.com/v1" else None,
             llm_model=llm.model,
             embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
             embedding_model=embedding.model,
             falkordb_host=db.host,
             falkordb_port=db.port,
+            falkordb_password=db.password if db.password else None,
             max_workers=get_leanrag_max_workers(),
         )
 
@@ -227,7 +234,60 @@ class LeanRAGBackend(MemoryBackend):
 
     def __init__(self, config: LeanRAGConfig | None = None) -> None:
         self.config = config or LeanRAGConfig()
+        self._apply_config_to_env()  # Bridge config to LeanRAG's expected env vars
         self._validate_config()
+
+    def _apply_config_to_env(self) -> None:
+        """Set environment variables from resolved config.
+
+        LeanRAG's config.yaml uses ${VAR} substitution to read environment variables.
+        This method bridges the unified watercooler config to LeanRAG's expected env vars.
+
+        Equivalence mapping (Watercooler standard → LeanRAG):
+            LLM_API_KEY      → DEEPSEEK_API_KEY
+            LLM_MODEL        → DEEPSEEK_MODEL
+            LLM_API_BASE     → DEEPSEEK_BASE_URL
+            EMBEDDING_MODEL  → GLM_MODEL
+            EMBEDDING_API_BASE → GLM_BASE_URL
+
+        Database vars use the same names in both systems:
+            FALKORDB_HOST, FALKORDB_PORT, FALKORDB_PASSWORD
+
+        Priority: If the LeanRAG var is already set, we don't override it.
+        If only the watercooler standard var is set, we bridge it to LeanRAG's name.
+        """
+        # Bridge standard watercooler env vars to LeanRAG equivalents
+        # This allows users to use either naming convention
+        standard_to_leanrag = [
+            ("LLM_API_KEY", "DEEPSEEK_API_KEY"),
+            ("LLM_MODEL", "DEEPSEEK_MODEL"),
+            ("LLM_API_BASE", "DEEPSEEK_BASE_URL"),
+            ("EMBEDDING_MODEL", "GLM_MODEL"),
+            ("EMBEDDING_API_BASE", "GLM_BASE_URL"),
+        ]
+        for standard_var, leanrag_var in standard_to_leanrag:
+            if leanrag_var not in os.environ and standard_var in os.environ:
+                os.environ[leanrag_var] = os.environ[standard_var]
+                logger.debug(f"Bridged {standard_var} → {leanrag_var}")
+
+        # Set from resolved config (only if not already set)
+        env_mappings = [
+            # LLM config (used by generate_text via OpenAI client)
+            ("DEEPSEEK_API_KEY", self.config.llm_api_key),
+            ("DEEPSEEK_MODEL", self.config.llm_model),
+            ("DEEPSEEK_BASE_URL", self.config.llm_api_base),
+            # Embedding config (used by embedding() via raw HTTP POST - no auth)
+            ("GLM_BASE_URL", self.config.embedding_api_base),
+            ("GLM_MODEL", self.config.embedding_model),
+            # Database config
+            ("FALKORDB_HOST", self.config.falkordb_host),
+            ("FALKORDB_PORT", str(self.config.falkordb_port) if self.config.falkordb_port else None),
+            ("FALKORDB_PASSWORD", self.config.falkordb_password),
+        ]
+        for env_name, value in env_mappings:
+            if value and env_name not in os.environ:
+                os.environ[env_name] = value
+                logger.debug(f"Set {env_name} from unified config")
 
     def _validate_config(self) -> None:
         """Validate configuration and LeanRAG availability."""
