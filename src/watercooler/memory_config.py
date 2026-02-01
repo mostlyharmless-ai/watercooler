@@ -527,7 +527,7 @@ def get_leanrag_max_workers() -> int:
 # Default values for baseline graph (only used when no env vars or config set)
 # llama-server for LLM (completion mode) on port 8000
 _BASELINE_GRAPH_DEFAULT_LLM_API_BASE = "http://localhost:8000/v1"
-_BASELINE_GRAPH_DEFAULT_LLM_MODEL = "llama3.2:3b"
+_BASELINE_GRAPH_DEFAULT_LLM_MODEL = "qwen3:1.7b"
 _BASELINE_GRAPH_DEFAULT_LLM_API_KEY = ""  # Local llama-server doesn't need a key
 # llama-server for embeddings (embedding mode) on port 8080
 _BASELINE_GRAPH_DEFAULT_EMBEDDING_API_BASE = "http://localhost:8080/v1"

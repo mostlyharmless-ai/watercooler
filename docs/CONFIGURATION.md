@@ -281,7 +281,7 @@ export WATERCOOLER_GRAPHITI_ENABLED=1
 # LLM via llama-server
 export LLM_API_KEY="local"  # Local server doesn't require a real key
 export LLM_API_BASE="http://localhost:8000/v1"
-export LLM_MODEL="llama3.2:3b"
+export LLM_MODEL="qwen3:1.7b"
 
 # Embeddings via llama-server
 export EMBEDDING_API_KEY="local"  # Local server doesn't require a real key

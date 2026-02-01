@@ -39,8 +39,13 @@ from watercooler.baseline_graph.export import (
     _extract_commit_refs,
 )
 from watercooler.baseline_graph.summarizer import (
+    _build_summary_messages,
     _extract_headers,
     _truncate_text,
+)
+from watercooler.models import (
+    get_model_family,
+    get_model_prompt_defaults,
 )
 
 
@@ -75,7 +80,7 @@ class TestSummarizerConfig:
         try:
             summarizer_config = SummarizerConfig()
             assert summarizer_config.api_base == "http://localhost:8000/v1"  # llama-server port
-            assert summarizer_config.model == "llama3.2:3b"
+            assert summarizer_config.model == "qwen3:1.7b"
             assert summarizer_config.api_key == ""  # Empty for local llama-server
             assert summarizer_config.timeout == 30.0
             assert summarizer_config.max_tokens == 256
@@ -127,7 +132,7 @@ class TestSummarizerConfig:
         try:
             summarizer_config = SummarizerConfig.from_config_dict({})
             assert summarizer_config.api_base == "http://localhost:8000/v1"  # llama-server port
-            assert summarizer_config.model == "llama3.2:3b"
+            assert summarizer_config.model == "qwen3:1.7b"
         finally:
             config.reset()
 
@@ -745,3 +750,223 @@ Content.
         nodes_content = (output_dir / "nodes.jsonl").read_text()
         assert '{"old": "data"}' not in nodes_content
         assert "thread:test" in nodes_content  # New data present
+
+
+# =============================================================================
+# Model Family Detection Tests
+# =============================================================================
+
+
+class TestGetModelFamily:
+    """Tests for get_model_family() function."""
+
+    def test_qwen3_family(self):
+        """Test Qwen3 model family detection."""
+        assert get_model_family("qwen3:1.7b") == "qwen3"
+        assert get_model_family("qwen3:30b") == "qwen3"
+        assert get_model_family("Qwen3:1.7b") == "qwen3"  # Case insensitive
+        assert get_model_family("QWEN3:8B") == "qwen3"
+
+    def test_qwen2_5_family(self):
+        """Test Qwen2.5 model family detection."""
+        assert get_model_family("qwen2.5:3b") == "qwen2.5"
+        assert get_model_family("qwen2.5:7b") == "qwen2.5"
+        assert get_model_family("Qwen2.5:3b") == "qwen2.5"  # Case insensitive
+
+    def test_llama_family(self):
+        """Test Llama model family detection."""
+        assert get_model_family("llama3.2:3b") == "llama"
+        assert get_model_family("llama3:8b") == "llama"
+        assert get_model_family("Llama3.2:3B") == "llama"  # Case insensitive
+
+    def test_smollm2_family(self):
+        """Test SmolLM2 model family detection."""
+        assert get_model_family("smollm2:1.7b") == "smollm2"
+        assert get_model_family("SmolLM2:360m") == "smollm2"
+
+    def test_phi3_family(self):
+        """Test Phi-3 model family detection."""
+        assert get_model_family("phi3:3.8b") == "phi3"
+        assert get_model_family("Phi-3:mini") == "phi3"
+        assert get_model_family("phi-3:3.8b") == "phi3"
+
+    def test_unknown_model_returns_default(self):
+        """Test unknown models return 'default' family."""
+        assert get_model_family("unknown-model") == "default"
+        assert get_model_family("gpt-4o") == "default"
+        assert get_model_family("claude-3") == "default"
+
+    def test_empty_model_returns_default(self):
+        """Test empty model name returns 'default' family."""
+        assert get_model_family("") == "default"
+
+
+class TestGetModelPromptDefaults:
+    """Tests for get_model_prompt_defaults() function."""
+
+    def test_qwen3_uses_no_think_prefix(self):
+        """Test Qwen3 models get /no_think prefix."""
+        defaults = get_model_prompt_defaults("qwen3:1.7b")
+        assert defaults["prompt_prefix"] == "/no_think "
+        assert defaults["system_prompt"] == ""  # No system prompt
+
+    def test_qwen2_5_uses_system_prompt(self):
+        """Test Qwen2.5 models get system prompt instead of prefix."""
+        defaults = get_model_prompt_defaults("qwen2.5:3b")
+        assert defaults["prompt_prefix"] == ""
+        assert "summarize" in defaults["system_prompt"].lower()
+
+    def test_llama_uses_system_prompt(self):
+        """Test Llama models get system prompt."""
+        defaults = get_model_prompt_defaults("llama3.2:3b")
+        assert defaults["prompt_prefix"] == ""
+        assert "summarize" in defaults["system_prompt"].lower()
+
+    def test_unknown_model_uses_default(self):
+        """Test unknown models get default prompting."""
+        defaults = get_model_prompt_defaults("unknown-model")
+        assert defaults["prompt_prefix"] == ""
+        assert "summarize" in defaults["system_prompt"].lower()
+
+    def test_returns_both_keys(self):
+        """Test all models return both prompt_prefix and system_prompt keys."""
+        for model in ["qwen3:1.7b", "qwen2.5:3b", "llama3.2:3b", "unknown"]:
+            defaults = get_model_prompt_defaults(model)
+            assert "prompt_prefix" in defaults
+            assert "system_prompt" in defaults
+
+
+# =============================================================================
+# Message Building Tests
+# =============================================================================
+
+
+class TestBuildSummaryMessages:
+    """Tests for _build_summary_messages() function."""
+
+    def test_qwen3_includes_no_think_prefix(self):
+        """Test Qwen3 model messages include /no_think prefix."""
+        config = SummarizerConfig(model="qwen3:1.7b")
+        messages = _build_summary_messages(
+            entry_body="Test content",
+            entry_title="Test Title",
+            entry_type="Note",
+            config=config,
+        )
+
+        # Should have user message with /no_think prefix
+        user_msg = next(m for m in messages if m["role"] == "user")
+        assert user_msg["content"].startswith("/no_think")
+
+        # Should not have system message (Qwen3 doesn't use one)
+        system_msgs = [m for m in messages if m["role"] == "system"]
+        assert len(system_msgs) == 0 or system_msgs[0]["content"] == ""
+
+    def test_qwen2_5_includes_system_prompt(self):
+        """Test Qwen2.5 model messages include system prompt."""
+        config = SummarizerConfig(model="qwen2.5:3b")
+        messages = _build_summary_messages(
+            entry_body="Test content",
+            entry_title="Test Title",
+            entry_type="Note",
+            config=config,
+        )
+
+        # Should have system message with summarization instruction
+        system_msgs = [m for m in messages if m["role"] == "system"]
+        assert len(system_msgs) == 1
+        assert "summarize" in system_msgs[0]["content"].lower()
+
+        # User message should not have /no_think prefix
+        user_msg = next(m for m in messages if m["role"] == "user")
+        assert not user_msg["content"].startswith("/no_think")
+
+    def test_includes_entry_context(self):
+        """Test messages include entry title and type."""
+        config = SummarizerConfig(model="llama3.2:3b")
+        messages = _build_summary_messages(
+            entry_body="Test content",
+            entry_title="My Entry Title",
+            entry_type="Decision",
+            config=config,
+        )
+
+        user_msg = next(m for m in messages if m["role"] == "user")
+        assert "My Entry Title" in user_msg["content"]
+        assert "Decision" in user_msg["content"]
+
+    def test_includes_few_shot_example(self):
+        """Test messages include few-shot example when configured."""
+        config = SummarizerConfig(
+            model="llama3.2:3b",
+            summary_example_input="Example input text",
+            summary_example_output="Example output with\ntags: #example",
+        )
+        messages = _build_summary_messages(
+            entry_body="Test content",
+            entry_title=None,
+            entry_type=None,
+            config=config,
+        )
+
+        user_msg = next(m for m in messages if m["role"] == "user")
+        assert "Example input text" in user_msg["content"]
+        assert "Example output with" in user_msg["content"]
+
+    def test_config_overrides_auto_detect(self):
+        """Test explicit config values override auto-detection."""
+        # Qwen3 would normally use /no_think, but explicit prefix overrides
+        config = SummarizerConfig(
+            model="qwen3:1.7b",
+            system_prompt="Custom system prompt",
+            prompt_prefix="CUSTOM_PREFIX ",  # Custom prefix overrides auto-detect
+        )
+        messages = _build_summary_messages(
+            entry_body="Test content",
+            entry_title=None,
+            entry_type=None,
+            config=config,
+        )
+
+        # Should use custom system prompt
+        system_msgs = [m for m in messages if m["role"] == "system"]
+        assert len(system_msgs) == 1
+        assert system_msgs[0]["content"] == "Custom system prompt"
+
+        # User message should have custom prefix (not auto-detected /no_think)
+        user_msg = next(m for m in messages if m["role"] == "user")
+        assert user_msg["content"].startswith("CUSTOM_PREFIX")
+        assert not user_msg["content"].startswith("/no_think")
+
+    def test_empty_prompt_prefix_triggers_auto_detect(self):
+        """Test empty prompt_prefix means auto-detect (documented behavior)."""
+        # Empty string intentionally means "auto-detect based on model"
+        config = SummarizerConfig(
+            model="qwen3:1.7b",
+            prompt_prefix="",  # Empty = use auto-detected /no_think
+        )
+        messages = _build_summary_messages(
+            entry_body="Test content",
+            entry_title=None,
+            entry_type=None,
+            config=config,
+        )
+
+        # Qwen3 should get /no_think prefix via auto-detection
+        user_msg = next(m for m in messages if m["role"] == "user")
+        assert user_msg["content"].startswith("/no_think")
+
+    def test_empty_body_handled(self):
+        """Test empty entry body is handled gracefully."""
+        config = SummarizerConfig(model="llama3.2:3b")
+        messages = _build_summary_messages(
+            entry_body="",
+            entry_title=None,
+            entry_type=None,
+            config=config,
+        )
+
+        # Should still return valid messages
+        assert len(messages) >= 1
+        user_msg = next(m for m in messages if m["role"] == "user")
+        assert user_msg["content"]  # Not empty

@@ -484,7 +484,7 @@ LLM_GGUF_MODELS: dict[str, LLMGGUFModelSpec | str] = {
 }
 
 # Default LLM model when none specified
-DEFAULT_LLM_GGUF_MODEL = "llama3.2:3b"
+DEFAULT_LLM_GGUF_MODEL = "qwen3:1.7b"
 
 
 def resolve_llm_gguf_model(name: str) -> LLMGGUFModelSpec:
