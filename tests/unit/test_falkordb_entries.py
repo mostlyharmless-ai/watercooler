@@ -93,16 +93,18 @@ dim = 768
         monkeypatch.delenv("FALKORDB_HOST", raising=False)
         monkeypatch.delenv("FALKORDB_PORT", raising=False)
         monkeypatch.delenv("EMBEDDING_DIM", raising=False)
-        config.reset()
 
-        try:
-            store = FalkorDBEntryStore.from_config("my_group")
-            assert store.group_id == "my_group"
-            assert store.host == "config-host"
-            assert store.port == 6380
-            assert store.embedding_dim == 768
-        finally:
+        # Prevent project config from overriding user config during test
+        with patch("watercooler.config_loader._get_project_config_dir", return_value=None):
             config.reset()
+            try:
+                store = FalkorDBEntryStore.from_config("my_group")
+                assert store.group_id == "my_group"
+                assert store.host == "config-host"
+                assert store.port == 6380
+                assert store.embedding_dim == 768
+            finally:
+                config.reset()
 
     def test_from_config_env_vars_override(self, monkeypatch, tmp_path):
         """Test that environment variables override config file."""
@@ -118,14 +120,16 @@ port = 6380
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("FALKORDB_HOST", "env-host")
         monkeypatch.setenv("FALKORDB_PORT", "7379")
-        config.reset()
 
-        try:
-            store = FalkorDBEntryStore.from_config("test")
-            assert store.host == "env-host"
-            assert store.port == 7379
-        finally:
+        # Prevent project config from overriding user config during test
+        with patch("watercooler.config_loader._get_project_config_dir", return_value=None):
             config.reset()
+            try:
+                store = FalkorDBEntryStore.from_config("test")
+                assert store.host == "env-host"
+                assert store.port == 7379
+            finally:
+                config.reset()
 
 
 class TestFalkorDBEntryStoreConnectionState:
