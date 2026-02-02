@@ -24,6 +24,7 @@ from watercooler.memory_config import (
     resolve_embedding_config,
     resolve_database_config,
     get_graphiti_reranker,
+    get_leanrag_path,
 )
 
 # Import backend's GraphitiConfig directly (consolidates duplicate configs)
@@ -170,6 +171,120 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
         reranker=reranker,
         database=database,
     )
+
+
+def load_leanrag_config(code_path: str | Path | None = None) -> Optional["LeanRAGConfig"]:
+    """Load LeanRAG configuration from unified config system.
+
+    Returns None if LeanRAG is disabled or configuration is invalid.
+
+    Args:
+        code_path: Path to the project directory. Used to set the work_dir
+            for LeanRAG exports.
+
+    Configuration Sources:
+        Environment Variables:
+            WATERCOOLER_MEMORY_DISABLED: "1" to disable all memory backends
+            WATERCOOLER_LEANRAG_ENABLED: "1" to enable, "0" to disable
+                (if not set, uses [memory].backend from TOML config)
+            LEANRAG_PATH: Path to the LeanRAG submodule (required)
+            WATERCOOLER_LEANRAG_DATABASE: Override derived database name
+
+        TOML (config.toml):
+            [memory]
+            enabled = true
+            backend = "leanrag"
+
+            [memory.leanrag]
+            max_workers = 8
+
+    Returns:
+        LeanRAGConfig instance or None if disabled/invalid
+    """
+    # 1. Global disable check
+    if not is_memory_enabled():
+        log_debug("MEMORY: All memory backends disabled")
+        return None
+
+    # 2. LeanRAG-specific enable check
+    # Priority: env var > TOML tier config > TOML backend setting
+    env_enabled = os.getenv("WATERCOOLER_LEANRAG_ENABLED", "").lower()
+    if env_enabled in ("1", "true", "yes"):
+        enabled = True
+    elif env_enabled in ("0", "false", "no"):
+        enabled = False
+    else:
+        # Check tier config first (t3_enabled implies LeanRAG should be available)
+        try:
+            from watercooler.memory_config import resolve_tier_config
+            tier_cfg = resolve_tier_config()
+            if tier_cfg.t3_enabled:
+                enabled = True
+            else:
+                enabled = get_memory_backend() == "leanrag"
+        except ImportError:
+            enabled = get_memory_backend() == "leanrag"
+
+    if not enabled:
+        log_debug("MEMORY: LeanRAG disabled (set memory.tiers.t3_enabled=true or WATERCOOLER_LEANRAG_ENABLED=1)")
+        return None
+
+    # 3. Check LEANRAG_PATH exists (env var > TOML config)
+    leanrag_path = get_leanrag_path()
+    if not leanrag_path:
+        log_warning(
+            "MEMORY: LeanRAG enabled but path not configured. "
+            "Set LEANRAG_PATH env var or memory.leanrag.path in config.toml"
+        )
+        return None
+
+    leanrag_path_obj = Path(leanrag_path).expanduser()
+    if not leanrag_path_obj.exists():
+        log_warning(f"MEMORY: LeanRAG path does not exist: {leanrag_path}")
+        return None
+
+    # 4. Import and create config using unified system
+    try:
+        from watercooler_memory.backends.leanrag import LeanRAGConfig
+    except ImportError:
+        log_warning("MEMORY: LeanRAG backend not available")
+        return None
+
+    # 5. Use from_unified() which handles LLM/embedding/database config
+    try:
+        config = LeanRAGConfig.from_unified()
+        config.leanrag_path = leanrag_path_obj
+
+        # Derive database name consistently with Graphiti and index_leanrag.py
+        # Uses the same pattern as load_graphiti_config:
+        # 1. Check backend-specific env var override
+        # 2. Fall back to _derive_database_name(code_path)
+        database = os.getenv("WATERCOOLER_LEANRAG_DATABASE")
+        if not database:
+            database = _derive_database_name(code_path)
+
+        # Set work_dir to ~/.watercooler/{database_name}
+        # LeanRAG uses work_dir.name as FalkorDB graph name
+        watercooler_home = Path.home() / ".watercooler"
+        config.work_dir = watercooler_home / database
+
+        return config
+    except Exception as e:
+        log_warning(f"MEMORY: Failed to create LeanRAG config: {e}")
+        return None
+
+
+# Import LeanRAGConfig for type hints
+try:
+    from watercooler_memory.backends.leanrag import LeanRAGConfig
+except ImportError:
+    # If backend not installed, define minimal config for type hints
+    from dataclasses import dataclass as _dataclass
+    @_dataclass
+    class LeanRAGConfig:  # type: ignore
+        """Minimal config stub when backend unavailable."""
+        leanrag_path: Path | None = None
+        work_dir: Path | None = None
 
 
 def get_graphiti_backend(config: GraphitiConfig) -> Any:
