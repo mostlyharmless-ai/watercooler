@@ -27,9 +27,9 @@ The memory graph features require local model inference via llama-server. Below 
 | Model | Quantization | Disk | RAM | Notes |
 |-------|--------------|------|-----|-------|
 | llama3.2:1b | Q8_0 | ~1.2 GB | ~2 GB | Minimal, basic summarization |
-| llama3.2:3b | Q8_0 | ~3.2 GB | ~5 GB | Default, good balance |
+| llama3.2:3b | Q8_0 | ~3.2 GB | ~5 GB | Good balance, heavier |
 | qwen3:0.6b | Q4_K_M | ~400 MB | ~1 GB | Ultra-light, basic extraction |
-| qwen3:1.7b | Q4_K_M | ~1.1 GB | ~2 GB | Light with thinking mode |
+| qwen3:1.7b | Q4_K_M | ~1.1 GB | ~2 GB | **Default**, fast with /no_think |
 | qwen3:4b | Q4_K_M | ~2.5 GB | ~4 GB | Balanced with thinking mode |
 | qwen3:8b | Q4_K_M | ~5 GB | ~7 GB | Quality with thinking mode |
 | qwen3:30b | Q4_K_M | ~17 GB | ~20 GB | Best quality (MoE, 3B active) |
@@ -53,10 +53,10 @@ model = "llama3.2:1b"
 model = "bge-m3"
 
 [memory.llm]
-model = "llama3.2:3b"
+model = "qwen3:1.7b"
 ```
-- Total disk: ~4 GB
-- Total RAM: ~6 GB (allows concurrent operation)
+- Total disk: ~2.5 GB
+- Total RAM: ~4 GB (allows concurrent operation)
 
 **High Quality (32+ GB RAM):**
 ```toml

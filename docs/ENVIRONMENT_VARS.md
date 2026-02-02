@@ -24,7 +24,7 @@
 | [`WATERCOOLER_TEMPLATES`](#watercooler_templates) | No | Built-in | MCP & CLI | Custom templates directory |
 | [`WATERCOOLER_USER`](#watercooler_user) | No | OS username | Lock System | Override username in lock files |
 | [`BASELINE_GRAPH_API_BASE`](#baseline_graph_api_base) | No | `http://localhost:8000/v1` | Baseline Graph | LLM API endpoint |
-| [`BASELINE_GRAPH_MODEL`](#baseline_graph_model) | No | `llama3.2:3b` | Baseline Graph | LLM model name |
+| [`BASELINE_GRAPH_MODEL`](#baseline_graph_model) | No | `qwen3:1.7b` | Baseline Graph | LLM model name |
 | [`BASELINE_GRAPH_EXTRACTIVE_ONLY`](#baseline_graph_extractive_only) | No | `false` | Baseline Graph | Force extractive mode |
 | [`WATERCOOLER_GRAPHITI_ENABLED`](#watercooler_graphiti_enabled) | No | `"0"` | MCP Memory | Enable Graphiti memory queries |
 | [`WATERCOOLER_MEMORY_DISABLED`](#watercooler_memory_disabled) | No | Not set | All Memory | Disable all memory backends |
@@ -668,7 +668,7 @@ export BASELINE_GRAPH_API_BASE="https://api.openai.com/v1"
 
 **Required:** No
 
-**Default:** `"llama3.2:3b"`
+**Default:** `"qwen3:1.7b"` (recommended)
 
 **Format:** Model identifier string
 
@@ -676,13 +676,18 @@ export BASELINE_GRAPH_API_BASE="https://api.openai.com/v1"
 
 **Details:**
 
-Specifies which model to use for LLM-based summarization. Use a small, fast model for best results.
+Specifies which model to use for LLM-based summarization. The system auto-detects model family and applies optimal prompting (e.g., `/no_think` prefix for Qwen3 models).
+
+**Recommended models:**
+- `qwen3:1.7b` - Fast, efficient (auto `/no_think` applied)
+- `qwen2.5:3b` - Higher quality, slightly slower
+- `llama3.2:3b` - Balanced option
 
 **Configuration examples:**
 
 **Shell:**
 ```bash
-export BASELINE_GRAPH_MODEL="llama3.2:3b"
+export BASELINE_GRAPH_MODEL="qwen3:1.7b"
 ```
 
 ---
@@ -769,6 +774,64 @@ export BASELINE_GRAPH_EXTRACTIVE_ONLY="true"
 
 **Related:**
 - See [Baseline Graph Documentation](baseline-graph.md) for full module documentation
+
+---
+
+### LLM_SYSTEM_PROMPT
+
+**Purpose:** System prompt for chat-style LLMs in summarization.
+
+**Required:** No
+
+**Default:** Auto-detected based on model family
+
+**Format:** String
+
+**Used by:** Baseline Graph Module
+
+**Details:**
+
+When empty (default), the system auto-detects the appropriate system prompt based on model family:
+- Qwen3: No system prompt (uses `/no_think` prefix instead)
+- Qwen2.5, Llama, others: `"You summarize technical entries concisely with relevant tags."`
+
+Set explicitly to override auto-detection.
+
+**Configuration examples:**
+
+**Shell:**
+```bash
+export LLM_SYSTEM_PROMPT="You are a technical summarizer."
+```
+
+---
+
+### LLM_PROMPT_PREFIX
+
+**Purpose:** Prefix added to user prompt for LLM summarization.
+
+**Required:** No
+
+**Default:** Auto-detected based on model family
+
+**Format:** String
+
+**Used by:** Baseline Graph Module
+
+**Details:**
+
+When empty (default), the system auto-detects the appropriate prefix based on model family:
+- Qwen3: `/no_think ` (disables thinking mode for direct output)
+- Others: Empty (not needed)
+
+Set explicitly to override auto-detection.
+
+**Configuration examples:**
+
+**Shell:**
+```bash
+export LLM_PROMPT_PREFIX="/no_think "
+```
 
 ---
 

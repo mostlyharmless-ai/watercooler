@@ -87,8 +87,14 @@ class ResolvedLLMConfig:
     model: str
     timeout: float
     max_tokens: int
+    # Prompt configuration
+    system_prompt: str = ""
+    prompt_prefix: str = ""
     summary_prompt: str = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
     thread_summary_prompt: str = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
+    # Few-shot example
+    summary_example_input: str = "Implemented OAuth2 authentication with JWT tokens. Added refresh token rotation and secure cookie storage."
+    summary_example_output: str = "OAuth2 authentication implemented with JWT tokens, refresh rotation, and secure cookie storage.\ntags: #authentication #OAuth2 #JWT #security"
 
     def __repr__(self) -> str:
         """Return string representation with redacted API key."""
@@ -521,7 +527,7 @@ def get_leanrag_max_workers() -> int:
 # Default values for baseline graph (only used when no env vars or config set)
 # llama-server for LLM (completion mode) on port 8000
 _BASELINE_GRAPH_DEFAULT_LLM_API_BASE = "http://localhost:8000/v1"
-_BASELINE_GRAPH_DEFAULT_LLM_MODEL = "llama3.2:3b"
+_BASELINE_GRAPH_DEFAULT_LLM_MODEL = "qwen3:1.7b"
 _BASELINE_GRAPH_DEFAULT_LLM_API_KEY = ""  # Local llama-server doesn't need a key
 # llama-server for embeddings (embedding mode) on port 8080
 _BASELINE_GRAPH_DEFAULT_EMBEDDING_API_BASE = "http://localhost:8080/v1"
@@ -572,9 +578,15 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
     timeout = _safe_float(os.getenv("LLM_TIMEOUT"), mem.llm.timeout, 1.0, 600.0)
     max_tokens = _safe_int(os.getenv("LLM_MAX_TOKENS"), mem.llm.max_tokens, 1, 32768)
 
-    # Resolve summary prompts from env/TOML
+    # Resolve prompt configuration from env/TOML
+    system_prompt = os.getenv("LLM_SYSTEM_PROMPT") or mem.llm.system_prompt
+    prompt_prefix = os.getenv("LLM_PROMPT_PREFIX") or mem.llm.prompt_prefix
     summary_prompt = os.getenv("LLM_SUMMARY_PROMPT") or mem.llm.summary_prompt
     thread_summary_prompt = os.getenv("LLM_THREAD_SUMMARY_PROMPT") or mem.llm.thread_summary_prompt
+
+    # Resolve few-shot example from TOML (no env override for these)
+    summary_example_input = mem.llm.summary_example_input
+    summary_example_output = mem.llm.summary_example_output
 
     return ResolvedLLMConfig(
         api_key=api_key,
@@ -582,8 +594,12 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
         model=model,
         timeout=timeout,
         max_tokens=max_tokens,
+        system_prompt=system_prompt,
+        prompt_prefix=prompt_prefix,
         summary_prompt=summary_prompt,
         thread_summary_prompt=thread_summary_prompt,
+        summary_example_input=summary_example_input,
+        summary_example_output=summary_example_output,
     )
 
 

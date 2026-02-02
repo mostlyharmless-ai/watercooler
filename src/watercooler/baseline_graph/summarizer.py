@@ -61,9 +61,17 @@ class SummarizerConfig:
     timeout: float = 30.0
     max_tokens: int = 256
 
+    # Prompt configuration (auto-detected from model if empty)
+    system_prompt: str = ""  # Empty means auto-detect based on model
+    prompt_prefix: str = ""  # Empty means auto-detect (e.g., "/no_think" for Qwen3)
+
     # Summary prompts (configurable via [memory.llm])
     summary_prompt: str = field(default_factory=_get_default_summary_prompt)
     thread_summary_prompt: str = field(default_factory=_get_default_thread_summary_prompt)
+
+    # Few-shot example for format compliance
+    summary_example_input: str = "Implemented OAuth2 authentication with JWT tokens. Added refresh token rotation and secure cookie storage."
+    summary_example_output: str = "OAuth2 authentication implemented with JWT tokens, refresh rotation, and secure cookie storage.\ntags: #authentication #OAuth2 #JWT #security"
 
     # Extractive fallback settings
     extractive_max_chars: int = 200
@@ -92,8 +100,12 @@ class SummarizerConfig:
             api_key=llm.get("api_key", llm_defaults.api_key),
             timeout=llm.get("timeout", cls.timeout),
             max_tokens=llm.get("max_tokens", cls.max_tokens),
+            system_prompt=llm.get("system_prompt", llm_defaults.system_prompt),
+            prompt_prefix=llm.get("prompt_prefix", llm_defaults.prompt_prefix),
             summary_prompt=llm.get("summary_prompt", llm_defaults.summary_prompt),
             thread_summary_prompt=llm.get("thread_summary_prompt", llm_defaults.thread_summary_prompt),
+            summary_example_input=llm.get("summary_example_input", llm_defaults.summary_example_input),
+            summary_example_output=llm.get("summary_example_output", llm_defaults.summary_example_output),
             extractive_max_chars=extractive.get("max_chars", cls.extractive_max_chars),
             include_headers=extractive.get("include_headers", cls.include_headers),
             max_headers=extractive.get("max_headers", cls.max_headers),
@@ -135,8 +147,12 @@ class SummarizerConfig:
             api_key=llm_config.api_key,
             timeout=timeout,
             max_tokens=max_tokens,
+            system_prompt=llm_config.system_prompt,
+            prompt_prefix=llm_config.prompt_prefix,
             summary_prompt=llm_config.summary_prompt,
             thread_summary_prompt=llm_config.thread_summary_prompt,
+            summary_example_input=llm_config.summary_example_input,
+            summary_example_output=llm_config.summary_example_output,
             prefer_extractive=os.environ.get("BASELINE_GRAPH_EXTRACTIVE_ONLY", "").lower() in ("1", "true", "yes"),
         )
 
@@ -272,6 +288,56 @@ def extractive_summary(
     return " | ".join(parts) if parts else text[:max_chars]
 
 
+def _extract_tags(text: str) -> List[str]:
+    """Extract hashtags from text.
+
+    Looks for tags in formats:
+    - "tags: #foo #bar #baz"
+    - "#foo #bar" (standalone hashtags)
+
+    Args:
+        text: Text that may contain tags
+
+    Returns:
+        List of tag strings (without # prefix), deduplicated
+    """
+    if not text:
+        return []
+
+    tags = set()
+
+    # Pattern 1: "tags: #foo #bar" line
+    tags_line_match = re.search(r"tags:\s*((?:#\w+\s*)+)", text, re.IGNORECASE)
+    if tags_line_match:
+        tag_str = tags_line_match.group(1)
+        for match in re.finditer(r"#(\w+)", tag_str):
+            tags.add(match.group(1).lower())
+
+    # Pattern 2: Standalone hashtags (if no tags: line found)
+    if not tags:
+        for match in re.finditer(r"#(\w+)", text):
+            tags.add(match.group(1).lower())
+
+    return sorted(tags)
+
+
+def _strip_tags_from_summary(text: str) -> str:
+    """Remove the tags line from a summary.
+
+    Args:
+        text: Summary text that may end with "tags: #foo #bar"
+
+    Returns:
+        Text with tags line removed and trailing whitespace stripped
+    """
+    if not text:
+        return ""
+
+    # Remove "tags: ..." line (typically at the end)
+    result = re.sub(r"\n?tags:\s*(?:#\w+\s*)+\s*$", "", text, flags=re.IGNORECASE)
+    return result.strip()
+
+
 def _validate_api_base(api_base: str) -> bool:
     """Validate api_base URL format and warn about security concerns.
 
@@ -312,13 +378,13 @@ def _validate_api_base(api_base: str) -> bool:
 
 
 def _call_llm(
-    prompt: str,
+    messages: List[Dict[str, str]],
     config: SummarizerConfig,
 ) -> Optional[str]:
     """Call local LLM via OpenAI-compatible API.
 
     Args:
-        prompt: Prompt to send
+        messages: List of message dicts with "role" and "content" keys
         config: Summarizer configuration
 
     Returns:
@@ -342,7 +408,7 @@ def _call_llm(
 
     payload = {
         "model": config.model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0.3,  # Low temp for factual summaries
     }
@@ -382,6 +448,87 @@ def _call_llm(
         return None
 
 
+def _build_summary_messages(
+    entry_body: str,
+    entry_title: Optional[str],
+    entry_type: Optional[str],
+    config: SummarizerConfig,
+) -> List[Dict[str, str]]:
+    """Build chat messages for summarization with model-aware prompting.
+
+    Constructs a message list with:
+    - Optional system prompt (from config or auto-detected by model family)
+    - User message with optional prefix, few-shot example, and entry content
+
+    Args:
+        entry_body: Entry body text
+        entry_title: Optional entry title
+        entry_type: Optional entry type
+        config: Summarizer configuration
+
+    Returns:
+        List of message dicts for the LLM API
+    """
+    from watercooler.models import get_model_prompt_defaults
+
+    # Get model-specific defaults
+    model_defaults = get_model_prompt_defaults(config.model)
+
+    # Resolve system prompt (config > auto-detect)
+    system_prompt = config.system_prompt or model_defaults.get("system_prompt", "")
+
+    # Resolve prompt prefix (config > auto-detect)
+    prompt_prefix = config.prompt_prefix or model_defaults.get("prompt_prefix", "")
+
+    # Build entry context
+    context = ""
+    if entry_title:
+        context += f"Title: {entry_title}\n"
+    if entry_type:
+        context += f"Type: {entry_type}\n"
+
+    content = _truncate_text(entry_body, 2000)
+
+    # Build the user prompt with few-shot example
+    user_prompt_parts = []
+
+    # Add prefix if needed (e.g., "/no_think" for Qwen3)
+    if prompt_prefix:
+        user_prompt_parts.append(prompt_prefix.rstrip())
+
+    # Add instruction from config (or default)
+    instruction = config.summary_prompt
+    if not instruction or "{context}" in instruction or "{content}" in instruction:
+        # Use simple default if template-style or empty
+        instruction = "Summarize the entry in 1-2 sentences, then add relevant tags."
+    user_prompt_parts.append(instruction)
+
+    # Add few-shot example
+    if config.summary_example_input and config.summary_example_output:
+        user_prompt_parts.append(
+            f"\nExample input:\n\"{config.summary_example_input}\"\n\n"
+            f"Example output:\n{config.summary_example_output}"
+        )
+
+    # Add the actual entry to summarize
+    if context:
+        user_prompt_parts.append(f"\nNow summarize this entry:\n{context}\n{content}")
+    else:
+        user_prompt_parts.append(f"\nNow summarize this entry:\n{content}")
+
+    user_content = "\n".join(user_prompt_parts)
+
+    # Build messages list
+    messages: List[Dict[str, str]] = []
+
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+
+    messages.append({"role": "user", "content": user_content})
+
+    return messages
+
+
 def summarize_entry(
     entry_body: str,
     entry_title: Optional[str] = None,
@@ -390,7 +537,8 @@ def summarize_entry(
 ) -> str:
     """Summarize a single thread entry.
 
-    Uses LLM for summarization. Returns empty string if LLM unavailable.
+    Uses LLM for summarization with model-aware prompting.
+    Returns empty string if LLM unavailable.
 
     Args:
         entry_body: Entry body text
@@ -412,31 +560,10 @@ def summarize_entry(
             max_headers=config.max_headers,
         )
 
-    # Build LLM prompt
-    context = ""
-    if entry_title:
-        context += f"Title: {entry_title}\n"
-    if entry_type:
-        context += f"Type: {entry_type}\n"
+    # Build messages with model-aware prompting
+    messages = _build_summary_messages(entry_body, entry_title, entry_type, config)
 
-    content = _truncate_text(entry_body, 2000)
-
-    # Use configurable prompt with {context} and {content} placeholders
-    base_prompt = config.summary_prompt
-    if "{context}" in base_prompt or "{content}" in base_prompt:
-        # Template-style prompt
-        prompt = base_prompt.format(context=context, content=content)
-    else:
-        # Simple instruction prompt - wrap with context and content
-        prompt = f"""{base_prompt}
-
-{context}
-Content:
-{content}
-
-Summary:"""
-
-    result = _call_llm(prompt, config)
+    result = _call_llm(messages, config)
 
     if result is None:
         logger.warning(
@@ -455,51 +582,87 @@ def summarize_thread(
 ) -> str:
     """Summarize an entire thread from its entries.
 
+    Generates a prose summary of the thread and aggregates tags from all
+    entry summaries. Tags are extracted deterministically and deduplicated,
+    then appended to the thread summary.
+
     Args:
-        entries: List of entry dicts with 'body', 'title', 'type' keys
+        entries: List of entry dicts with 'body', 'title', 'type' keys.
+            May also include 'summary' with pre-computed entry summary.
         thread_title: Optional thread title
         config: Summarizer configuration
 
     Returns:
-        Thread summary string
+        Thread summary string with aggregated tags
     """
     config = config or SummarizerConfig()
 
     if not entries:
         return ""
 
-    # Concatenate entry summaries for context
+    # Collect entry summaries and aggregate tags
     entry_summaries = []
+    all_tags: set[str] = set()
+
     for entry in entries[:config.max_thread_entries]:
         body = entry.get("body", "")
         title = entry.get("title", "")
-        if body:
+        entry_summary = entry.get("summary", "")
+
+        # Extract tags from entry summary if available
+        if entry_summary:
+            tags = _extract_tags(entry_summary)
+            all_tags.update(tags)
+            # Use summary without tags for prose generation
+            short = _strip_tags_from_summary(entry_summary)[:100]
+        elif body:
             short = extractive_summary(body, max_chars=100, include_headers=False)
-            if title:
-                entry_summaries.append(f"- {title}: {short}")
-            else:
-                entry_summaries.append(f"- {short}")
+        else:
+            continue
+
+        if title:
+            entry_summaries.append(f"- {title}: {short}")
+        else:
+            entry_summaries.append(f"- {short}")
 
     combined = "\n".join(entry_summaries)
 
     # Use extractive if forced
     if config.prefer_extractive:
-        return extractive_summary(
+        prose = extractive_summary(
             combined,
             max_chars=config.extractive_max_chars * 2,
             include_headers=False,
         )
+        # Append aggregated tags
+        if all_tags:
+            tag_line = "tags: " + " ".join(f"#{t}" for t in sorted(all_tags))
+            return f"{prose}\n{tag_line}"
+        return prose
 
-    # Build LLM prompt using configurable template
+    # Build LLM messages using model-aware prompting
+    from watercooler.models import get_model_prompt_defaults
+
     title = thread_title or "Development Discussion"
+    model_defaults = get_model_prompt_defaults(config.model)
 
+    # Resolve system prompt and prefix
+    system_prompt = config.system_prompt or model_defaults.get("system_prompt", "")
+    prompt_prefix = config.prompt_prefix or model_defaults.get("prompt_prefix", "")
+
+    # Build user message - ask for prose only, we'll add tags separately
     base_prompt = config.thread_summary_prompt
-    if "{title}" in base_prompt or "{entries}" in base_prompt:
-        # Template-style prompt
-        prompt = base_prompt.format(title=title, entries=combined)
+    # Modify prompt to exclude tags (we aggregate them separately)
+    prose_prompt = base_prompt.replace("then add relevant tags", "").replace(
+        "include relevant tags", ""
+    ).strip()
+    if not prose_prompt:
+        prose_prompt = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
+
+    if "{title}" in prose_prompt or "{entries}" in prose_prompt:
+        user_content = prose_prompt.format(title=title, entries=combined)
     else:
-        # Simple instruction prompt - wrap with context
-        prompt = f"""{base_prompt}
+        user_content = f"""{prose_prompt}
 
 Thread: {title}
 
@@ -508,7 +671,17 @@ Entries:
 
 Summary:"""
 
-    result = _call_llm(prompt, config)
+    # Add prefix if needed
+    if prompt_prefix:
+        user_content = f"{prompt_prefix.rstrip()} {user_content}"
+
+    # Build messages
+    messages: List[Dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_content})
+
+    result = _call_llm(messages, config)
 
     if result is None:
         logger.warning(
@@ -517,7 +690,15 @@ Summary:"""
         )
         return ""
 
-    return result
+    # Strip any tags the LLM may have added (we aggregate our own)
+    prose = _strip_tags_from_summary(result)
+
+    # Append deterministically aggregated tags
+    if all_tags:
+        tag_line = "tags: " + " ".join(f"#{t}" for t in sorted(all_tags))
+        return f"{prose}\n{tag_line}"
+
+    return prose
 
 
 def get_baseline_graph_config() -> Dict[str, Any]:

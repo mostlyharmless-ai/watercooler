@@ -416,17 +416,18 @@ LLM_GGUF_MODELS: dict[str, LLMGGUFModelSpec | str] = {
         "context": 40960,
         "size_mb": 2700,  # ~2.7 GB
     },
+    # Qwen3 small models - require /no_think prefix to disable reasoning mode
     "qwen3:1.7b": {
-        "hf_repo": "Qwen/Qwen3-1.7B-GGUF",
+        "hf_repo": "unsloth/Qwen3-1.7B-GGUF",  # Community GGUF (official not available)
         "hf_file": "Qwen3-1.7B-Q4_K_M.gguf",
         "context": 40960,
-        "size_mb": 1200,  # ~1.2 GB
+        "size_mb": 1100,  # ~1.1 GB, good quality with /no_think prefix
     },
     "qwen3:0.6b": {
-        "hf_repo": "Qwen/Qwen3-0.6B-GGUF",
+        "hf_repo": "unsloth/Qwen3-0.6B-GGUF",  # Community GGUF (official not available)
         "hf_file": "Qwen3-0.6B-Q4_K_M.gguf",
         "context": 40960,
-        "size_mb": 500,  # ~500 MB
+        "size_mb": 400,  # ~400 MB, smallest viable summarizer with /no_think
     },
     # Llama 3.2 models
     "llama3.2:3b": {
@@ -441,15 +442,49 @@ LLM_GGUF_MODELS: dict[str, LLMGGUFModelSpec | str] = {
         "context": 8192,
         "size_mb": 1300,  # ~1.3 GB
     },
+    # SmolLM2 models - requires two-phase prompting for summarization (extract→synthesize)
+    "smollm2:1.7b": {
+        "hf_repo": "bartowski/SmolLM2-1.7B-Instruct-GGUF",
+        "hf_file": "SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
+        "context": 8192,
+        "size_mb": 1000,  # ~1 GB, needs two-phase prompting for summarization
+    },
+    # Qwen2.5 models - excellent for summarization with few-shot prompting, no special prefix needed
+    "qwen2.5:3b": {
+        "hf_repo": "Qwen/Qwen2.5-3B-Instruct-GGUF",
+        "hf_file": "qwen2.5-3b-instruct-q4_k_m.gguf",
+        "context": 32768,
+        "size_mb": 2000,  # ~2 GB, best quality for summarization
+    },
+    "qwen2.5:1.5b": {
+        "hf_repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+        "hf_file": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "context": 32768,
+        "size_mb": 1100,  # ~1.1 GB, fastest and recommended for summarization
+    },
+    # Phi-3 models (Microsoft, high accuracy but verbose)
+    "phi3:3.8b": {
+        "hf_repo": "microsoft/Phi-3-mini-4k-instruct-gguf",
+        "hf_file": "Phi-3-mini-4k-instruct-q4.gguf",
+        "context": 4096,
+        "size_mb": 2300,  # ~2.3 GB
+    },
     # Aliases
     "qwen3:latest": "qwen3:30b",
     "qwen3": "qwen3:30b",
     "llama3.2": "llama3.2:3b",
     "llama3.2:latest": "llama3.2:3b",
+    "smollm2": "smollm2:1.7b",
+    "smollm2:latest": "smollm2:1.7b",
+    "qwen2.5": "qwen2.5:3b",
+    "qwen2.5:latest": "qwen2.5:3b",
+    "phi3": "phi3:3.8b",
+    "phi3:latest": "phi3:3.8b",
+    "phi3-mini": "phi3:3.8b",
 }
 
 # Default LLM model when none specified
-DEFAULT_LLM_GGUF_MODEL = "llama3.2:3b"
+DEFAULT_LLM_GGUF_MODEL = "qwen3:1.7b"
 
 
 def resolve_llm_gguf_model(name: str) -> LLMGGUFModelSpec:
@@ -711,6 +746,28 @@ LLM_MODELS: dict[str, LLMModelSpec | str] = {
         "response_field": "content",
         "supports_thinking": False,
     },
+    # SmolLM2 models - requires two-phase prompting for summarization
+    "smollm2:1.7b": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+    "smollm2": "smollm2:1.7b",
+    # Qwen2.5 models - excellent for summarization with few-shot prompting
+    "qwen2.5:3b": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+    "qwen2.5:1.5b": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+    "qwen2.5": "qwen2.5:3b",
+    # Phi-3 models (clean output)
+    "phi3:3.8b": {
+        "response_field": "content",
+        "supports_thinking": False,
+    },
+    "phi3": "phi3:3.8b",
     "mistral": {
         "response_field": "content",
         "supports_thinking": False,
@@ -814,3 +871,67 @@ def get_min_max_tokens(model_name: str, default: int = 256) -> int:
     """
     spec = resolve_llm_model(model_name)
     return spec.get("min_max_tokens", default)
+
+
+# Model family detection for prompt configuration
+# These defaults are applied when user doesn't specify system_prompt or prompt_prefix
+
+_MODEL_FAMILY_DEFAULTS: dict[str, dict[str, str]] = {
+    # Qwen3 family needs /no_think to disable reasoning mode
+    "qwen3": {
+        "prompt_prefix": "/no_think ",
+        "system_prompt": "",  # No system prompt needed with /no_think
+    },
+    # Qwen2.5 family works well with system prompt, no prefix needed
+    "qwen2.5": {
+        "prompt_prefix": "",
+        "system_prompt": "You summarize technical entries concisely with relevant tags.",
+    },
+    # Default for unknown models
+    "default": {
+        "prompt_prefix": "",
+        "system_prompt": "You summarize technical entries concisely with relevant tags.",
+    },
+}
+
+
+def get_model_family(model_name: str) -> str:
+    """Detect model family from model name.
+
+    Args:
+        model_name: Model name (e.g., "qwen3:1.7b", "qwen2.5:3b")
+
+    Returns:
+        Model family identifier (e.g., "qwen3", "qwen2.5", "default")
+    """
+    name_lower = model_name.lower()
+
+    # Check known families (order matters - check more specific first)
+    if "qwen3" in name_lower:
+        return "qwen3"
+    if "qwen2.5" in name_lower or "qwen2-5" in name_lower:
+        return "qwen2.5"
+    if "smollm" in name_lower:
+        return "smollm2"
+    if "phi3" in name_lower or "phi-3" in name_lower:
+        return "phi3"
+    if "llama" in name_lower:
+        return "llama"
+
+    return "default"
+
+
+def get_model_prompt_defaults(model_name: str) -> dict[str, str]:
+    """Get prompt configuration defaults for a model.
+
+    Returns appropriate system_prompt and prompt_prefix based on model family.
+    These are used when user doesn't configure explicit values.
+
+    Args:
+        model_name: Model name (e.g., "qwen3:1.7b")
+
+    Returns:
+        Dict with "system_prompt" and "prompt_prefix" keys
+    """
+    family = get_model_family(model_name)
+    return _MODEL_FAMILY_DEFAULTS.get(family, _MODEL_FAMILY_DEFAULTS["default"])
