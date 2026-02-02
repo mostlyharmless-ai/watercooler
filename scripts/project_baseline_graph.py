@@ -219,8 +219,8 @@ Examples:
             )
 
             if sync_result.success:
-                if sync_result.commit_result and sync_result.commit_result.sha:
-                    print(f"Committed: {sync_result.commit_result.sha[:8]}")
+                if sync_result.commit_result and sync_result.commit_result.commit_sha:
+                    print(f"Committed: {sync_result.commit_result.commit_sha[:8]}")
                 if sync_result.push_result and sync_result.push_result.commits_pushed:
                     print(f"Pushed {sync_result.push_result.commits_pushed} commit(s) to remote")
                 else:
