@@ -16,6 +16,7 @@ Usage:
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 # Add src to path for imports
@@ -269,6 +270,7 @@ Examples:
 
     database_name = _derive_database_name(code_path)
     print(f"Database: {database_name} (derived from {code_path.name})")
+    print(f"FalkorDB graph: {database_name}")
 
     # Determine LeanRAG directory
     if args.leanrag_dir:
@@ -302,37 +304,104 @@ Examples:
         return 1
     print(f"✓ Backend healthy: {health.details}")
 
+    # Track timing for each step
+    timings = {}
+    total_start = time.perf_counter()
+
     # Build corpus from threads and/or documents
+    step_start = time.perf_counter()
     corpus = build_corpus(
         threads_dir,
         thread_files,
         docs_dir=docs_dir,
         docs_pattern=args.docs_pattern,
     )
-    print(f"\n✓ Built corpus: {len(corpus.threads)} threads, {len(corpus.entries)} entries")
+    timings["corpus"] = time.perf_counter() - step_start
+    print(f"\n✓ Built corpus: {len(corpus.threads)} threads, {len(corpus.entries)} entries ({timings['corpus']:.1f}s)")
 
-    # Step 1: Prepare (entity extraction)
-    print("\nStep 1: Preparing (entity/relation extraction)...")
-    print("  This step uses LLM to extract entities and relationships from chunks.")
-    print("  With 3 threads, expect ~5-15 minutes depending on chunk count.")
+    # Step 1: Prepare (export to LeanRAG format)
+    print("\nStep 1: Preparing corpus for LeanRAG...")
+    step_start = time.perf_counter()
     prepare_result = backend.prepare(corpus)
-    print(f"✓ Prepared {prepare_result.prepared_count} chunks")
+    timings["prepare"] = time.perf_counter() - step_start
+    print(f"✓ Prepared {prepare_result.prepared_count} entries ({timings['prepare']:.1f}s)")
 
     # Step 2: Build chunks
-    print("\nStep 2: Building chunks...")
+    print("\nStep 2: Building chunk payload...")
+    step_start = time.perf_counter()
     chunks = build_chunks(corpus)
-    print(f"✓ Built {len(chunks.chunks)} chunks")
+    timings["chunks"] = time.perf_counter() - step_start
+    print(f"✓ Built {len(chunks.chunks)} chunks ({timings['chunks']:.1f}s)")
 
-    # Step 3: Index (build hierarchical graph)
-    print("\nStep 3: Building hierarchical knowledge graph...")
-    print("  This step performs clustering and builds the graph in FalkorDB.")
-    index_result = backend.index(chunks)
-    print(f"✓ Indexed {index_result.indexed_count} chunks into LeanRAG graph")
+    # Step 3: Index (triple extraction + hierarchical graph building)
+    # Graph name in FalkorDB is the work_dir basename (same as database_name)
+    graph_name = work_dir.name
+    print(f"\nStep 3: Indexing into LeanRAG (FalkorDB graph: {graph_name})...")
+    print("  3a. Triple extraction: LLM extracts entities and relationships from each chunk")
+    print("  3b. Graph building: Clustering, embeddings, and FalkorDB insertion")
+    print(f"  Processing {len(chunks.chunks)} chunks - this may take several minutes...")
+    print()
 
-    print(f"\n✅ Indexing complete! Work directory: {work_dir}")
-    print("\nYou can now query via Phase 2 backend:")
-    print('  backend.search_nodes(query="your question", max_results=10)')
-    print('  backend.search_facts(query="your question", max_results=10)')
+    # Progress tracking state
+    last_stage = [None]
+    last_step = [None]
+    stage_start = [time.perf_counter()]
+    last_extraction_report = [0]
+
+    def progress_callback(stage: str, step: str, current: int, total: int) -> None:
+        """Print progress updates during indexing."""
+        # Track stage transitions
+        if stage != last_stage[0]:
+            if last_stage[0] is not None:
+                elapsed = time.perf_counter() - stage_start[0]
+                print(f"\n  ✓ {last_stage[0]} complete ({elapsed:.1f}s)")
+            last_stage[0] = stage
+            stage_start[0] = time.perf_counter()
+            last_extraction_report[0] = 0
+            if stage == "triple_extraction":
+                print(f"  → Triple extraction: processing {total} chunks...", flush=True)
+            elif stage == "graph_building":
+                print(f"  → Graph building: 5 steps...")
+
+        # Progress updates during triple extraction
+        if stage == "triple_extraction" and step == "processing":
+            elapsed = time.perf_counter() - stage_start[0]
+            # Only report if we've made progress
+            if current > last_extraction_report[0]:
+                last_extraction_report[0] = current
+                pct = (current / total * 100) if total > 0 else 0
+                rate = current / elapsed if elapsed > 0 else 0
+                eta = (total - current) / rate if rate > 0 else 0
+                print(f"    {current}/{total} chunks (~{pct:.0f}%) | {elapsed:.0f}s elapsed | ETA: {eta:.0f}s", flush=True)
+
+        # Track step transitions within graph_building
+        if stage == "graph_building" and step != last_step[0] and step not in ("starting", "complete"):
+            last_step[0] = step
+            print(f"    [{current}/5] {step}...", flush=True)
+
+    step_start = time.perf_counter()
+    index_result = backend.index(chunks, progress_callback=progress_callback)
+    timings["index"] = time.perf_counter() - step_start
+
+    # Final stage completion
+    if last_stage[0] is not None:
+        elapsed = time.perf_counter() - stage_start[0]
+        print(f"  ✓ {last_stage[0]} complete ({elapsed:.1f}s)")
+
+    print(f"\n✓ Indexed {index_result.indexed_count} chunks into LeanRAG graph ({timings['index']:.1f}s)")
+
+    # Summary
+    total_elapsed = time.perf_counter() - total_start
+    print(f"\n{'─' * 50}")
+    print(f"✅ Indexing complete! Total time: {total_elapsed:.1f}s")
+    print(f"\nTiming breakdown:")
+    for step_name, elapsed in timings.items():
+        pct = (elapsed / total_elapsed) * 100
+        print(f"  {step_name:15} {elapsed:6.1f}s ({pct:4.1f}%)")
+    print(f"\nFalkorDB graph: {graph_name}")
+    print(f"Work directory: {work_dir}")
+    print("\nYou can now query via MCP tools:")
+    print(f'  watercooler_smart_query(query="your question", code_path="{code_path}")')
 
     return 0
 
