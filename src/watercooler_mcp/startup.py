@@ -633,9 +633,19 @@ def ensure_llm_running() -> None:
         # Start in background thread
         log_debug(f"LLM service not available at {api_base}, starting in background...")
 
-        # Get context size from model spec or use default
+        # Get context size: config.toml > model registry > default
+        # Config takes priority (user explicitly set it), then model spec, then default
         from watercooler.models import get_llm_context_size
-        context_size = get_llm_context_size(model_name, default=DEFAULT_CONTEXT_SIZE)
+        config_context_size = llm_config.context_size
+        model_context_size = get_llm_context_size(model_name, default=DEFAULT_CONTEXT_SIZE)
+
+        # Use config if explicitly set (not default 8192), otherwise use model spec
+        if config_context_size != 8192:
+            context_size = config_context_size
+            log_debug(f"Using context_size={context_size} from config.toml")
+        else:
+            context_size = model_context_size
+            log_debug(f"Using context_size={context_size} from model registry")
 
         thread = threading.Thread(
             target=_llm_startup_worker,
