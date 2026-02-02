@@ -524,10 +524,27 @@ auto_detect_services = true
 # Thread summary instruction
 # Env: LLM_THREAD_SUMMARY_PROMPT
 #
-# For summarizing entire threads. Thread title and entry summaries are
-# appended automatically.
+# Template format with placeholders:
+#   {title} - Thread title
+#   {entries} - Bullet list of entry summaries (tags already stripped)
 #
-# thread_summary_prompt = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
+# NOTE: Do NOT ask for tags in this prompt. The code automatically:
+#   1. Extracts tags from each entry summary
+#   2. Strips tags from entries before passing to LLM
+#   3. Aggregates all unique tags and appends them to the thread summary
+#
+# Simple format (title and entries appended automatically):
+# thread_summary_prompt = "Summarize this development thread in 2-3 sentences."
+#
+# Template format (full control over structure):
+# thread_summary_prompt = """Summarize this development thread in 2-3 sentences. Focus on the main topic, key decisions, and outcomes. Do NOT include tags in your response.
+#
+# Thread: {title}
+#
+# Entry summaries:
+# {entries}
+#
+# Summary:"""
 
 # Few-shot example for format compliance (recommended for tags output)
 #
