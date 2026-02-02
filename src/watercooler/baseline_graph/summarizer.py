@@ -288,6 +288,56 @@ def extractive_summary(
     return " | ".join(parts) if parts else text[:max_chars]
 
 
+def _extract_tags(text: str) -> List[str]:
+    """Extract hashtags from text.
+
+    Looks for tags in formats:
+    - "tags: #foo #bar #baz"
+    - "#foo #bar" (standalone hashtags)
+
+    Args:
+        text: Text that may contain tags
+
+    Returns:
+        List of tag strings (without # prefix), deduplicated
+    """
+    if not text:
+        return []
+
+    tags = set()
+
+    # Pattern 1: "tags: #foo #bar" line
+    tags_line_match = re.search(r"tags:\s*((?:#\w+\s*)+)", text, re.IGNORECASE)
+    if tags_line_match:
+        tag_str = tags_line_match.group(1)
+        for match in re.finditer(r"#(\w+)", tag_str):
+            tags.add(match.group(1).lower())
+
+    # Pattern 2: Standalone hashtags (if no tags: line found)
+    if not tags:
+        for match in re.finditer(r"#(\w+)", text):
+            tags.add(match.group(1).lower())
+
+    return sorted(tags)
+
+
+def _strip_tags_from_summary(text: str) -> str:
+    """Remove the tags line from a summary.
+
+    Args:
+        text: Summary text that may end with "tags: #foo #bar"
+
+    Returns:
+        Text with tags line removed and trailing whitespace stripped
+    """
+    if not text:
+        return ""
+
+    # Remove "tags: ..." line (typically at the end)
+    result = re.sub(r"\n?tags:\s*(?:#\w+\s*)+\s*$", "", text, flags=re.IGNORECASE)
+    return result.strip()
+
+
 def _validate_api_base(api_base: str) -> bool:
     """Validate api_base URL format and warn about security concerns.
 
@@ -532,40 +582,63 @@ def summarize_thread(
 ) -> str:
     """Summarize an entire thread from its entries.
 
+    Generates a prose summary of the thread and aggregates tags from all
+    entry summaries. Tags are extracted deterministically and deduplicated,
+    then appended to the thread summary.
+
     Args:
-        entries: List of entry dicts with 'body', 'title', 'type' keys
+        entries: List of entry dicts with 'body', 'title', 'type' keys.
+            May also include 'summary' with pre-computed entry summary.
         thread_title: Optional thread title
         config: Summarizer configuration
 
     Returns:
-        Thread summary string
+        Thread summary string with aggregated tags
     """
     config = config or SummarizerConfig()
 
     if not entries:
         return ""
 
-    # Concatenate entry summaries for context
+    # Collect entry summaries and aggregate tags
     entry_summaries = []
+    all_tags: set[str] = set()
+
     for entry in entries[:config.max_thread_entries]:
         body = entry.get("body", "")
         title = entry.get("title", "")
-        if body:
+        entry_summary = entry.get("summary", "")
+
+        # Extract tags from entry summary if available
+        if entry_summary:
+            tags = _extract_tags(entry_summary)
+            all_tags.update(tags)
+            # Use summary without tags for prose generation
+            short = _strip_tags_from_summary(entry_summary)[:100]
+        elif body:
             short = extractive_summary(body, max_chars=100, include_headers=False)
-            if title:
-                entry_summaries.append(f"- {title}: {short}")
-            else:
-                entry_summaries.append(f"- {short}")
+        else:
+            continue
+
+        if title:
+            entry_summaries.append(f"- {title}: {short}")
+        else:
+            entry_summaries.append(f"- {short}")
 
     combined = "\n".join(entry_summaries)
 
     # Use extractive if forced
     if config.prefer_extractive:
-        return extractive_summary(
+        prose = extractive_summary(
             combined,
             max_chars=config.extractive_max_chars * 2,
             include_headers=False,
         )
+        # Append aggregated tags
+        if all_tags:
+            tag_line = "tags: " + " ".join(f"#{t}" for t in sorted(all_tags))
+            return f"{prose}\n{tag_line}"
+        return prose
 
     # Build LLM messages using model-aware prompting
     from watercooler.models import get_model_prompt_defaults
@@ -577,12 +650,19 @@ def summarize_thread(
     system_prompt = config.system_prompt or model_defaults.get("system_prompt", "")
     prompt_prefix = config.prompt_prefix or model_defaults.get("prompt_prefix", "")
 
-    # Build user message
+    # Build user message - ask for prose only, we'll add tags separately
     base_prompt = config.thread_summary_prompt
-    if "{title}" in base_prompt or "{entries}" in base_prompt:
-        user_content = base_prompt.format(title=title, entries=combined)
+    # Modify prompt to exclude tags (we aggregate them separately)
+    prose_prompt = base_prompt.replace("then add relevant tags", "").replace(
+        "include relevant tags", ""
+    ).strip()
+    if not prose_prompt:
+        prose_prompt = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
+
+    if "{title}" in prose_prompt or "{entries}" in prose_prompt:
+        user_content = prose_prompt.format(title=title, entries=combined)
     else:
-        user_content = f"""{base_prompt}
+        user_content = f"""{prose_prompt}
 
 Thread: {title}
 
@@ -610,7 +690,15 @@ Summary:"""
         )
         return ""
 
-    return result
+    # Strip any tags the LLM may have added (we aggregate our own)
+    prose = _strip_tags_from_summary(result)
+
+    # Append deterministically aggregated tags
+    if all_tags:
+        tag_line = "tags: " + " ".join(f"#{t}" for t in sorted(all_tags))
+        return f"{prose}\n{tag_line}"
+
+    return prose
 
 
 def get_baseline_graph_config() -> Dict[str, Any]:

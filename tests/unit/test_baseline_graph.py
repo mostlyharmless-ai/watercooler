@@ -41,6 +41,8 @@ from watercooler.baseline_graph.export import (
 from watercooler.baseline_graph.summarizer import (
     _build_summary_messages,
     _extract_headers,
+    _extract_tags,
+    _strip_tags_from_summary,
     _truncate_text,
 )
 from watercooler.models import (
@@ -970,3 +972,147 @@ class TestBuildSummaryMessages:
         assert len(messages) >= 1
         user_msg = next(m for m in messages if m["role"] == "user")
         assert user_msg["content"]  # Not empty
+
+
+# =============================================================================
+# Tag Extraction Tests
+# =============================================================================
+
+
+class TestExtractTags:
+    """Tests for _extract_tags() function."""
+
+    def test_extract_tags_from_tags_line(self):
+        """Test extracting tags from 'tags: #foo #bar' format."""
+        text = "Summary of the entry.\ntags: #authentication #OAuth2 #JWT"
+        tags = _extract_tags(text)
+        assert tags == ["authentication", "jwt", "oauth2"]
+
+    def test_extract_tags_case_insensitive(self):
+        """Test tags are normalized to lowercase."""
+        text = "tags: #Authentication #OAUTH2 #jwt"
+        tags = _extract_tags(text)
+        assert tags == ["authentication", "jwt", "oauth2"]
+
+    def test_extract_tags_deduplication(self):
+        """Test duplicate tags are removed."""
+        text = "tags: #auth #Auth #AUTH #security"
+        tags = _extract_tags(text)
+        assert tags == ["auth", "security"]
+
+    def test_extract_standalone_hashtags(self):
+        """Test extracting standalone hashtags when no tags: line."""
+        text = "Implemented #authentication with #JWT tokens"
+        tags = _extract_tags(text)
+        assert tags == ["authentication", "jwt"]
+
+    def test_extract_tags_empty_string(self):
+        """Test empty string returns empty list."""
+        assert _extract_tags("") == []
+        assert _extract_tags(None) == []
+
+    def test_extract_tags_no_tags(self):
+        """Test text without tags returns empty list."""
+        text = "Just a regular summary without any tags."
+        assert _extract_tags(text) == []
+
+    def test_extract_tags_sorted(self):
+        """Test tags are returned sorted alphabetically."""
+        text = "tags: #zebra #alpha #middle"
+        tags = _extract_tags(text)
+        assert tags == ["alpha", "middle", "zebra"]
+
+
+class TestStripTagsFromSummary:
+    """Tests for _strip_tags_from_summary() function."""
+
+    def test_strip_tags_line(self):
+        """Test removing tags line from summary."""
+        text = "Summary of the entry.\ntags: #foo #bar #baz"
+        result = _strip_tags_from_summary(text)
+        assert result == "Summary of the entry."
+
+    def test_strip_tags_preserves_content(self):
+        """Test non-tag content is preserved."""
+        text = "First line.\nSecond line.\ntags: #test"
+        result = _strip_tags_from_summary(text)
+        assert result == "First line.\nSecond line."
+
+    def test_strip_tags_no_tags(self):
+        """Test text without tags is returned unchanged."""
+        text = "Summary without tags."
+        result = _strip_tags_from_summary(text)
+        assert result == "Summary without tags."
+
+    def test_strip_tags_empty_string(self):
+        """Test empty string returns empty string."""
+        assert _strip_tags_from_summary("") == ""
+
+    def test_strip_tags_only_tags(self):
+        """Test summary that is only tags returns empty."""
+        text = "tags: #only #tags"
+        result = _strip_tags_from_summary(text)
+        assert result == ""
+
+
+class TestSummarizeThreadTagAggregation:
+    """Tests for tag aggregation in summarize_thread()."""
+
+    def test_thread_summary_aggregates_tags_from_entries(self):
+        """Test that thread summary aggregates tags from entry summaries."""
+        entries = [
+            {
+                "title": "Entry 1",
+                "body": "Content 1",
+                "summary": "Summary 1.\ntags: #auth #security",
+            },
+            {
+                "title": "Entry 2",
+                "body": "Content 2",
+                "summary": "Summary 2.\ntags: #api #security",
+            },
+        ]
+        config = SummarizerConfig(prefer_extractive=True)
+        result = summarize_thread(entries, thread_title="Test", config=config)
+
+        # Should contain aggregated, deduplicated tags
+        assert "tags:" in result
+        assert "#api" in result
+        assert "#auth" in result
+        assert "#security" in result
+
+    def test_thread_summary_deduplicates_tags(self):
+        """Test that duplicate tags across entries are deduplicated."""
+        entries = [
+            {"title": "E1", "body": "C1", "summary": "S1.\ntags: #auth #jwt"},
+            {"title": "E2", "body": "C2", "summary": "S2.\ntags: #auth #oauth"},
+        ]
+        config = SummarizerConfig(prefer_extractive=True)
+        result = summarize_thread(entries, thread_title="Test", config=config)
+
+        # Count occurrences of #auth - should only appear once
+        assert result.count("#auth") == 1
+
+    def test_thread_summary_sorts_tags(self):
+        """Test that aggregated tags are sorted alphabetically."""
+        entries = [
+            {"title": "E1", "body": "C1", "summary": "S1.\ntags: #zebra #alpha"},
+        ]
+        config = SummarizerConfig(prefer_extractive=True)
+        result = summarize_thread(entries, thread_title="Test", config=config)
+
+        # Tags should be sorted
+        tags_line = [line for line in result.split("\n") if line.startswith("tags:")][0]
+        assert tags_line.index("#alpha") < tags_line.index("#zebra")
+
+    def test_thread_summary_no_tags_if_entries_have_none(self):
+        """Test no tags line if entries don't have tags."""
+        entries = [
+            {"title": "E1", "body": "Content without tags", "summary": "Summary 1."},
+            {"title": "E2", "body": "More content", "summary": "Summary 2."},
+        ]
+        config = SummarizerConfig(prefer_extractive=True)
+        result = summarize_thread(entries, thread_title="Test", config=config)
+
+        # Should not have a tags line
+        assert "tags:" not in result
