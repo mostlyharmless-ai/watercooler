@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # Thread-safe lock for os.chdir() operations
 # os.chdir() changes the process-wide current directory, which is not thread-safe.
 # This lock ensures that only one thread can change directories at a time.
-_chdir_lock = threading.Lock()
+_chdir_lock = threading.RLock()
 
 # Resolve default submodule path from package location
 _PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent.parent
