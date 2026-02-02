@@ -74,6 +74,9 @@ Examples:
     # Full rebuild (preview first)
     %(prog)s /path/to/threads --mode all --dry-run
     %(prog)s /path/to/threads --mode all
+
+    # Recover and sync to remote
+    %(prog)s /path/to/threads --mode stale --sync
         """,
     )
     parser.add_argument(
@@ -124,6 +127,11 @@ Examples:
         "-v", "--verbose",
         action="store_true",
         help="Verbose output",
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Commit and push changes to remote after recovery completes",
     )
     args = parser.parse_args()
 
@@ -211,6 +219,42 @@ Examples:
         sys.exit(1)
 
     print("\nRecovery complete!")
+
+    # Sync to remote if requested
+    if args.sync and not args.dry_run:
+        print("\n=== SYNCING TO REMOTE ===")
+        try:
+            from watercooler_mcp.sync import LocalRemoteSyncManager
+
+            manager = LocalRemoteSyncManager(threads_dir)
+
+            commit_msg = f"chore(baseline): recover graph ({result.threads_recovered} threads, {result.entries_parsed} entries)"
+            sync_result = manager.commit_and_push(
+                message=commit_msg,
+                all_changes=True,
+            )
+
+            if sync_result.success:
+                if sync_result.commit_result and sync_result.commit_result.sha:
+                    print(f"Committed: {sync_result.commit_result.sha[:8]}")
+                if sync_result.push_result and sync_result.push_result.commits_pushed:
+                    print(f"Pushed {sync_result.push_result.commits_pushed} commit(s) to remote")
+                else:
+                    print("No changes to push (already synced)")
+            else:
+                error = ""
+                if sync_result.commit_result and sync_result.commit_result.error:
+                    error = sync_result.commit_result.error
+                elif sync_result.push_result and sync_result.push_result.error:
+                    error = sync_result.push_result.error
+                print(f"Sync failed: {error}", file=sys.stderr)
+                sys.exit(1)
+        except ImportError as e:
+            print(f"Sync unavailable (missing dependency): {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Sync error: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":
