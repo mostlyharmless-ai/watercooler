@@ -70,7 +70,12 @@ class DashboardCredentials(BaseModel):
 
 
 class DeepSeekCredentials(BaseModel):
-    """DeepSeek API credentials for LLM summarization."""
+    """DeepSeek API credentials for LLM summarization.
+
+    .. deprecated::
+        Use OpenAICredentials or other provider-specific credentials instead.
+        DeepSeek is kept for backward compatibility only.
+    """
 
     api_key: str = Field(
         default="",
@@ -78,11 +83,78 @@ class DeepSeekCredentials(BaseModel):
     )
 
 
-class Credentials(BaseModel):
-    """All Watercooler credentials."""
+# =============================================================================
+# Provider API Credentials
+# =============================================================================
 
+
+class OpenAICredentials(BaseModel):
+    """OpenAI API credentials."""
+
+    api_key: str = Field(
+        default="",
+        description="OpenAI API key (sk-...)",
+    )
+
+
+class AnthropicCredentials(BaseModel):
+    """Anthropic API credentials."""
+
+    api_key: str = Field(
+        default="",
+        description="Anthropic API key (sk-ant-...)",
+    )
+
+
+class GroqCredentials(BaseModel):
+    """Groq API credentials."""
+
+    api_key: str = Field(
+        default="",
+        description="Groq API key (gsk_...)",
+    )
+
+
+class VoyageCredentials(BaseModel):
+    """Voyage AI credentials for embeddings."""
+
+    api_key: str = Field(
+        default="",
+        description="Voyage API key",
+    )
+
+
+class GoogleCredentials(BaseModel):
+    """Google/Gemini API credentials."""
+
+    api_key: str = Field(
+        default="",
+        description="Google API key",
+    )
+
+
+class Credentials(BaseModel):
+    """All Watercooler credentials.
+
+    Credentials are stored in ~/.watercooler/credentials.toml separately from
+    configuration (config.toml) for security:
+    - credentials.toml: secrets (API keys, tokens) - gitignored, 0600 permissions
+    - config.toml: settings (api_base, model, etc.) - can be version controlled
+    """
+
+    # GitHub authentication
     github: GitHubCredentials = Field(default_factory=GitHubCredentials)
+    # Dashboard (self-hosted)
     dashboard: DashboardCredentials = Field(default_factory=DashboardCredentials)
+
+    # Provider API keys (new)
+    openai: OpenAICredentials = Field(default_factory=OpenAICredentials)
+    anthropic: AnthropicCredentials = Field(default_factory=AnthropicCredentials)
+    groq: GroqCredentials = Field(default_factory=GroqCredentials)
+    voyage: VoyageCredentials = Field(default_factory=VoyageCredentials)
+    google: GoogleCredentials = Field(default_factory=GoogleCredentials)
+
+    # Legacy (deprecated)
     deepseek: DeepSeekCredentials = Field(default_factory=DeepSeekCredentials)
 
 
@@ -135,79 +207,105 @@ def _migrate_json_to_toml(json_path: Path, toml_path: Path) -> bool:
         return False
 
     try:
-        # Check file size to prevent OOM from maliciously large files
-        file_size = json_path.stat().st_size
-        if file_size > _MAX_JSON_SIZE_BYTES:
-            warnings.warn(
-                f"Credentials file too large ({file_size} bytes). "
-                f"Maximum allowed: {_MAX_JSON_SIZE_BYTES} bytes. Skipping migration.",
-                UserWarning,
-            )
+        # Use atomic lock file to prevent race conditions during migration
+        # O_CREAT|O_EXCL fails if file exists, providing atomic check-and-create
+        lock_path = json_path.with_suffix(".json.migrating")
+        backup_path = json_path.with_suffix(".json.bak")
+
+        # If backup exists, migration already completed
+        if backup_path.exists():
             return False
 
-        # Read JSON
-        with open(json_path, "r") as f:
-            data = json.load(f)
+        # Try to create lock file atomically
+        try:
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(lock_fd)
+        except FileExistsError:
+            # Another process is migrating, skip
+            return False
 
-        # Convert to TOML structure
-        toml_data: Dict[str, Any] = {}
+        try:
+            # Use bounded read to prevent OOM from maliciously large files
+            # (TOCTOU-safe: read limited bytes, then check actual size)
+            with open(json_path, "r") as f:
+                content = f.read(_MAX_JSON_SIZE_BYTES + 1)
 
-        # Map known JSON fields to TOML structure
-        if "github_token" in data:
-            if "github" not in toml_data:
-                toml_data["github"] = {}
-            toml_data["github"]["token"] = data["github_token"]
+            if len(content) > _MAX_JSON_SIZE_BYTES:
+                warnings.warn(
+                    f"Credentials file too large (>{_MAX_JSON_SIZE_BYTES} bytes). "
+                    f"Maximum allowed: {_MAX_JSON_SIZE_BYTES} bytes. Skipping migration.",
+                    UserWarning,
+                )
+                return False
 
-        if "github_ssh_key" in data or "ssh_key" in data:
-            if "github" not in toml_data:
-                toml_data["github"] = {}
-            toml_data["github"]["ssh_key"] = data.get("github_ssh_key", data.get("ssh_key", ""))
+            # Parse JSON from bounded content
+            data = json.loads(content)
 
-        if "session_secret" in data:
-            if "dashboard" not in toml_data:
-                toml_data["dashboard"] = {}
-            toml_data["dashboard"]["session_secret"] = data["session_secret"]
+            # Convert to TOML structure
+            toml_data: Dict[str, Any] = {}
 
-        # Handle nested structures
-        if "github" in data and isinstance(data["github"], dict):
-            if "github" not in toml_data:
-                toml_data["github"] = {}
-            toml_data["github"].update(data["github"])
+            # Map known JSON fields to TOML structure
+            if "github_token" in data:
+                if "github" not in toml_data:
+                    toml_data["github"] = {}
+                toml_data["github"]["token"] = data["github_token"]
 
-        if "dashboard" in data and isinstance(data["dashboard"], dict):
-            if "dashboard" not in toml_data:
-                toml_data["dashboard"] = {}
-            toml_data["dashboard"].update(data["dashboard"])
+            if "github_ssh_key" in data or "ssh_key" in data:
+                if "github" not in toml_data:
+                    toml_data["github"] = {}
+                toml_data["github"]["ssh_key"] = data.get("github_ssh_key", data.get("ssh_key", ""))
 
-        # Write TOML
-        toml_path.parent.mkdir(parents=True, exist_ok=True)
+            if "session_secret" in data:
+                if "dashboard" not in toml_data:
+                    toml_data["dashboard"] = {}
+                toml_data["dashboard"]["session_secret"] = data["session_secret"]
 
-        doc = tomlkit.document()
-        doc.add(tomlkit.comment(" Watercooler Credentials"))
-        doc.add(tomlkit.comment(" Auto-migrated from credentials.json"))
-        doc.add(tomlkit.comment(" Keep this file secure - do not commit to version control"))
-        doc.add(tomlkit.nl())
+            # Handle nested structures
+            if "github" in data and isinstance(data["github"], dict):
+                if "github" not in toml_data:
+                    toml_data["github"] = {}
+                toml_data["github"].update(data["github"])
 
-        for section, values in toml_data.items():
-            if isinstance(values, dict):
-                table = tomlkit.table()
-                for key, value in values.items():
-                    table.add(key, value)
-                doc.add(section, table)
-            else:
-                doc.add(section, values)
+            if "dashboard" in data and isinstance(data["dashboard"], dict):
+                if "dashboard" not in toml_data:
+                    toml_data["dashboard"] = {}
+                toml_data["dashboard"].update(data["dashboard"])
 
-        with open(toml_path, "w") as f:
-            f.write(tomlkit.dumps(doc))
+            # Write TOML
+            toml_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Secure permissions
-        _secure_file_permissions(toml_path)
+            doc = tomlkit.document()
+            doc.add(tomlkit.comment(" Watercooler Credentials"))
+            doc.add(tomlkit.comment(" Auto-migrated from credentials.json"))
+            doc.add(tomlkit.comment(" Keep this file secure - do not commit to version control"))
+            doc.add(tomlkit.nl())
 
-        # Rename old file to .bak
-        backup_path = json_path.with_suffix(".json.bak")
-        json_path.rename(backup_path)
+            for section, values in toml_data.items():
+                if isinstance(values, dict):
+                    table = tomlkit.table()
+                    for key, value in values.items():
+                        table.add(key, value)
+                    doc.add(section, table)
+                else:
+                    doc.add(section, values)
 
-        return True
+            with open(toml_path, "w") as f:
+                f.write(tomlkit.dumps(doc))
+
+            # Secure permissions
+            _secure_file_permissions(toml_path)
+
+            # Rename old file to .bak
+            json_path.rename(backup_path)
+
+            return True
+
+        finally:
+            # Always clean up lock file
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     except (json.JSONDecodeError, OSError, KeyError) as e:
         warnings.warn(f"Failed to migrate credentials: {e}", UserWarning)
@@ -215,15 +313,27 @@ def _migrate_json_to_toml(json_path: Path, toml_path: Path) -> bool:
 
 
 def _load_toml_credentials(path: Path) -> Dict[str, Any]:
-    """Load credentials from TOML file."""
+    """Load credentials from TOML file.
+
+    Uses bounded read to prevent OOM from maliciously large files.
+    """
     if tomllib is None:
         raise RuntimeError(
             "TOML support requires Python 3.11+ or 'tomli' package. "
             "Install with: pip install tomli"
         )
 
+    # Use bounded read to prevent OOM attacks (same protection as JSON migration)
     with open(path, "rb") as f:
-        return tomllib.load(f)
+        content = f.read(_MAX_JSON_SIZE_BYTES + 1)
+
+    if len(content) > _MAX_JSON_SIZE_BYTES:
+        raise ValueError(
+            f"Credentials file too large (>{_MAX_JSON_SIZE_BYTES} bytes). "
+            f"Maximum allowed: {_MAX_JSON_SIZE_BYTES} bytes."
+        )
+
+    return tomllib.loads(content.decode("utf-8"))
 
 
 def load_credentials(auto_migrate: bool = True) -> Credentials:
@@ -303,6 +413,38 @@ def save_credentials(creds: Credentials) -> Path:
         dashboard.add("session_secret", creds.dashboard.session_secret)
         doc.add("dashboard", dashboard)
 
+    # Provider API keys
+    if creds.openai.api_key:
+        openai = tomlkit.table()
+        openai.add("api_key", creds.openai.api_key)
+        doc.add("openai", openai)
+
+    if creds.anthropic.api_key:
+        anthropic = tomlkit.table()
+        anthropic.add("api_key", creds.anthropic.api_key)
+        doc.add("anthropic", anthropic)
+
+    if creds.groq.api_key:
+        groq = tomlkit.table()
+        groq.add("api_key", creds.groq.api_key)
+        doc.add("groq", groq)
+
+    if creds.voyage.api_key:
+        voyage = tomlkit.table()
+        voyage.add("api_key", creds.voyage.api_key)
+        doc.add("voyage", voyage)
+
+    if creds.google.api_key:
+        google = tomlkit.table()
+        google.add("api_key", creds.google.api_key)
+        doc.add("google", google)
+
+    # Legacy deepseek (deprecated)
+    if creds.deepseek.api_key:
+        deepseek = tomlkit.table()
+        deepseek.add("api_key", creds.deepseek.api_key)
+        doc.add("deepseek", deepseek)
+
     with open(toml_path, "w") as f:
         f.write(tomlkit.dumps(doc))
 
@@ -323,6 +465,43 @@ def get_github_token() -> Optional[str]:
     # Load from credentials
     creds = load_credentials()
     return creds.github.token or None
+
+
+def get_provider_api_key(provider: str) -> Optional[str]:
+    """Get API key for a provider from credentials.toml.
+
+    This is the canonical way to retrieve provider-specific API keys from
+    the credentials file. Provider names are case-insensitive.
+
+    Supported providers:
+    - openai: OpenAI API key
+    - anthropic: Anthropic API key
+    - groq: Groq API key
+    - voyage: Voyage AI API key
+    - google: Google/Gemini API key
+    - deepseek: DeepSeek API key (legacy)
+
+    Args:
+        provider: Provider name (e.g., "openai", "anthropic", "groq")
+
+    Returns:
+        API key string if found and non-empty, None otherwise
+
+    Example:
+        >>> key = get_provider_api_key("openai")
+        >>> if key:
+        ...     print("OpenAI key found in credentials.toml")
+    """
+    creds = load_credentials()
+    provider_lower = provider.lower()
+
+    # Map provider name to credential attribute
+    provider_creds = getattr(creds, provider_lower, None)
+    if provider_creds and hasattr(provider_creds, "api_key"):
+        key = provider_creds.api_key
+        return key if key else None
+
+    return None
 
 
 def get_ssh_key_path() -> Optional[Path]:

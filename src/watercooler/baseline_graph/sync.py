@@ -236,6 +236,12 @@ def _get_default_embedding_model() -> str:
     return resolve_baseline_graph_embedding_config().model
 
 
+def _get_default_embedding_api_key() -> str:
+    """Get default embedding API key from unified config (checks env vars first)."""
+    from watercooler.memory_config import resolve_baseline_graph_embedding_config
+    return resolve_baseline_graph_embedding_config().api_key
+
+
 @dataclass
 class EmbeddingConfig:
     """Embedding server configuration for real-time sync.
@@ -249,6 +255,7 @@ class EmbeddingConfig:
 
     api_base: str = field(default_factory=_get_default_embedding_api_base)
     model: str = field(default_factory=_get_default_embedding_model)
+    api_key: str = field(default_factory=_get_default_embedding_api_key)
     timeout: float = 30.0
     max_text_chars: int = DEFAULT_EMBEDDING_TEXT_MAX_CHARS
 
@@ -268,6 +275,7 @@ class EmbeddingConfig:
         return cls(
             api_base=embed_config.api_base,
             model=embed_config.model,
+            api_key=embed_config.api_key,
             timeout=timeout,
         )
 
@@ -279,8 +287,12 @@ def is_embedding_available(config: Optional[EmbeddingConfig] = None) -> bool:
     try:
         import httpx
         url = f"{config.api_base.rstrip('/')}/models"
+        headers = {}
+        # Add auth header for external APIs (not needed for local llama-server)
+        if config.api_key and config.api_key not in ("", "local"):
+            headers["Authorization"] = f"Bearer {config.api_key}"
         with httpx.Client(timeout=5.0) as client:
-            response = client.get(url)
+            response = client.get(url, headers=headers)
             return response.status_code == 200
     except Exception as e:
         logger.debug(f"Embedding service not available: {e}")
@@ -306,13 +318,29 @@ def generate_embedding(
         import httpx
         url = f"{config.api_base.rstrip('/')}/embeddings"
 
+        # Add auth header for external APIs (not needed for local llama-server)
+        headers = {"Content-Type": "application/json"}
+        if config.api_key and config.api_key not in ("", "local"):
+            headers["Authorization"] = f"Bearer {config.api_key}"
+
         with httpx.Client(timeout=config.timeout) as client:
             response = client.post(url, json={
                 "model": config.model,
                 "input": text[:2000],
-            })
+            }, headers=headers)
             response.raise_for_status()
             data = response.json()
+
+            # Log token usage if available (OpenAI API returns this)
+            usage = data.get("usage", {})
+            if usage:
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                total_tokens = usage.get("total_tokens", 0)
+                logger.info(
+                    f"Embedding usage: model={config.model} "
+                    f"tokens={total_tokens or prompt_tokens}"
+                )
+
             return data["data"][0]["embedding"]
     except Exception as e:
         logger.debug(f"Failed to generate embedding: {e}")

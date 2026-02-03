@@ -33,6 +33,8 @@ from ..entry_episode_index import EntryEpisodeIndex, IndexConfig
 
 import os
 
+from watercooler.memory_config import is_anthropic_url
+
 # Resolve package root from this file's location
 # graphiti.py is at: src/watercooler_memory/backends/graphiti.py
 # Package root is 4 levels up: watercooler-cloud/
@@ -817,13 +819,25 @@ class GraphitiBackend(MemoryBackend):
         finally:
             asyncio.get_running_loop = original_get_running_loop
 
-        # Configure LLM client (supports OpenAI, local servers, DeepSeek, etc.)
-        llm_config = LLMConfig(
-            api_key=self.config.llm_api_key,
-            model=self.config.llm_model,
-            base_url=self.config.llm_api_base,
-        )
-        llm_client = OpenAIGenericClient(config=llm_config)
+        # Configure LLM client (supports OpenAI, Anthropic, local servers, DeepSeek, etc.)
+        llm_api_base = self.config.llm_api_base or ""
+        is_anthropic = is_anthropic_url(llm_api_base)
+
+        if is_anthropic:
+            # Use native Anthropic client for Anthropic API
+            from graphiti_core.llm_client.anthropic_client import AnthropicClient
+            llm_client = AnthropicClient(
+                api_key=self.config.llm_api_key,
+                model=self.config.llm_model,
+            )
+        else:
+            # Use OpenAI-compatible client for OpenAI, DeepSeek, Groq, local servers
+            llm_config = LLMConfig(
+                api_key=self.config.llm_api_key,
+                model=self.config.llm_model,
+                base_url=self.config.llm_api_base,
+            )
+            llm_client = OpenAIGenericClient(config=llm_config)
 
         # Configure embedder (supports OpenAI, local llama.cpp, etc.)
         # Check if embedding service needs auto-start

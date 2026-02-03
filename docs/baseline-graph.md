@@ -94,7 +94,7 @@ manifest = export_all_threads(
 |--------|---------|-------------|
 | `api_base` | `http://localhost:8000/v1` | OpenAI-compatible API endpoint |
 | `model` | `qwen3:1.7b` | Model name for LLM summarization (recommended) |
-| `api_key` | `local` | API key (local llama-server doesn't require one) |
+| `api_key` | (resolved) | API key - resolved from env vars or credentials.toml |
 | `timeout` | `30.0` | Request timeout in seconds |
 | `max_tokens` | `256` | Maximum tokens for LLM response |
 | `system_prompt` | `""` (auto-detect) | System prompt for chat-style LLMs |
@@ -124,7 +124,7 @@ This auto-detection is based on the model name. Set `system_prompt` or `prompt_p
 |----------|---------|-------------|
 | `BASELINE_GRAPH_API_BASE` | `http://localhost:8000/v1` | LLM API endpoint |
 | `BASELINE_GRAPH_MODEL` | `qwen3:1.7b` | LLM model name (recommended for summarization) |
-| `BASELINE_GRAPH_API_KEY` | `local` | API key for LLM |
+| `BASELINE_GRAPH_API_KEY` | (empty) | API key for LLM (or use `OPENAI_API_KEY`, or credentials.toml) |
 | `BASELINE_GRAPH_TIMEOUT` | `30.0` | Request timeout (seconds) |
 | `BASELINE_GRAPH_MAX_TOKENS` | `256` | Max response tokens |
 | `LLM_SYSTEM_PROMPT` | (auto-detect) | System prompt (empty = auto-detect by model family) |
@@ -140,9 +140,9 @@ prefer_extractive = false
 [baseline_graph.llm]
 api_base = "http://localhost:8000/v1"
 model = "qwen3:1.7b"  # Recommended for summarization
-api_key = "local"
 timeout = 30.0
 max_tokens = 256
+# NOTE: API keys go in credentials.toml, not here
 
 # Prompt configuration (optional - auto-detected from model)
 # system_prompt = ""        # Empty = auto-detect by model family
@@ -154,11 +154,25 @@ include_headers = true
 max_headers = 3
 ```
 
+### API Key Configuration
+
+API keys should be stored in `~/.watercooler/credentials.toml`:
+
+```toml
+# For OpenAI (when using api_base = "https://api.openai.com/v1")
+[openai]
+api_key = "sk-..."
+```
+
+Or use environment variables: `OPENAI_API_KEY`, `BASELINE_GRAPH_API_KEY`, or `LLM_API_KEY`.
+
 ### Configuration Precedence
 
 1. Environment variables (highest priority)
-2. `config.toml` `[baseline_graph]` section
-3. Built-in defaults (lowest priority)
+2. Provider-specific env vars (`OPENAI_API_KEY` based on api_base URL)
+3. `credentials.toml` provider sections (`[openai].api_key`, etc.)
+4. `config.toml` `[baseline_graph]` section (for non-secret settings)
+5. Built-in defaults (lowest priority)
 
 ## Output Format
 
@@ -355,10 +369,17 @@ models = false        # Don't auto-download GGUF models
 ### Any OpenAI-Compatible API
 
 ```toml
+# In config.toml (settings)
 [baseline_graph.llm]
 api_base = "https://your-api.example.com/v1"
 model = "your-model"
-api_key = "your-api-key"
+
+# In credentials.toml (secrets) - if using OpenAI endpoint:
+# [openai]
+# api_key = "your-api-key"
+#
+# Or use environment variable:
+# export OPENAI_API_KEY="your-api-key"
 ```
 
 ## Fallback Behavior

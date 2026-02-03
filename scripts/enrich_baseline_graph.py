@@ -20,6 +20,9 @@ Usage:
     # Test batch of 5 entries with summaries and embeddings
     ./scripts/enrich_baseline_graph.py /path/to/threads --summaries --embeddings --limit 5
 
+    # Enrich and sync to remote
+    ./scripts/enrich_baseline_graph.py /path/to/threads --mode missing --embeddings --sync
+
 Requirements:
     - For summaries: llama-server at localhost:8000 (auto-starts when configured)
     - For embeddings: llama-server at localhost:8080 (auto-starts when configured)
@@ -180,6 +183,11 @@ Examples:
         action="store_true",
         help="Disable progress bar",
     )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Commit and push changes to remote after enrichment completes",
+    )
     args = parser.parse_args()
 
     # Validate arguments
@@ -282,6 +290,14 @@ Examples:
         sys.exit(1)
 
     print("\nEnrichment complete!")
+
+    # Sync to remote if requested
+    if args.sync and not args.dry_run:
+        print("\n=== SYNCING TO REMOTE ===")
+        from _sync_helpers import sync_to_remote
+
+        commit_msg = f"chore(baseline): enrich graph ({result.summaries_generated} summaries, {result.embeddings_generated} embeddings)"
+        sync_to_remote(threads_dir, commit_msg)
 
 
 if __name__ == "__main__":

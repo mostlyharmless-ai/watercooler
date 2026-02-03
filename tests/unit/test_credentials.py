@@ -11,13 +11,19 @@ from pathlib import Path
 import pytest
 
 from watercooler.credentials import (
+    AnthropicCredentials,
     Credentials,
     DashboardCredentials,
     GitHubCredentials,
+    GoogleCredentials,
+    GroqCredentials,
+    OpenAICredentials,
+    VoyageCredentials,
     _MAX_JSON_SIZE_BYTES,
     _migrate_json_to_toml,
     _secure_file_permissions,
     get_github_token,
+    get_provider_api_key,
     get_ssh_key_path,
     load_credentials,
     save_credentials,
@@ -331,3 +337,229 @@ class TestGetSshKeyPath:
         path = creds_mod.get_ssh_key_path()
         assert "~" not in str(path)
         assert str(path).startswith(str(Path.home()))
+
+
+class TestProviderCredentialsModels:
+    """Tests for provider-specific credential models."""
+
+    def test_openai_credentials_defaults(self):
+        """OpenAICredentials has empty defaults."""
+        creds = OpenAICredentials()
+        assert creds.api_key == ""
+
+    def test_anthropic_credentials_defaults(self):
+        """AnthropicCredentials has empty defaults."""
+        creds = AnthropicCredentials()
+        assert creds.api_key == ""
+
+    def test_groq_credentials_defaults(self):
+        """GroqCredentials has empty defaults."""
+        creds = GroqCredentials()
+        assert creds.api_key == ""
+
+    def test_voyage_credentials_defaults(self):
+        """VoyageCredentials has empty defaults."""
+        creds = VoyageCredentials()
+        assert creds.api_key == ""
+
+    def test_google_credentials_defaults(self):
+        """GoogleCredentials has empty defaults."""
+        creds = GoogleCredentials()
+        assert creds.api_key == ""
+
+    def test_credentials_has_provider_fields(self):
+        """Credentials includes all provider credential fields."""
+        creds = Credentials()
+        assert hasattr(creds, "openai")
+        assert hasattr(creds, "anthropic")
+        assert hasattr(creds, "groq")
+        assert hasattr(creds, "voyage")
+        assert hasattr(creds, "google")
+        assert isinstance(creds.openai, OpenAICredentials)
+        assert isinstance(creds.anthropic, AnthropicCredentials)
+
+    def test_credentials_with_provider_values(self):
+        """Credentials can be constructed with provider values."""
+        creds = Credentials(
+            openai=OpenAICredentials(api_key="sk-test-123"),
+            anthropic=AnthropicCredentials(api_key="sk-ant-test"),
+            groq=GroqCredentials(api_key="gsk_test"),
+        )
+        assert creds.openai.api_key == "sk-test-123"
+        assert creds.anthropic.api_key == "sk-ant-test"
+        assert creds.groq.api_key == "gsk_test"
+
+
+class TestGetProviderApiKey:
+    """Tests for get_provider_api_key function."""
+
+    def test_returns_none_when_no_file(self, tmp_path, monkeypatch):
+        """Returns None when credentials file doesn't exist."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        import importlib
+        import watercooler.credentials as creds_mod
+        importlib.reload(creds_mod)
+
+        key = creds_mod.get_provider_api_key("openai")
+        assert key is None
+
+    def test_returns_key_from_toml(self, tmp_path, monkeypatch):
+        """Returns API key from TOML credentials file."""
+        fake_home = tmp_path / "home"
+        config_dir = fake_home / ".watercooler"
+        config_dir.mkdir(parents=True)
+
+        (config_dir / "credentials.toml").write_text("""
+[openai]
+api_key = "sk-test-from-toml"
+
+[anthropic]
+api_key = "sk-ant-test-from-toml"
+""")
+
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        import importlib
+        import watercooler.credentials as creds_mod
+        importlib.reload(creds_mod)
+
+        assert creds_mod.get_provider_api_key("openai") == "sk-test-from-toml"
+        assert creds_mod.get_provider_api_key("anthropic") == "sk-ant-test-from-toml"
+
+    def test_returns_none_for_empty_key(self, tmp_path, monkeypatch):
+        """Returns None when API key is empty string."""
+        fake_home = tmp_path / "home"
+        config_dir = fake_home / ".watercooler"
+        config_dir.mkdir(parents=True)
+
+        (config_dir / "credentials.toml").write_text("""
+[openai]
+api_key = ""
+""")
+
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        import importlib
+        import watercooler.credentials as creds_mod
+        importlib.reload(creds_mod)
+
+        key = creds_mod.get_provider_api_key("openai")
+        assert key is None
+
+    def test_case_insensitive_provider(self, tmp_path, monkeypatch):
+        """Provider name is case-insensitive."""
+        fake_home = tmp_path / "home"
+        config_dir = fake_home / ".watercooler"
+        config_dir.mkdir(parents=True)
+
+        (config_dir / "credentials.toml").write_text("""
+[openai]
+api_key = "sk-case-test"
+""")
+
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        import importlib
+        import watercooler.credentials as creds_mod
+        importlib.reload(creds_mod)
+
+        assert creds_mod.get_provider_api_key("openai") == "sk-case-test"
+        assert creds_mod.get_provider_api_key("OPENAI") == "sk-case-test"
+        assert creds_mod.get_provider_api_key("OpenAI") == "sk-case-test"
+
+    def test_returns_none_for_unknown_provider(self, tmp_path, monkeypatch):
+        """Returns None for unknown provider."""
+        fake_home = tmp_path / "home"
+        config_dir = fake_home / ".watercooler"
+        config_dir.mkdir(parents=True)
+
+        (config_dir / "credentials.toml").write_text("""
+[openai]
+api_key = "sk-test"
+""")
+
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        import importlib
+        import watercooler.credentials as creds_mod
+        importlib.reload(creds_mod)
+
+        key = creds_mod.get_provider_api_key("unknown_provider")
+        assert key is None
+
+
+class TestSaveCredentialsWithProviders:
+    """Tests for save_credentials with provider API keys."""
+
+    def test_saves_provider_keys(self, tmp_path, monkeypatch):
+        """Saves provider API keys to TOML file."""
+        fake_home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        import importlib
+        import watercooler.credentials as creds_mod
+        importlib.reload(creds_mod)
+
+        creds = Credentials(
+            openai=OpenAICredentials(api_key="sk-save-test"),
+            anthropic=AnthropicCredentials(api_key="sk-ant-save"),
+            groq=GroqCredentials(api_key="gsk_save"),
+        )
+
+        path = creds_mod.save_credentials(creds)
+        assert path.exists()
+
+        content = path.read_text()
+        assert "sk-save-test" in content
+        assert "sk-ant-save" in content
+        assert "gsk_save" in content
+        assert "[openai]" in content
+        assert "[anthropic]" in content
+        assert "[groq]" in content
+
+    def test_skips_empty_provider_keys(self, tmp_path, monkeypatch):
+        """Doesn't write sections for empty provider keys."""
+        fake_home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        import importlib
+        import watercooler.credentials as creds_mod
+        importlib.reload(creds_mod)
+
+        creds = Credentials(
+            openai=OpenAICredentials(api_key="sk-only-openai"),
+            # anthropic, groq, etc. left as empty defaults
+        )
+
+        path = creds_mod.save_credentials(creds)
+        content = path.read_text()
+
+        assert "[openai]" in content
+        assert "sk-only-openai" in content
+        assert "[anthropic]" not in content
+        assert "[groq]" not in content
+
+    def test_roundtrip_provider_keys(self, tmp_path, monkeypatch):
+        """Provider keys survive save/load roundtrip."""
+        fake_home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        import importlib
+        import watercooler.credentials as creds_mod
+        importlib.reload(creds_mod)
+
+        original = Credentials(
+            openai=OpenAICredentials(api_key="sk-roundtrip"),
+            voyage=VoyageCredentials(api_key="vg-roundtrip"),
+            google=GoogleCredentials(api_key="AIza-roundtrip"),
+        )
+
+        creds_mod.save_credentials(original)
+        loaded = creds_mod.load_credentials()
+
+        assert loaded.openai.api_key == "sk-roundtrip"
+        assert loaded.voyage.api_key == "vg-roundtrip"
+        assert loaded.google.api_key == "AIza-roundtrip"

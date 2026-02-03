@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from watercooler.memory_config import is_anthropic_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -164,7 +166,7 @@ def is_llm_service_available(config: Optional[SummarizerConfig] = None) -> bool:
         config: Summarizer configuration (uses env defaults if None)
 
     Returns:
-        True if the LLM service responds to a models list request
+        True if the LLM service responds to a health check request
     """
     config = config or SummarizerConfig.from_env()
 
@@ -175,10 +177,33 @@ def is_llm_service_available(config: Optional[SummarizerConfig] = None) -> bool:
         return False
 
     try:
-        url = f"{config.api_base.rstrip('/')}/models"
+        api_base = config.api_base or ""
+        is_anthropic = is_anthropic_url(api_base)
+        headers = {}
+
+        # Add auth header for external APIs (not needed for local llama-server)
+        if config.api_key and config.api_key not in ("", "local"):
+            if is_anthropic:
+                # Anthropic uses x-api-key header
+                headers["x-api-key"] = config.api_key
+                headers["anthropic-version"] = "2023-06-01"
+            else:
+                headers["Authorization"] = f"Bearer {config.api_key}"
+
         with httpx.Client(timeout=5.0) as client:
-            response = client.get(url)
-            return response.status_code == 200
+            if is_anthropic:
+                # Anthropic doesn't have /models endpoint. Use GET on /messages
+                # which returns 405 Method Not Allowed - confirms API is reachable
+                # without triggering actual completions (avoids rate limits/charges)
+                url = f"{api_base.rstrip('/')}/messages"
+                response = client.get(url, headers=headers)
+                # 405 = API reachable, method not allowed (expected for GET on POST endpoint)
+                # 400 = API reachable, bad request (also acceptable)
+                return response.status_code in (200, 400, 405)
+            else:
+                url = f"{api_base.rstrip('/')}/models"
+                response = client.get(url, headers=headers)
+                return response.status_code == 200
     except Exception as e:
         logger.debug(f"LLM service not available at {config.api_base}: {e}")
         return False
@@ -426,6 +451,17 @@ def _call_llm(
             response.raise_for_status()
             data = response.json()
             message = data["choices"][0]["message"]
+
+            # Log token usage if available (OpenAI API returns this)
+            usage = data.get("usage", {})
+            if usage:
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+                total_tokens = usage.get("total_tokens", 0)
+                logger.info(
+                    f"LLM usage: model={config.model} "
+                    f"prompt={prompt_tokens} completion={completion_tokens} total={total_tokens}"
+                )
 
             # Get response field based on model (e.g., "reasoning" for qwen3)
             from watercooler.models import get_response_field

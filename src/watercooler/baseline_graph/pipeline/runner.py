@@ -437,6 +437,12 @@ class BaselineGraphRunner:
         url = f"{self.config.embedding.api_base.rstrip('/')}/embeddings"
         generated = 0
 
+        # Build auth headers
+        headers = {"Content-Type": "application/json"}
+        api_key = self.config.embedding.api_key
+        if api_key and api_key not in ("", "local"):
+            headers["Authorization"] = f"Bearer {api_key}"
+
         with httpx.Client(timeout=30.0) as client:
             for i, entry in enumerate(entries_needing_embedding, 1):
                 if i % 10 == 0 or i == total_to_process:
@@ -449,7 +455,7 @@ class BaselineGraphRunner:
                     response = client.post(url, json={
                         "model": self.config.embedding.model,
                         "input": text,
-                    })
+                    }, headers=headers)
                     response.raise_for_status()
                     data = response.json()
                     entry.embedding = data["data"][0]["embedding"]

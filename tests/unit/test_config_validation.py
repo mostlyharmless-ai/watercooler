@@ -311,10 +311,14 @@ class TestLLMServiceConfig:
     """Tests for LLMServiceConfig model."""
 
     def test_default_values(self):
-        """Test default LLMServiceConfig values."""
+        """Test default LLMServiceConfig values.
+
+        Note: api_base and model default to empty string, meaning "use context-specific
+        default" (e.g., localhost for baseline graph, resolved at runtime).
+        """
         config = LLMServiceConfig()
-        assert config.api_base == "https://api.openai.com/v1"
-        assert config.model == "gpt-4o-mini"
+        assert config.api_base == ""  # Empty = use context-specific default
+        assert config.model == ""  # Empty = use context-specific default
         assert config.timeout == 60.0
         assert config.max_tokens == 512
 
@@ -660,20 +664,36 @@ class TestEdgeCases:
 class TestSecurityFields:
     """Tests for security-sensitive configuration."""
 
-    def test_api_key_not_in_repr(self):
-        """Test that API keys are not exposed in repr."""
-        config = LLMServiceConfig(api_key="sk-secret-key-12345")
+    def test_api_key_not_in_config(self):
+        """Test that API keys are not stored in config schema.
 
-        # The repr should not contain the full key
-        repr_str = repr(config)
-        # Pydantic v2 may or may not hide - check it exists but with care
-        assert config.api_key == "sk-secret-key-12345"  # Value is accessible
+        API keys belong in credentials.toml, not config.toml.
+        The LLMServiceConfig and EmbeddingServiceConfig no longer have api_key fields.
+        """
+        config = LLMServiceConfig()
+
+        # api_key field was removed - secrets belong in credentials.toml
+        assert not hasattr(config, "api_key")
+        # But api_base and model are still config settings
+        assert hasattr(config, "api_base")
+        assert hasattr(config, "model")
 
     def test_credentials_separate_from_config(self):
-        """Test that credentials should be loaded separately."""
-        # This documents the expected pattern
+        """Test that credentials and config are properly separated.
+
+        Config holds settings (api_base, model, etc.) - can be version controlled.
+        Credentials hold secrets (api_key) - stored in credentials.toml, never committed.
+        """
+        from watercooler.credentials import Credentials, OpenAICredentials
+
+        # Config doesn't have api_key
         config = LLMServiceConfig()
-        assert config.api_key == ""  # Default is empty
+        assert not hasattr(config, "api_key")
+
+        # Credentials have api_key by provider
+        creds = Credentials()
+        assert hasattr(creds, "openai")
+        assert hasattr(creds.openai, "api_key")
 
     def test_webhook_url_not_required(self):
         """Test webhook URL is optional."""

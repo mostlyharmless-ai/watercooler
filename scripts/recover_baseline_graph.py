@@ -74,6 +74,9 @@ Examples:
     # Full rebuild (preview first)
     %(prog)s /path/to/threads --mode all --dry-run
     %(prog)s /path/to/threads --mode all
+
+    # Recover and sync to remote
+    %(prog)s /path/to/threads --mode stale --sync
         """,
     )
     parser.add_argument(
@@ -124,6 +127,11 @@ Examples:
         "-v", "--verbose",
         action="store_true",
         help="Verbose output",
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Commit and push changes to remote after recovery completes",
     )
     args = parser.parse_args()
 
@@ -211,6 +219,14 @@ Examples:
         sys.exit(1)
 
     print("\nRecovery complete!")
+
+    # Sync to remote if requested
+    if args.sync and not args.dry_run:
+        print("\n=== SYNCING TO REMOTE ===")
+        from _sync_helpers import sync_to_remote
+
+        commit_msg = f"chore(baseline): recover graph ({result.threads_recovered} threads, {result.entries_parsed} entries)"
+        sync_to_remote(threads_dir, commit_msg)
 
 
 if __name__ == "__main__":

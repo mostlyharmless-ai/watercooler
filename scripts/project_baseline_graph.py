@@ -72,6 +72,9 @@ Examples:
     # Full regeneration (preview first)
     %(prog)s /path/to/threads --mode all --overwrite --dry-run
     %(prog)s /path/to/threads --mode all --overwrite
+
+    # Project and sync to remote
+    %(prog)s /path/to/threads --mode missing --sync
         """,
     )
     parser.add_argument(
@@ -103,6 +106,11 @@ Examples:
         "-v", "--verbose",
         action="store_true",
         help="Verbose output",
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Commit and push changes to remote after projection completes",
     )
     args = parser.parse_args()
 
@@ -195,6 +203,14 @@ Examples:
         sys.exit(1)
 
     print("\nProjection complete!")
+
+    # Sync to remote if requested
+    if args.sync and not args.dry_run:
+        print("\n=== SYNCING TO REMOTE ===")
+        from _sync_helpers import sync_to_remote
+
+        commit_msg = f"chore(baseline): project graph ({result.files_created} created, {result.files_updated} updated)"
+        sync_to_remote(threads_dir, commit_msg)
 
 
 if __name__ == "__main__":

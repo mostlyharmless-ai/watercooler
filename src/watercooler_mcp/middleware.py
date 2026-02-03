@@ -10,6 +10,8 @@ import json
 import time
 from typing import Callable, TypeVar
 
+from watercooler.memory_config import is_anthropic_url
+
 from .config import (
     ThreadContext,
     get_git_sync_manager_from_context,
@@ -33,6 +35,21 @@ from .helpers import _should_auto_branch, _build_commit_footers
 # is deprecated and ignored. All writes go through commands_graph.py which writes
 # structural data first, then projects to markdown. Enrichment (summaries/embeddings)
 # runs after the structural write if services are available.
+
+# Service availability cache (TTL-based to avoid HTTP checks on every write)
+_SERVICE_CACHE_TTL_SECONDS = 60.0  # Cache results for 60 seconds
+_service_availability_cache: dict[str, tuple[bool, bool, float]] = {}
+# Key format: f"{llm_base}|{embed_base}", Value: (llm_available, embed_available, timestamp)
+
+
+def clear_service_availability_cache() -> None:
+    """Clear the service availability cache.
+
+    Call this when service configuration changes (e.g., after updating
+    credentials.toml or environment variables) to force re-checking
+    service availability on the next write operation.
+    """
+    _service_availability_cache.clear()
 
 
 def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
@@ -58,40 +75,86 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
     if not graph_config.generate_summaries and not graph_config.generate_embeddings:
         return (False, False)
 
+    # Build cache key from service URLs
+    llm_base_for_cache = getattr(graph_config, 'summarizer_api_base', '') or ''
+    embed_base_for_cache = getattr(graph_config, 'embedding_api_base', '') or ''
+    cache_key = f"{llm_base_for_cache}|{embed_base_for_cache}"
+
+    # Check cache first (avoid HTTP requests on every write)
+    now = time.time()
+    if cache_key in _service_availability_cache:
+        cached_llm, cached_embed, cached_time = _service_availability_cache[cache_key]
+        if now - cached_time < _SERVICE_CACHE_TTL_SECONDS:
+            log_debug(f"[GRAPH] Using cached service availability (age: {now - cached_time:.1f}s)")
+            return (cached_llm, cached_embed)
+
     llm_available = False
     embed_available = False
 
     try:
         # Check LLM service if summaries requested
         if graph_config.generate_summaries:
-            llm_base = getattr(graph_config, 'summarizer_api_base', None)
-            if not llm_base:
-                from watercooler.baseline_graph.summarizer import SummarizerConfig
-                llm_base = SummarizerConfig.from_env().api_base
+            from watercooler.baseline_graph.summarizer import SummarizerConfig
+            from watercooler.memory_config import _get_provider_api_key
+            llm_config = SummarizerConfig.from_env()
+            llm_base = getattr(graph_config, 'summarizer_api_base', None) or llm_config.api_base
+            # Resolve API key based on actual llm_base URL, not default config
+            llm_api_key = _get_provider_api_key(llm_base) if llm_base else llm_config.api_key
             if llm_base:
                 try:
-                    with httpx.Client(timeout=2.0) as client:
-                        url = f"{llm_base.rstrip('/')}/models"
-                        response = client.get(url)
-                        if 200 <= response.status_code < 300:
-                            llm_available = True
-                            log_debug(f"[GRAPH] LLM service available at {llm_base}")
+                    headers = {}
+                    is_anthropic = is_anthropic_url(llm_base)
+                    # Add auth header for external APIs (not needed for local llama-server)
+                    if llm_api_key and llm_api_key not in ("", "local"):
+                        if is_anthropic:
+                            # Anthropic uses x-api-key header
+                            headers["x-api-key"] = llm_api_key
+                            headers["anthropic-version"] = "2023-06-01"
                         else:
-                            log_debug(f"[GRAPH] LLM service returned {response.status_code} at {llm_base}")
+                            headers["Authorization"] = f"Bearer {llm_api_key}"
+                    with httpx.Client(timeout=5.0) as client:
+                        # Anthropic doesn't have /models endpoint
+                        if is_anthropic:
+                            # Use GET on /messages which returns 405 Method Not Allowed
+                            # This confirms API is reachable without triggering actual
+                            # completions (avoids rate limits and potential charges)
+                            url = f"{llm_base.rstrip('/')}/messages"
+                            response = client.get(url, headers=headers)
+                            # 405 = API reachable, method not allowed (expected)
+                            # 400 = API reachable, bad request (also acceptable)
+                            if response.status_code in (200, 400, 405):
+                                llm_available = True
+                                log_debug(f"[GRAPH] LLM service available at {llm_base}")
+                            else:
+                                log_debug(f"[GRAPH] LLM service returned {response.status_code} at {llm_base}")
+                        else:
+                            url = f"{llm_base.rstrip('/')}/models"
+                            response = client.get(url, headers=headers)
+                            if 200 <= response.status_code < 300:
+                                llm_available = True
+                                log_debug(f"[GRAPH] LLM service available at {llm_base}")
+                            else:
+                                log_debug(f"[GRAPH] LLM service returned {response.status_code} at {llm_base}")
                 except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError):
                     log_debug(f"[GRAPH] Cannot connect to LLM at {llm_base}")
 
         # Check embedding service if embeddings requested
         if graph_config.generate_embeddings:
-            embed_base = getattr(graph_config, 'embedding_api_base', None)
-            if not embed_base:
-                from watercooler.baseline_graph.sync import EmbeddingConfig
-                embed_base = EmbeddingConfig.from_env().api_base
+            from watercooler.baseline_graph.sync import EmbeddingConfig
+            from watercooler.memory_config import _get_embedding_provider_api_key
+            embed_config = EmbeddingConfig.from_env()
+            embed_base = getattr(graph_config, 'embedding_api_base', None) or embed_config.api_base
+            # Resolve API key based on actual embed_base URL, not default config
+            embed_api_key = _get_embedding_provider_api_key(embed_base) if embed_base else embed_config.api_key
             if embed_base:
                 try:
-                    with httpx.Client(timeout=2.0) as client:
+                    headers = {}
+                    # Add auth header for external APIs (not needed for local llama-server)
+                    if embed_api_key and embed_api_key not in ("", "local"):
+                        headers["Authorization"] = f"Bearer {embed_api_key}"
+                    with httpx.Client(timeout=5.0) as client:
                         url = f"{embed_base.rstrip('/')}/models"
-                        response = client.get(url)
+                        response = client.get(url, headers=headers)
                         if 200 <= response.status_code < 300:
                             embed_available = True
                             log_debug(f"[GRAPH] Embedding service available at {embed_base}")
@@ -100,13 +163,16 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                 except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError):
                     log_debug(f"[GRAPH] Cannot connect to embedding service at {embed_base}")
 
+        # Cache the result
+        _service_availability_cache[cache_key] = (llm_available, embed_available, time.time())
         return (llm_available, embed_available)
-    except (ImportError, AttributeError, ValueError, OSError) as e:
-        # ImportError: config modules missing
-        # AttributeError: config objects malformed
-        # ValueError: config parsing failed
-        # OSError: network/file issues
-        log_debug(f"[GRAPH] Service check failed: {e}")
+    except Exception as e:
+        # Gracefully handle all errors - service checks should never crash writes
+        # Common causes: ImportError (config modules missing), AttributeError (malformed config),
+        # ValueError (invalid config values), OSError (file access issues)
+        log_debug(f"[GRAPH] Service check failed: {type(e).__name__}: {e}")
+        # Cache the failure too (to avoid retrying immediately)
+        _service_availability_cache[cache_key] = (False, False, time.time())
         return (False, False)
 
 
