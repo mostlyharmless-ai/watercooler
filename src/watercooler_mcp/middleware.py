@@ -71,17 +71,36 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
             if llm_base:
                 try:
                     headers = {}
+                    is_anthropic = "anthropic.com" in llm_base.lower()
                     # Add auth header for external APIs (not needed for local llama-server)
                     if llm_api_key and llm_api_key not in ("", "local"):
-                        headers["Authorization"] = f"Bearer {llm_api_key}"
-                    with httpx.Client(timeout=2.0) as client:
-                        url = f"{llm_base.rstrip('/')}/models"
-                        response = client.get(url, headers=headers)
-                        if 200 <= response.status_code < 300:
-                            llm_available = True
-                            log_debug(f"[GRAPH] LLM service available at {llm_base}")
+                        if is_anthropic:
+                            # Anthropic uses x-api-key header
+                            headers["x-api-key"] = llm_api_key
+                            headers["anthropic-version"] = "2023-06-01"
                         else:
-                            log_debug(f"[GRAPH] LLM service returned {response.status_code} at {llm_base}")
+                            headers["Authorization"] = f"Bearer {llm_api_key}"
+                    with httpx.Client(timeout=2.0) as client:
+                        # Anthropic doesn't have /models endpoint, check base URL
+                        if is_anthropic:
+                            # For Anthropic, just verify we can reach the API
+                            # A 401 with valid structure means API is reachable
+                            url = f"{llm_base.rstrip('/')}/messages"
+                            response = client.post(url, headers=headers, json={})
+                            # 400 (bad request) or 200 means API is reachable and auth works
+                            if response.status_code in (200, 400):
+                                llm_available = True
+                                log_debug(f"[GRAPH] LLM service available at {llm_base}")
+                            else:
+                                log_debug(f"[GRAPH] LLM service returned {response.status_code} at {llm_base}")
+                        else:
+                            url = f"{llm_base.rstrip('/')}/models"
+                            response = client.get(url, headers=headers)
+                            if 200 <= response.status_code < 300:
+                                llm_available = True
+                                log_debug(f"[GRAPH] LLM service available at {llm_base}")
+                            else:
+                                log_debug(f"[GRAPH] LLM service returned {response.status_code} at {llm_base}")
                 except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError):
                     log_debug(f"[GRAPH] Cannot connect to LLM at {llm_base}")
 
