@@ -11,22 +11,16 @@ from watercooler_mcp import memory
 
 
 @pytest.fixture
-def isolated_config(tmp_path, monkeypatch):
+def isolated_config(tmp_path, monkeypatch, clean_api_keys):
     """Isolate tests from user AND project config.
 
     This prevents both:
     - User's ~/.watercooler/config.toml from affecting tests (via HOME redirect)
     - Project config discovery walking up to user's home (via .watercooler dir + chdir)
-    """
-    # Clear API keys BEFORE importing config
-    api_keys = [
-        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
-        "GEMINI_API_KEY", "GROQ_API_KEY", "VOYAGE_API_KEY",
-        "LLM_API_KEY", "EMBEDDING_API_KEY", "DEEPSEEK_API_KEY",
-    ]
-    for key in api_keys:
-        monkeypatch.delenv(key, raising=False)
 
+    Uses the shared clean_api_keys fixture from conftest.py to clear all
+    provider API keys before config loading.
+    """
     # Create .watercooler dir to stop project config upward search
     watercooler_dir = tmp_path / ".watercooler"
     watercooler_dir.mkdir()

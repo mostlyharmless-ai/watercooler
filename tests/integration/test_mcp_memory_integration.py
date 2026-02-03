@@ -14,11 +14,24 @@ import pytest
 
 
 @pytest.fixture
-def isolated_config(tmp_path, monkeypatch):
-    """Isolate tests from user config by redirecting HOME to temp dir."""
+def isolated_config(tmp_path, monkeypatch, clean_api_keys):
+    """Isolate tests from user AND project config.
+
+    This prevents both:
+    - User's ~/.watercooler/config.toml from affecting tests (via HOME redirect)
+    - Project config discovery walking up to user's home (via .watercooler dir + chdir)
+
+    Uses the shared clean_api_keys fixture from conftest.py to clear all
+    provider API keys before config loading.
+    """
+    # Create .watercooler dir to stop project config upward search
+    watercooler_dir = tmp_path / ".watercooler"
+    watercooler_dir.mkdir()
+
     from watercooler.config_facade import config
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.chdir(tmp_path)
     config.reset()
     yield tmp_path
     config.reset()
