@@ -427,6 +427,17 @@ def _call_llm(
             data = response.json()
             message = data["choices"][0]["message"]
 
+            # Log token usage if available (OpenAI API returns this)
+            usage = data.get("usage", {})
+            if usage:
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+                total_tokens = usage.get("total_tokens", 0)
+                logger.info(
+                    f"LLM usage: model={config.model} "
+                    f"prompt={prompt_tokens} completion={completion_tokens} total={total_tokens}"
+                )
+
             # Get response field based on model (e.g., "reasoning" for qwen3)
             from watercooler.models import get_response_field
             response_field = get_response_field(config.model)
