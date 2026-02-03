@@ -179,26 +179,58 @@ def get_memory_backend() -> str:
 def _get_provider_api_key(api_base: str) -> str | None:
     """Get provider-specific API key based on api_base URL.
 
-    Checks standard provider environment variables based on the API endpoint.
-    This allows users to use their existing OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.
+    Priority:
+    1. Provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+    2. Provider-specific credentials.toml section
 
     Args:
         api_base: The resolved API base URL
 
     Returns:
-        API key from provider-specific env var, or None if not found
+        API key from env var or credentials.toml, or None if not found
     """
+    from .credentials import get_provider_api_key as get_creds_api_key
+
     api_base_lower = api_base.lower() if api_base else ""
 
-    # Map provider domains to their standard env vars
+    # Detect provider and env key from URL
+    provider = None
+    env_key = None
+
     if "openai.com" in api_base_lower or "openai.azure.com" in api_base_lower:
-        return os.getenv("OPENAI_API_KEY")
-    if "anthropic.com" in api_base_lower:
-        return os.getenv("ANTHROPIC_API_KEY")
-    if "googleapis.com" in api_base_lower or "generativelanguage" in api_base_lower:
-        return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if "groq.com" in api_base_lower:
-        return os.getenv("GROQ_API_KEY")
+        provider = "openai"
+        env_key = "OPENAI_API_KEY"
+    elif "anthropic.com" in api_base_lower:
+        provider = "anthropic"
+        env_key = "ANTHROPIC_API_KEY"
+    elif "googleapis.com" in api_base_lower or "generativelanguage" in api_base_lower:
+        provider = "google"
+        env_key = "GOOGLE_API_KEY"
+    elif "groq.com" in api_base_lower:
+        provider = "groq"
+        env_key = "GROQ_API_KEY"
+    elif "deepseek.com" in api_base_lower:
+        provider = "deepseek"
+        env_key = "DEEPSEEK_API_KEY"
+
+    if not provider:
+        return None
+
+    # 1. Check provider-specific env var first
+    key = os.getenv(env_key)
+    if key:
+        return key
+
+    # Also check GEMINI_API_KEY as fallback for Google
+    if provider == "google":
+        key = os.getenv("GEMINI_API_KEY")
+        if key:
+            return key
+
+    # 2. Check credentials.toml
+    key = get_creds_api_key(provider)
+    if key:
+        return key
 
     return None
 
@@ -232,15 +264,14 @@ def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
     if not api_base:
         api_base = mem.llm.api_base
 
-    # Resolve api_key: env > backend-specific > provider-specific > shared
+    # Resolve api_key: env > provider-specific (env + credentials.toml)
+    # Note: API keys belong in credentials.toml, not config.toml
     api_key = os.getenv("LLM_API_KEY")
-    if not api_key and backend_cfg:
-        api_key = backend_cfg.llm_api_key or None
     if not api_key:
-        # Check provider-specific env vars based on resolved api_base
+        # Check provider-specific env vars + credentials.toml based on resolved api_base
         api_key = _get_provider_api_key(api_base)
     if not api_key:
-        api_key = mem.llm.api_key
+        api_key = ""  # Empty string if not found (local servers often don't need keys)
 
     # Resolve model: env > backend-specific > shared
     model = os.getenv("LLM_MODEL")
@@ -292,24 +323,52 @@ def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
 def _get_embedding_provider_api_key(api_base: str) -> str | None:
     """Get provider-specific API key for embeddings based on api_base URL.
 
-    Checks standard provider environment variables based on the API endpoint.
-    This allows users to use their existing OPENAI_API_KEY, VOYAGE_API_KEY, etc.
+    Priority:
+    1. Provider-specific env vars (OPENAI_API_KEY, VOYAGE_API_KEY, etc.)
+    2. Provider-specific credentials.toml section
 
     Args:
         api_base: The resolved API base URL
 
     Returns:
-        API key from provider-specific env var, or None if not found
+        API key from env var or credentials.toml, or None if not found
     """
+    from .credentials import get_provider_api_key as get_creds_api_key
+
     api_base_lower = api_base.lower() if api_base else ""
 
-    # Map provider domains to their standard env vars
+    # Detect provider and env key from URL
+    provider = None
+    env_key = None
+
     if "openai.com" in api_base_lower or "openai.azure.com" in api_base_lower:
-        return os.getenv("OPENAI_API_KEY")
-    if "voyageai.com" in api_base_lower:
-        return os.getenv("VOYAGE_API_KEY")
-    if "googleapis.com" in api_base_lower or "generativelanguage" in api_base_lower:
-        return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        provider = "openai"
+        env_key = "OPENAI_API_KEY"
+    elif "voyageai.com" in api_base_lower:
+        provider = "voyage"
+        env_key = "VOYAGE_API_KEY"
+    elif "googleapis.com" in api_base_lower or "generativelanguage" in api_base_lower:
+        provider = "google"
+        env_key = "GOOGLE_API_KEY"
+
+    if not provider:
+        return None
+
+    # 1. Check provider-specific env var first
+    key = os.getenv(env_key)
+    if key:
+        return key
+
+    # Also check GEMINI_API_KEY as fallback for Google
+    if provider == "google":
+        key = os.getenv("GEMINI_API_KEY")
+        if key:
+            return key
+
+    # 2. Check credentials.toml
+    key = get_creds_api_key(provider)
+    if key:
+        return key
 
     return None
 
@@ -343,15 +402,14 @@ def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConf
     if not api_base:
         api_base = mem.embedding.api_base
 
-    # Resolve api_key: env > backend-specific > provider-specific > shared
+    # Resolve api_key: env > provider-specific (env + credentials.toml)
+    # Note: API keys belong in credentials.toml, not config.toml
     api_key = os.getenv("EMBEDDING_API_KEY")
-    if not api_key and backend_cfg:
-        api_key = backend_cfg.embedding_api_key or None
     if not api_key:
-        # Check provider-specific env vars based on resolved api_base
+        # Check provider-specific env vars + credentials.toml based on resolved api_base
         api_key = _get_embedding_provider_api_key(api_base)
     if not api_key:
-        api_key = mem.embedding.api_key
+        api_key = ""  # Empty string if not found (local servers often don't need keys)
 
     # Resolve model: env > backend-specific > shared
     model = os.getenv("EMBEDDING_MODEL")
@@ -704,13 +762,19 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
     cfg = config.full()
     mem = cfg.memory
 
-    # Resolve api_key: LLM_API_KEY > BASELINE_GRAPH_API_KEY > TOML > default
-    api_key = (
-        os.getenv("LLM_API_KEY")
-        or os.getenv("BASELINE_GRAPH_API_KEY")
-        or mem.llm.api_key
-        or _BASELINE_GRAPH_DEFAULT_LLM_API_KEY
-    )
+    # Resolve api_key: LLM_API_KEY > BASELINE_GRAPH_API_KEY > provider credentials > default
+    # Note: We no longer fall back to mem.llm.api_key - secrets belong in credentials.toml
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("BASELINE_GRAPH_API_KEY")
+    if not api_key:
+        # Check provider-specific credentials based on api_base (resolved below)
+        # We need to resolve api_base first to know which provider to check
+        resolved_api_base = (
+            os.getenv("LLM_API_BASE")
+            or os.getenv("BASELINE_GRAPH_API_BASE")
+            or mem.llm.api_base
+            or _BASELINE_GRAPH_DEFAULT_LLM_API_BASE
+        )
+        api_key = _get_provider_api_key(resolved_api_base) or _BASELINE_GRAPH_DEFAULT_LLM_API_KEY
 
     # Resolve api_base: LLM_API_BASE > BASELINE_GRAPH_API_BASE > TOML > default
     # Note: TOML values are respected as-is, including external APIs like OpenAI.
@@ -784,13 +848,18 @@ def resolve_baseline_graph_embedding_config() -> ResolvedEmbeddingConfig:
     cfg = config.full()
     mem = cfg.memory
 
-    # Resolve api_key: EMBEDDING_API_KEY > BASELINE_GRAPH_EMBEDDING_API_KEY > TOML > empty
-    api_key = (
-        os.getenv("EMBEDDING_API_KEY")
-        or os.getenv("BASELINE_GRAPH_EMBEDDING_API_KEY")
-        or mem.embedding.api_key
-        or ""  # Embedding servers often don't need keys
-    )
+    # Resolve api_key: EMBEDDING_API_KEY > BASELINE_GRAPH_EMBEDDING_API_KEY > provider credentials > empty
+    # Note: We no longer fall back to mem.embedding.api_key - secrets belong in credentials.toml
+    api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("BASELINE_GRAPH_EMBEDDING_API_KEY")
+    if not api_key:
+        # Check provider-specific credentials based on api_base (resolved below)
+        resolved_api_base = (
+            os.getenv("EMBEDDING_API_BASE")
+            or os.getenv("BASELINE_GRAPH_EMBEDDING_API_BASE")
+            or mem.embedding.api_base
+            or _BASELINE_GRAPH_DEFAULT_EMBEDDING_API_BASE
+        )
+        api_key = _get_embedding_provider_api_key(resolved_api_base) or ""  # Embedding servers often don't need keys
 
     # Resolve api_base: EMBEDDING_API_BASE > BASELINE_GRAPH_EMBEDDING_API_BASE > TOML > default
     api_base = (

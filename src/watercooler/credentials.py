@@ -70,7 +70,12 @@ class DashboardCredentials(BaseModel):
 
 
 class DeepSeekCredentials(BaseModel):
-    """DeepSeek API credentials for LLM summarization."""
+    """DeepSeek API credentials for LLM summarization.
+
+    .. deprecated::
+        Use OpenAICredentials or other provider-specific credentials instead.
+        DeepSeek is kept for backward compatibility only.
+    """
 
     api_key: str = Field(
         default="",
@@ -78,11 +83,78 @@ class DeepSeekCredentials(BaseModel):
     )
 
 
-class Credentials(BaseModel):
-    """All Watercooler credentials."""
+# =============================================================================
+# Provider API Credentials
+# =============================================================================
 
+
+class OpenAICredentials(BaseModel):
+    """OpenAI API credentials."""
+
+    api_key: str = Field(
+        default="",
+        description="OpenAI API key (sk-...)",
+    )
+
+
+class AnthropicCredentials(BaseModel):
+    """Anthropic API credentials."""
+
+    api_key: str = Field(
+        default="",
+        description="Anthropic API key (sk-ant-...)",
+    )
+
+
+class GroqCredentials(BaseModel):
+    """Groq API credentials."""
+
+    api_key: str = Field(
+        default="",
+        description="Groq API key (gsk_...)",
+    )
+
+
+class VoyageCredentials(BaseModel):
+    """Voyage AI credentials for embeddings."""
+
+    api_key: str = Field(
+        default="",
+        description="Voyage API key",
+    )
+
+
+class GoogleCredentials(BaseModel):
+    """Google/Gemini API credentials."""
+
+    api_key: str = Field(
+        default="",
+        description="Google API key",
+    )
+
+
+class Credentials(BaseModel):
+    """All Watercooler credentials.
+
+    Credentials are stored in ~/.watercooler/credentials.toml separately from
+    configuration (config.toml) for security:
+    - credentials.toml: secrets (API keys, tokens) - gitignored, 0600 permissions
+    - config.toml: settings (api_base, model, etc.) - can be version controlled
+    """
+
+    # GitHub authentication
     github: GitHubCredentials = Field(default_factory=GitHubCredentials)
+    # Dashboard (self-hosted)
     dashboard: DashboardCredentials = Field(default_factory=DashboardCredentials)
+
+    # Provider API keys (new)
+    openai: OpenAICredentials = Field(default_factory=OpenAICredentials)
+    anthropic: AnthropicCredentials = Field(default_factory=AnthropicCredentials)
+    groq: GroqCredentials = Field(default_factory=GroqCredentials)
+    voyage: VoyageCredentials = Field(default_factory=VoyageCredentials)
+    google: GoogleCredentials = Field(default_factory=GoogleCredentials)
+
+    # Legacy (deprecated)
     deepseek: DeepSeekCredentials = Field(default_factory=DeepSeekCredentials)
 
 
@@ -303,6 +375,38 @@ def save_credentials(creds: Credentials) -> Path:
         dashboard.add("session_secret", creds.dashboard.session_secret)
         doc.add("dashboard", dashboard)
 
+    # Provider API keys
+    if creds.openai.api_key:
+        openai = tomlkit.table()
+        openai.add("api_key", creds.openai.api_key)
+        doc.add("openai", openai)
+
+    if creds.anthropic.api_key:
+        anthropic = tomlkit.table()
+        anthropic.add("api_key", creds.anthropic.api_key)
+        doc.add("anthropic", anthropic)
+
+    if creds.groq.api_key:
+        groq = tomlkit.table()
+        groq.add("api_key", creds.groq.api_key)
+        doc.add("groq", groq)
+
+    if creds.voyage.api_key:
+        voyage = tomlkit.table()
+        voyage.add("api_key", creds.voyage.api_key)
+        doc.add("voyage", voyage)
+
+    if creds.google.api_key:
+        google = tomlkit.table()
+        google.add("api_key", creds.google.api_key)
+        doc.add("google", google)
+
+    # Legacy deepseek (deprecated)
+    if creds.deepseek.api_key:
+        deepseek = tomlkit.table()
+        deepseek.add("api_key", creds.deepseek.api_key)
+        doc.add("deepseek", deepseek)
+
     with open(toml_path, "w") as f:
         f.write(tomlkit.dumps(doc))
 
@@ -323,6 +427,43 @@ def get_github_token() -> Optional[str]:
     # Load from credentials
     creds = load_credentials()
     return creds.github.token or None
+
+
+def get_provider_api_key(provider: str) -> Optional[str]:
+    """Get API key for a provider from credentials.toml.
+
+    This is the canonical way to retrieve provider-specific API keys from
+    the credentials file. Provider names are case-insensitive.
+
+    Supported providers:
+    - openai: OpenAI API key
+    - anthropic: Anthropic API key
+    - groq: Groq API key
+    - voyage: Voyage AI API key
+    - google: Google/Gemini API key
+    - deepseek: DeepSeek API key (legacy)
+
+    Args:
+        provider: Provider name (e.g., "openai", "anthropic", "groq")
+
+    Returns:
+        API key string if found and non-empty, None otherwise
+
+    Example:
+        >>> key = get_provider_api_key("openai")
+        >>> if key:
+        ...     print("OpenAI key found in credentials.toml")
+    """
+    creds = load_credentials()
+    provider_lower = provider.lower()
+
+    # Map provider name to credential attribute
+    provider_creds = getattr(creds, provider_lower, None)
+    if provider_creds and hasattr(provider_creds, "api_key"):
+        key = provider_creds.api_key
+        return key if key else None
+
+    return None
 
 
 def get_ssh_key_path() -> Optional[Path]:

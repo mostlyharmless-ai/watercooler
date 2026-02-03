@@ -858,7 +858,7 @@ Variables for querying thread history via Graphiti temporal graph memory. These 
 Enables the memory query tools (`watercooler_smart_query`, `watercooler_search`) for asking questions about thread history using Graphiti's temporal graph memory. When disabled, the tools return an error message directing users to enable it.
 
 **Prerequisites** (when enabled):
-- LLM API key configured (via `LLM_API_KEY` env var or `[memory.llm].api_key` in TOML)
+- LLM API key configured (via `LLM_API_KEY` env var, `OPENAI_API_KEY`, or `[openai].api_key` in credentials.toml)
 - FalkorDB running locally: `docker run -d -p 6379:6379 falkordb/falkordb:latest`
 - Memory extras installed: `pip install 'watercooler-cloud[memory]'`
 - Index built via CLI: `python -m watercooler_memory.pipeline run --backend graphiti --threads /path/to/threads`
@@ -871,9 +871,13 @@ enabled = true
 backend = "graphiti"
 
 [memory.llm]
-api_key = "local"  # or your API key
 api_base = "http://localhost:8000/v1"  # llama-server
 model = "qwen3:30b"
+
+# API keys go in credentials.toml (not config.toml):
+# ~/.watercooler/credentials.toml
+# [openai]
+# api_key = "sk-..."
 ```
 
 **Defaults:**
@@ -1020,9 +1024,13 @@ Variables used by the Graphiti memory backend.
 | `EMBEDDING_MODEL` | No | `text-embedding-3-small` | Embedding model name |
 | `WATERCOOLER_GRAPHITI_RERANKER` | No | `rrf` | Reranker algorithm |
 
-*Required when Graphiti is enabled. For local servers, use a dummy value like `"not-needed-for-local"`.
+*Required when using cloud providers like OpenAI. For local servers (llama-server), API keys are not needed.
 
-**Note:** If `LLM_API_KEY` or `EMBEDDING_API_KEY` is not set, there is a temporary fallback to `OPENAI_API_KEY` with a deprecation warning. This fallback will be removed in a future release - please set `LLM_API_KEY` and `EMBEDDING_API_KEY` explicitly.
+**API Key Resolution Priority:**
+1. `LLM_API_KEY` / `EMBEDDING_API_KEY` (explicit env vars)
+2. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc. (auto-detected from api_base URL)
+3. `[openai].api_key`, etc. in `~/.watercooler/credentials.toml` (file-based)
+4. Empty string (local servers don't need keys)
 
 **Local server example:**
 ```bash

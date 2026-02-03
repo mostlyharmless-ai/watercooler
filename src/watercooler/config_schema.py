@@ -606,19 +606,18 @@ class LLMServiceConfig(BaseModel):
 
     Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT, LLM_MAX_TOKENS,
                    LLM_CONTEXT_SIZE
+
+    Note: API keys should be stored in credentials.toml, not config.toml.
+    Use [openai].api_key, [anthropic].api_key, etc. in ~/.watercooler/credentials.toml
     """
 
-    api_key: str = Field(
-        default="",
-        description="LLM API key (set via env for security)",
-    )
     api_base: str = Field(
-        default="https://api.openai.com/v1",
-        description="LLM API base URL",
+        default="",
+        description="LLM API base URL. Empty means use context-specific default (localhost for baseline graph).",
     )
     model: str = Field(
-        default="gpt-4o-mini",
-        description="LLM model name",
+        default="",
+        description="LLM model name. Empty means use context-specific default.",
     )
     timeout: float = Field(
         default=60.0,
@@ -668,12 +667,11 @@ class EmbeddingServiceConfig(BaseModel):
 
     Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM,
                    EMBEDDING_TIMEOUT, EMBEDDING_BATCH_SIZE, EMBEDDING_CONTEXT_SIZE
+
+    Note: API keys should be stored in credentials.toml, not config.toml.
+    Use [openai].api_key, [voyage].api_key, etc. in ~/.watercooler/credentials.toml
     """
 
-    api_key: str = Field(
-        default="",
-        description="Embedding API key (often not needed for local servers)",
-    )
     api_base: str = Field(
         default="http://localhost:8080/v1",
         description="Embedding API base URL (llama.cpp default)",
@@ -734,13 +732,12 @@ class GraphitiBackendConfig(BaseModel):
     """Graphiti-specific configuration overrides.
 
     These override shared [memory.llm] and [memory.embedding] settings.
+
+    Note: API keys should be stored in credentials.toml, not config.toml.
+    Use [openai].api_key, etc. in ~/.watercooler/credentials.toml
     """
 
     # LLM overrides (empty = use shared)
-    llm_api_key: str = Field(
-        default="",
-        description="Override LLM API key for Graphiti (e.g., OpenAI key when shared uses local)",
-    )
     llm_model: str = Field(
         default="",
         description="Override LLM model for Graphiti",
@@ -751,10 +748,6 @@ class GraphitiBackendConfig(BaseModel):
     )
 
     # Embedding overrides (empty = use shared)
-    embedding_api_key: str = Field(
-        default="",
-        description="Override embedding API key for Graphiti",
-    )
     embedding_model: str = Field(
         default="",
         description="Override embedding model for Graphiti",
@@ -797,6 +790,9 @@ class LeanRAGBackendConfig(BaseModel):
     """LeanRAG-specific configuration overrides.
 
     These override shared [memory.llm] and [memory.embedding] settings.
+
+    Note: API keys should be stored in credentials.toml, not config.toml.
+    Use [openai].api_key, etc. in ~/.watercooler/credentials.toml
     """
 
     # Path to LeanRAG installation
@@ -806,10 +802,6 @@ class LeanRAGBackendConfig(BaseModel):
     )
 
     # LLM overrides (empty = use shared)
-    llm_api_key: str = Field(
-        default="",
-        description="Override LLM API key for LeanRAG (e.g., OpenAI key when shared uses local)",
-    )
     llm_model: str = Field(
         default="",
         description="Override LLM model for LeanRAG",
@@ -820,10 +812,6 @@ class LeanRAGBackendConfig(BaseModel):
     )
 
     # Embedding overrides (empty = use shared)
-    embedding_api_key: str = Field(
-        default="",
-        description="Override embedding API key for LeanRAG",
-    )
     embedding_model: str = Field(
         default="",
         description="Override embedding model for LeanRAG",

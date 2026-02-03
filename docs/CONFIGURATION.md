@@ -403,9 +403,25 @@ level = "DEBUG"
 
 **Note:** Environment variables still work and override config file values.
 
-## Credentials
+## Credentials vs Configuration
 
-Credentials (GitHub tokens, SSH keys) are stored separately in `credentials.toml`:
+Watercooler separates **credentials** (secrets) from **configuration** (settings):
+
+| File | Purpose | Permissions | Git |
+|------|---------|-------------|-----|
+| `~/.watercooler/config.toml` | Settings (api_base, model, etc.) | Normal | Can commit |
+| `~/.watercooler/credentials.toml` | Secrets (API keys, tokens) | 0600 | **Never commit** |
+
+### Why Separate Files?
+
+1. **Security**: Different access patterns - credentials need 0600 permissions
+2. **Version control**: Config can be shared in repos; credentials cannot
+3. **Environment parity**: Same config across dev/prod, different credentials
+4. **Intuitive**: "I have an OpenAI key" vs "I have an LLM key"
+
+### API Key Storage
+
+Store API keys in `credentials.toml` by **provider name**:
 
 ```toml
 # ~/.watercooler/credentials.toml
@@ -414,8 +430,62 @@ Credentials (GitHub tokens, SSH keys) are stored separately in `credentials.toml
 token = "ghp_xxxxxxxxxxxx"
 ssh_key = "~/.ssh/id_ed25519"
 
+[openai]
+api_key = "sk-proj-..."
+
+[anthropic]
+api_key = "sk-ant-..."
+
+[groq]
+api_key = "gsk_..."
+
+[voyage]
+api_key = "vg-..."
+
+[google]
+api_key = "AIza..."
+
 [dashboard]
 session_secret = "your-secret-key"
+```
+
+The system auto-detects which provider to use based on `api_base` in config.toml.
+
+### API Key Resolution Priority
+
+When resolving API keys for LLM or embedding services:
+
+```
+1. Env var (highest):     LLM_API_KEY / EMBEDDING_API_KEY
+2. Provider-specific env: OPENAI_API_KEY (auto-detected from api_base)
+3. Provider credentials:  [openai].api_key in credentials.toml
+4. Empty string (lowest): Local servers often don't need keys
+```
+
+### Migration from config.toml
+
+If you have API keys in config.toml, move them to credentials.toml:
+
+**Before** (deprecated):
+```toml
+# ~/.watercooler/config.toml
+[memory.llm]
+api_key = "sk-proj-..."  # ❌ Secrets don't belong here
+api_base = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+```
+
+**After** (correct):
+```toml
+# ~/.watercooler/config.toml
+[memory.llm]
+api_base = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+# No api_key here - it's in credentials.toml
+
+# ~/.watercooler/credentials.toml
+[openai]
+api_key = "sk-proj-..."
 ```
 
 **Security:** Credentials files are automatically set to mode 0600 (owner read/write only).

@@ -453,16 +453,15 @@ auto_detect_services = true
 # Watercooler auto-starts llama-server on port 8000 if a localhost endpoint is
 # configured and the service isn't already running.
 #
-# For OpenAI or other cloud providers, set api_base and api_key accordingly.
+# For OpenAI or other cloud providers, set api_base accordingly and store
+# your API key in credentials.toml (see ~/.watercooler/credentials.toml).
 # Cloud endpoints are NOT auto-started - they're assumed to be managed externally.
+#
+# NOTE: API keys belong in credentials.toml, NOT here. This keeps secrets
+# separate from configuration (which can be version-controlled).
+# See the credentials.example.toml template for the proper format.
 # -----------------------------------------------------------------------------
 [memory.llm]
-
-# LLM API key
-# Env: LLM_API_KEY
-# For local llama-server: not required (empty string is fine)
-# For OpenAI: set to your API key
-# api_key = ""
 
 # LLM API base URL
 # Env: LLM_API_BASE
@@ -575,14 +574,10 @@ auto_detect_services = true
 #   - Build from source: https://github.com/ggml-org/llama.cpp
 #   - Or download release: https://github.com/ggml-org/llama.cpp/releases
 #   - Watercooler will auto-download if not found
+# NOTE: API keys belong in credentials.toml, NOT here. This keeps secrets
+# separate from configuration (which can be version-controlled).
 # -----------------------------------------------------------------------------
 [memory.embedding]
-
-# Embedding API key (not required for local llama-server)
-# Env: EMBEDDING_API_KEY
-# For local llama-server: not required (empty string is fine)
-# For OpenAI embeddings: set to your API key
-# api_key = ""
 
 # Embedding API base URL
 # Env: EMBEDDING_API_BASE
@@ -654,15 +649,13 @@ auto_detect_services = true
 
 # Override LLM settings for Graphiti only (empty = use shared [memory.llm])
 # Use this when Graphiti needs a more capable model than the baseline graph.
-# API key resolution: TOML > provider-specific env (OPENAI_API_KEY if api_base is openai.com)
-# llm_api_key = ""  # Empty = check OPENAI_API_KEY if api_base is openai.com
+# API keys: Store in credentials.toml under the provider section (e.g., [openai])
 # llm_api_base = "https://api.openai.com/v1"
 # llm_model = "gpt-4o-mini"
 
 # Override embedding settings for Graphiti only (empty = use shared [memory.embedding])
 # Use this when Graphiti needs a different embedding model than the baseline graph.
-# API key resolution: TOML > provider-specific env (OPENAI_API_KEY, VOYAGE_API_KEY, etc.)
-# embedding_api_key = ""  # Empty = check provider env var based on api_base
+# API keys: Store in credentials.toml under the provider section
 # embedding_api_base = "https://api.openai.com/v1"
 # embedding_model = "text-embedding-3-small"
 
@@ -700,15 +693,13 @@ auto_detect_services = true
 
 # Override LLM settings for LeanRAG only (empty = use shared [memory.llm])
 # Use this when LeanRAG needs a more capable model than the baseline graph.
-# API key resolution: TOML > provider-specific env (OPENAI_API_KEY if api_base is openai.com)
-# llm_api_key = ""  # Empty = check OPENAI_API_KEY if api_base is openai.com
+# API keys: Store in credentials.toml under the provider section (e.g., [openai])
 # llm_api_base = "https://api.openai.com/v1"
 # llm_model = "gpt-4o-mini"
 
 # Override embedding settings for LeanRAG only (empty = use shared [memory.embedding])
 # Use this when LeanRAG needs a different embedding model than the baseline graph.
-# API key resolution: TOML > provider-specific env (OPENAI_API_KEY, VOYAGE_API_KEY, etc.)
-# embedding_api_key = ""  # Empty = check provider env var based on api_base
+# API keys: Store in credentials.toml under the provider section
 # embedding_api_base = "https://api.openai.com/v1"
 # embedding_model = "text-embedding-3-small"
 
@@ -746,15 +737,21 @@ auto_detect_services = true
 #   - llama-server binary is auto-downloaded if not found
 #
 # For OpenAI (cloud):
+#   # In config.toml:
 #   [memory.llm]
-#   api_key = "<your-openai-key>"  # or set OPENAI_API_KEY env var
 #   api_base = "https://api.openai.com/v1"
 #   model = "gpt-4o-mini"
 #
 #   [memory.embedding]
-#   api_key = "<your-openai-key>"  # or set OPENAI_API_KEY env var
 #   api_base = "https://api.openai.com/v1"
 #   model = "text-embedding-3-small"
+#
+#   # In credentials.toml (separate file for secrets):
+#   [openai]
+#   api_key = "<your-openai-key>"
+#
+#   # Or use environment variable:
+#   export OPENAI_API_KEY="<your-openai-key>"
 #
 # To disable all memory backends (e.g., for CI):
 #   WATERCOOLER_MEMORY_DISABLED=1
@@ -816,7 +813,6 @@ auto_detect_services = true
 # memory.enabled                 WATERCOOLER_MEMORY_DISABLED (inverted)
 # memory.backend                 WATERCOOLER_MEMORY_BACKEND
 #                                WATERCOOLER_GRAPHITI_ENABLED (legacy, use backend instead)
-# memory.llm.api_key             LLM_API_KEY
 # memory.llm.api_base            LLM_API_BASE
 # memory.llm.model               LLM_MODEL
 # memory.llm.timeout             LLM_TIMEOUT
@@ -825,7 +821,6 @@ auto_detect_services = true
 # memory.llm.prompt_prefix         LLM_PROMPT_PREFIX
 # memory.llm.summary_prompt        LLM_SUMMARY_PROMPT
 # memory.llm.thread_summary_prompt LLM_THREAD_SUMMARY_PROMPT
-# memory.embedding.api_key       EMBEDDING_API_KEY
 # memory.embedding.api_base      EMBEDDING_API_BASE
 # memory.embedding.model         EMBEDDING_MODEL
 # memory.embedding.dim           EMBEDDING_DIM
