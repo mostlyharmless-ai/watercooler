@@ -817,13 +817,25 @@ class GraphitiBackend(MemoryBackend):
         finally:
             asyncio.get_running_loop = original_get_running_loop
 
-        # Configure LLM client (supports OpenAI, local servers, DeepSeek, etc.)
-        llm_config = LLMConfig(
-            api_key=self.config.llm_api_key,
-            model=self.config.llm_model,
-            base_url=self.config.llm_api_base,
-        )
-        llm_client = OpenAIGenericClient(config=llm_config)
+        # Configure LLM client (supports OpenAI, Anthropic, local servers, DeepSeek, etc.)
+        llm_api_base = self.config.llm_api_base or ""
+        is_anthropic = "anthropic.com" in llm_api_base.lower()
+
+        if is_anthropic:
+            # Use native Anthropic client for Anthropic API
+            from graphiti_core.llm_client.anthropic_client import AnthropicClient
+            llm_client = AnthropicClient(
+                api_key=self.config.llm_api_key,
+                model=self.config.llm_model,
+            )
+        else:
+            # Use OpenAI-compatible client for OpenAI, DeepSeek, Groq, local servers
+            llm_config = LLMConfig(
+                api_key=self.config.llm_api_key,
+                model=self.config.llm_model,
+                base_url=self.config.llm_api_base,
+            )
+            llm_client = OpenAIGenericClient(config=llm_config)
 
         # Configure embedder (supports OpenAI, local llama.cpp, etc.)
         # Check if embedding service needs auto-start
