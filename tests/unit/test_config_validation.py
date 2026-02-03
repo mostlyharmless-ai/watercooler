@@ -311,10 +311,14 @@ class TestLLMServiceConfig:
     """Tests for LLMServiceConfig model."""
 
     def test_default_values(self):
-        """Test default LLMServiceConfig values."""
+        """Test default LLMServiceConfig values.
+
+        Note: api_base and model default to empty string, meaning "use context-specific
+        default" (e.g., localhost for baseline graph, resolved at runtime).
+        """
         config = LLMServiceConfig()
-        assert config.api_base == "https://api.openai.com/v1"
-        assert config.model == "gpt-4o-mini"
+        assert config.api_base == ""  # Empty = use context-specific default
+        assert config.model == ""  # Empty = use context-specific default
         assert config.timeout == 60.0
         assert config.max_tokens == 512
 
