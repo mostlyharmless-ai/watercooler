@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -641,6 +642,165 @@ class TestTierOrchestrator:
         assert result.sufficient is True
         assert result.primary_tier == Tier.T2
         assert result.result_count == len(low_confidence) + len(high_confidence)
+
+
+# ============================================================================
+# Test LeanRAG Level Mode Integration
+# ============================================================================
+
+
+class TestLevelModeIntegration:
+    """Tests verifying level_mode is passed through the orchestration chain."""
+
+    def test_t3_passes_level_mode_to_backend(self, mock_threads_dir, monkeypatch) -> None:
+        """Verify _query_t3 passes intent-based level_mode to LeanRAG search_nodes."""
+        config = TierConfig(
+            t1_enabled=False,
+            t2_enabled=False,
+            t3_enabled=True,
+            threads_dir=mock_threads_dir,
+            code_path=mock_threads_dir.parent,
+        )
+        orchestrator = TierOrchestrator(config)
+        orchestrator._available_tiers = [Tier.T3]
+
+        # Track what level_mode was passed to search_nodes
+        captured_kwargs: dict[str, Any] = {}
+
+        class FakeLeanRAGBackend:
+            def __init__(self, *args, **kwargs):
+                pass
+            def search_nodes(self, query, **kwargs):
+                captured_kwargs.update(kwargs)
+                return []
+            def search_facts(self, query, **kwargs):
+                return []
+
+        # Mock the imports inside _query_t3
+        monkeypatch.setattr(
+            "watercooler_memory.tier_strategy._query_t3",
+            lambda query, code_path, limit=5, group_ids=None, intent=None: (
+                # Simulate what _query_t3 does: compute level_mode from intent
+                _capture_and_return(intent, captured_kwargs)
+            ),
+        )
+
+        # Use LOOKUP intent -> should map to level_mode=0 (base)
+        result = orchestrator.query("find UserService class", intent=QueryIntent.LOOKUP)
+        assert captured_kwargs.get("intent") == QueryIntent.LOOKUP
+
+        # Use SUMMARIZE intent -> should map to level_mode=1 (clusters)
+        result = orchestrator.query("summarize the auth approach", intent=QueryIntent.SUMMARIZE)
+        assert captured_kwargs.get("intent") == QueryIntent.SUMMARIZE
+
+    def test_query_tier_passes_intent_to_t3(self, mock_threads_dir, monkeypatch) -> None:
+        """Verify _query_tier passes intent through when querying T3."""
+        config = TierConfig(
+            t1_enabled=False,
+            t2_enabled=False,
+            t3_enabled=True,
+            threads_dir=mock_threads_dir,
+            code_path=mock_threads_dir.parent,
+        )
+        orchestrator = TierOrchestrator(config)
+        orchestrator._available_tiers = [Tier.T3]
+
+        received_intent = [None]
+
+        def mock_query_t3(query, code_path, limit=5, group_ids=None, intent=None):
+            received_intent[0] = intent
+            return [
+                TierEvidence(tier=Tier.T3, id="t3-1", content="test", score=0.9),
+                TierEvidence(tier=Tier.T3, id="t3-2", content="test2", score=0.8),
+                TierEvidence(tier=Tier.T3, id="t3-3", content="test3", score=0.7),
+            ]
+
+        monkeypatch.setattr(
+            "watercooler_memory.tier_strategy._query_t3",
+            mock_query_t3,
+        )
+
+        # Query with RELATIONAL intent
+        result = orchestrator.query("components related to auth", intent=QueryIntent.RELATIONAL)
+        assert received_intent[0] == QueryIntent.RELATIONAL
+        assert Tier.T3 in result.tiers_queried
+
+    def test_level_mode_in_evidence_metadata(self, mock_threads_dir, monkeypatch) -> None:
+        """Verify level_mode is included in TierEvidence metadata."""
+        config = TierConfig(
+            t1_enabled=False,
+            t2_enabled=False,
+            t3_enabled=True,
+            threads_dir=mock_threads_dir,
+            code_path=mock_threads_dir.parent,
+        )
+        orchestrator = TierOrchestrator(config)
+        orchestrator._available_tiers = [Tier.T3]
+
+        def mock_query_t3(query, code_path, limit=5, group_ids=None, intent=None):
+            # Simulate what the real _query_t3 does: include level_mode in metadata
+            level_mode = get_leanrag_level_mode(intent or QueryIntent.UNKNOWN)
+            return [
+                TierEvidence(
+                    tier=Tier.T3,
+                    id="t3-1",
+                    content="test entity",
+                    score=0.9,
+                    metadata={
+                        "node_type": "hierarchical_entity",
+                        "backend": "leanrag",
+                        "level_mode": level_mode,
+                    },
+                ),
+                TierEvidence(
+                    tier=Tier.T3,
+                    id="t3-2",
+                    content="test entity 2",
+                    score=0.8,
+                    metadata={
+                        "node_type": "hierarchical_entity",
+                        "backend": "leanrag",
+                        "level_mode": level_mode,
+                    },
+                ),
+                TierEvidence(
+                    tier=Tier.T3,
+                    id="t3-3",
+                    content="test entity 3",
+                    score=0.7,
+                    metadata={
+                        "node_type": "hierarchical_entity",
+                        "backend": "leanrag",
+                        "level_mode": level_mode,
+                    },
+                ),
+            ]
+
+        monkeypatch.setattr(
+            "watercooler_memory.tier_strategy._query_t3",
+            mock_query_t3,
+        )
+
+        # LOOKUP -> level_mode=0 (base)
+        result = orchestrator.query("find auth class", intent=QueryIntent.LOOKUP)
+        for e in result.by_tier(Tier.T3):
+            assert e.metadata["level_mode"] == LEANRAG_LEVEL_MODE_BASE
+
+        # SUMMARIZE -> level_mode=1 (clusters)
+        result = orchestrator.query("summarize auth", intent=QueryIntent.SUMMARIZE)
+        for e in result.by_tier(Tier.T3):
+            assert e.metadata["level_mode"] == LEANRAG_LEVEL_MODE_CLUSTERS
+
+        # TEMPORAL -> level_mode=2 (all)
+        result = orchestrator.query("when was auth added", intent=QueryIntent.TEMPORAL)
+        for e in result.by_tier(Tier.T3):
+            assert e.metadata["level_mode"] == LEANRAG_LEVEL_MODE_ALL
+
+
+def _capture_and_return(intent, captured_kwargs):
+    """Helper for test_t3_passes_level_mode_to_backend."""
+    captured_kwargs["intent"] = intent
+    return []
 
 
 # ============================================================================

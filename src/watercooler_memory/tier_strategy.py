@@ -90,9 +90,15 @@ def get_leanrag_level_mode(intent: QueryIntent) -> int:
 
     This function selects the optimal level_mode based on query intent:
     - LOOKUP/ENTITY_SEARCH: Use base entities (level_mode=0) for precision
+      (maps to issue #119's "entity_context" concept)
     - SUMMARIZE/MULTI_HOP: Use clusters (level_mode=1) for synthesis
+      (maps to issue #119's "community_summary" concept)
     - TEMPORAL/RELATIONAL: Use all levels (level_mode=2) for completeness
+      (maps to issue #119's "hybrid" concept)
     - UNKNOWN: Default to clusters (level_mode=1)
+
+    Note: LeanRAG's API uses integer level_modes (0, 1, 2), not the string
+    identifiers described in issue #119.
 
     Args:
         intent: The detected query intent
@@ -652,7 +658,7 @@ def _query_t3(
     if intent is None:
         intent = detect_intent(query)
     level_mode = get_leanrag_level_mode(intent)
-    logger.debug(f"T3: Using level_mode={level_mode} for intent={intent.value}")
+    logger.info(f"T3: Using level_mode={level_mode} for intent={intent.value}")
 
     evidence = []
 
