@@ -72,6 +72,62 @@ class QueryIntent(str, Enum):
     UNKNOWN = "unknown"        # Default -> T1
 
 
+# LeanRAG level_mode values:
+#   0 = Base entities only (precise, individual nodes)
+#   1 = Clusters only (hierarchical summaries)
+#   2 = All levels (base + clusters combined)
+LEANRAG_LEVEL_MODE_BASE = 0
+LEANRAG_LEVEL_MODE_CLUSTERS = 1
+LEANRAG_LEVEL_MODE_ALL = 2
+
+
+def get_leanrag_level_mode(intent: QueryIntent) -> int:
+    """Map query intent to optimal LeanRAG level_mode.
+
+    LeanRAG's hierarchical graph has multiple levels:
+    - Level 0 (base entities): Individual extracted entities with descriptions
+    - Level 1+ (clusters): Hierarchical summaries via GMM clustering
+
+    This function selects the optimal level_mode based on query intent:
+    - LOOKUP/ENTITY_SEARCH: Use base entities (level_mode=0) for precision
+      (maps to issue #119's "entity_context" concept)
+    - SUMMARIZE/MULTI_HOP: Use clusters (level_mode=1) for synthesis
+      (maps to issue #119's "community_summary" concept)
+    - TEMPORAL/RELATIONAL: Use all levels (level_mode=2) for completeness
+      (maps to issue #119's "hybrid" concept)
+    - UNKNOWN: Default to clusters (level_mode=1)
+
+    Note: LeanRAG's API uses integer level_modes (0, 1, 2), not the string
+    identifiers described in issue #119.
+
+    Args:
+        intent: The detected query intent
+
+    Returns:
+        LeanRAG level_mode value (0, 1, or 2)
+
+    Example:
+        >>> get_leanrag_level_mode(QueryIntent.LOOKUP)
+        0
+        >>> get_leanrag_level_mode(QueryIntent.SUMMARIZE)
+        1
+        >>> get_leanrag_level_mode(QueryIntent.RELATIONAL)
+        2
+    """
+    if intent in (QueryIntent.LOOKUP, QueryIntent.ENTITY_SEARCH):
+        # Precision queries: use base entities for exact matches
+        return LEANRAG_LEVEL_MODE_BASE
+    elif intent in (QueryIntent.SUMMARIZE, QueryIntent.MULTI_HOP):
+        # Synthesis queries: use cluster summaries for broader context
+        return LEANRAG_LEVEL_MODE_CLUSTERS
+    elif intent in (QueryIntent.TEMPORAL, QueryIntent.RELATIONAL):
+        # Relationship/temporal queries: use all levels for completeness
+        return LEANRAG_LEVEL_MODE_ALL
+    else:
+        # Default: clusters provide good balance
+        return LEANRAG_LEVEL_MODE_CLUSTERS
+
+
 # Tier cost ordering (lower is cheaper)
 TIER_COSTS = {
     Tier.T1: 1,   # Just embeddings, JSONL scan
@@ -560,6 +616,7 @@ def _query_t3(
     code_path: Path,
     limit: int = 5,
     group_ids: Optional[Sequence[str]] = None,
+    intent: Optional[QueryIntent] = None,
 ) -> list[TierEvidence]:
     """Query T3 (LeanRAG backend).
 
@@ -568,6 +625,7 @@ def _query_t3(
         code_path: Path to code repository
         limit: Maximum results
         group_ids: Optional group IDs to filter
+        intent: Query intent for level_mode selection (auto-detected if None)
 
     Returns:
         List of TierEvidence from T3
@@ -596,11 +654,22 @@ def _query_t3(
         logger.warning(f"T3: Backend initialization failed: {e}")
         return []
 
+    # Determine level_mode based on intent
+    if intent is None:
+        intent = detect_intent(query)
+    level_mode = get_leanrag_level_mode(intent)
+    logger.info(f"T3: Using level_mode={level_mode} for intent={intent.value}")
+
     evidence = []
 
     # Search nodes (hierarchical)
     try:
-        nodes = backend.search_nodes(query, group_ids=group_ids, max_results=limit)
+        nodes = backend.search_nodes(
+            query,
+            group_ids=group_ids,
+            max_results=limit,
+            level_mode=level_mode,
+        )
         for node in nodes:
             evidence.append(TierEvidence(
                 tier=Tier.T3,
@@ -615,6 +684,7 @@ def _query_t3(
                 metadata={
                     "node_type": "hierarchical_entity",
                     "backend": "leanrag",
+                    "level_mode": level_mode,
                     **node.get("extra", {}),
                 },
             ))
@@ -803,7 +873,7 @@ class TierOrchestrator:
 
             # Query the tier
             before_count = result.result_count
-            tier_evidence = self._query_tier(tier, query, group_ids)
+            tier_evidence = self._query_tier(tier, query, group_ids, intent)
             result.evidence.extend(tier_evidence)
             new_count = result.result_count - before_count
 
@@ -863,6 +933,7 @@ class TierOrchestrator:
         tier: Tier,
         query: str,
         group_ids: Optional[Sequence[str]] = None,
+        intent: Optional[QueryIntent] = None,
     ) -> list[TierEvidence]:
         """Query a specific tier.
 
@@ -870,6 +941,7 @@ class TierOrchestrator:
             tier: Which tier to query
             query: Search query
             group_ids: Optional group IDs to filter
+            intent: Query intent (used by T3 for level_mode selection)
 
         Returns:
             List of TierEvidence from the tier
@@ -903,6 +975,7 @@ class TierOrchestrator:
                 self.config.code_path,
                 limit=self.config.t3_limit,
                 group_ids=group_ids,
+                intent=intent,
             )
 
         return []
@@ -995,6 +1068,7 @@ __all__ = [
     "detect_intent",
     "evaluate_sufficiency",
     "smart_query",
+    "get_leanrag_level_mode",
     # Orchestrator
     "TierOrchestrator",
     # Constants
@@ -1002,4 +1076,7 @@ __all__ = [
     "DEFAULT_MIN_RESULTS",
     "DEFAULT_MIN_CONFIDENCE",
     "DEFAULT_MAX_TIERS",
+    "LEANRAG_LEVEL_MODE_BASE",
+    "LEANRAG_LEVEL_MODE_CLUSTERS",
+    "LEANRAG_LEVEL_MODE_ALL",
 ]

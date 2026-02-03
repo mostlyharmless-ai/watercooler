@@ -14,7 +14,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Generator, Sequence
+from typing import Any, Generator, Literal, Sequence
 
 from . import (
     BackendError,
@@ -817,6 +817,7 @@ class LeanRAGBackend(MemoryBackend):
         group_ids: Sequence[str] | None = None,
         max_results: int = 10,
         entity_types: list[str] | None = None,
+        level_mode: Literal[0, 1, 2] = 2,
     ) -> list[dict[str, Any]]:
         """Search for entity nodes using vector similarity search.
 
@@ -825,6 +826,10 @@ class LeanRAGBackend(MemoryBackend):
             group_ids: Optional list of group IDs to filter by (ignored - LeanRAG uses separate databases)
             max_results: Maximum number of results to return
             entity_types: Optional list of entity types to filter by (not implemented in LeanRAG)
+            level_mode: LeanRAG hierarchy level mode (maps to search_vector_search):
+                - 0: Base entities only (precise, individual nodes)
+                - 1: Clusters only (hierarchical summaries)
+                - 2: All levels (base + clusters, default)
 
         Returns:
             List of normalized CoreResult dictionaries with node data
@@ -865,12 +870,13 @@ class LeanRAGBackend(MemoryBackend):
                     # Convert text query to embedding vector
                     query_embedding = embedding(query)
 
-                    # Execute vector search (level_mode=2 means all levels: base + clusters)
+                    # Execute vector search with specified level_mode
+                    logger.debug(f"LeanRAG search_nodes: level_mode={level_mode}")
                     results = search_vector_search(
                         str(work_dir),
                         query_embedding,
                         topk=max_results,
-                        level_mode=2
+                        level_mode=level_mode
                     )
 
                     # Normalize to CoreResult format
