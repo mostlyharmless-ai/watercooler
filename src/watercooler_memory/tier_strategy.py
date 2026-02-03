@@ -795,8 +795,17 @@ class TierOrchestrator:
         tiers_to_try = [current_tier]
         tiers_tried = 0
 
+        # Track queried tiers to prevent duplicates (O(1) lookup)
+        queried_tiers: set[Tier] = set()
+
         while tiers_tried < self.config.max_tiers and tiers_to_try:
             tier = tiers_to_try.pop(0)
+
+            # Skip if already queried (defensive guard)
+            if tier in queried_tiers:
+                continue
+
+            queried_tiers.add(tier)
             tiers_tried += 1
             result.tiers_queried.append(tier)
             result.total_cost += TIER_COSTS[tier]
@@ -832,7 +841,7 @@ class TierOrchestrator:
                 # Prefer cheaper fallback if the current tier produced nothing
                 if new_count == 0:
                     for lower_tier in self._get_lower_tiers(tier):
-                        if lower_tier not in result.tiers_queried and lower_tier not in tiers_to_try:
+                        if lower_tier not in queried_tiers and lower_tier not in tiers_to_try:
                             next_tier = lower_tier
                             break
 
@@ -840,7 +849,7 @@ class TierOrchestrator:
                 if next_tier is None:
                     next_tier = self._get_next_tier(tier)
 
-                if next_tier and next_tier not in result.tiers_queried and next_tier not in tiers_to_try:
+                if next_tier and next_tier not in queried_tiers and next_tier not in tiers_to_try:
                     result.escalation_reason = reason
                     tiers_to_try.append(next_tier)
                     logger.info(f"Escalating from {tier.value} to {next_tier.value}: {reason}")

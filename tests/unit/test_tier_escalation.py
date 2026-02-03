@@ -342,6 +342,51 @@ class TestEmptyResultsEscalation:
         # Should have tried all available tiers
         assert len(result.tiers_queried) == 3
 
+    def test_no_duplicate_t1_query_when_t2_empty(
+        self, full_tier_config: TierConfig, monkeypatch
+    ) -> None:
+        """T1 should be queried exactly once even when T2 returns empty and falls back.
+
+        Regression test for issue #117: When T1 is queried first, then T2 escalates
+        and returns empty, the fallback logic should NOT re-query T1.
+        """
+        orchestrator = TierOrchestrator(full_tier_config)
+        orchestrator._available_tiers = [Tier.T1, Tier.T2]
+
+        # Track how many times each tier is queried
+        t1_query_count = 0
+        t2_query_count = 0
+
+        def mock_t1(*args, **kwargs):
+            nonlocal t1_query_count
+            t1_query_count += 1
+            # Return some results but not enough for sufficiency
+            return make_evidence(Tier.T1, 1, base_score=0.5)
+
+        def mock_t2(*args, **kwargs):
+            nonlocal t2_query_count
+            t2_query_count += 1
+            # T2 returns empty, triggering fallback logic
+            return []
+
+        monkeypatch.setattr(
+            "watercooler_memory.tier_strategy._query_t1",
+            mock_t1,
+        )
+        monkeypatch.setattr(
+            "watercooler_memory.tier_strategy._query_t2",
+            mock_t2,
+        )
+
+        result = orchestrator.query("test query")
+
+        # T1 should be queried exactly once, not twice
+        assert t1_query_count == 1, f"T1 was queried {t1_query_count} times, expected 1"
+        assert t2_query_count == 1, f"T2 was queried {t2_query_count} times, expected 1"
+        # Both tiers should appear in queried list exactly once
+        assert result.tiers_queried.count(Tier.T1) == 1
+        assert result.tiers_queried.count(Tier.T2) == 1
+
 
 class TestPartialTierAvailability:
     """Tests for escalation with partially available tiers."""
