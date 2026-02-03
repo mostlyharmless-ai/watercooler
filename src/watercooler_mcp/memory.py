@@ -27,6 +27,9 @@ from watercooler.memory_config import (
     get_leanrag_path,
 )
 
+# Import unified derive_group_id from path_resolver
+from watercooler.path_resolver import derive_group_id
+
 # Import backend's GraphitiConfig directly (consolidates duplicate configs)
 try:
     from watercooler_memory.backends.graphiti import GraphitiConfig, _derive_database_name
@@ -40,12 +43,8 @@ except ImportError:
         reranker: str = "rrf"
 
     def _derive_database_name(code_path: Path | str | None) -> str:
-        """Fallback database name derivation."""
-        if code_path is None:
-            return "watercooler"
-        path = Path(code_path) if isinstance(code_path, str) else code_path
-        name = path.resolve().name
-        return name.replace("-", "_").lower() or "watercooler"
+        """Fallback database name derivation using unified function."""
+        return derive_group_id(code_path=Path(code_path) if code_path else None)
 
 
 def load_graphiti_config(code_path: str | Path | None = None) -> Optional[GraphitiConfig]:

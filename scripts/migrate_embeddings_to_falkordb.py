@@ -38,6 +38,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+# Add src to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from watercooler.path_resolver import derive_group_id as _derive_group_id
+
 
 @dataclass
 class MigrationStats:
@@ -81,16 +85,13 @@ def get_graph_dir(threads_dir: Path) -> Path:
 def get_group_id(threads_dir: Path) -> str:
     """Derive group_id from threads directory.
 
+    Delegates to unified function in watercooler.path_resolver.
+
     Handles two layouts:
     1. Paired repos: /path/to/watercooler-site-threads → watercooler_site
     2. Embedded dirs: /path/to/repo/threads/ → repo
     """
-    dir_name = threads_dir.name
-    if dir_name.endswith("-threads"):
-        name = dir_name[:-8]  # Strip "-threads" suffix
-    else:
-        name = threads_dir.parent.name
-    return name.replace("-", "_").lower() or "watercooler"
+    return _derive_group_id(threads_dir=threads_dir)
 
 
 def load_search_index(graph_dir: Path) -> Iterator[dict]:

@@ -25,7 +25,8 @@ class CommonConfig(BaseModel):
     )
     threads_suffix: str = Field(
         default="-threads",
-        description="Suffix appended to code repo name for threads repo",
+        description="Suffix appended to code repo name for threads repo. "
+                    "Override with WATERCOOLER_THREADS_SUFFIX env var.",
     )
     templates_dir: str = Field(
         default="",
