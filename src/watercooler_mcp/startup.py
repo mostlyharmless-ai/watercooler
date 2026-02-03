@@ -639,13 +639,13 @@ def ensure_llm_running() -> None:
         config_context_size = llm_config.context_size
         model_context_size = get_llm_context_size(model_name, default=DEFAULT_CONTEXT_SIZE)
 
-        # Use config if explicitly set (not default 8192), otherwise use model spec
-        if config_context_size != 8192:
+        # Use config if explicitly set (not default), otherwise use model spec
+        if config_context_size != DEFAULT_CONTEXT_SIZE:
             context_size = config_context_size
-            log_debug(f"Using context_size={context_size} from config.toml")
+            log_debug(f"Using context_size={context_size} from config.toml (overrides default {DEFAULT_CONTEXT_SIZE})")
         else:
             context_size = model_context_size
-            log_debug(f"Using context_size={context_size} from model registry")
+            log_debug(f"Using context_size={context_size} from model registry (config used default {DEFAULT_CONTEXT_SIZE})")
 
         thread = threading.Thread(
             target=_llm_startup_worker,

@@ -120,11 +120,34 @@ _TABLE_PATTERN = re.compile(r"^\|.*\|$", re.MULTILINE)
 _HEADER_PATTERN = re.compile(r"^(#{1,4})\s+(?:(\d+(?:\.\d+)*)\s*[.:]?\s+)?(.+)$")
 _FENCED_CODE_PATTERN = re.compile(r"^```", re.MULTILINE)
 
+# =============================================================================
+# Whitepaper Detection Scoring Constants
+# =============================================================================
+# Documents scoring >= WHITEPAPER_DETECTION_THRESHOLD are classified as whitepapers.
+# Each feature contributes points toward the total score.
+
+WHITEPAPER_DETECTION_THRESHOLD = 3  # Minimum score to classify as whitepaper
+
+# Scoring weights for each feature
+_SCORE_H1_WITH_AUTHORS = 2      # H1 title + **Authors**: metadata together
+_SCORE_ABSTRACT_SECTION = 1     # Has ## Abstract section
+_SCORE_NUMBERED_SECTIONS = 1    # Has numbered sections (## 1. ...)
+_SCORE_NUMBERED_SUBSECTIONS = 1 # Has numbered subsections (### 1.1 ...)
+_SCORE_REFERENCES_SECTION = 1   # Has ## References section
+_SCORE_LATEX_MATH = 1           # Contains $$ display math
+_SCORE_MARKDOWN_TABLES = 1      # Has markdown tables (>= 2 rows)
+
+# Detection scan limits (optimization to avoid scanning entire large documents)
+_HEADER_SCAN_LINES = 20         # Lines to scan for H1 header
+_METADATA_SCAN_CHARS = 2000     # Characters to scan for author metadata
+_MIN_TABLE_ROWS = 2             # Minimum rows for table detection
+
 
 def detect_whitepaper(text: str) -> bool:
     """Detect whether text has academic paper structure.
 
-    Uses a scoring system where score >= 3 indicates whitepaper structure.
+    Uses a scoring system where score >= WHITEPAPER_DETECTION_THRESHOLD
+    indicates whitepaper structure. See module constants for scoring weights.
 
     Args:
         text: Markdown text to analyze.
@@ -134,39 +157,39 @@ def detect_whitepaper(text: str) -> bool:
     """
     score = 0
 
-    # Check for H1 title + authors metadata (+2)
+    # Check for H1 title + authors metadata
     lines = text.split("\n")
-    has_h1 = any(line.startswith("# ") for line in lines[:20])
-    has_authors = bool(_AUTHOR_PATTERN.search(text[:2000]))
+    has_h1 = any(line.startswith("# ") for line in lines[:_HEADER_SCAN_LINES])
+    has_authors = bool(_AUTHOR_PATTERN.search(text[:_METADATA_SCAN_CHARS]))
     if has_h1 and has_authors:
-        score += 2
+        score += _SCORE_H1_WITH_AUTHORS
 
-    # Check for Abstract section (+1)
+    # Check for Abstract section
     if _ABSTRACT_PATTERN.search(text):
-        score += 1
+        score += _SCORE_ABSTRACT_SECTION
 
-    # Check for numbered sections (+1)
+    # Check for numbered sections
     if _NUMBERED_SECTION_PATTERN.search(text):
-        score += 1
+        score += _SCORE_NUMBERED_SECTIONS
 
-    # Check for numbered subsections (+1)
+    # Check for numbered subsections
     if _NUMBERED_SUBSECTION_PATTERN.search(text):
-        score += 1
+        score += _SCORE_NUMBERED_SUBSECTIONS
 
-    # Check for References section (+1)
+    # Check for References section
     if _REFERENCES_PATTERN.search(text):
-        score += 1
+        score += _SCORE_REFERENCES_SECTION
 
-    # Check for LaTeX display math (+1)
+    # Check for LaTeX display math
     if _DISPLAY_MATH_PATTERN.search(text):
-        score += 1
+        score += _SCORE_LATEX_MATH
 
-    # Check for markdown tables (+1)
+    # Check for markdown tables
     table_rows = _TABLE_PATTERN.findall(text)
-    if len(table_rows) >= 2:  # At least header + one row
-        score += 1
+    if len(table_rows) >= _MIN_TABLE_ROWS:
+        score += _SCORE_MARKDOWN_TABLES
 
-    return score >= 3
+    return score >= WHITEPAPER_DETECTION_THRESHOLD
 
 
 def _extract_metadata(text: str) -> DocumentMetadata:

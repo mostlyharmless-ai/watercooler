@@ -11,9 +11,10 @@ import os
 import sys
 import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Generator, Sequence
 
 from . import (
     BackendError,
@@ -36,6 +37,50 @@ logger = logging.getLogger(__name__)
 # os.chdir() changes the process-wide current directory, which is not thread-safe.
 # This lock ensures that only one thread can change directories at a time.
 _chdir_lock = threading.RLock()
+
+# Track LeanRAG paths that have been added to sys.path
+# NOTE: sys.path entries are intentionally NOT removed after use because:
+#   1. Python caches imported modules; removing the path would break reimports
+#   2. Duplicate entries are prevented by the `in sys.path` check
+#   3. In long-running processes, this is a bounded set (one path per LeanRAG location)
+_leanrag_paths_added: set[str] = set()
+
+
+@contextmanager
+def _leanrag_import_context(leanrag_path: Path) -> Generator[None, None, None]:
+    """Context manager for LeanRAG imports requiring chdir and sys.path setup.
+
+    Handles thread-safe directory changes and sys.path modifications needed
+    for importing LeanRAG modules (which load config.yaml at import time).
+
+    Note: sys.path entries are added once and persist for the process lifetime.
+    This is intentional - Python caches imported modules, so removing the path
+    after import would break module reloading. The check `if path not in sys.path`
+    prevents duplicate entries.
+
+    Args:
+        leanrag_path: Absolute path to LeanRAG installation directory.
+
+    Yields:
+        Control to the caller with proper context set up.
+    """
+    leanrag_path_str = str(leanrag_path)
+
+    with _chdir_lock:
+        # Add LeanRAG to sys.path if not already there (persists for process lifetime)
+        if leanrag_path_str not in sys.path:
+            sys.path.insert(0, leanrag_path_str)
+            _leanrag_paths_added.add(leanrag_path_str)
+            logger.debug(f"Added LeanRAG to sys.path: {leanrag_path_str}")
+
+        # Temporarily change to LeanRAG directory for imports
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(leanrag_path))
+            yield
+        finally:
+            os.chdir(original_cwd)
+
 
 # Resolve default submodule path from package location
 _PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent.parent
