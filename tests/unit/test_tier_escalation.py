@@ -387,6 +387,79 @@ class TestEmptyResultsEscalation:
         assert result.tiers_queried.count(Tier.T1) == 1
         assert result.tiers_queried.count(Tier.T2) == 1
 
+    def test_no_duplicate_query_multi_hop_fallback(
+        self, full_tier_config: TierConfig, monkeypatch
+    ) -> None:
+        """Each tier queried at most once during T2->T3(empty)->fallback.
+
+        Regression test for issue #117: When T2 starts, escalates to T3 which
+        returns empty, the fallback should not re-query T2 or T1.
+        """
+        orchestrator = TierOrchestrator(full_tier_config)
+        orchestrator._available_tiers = [Tier.T1, Tier.T2, Tier.T3]
+
+        query_counts: dict[Tier, int] = {Tier.T1: 0, Tier.T2: 0, Tier.T3: 0}
+
+        def mock_t1(*args, **kwargs):
+            query_counts[Tier.T1] += 1
+            return make_evidence(Tier.T1, 1, base_score=0.4)
+
+        def mock_t2(*args, **kwargs):
+            query_counts[Tier.T2] += 1
+            return make_evidence(Tier.T2, 1, base_score=0.5)
+
+        def mock_t3(*args, **kwargs):
+            query_counts[Tier.T3] += 1
+            return []
+
+        monkeypatch.setattr("watercooler_memory.tier_strategy._query_t1", mock_t1)
+        monkeypatch.setattr("watercooler_memory.tier_strategy._query_t2", mock_t2)
+        monkeypatch.setattr("watercooler_memory.tier_strategy._query_t3", mock_t3)
+
+        result = orchestrator.query("complex multi-hop question", intent=QueryIntent.MULTI_HOP)
+
+        for tier, count in query_counts.items():
+            assert count <= 1, f"{tier.value} was queried {count} times, expected at most 1"
+        # No duplicates in the queried list
+        assert len(result.tiers_queried) == len(set(result.tiers_queried))
+
+    def test_no_duplicate_when_t3_falls_back_to_queried_t1(
+        self, full_tier_config: TierConfig, monkeypatch
+    ) -> None:
+        """T1 queried once even when T3(empty) fallback targets already-queried T1.
+
+        Regression test for issue #117: T1->T2->T3 path where T3 returns empty
+        and fallback logic considers T2 then T1, both already queried.
+        """
+        orchestrator = TierOrchestrator(full_tier_config)
+        orchestrator._available_tiers = [Tier.T1, Tier.T2, Tier.T3]
+
+        query_counts: dict[Tier, int] = {Tier.T1: 0, Tier.T2: 0, Tier.T3: 0}
+
+        def mock_t1(*args, **kwargs):
+            query_counts[Tier.T1] += 1
+            return make_evidence(Tier.T1, 1, base_score=0.4)
+
+        def mock_t2(*args, **kwargs):
+            query_counts[Tier.T2] += 1
+            return make_evidence(Tier.T2, 1, base_score=0.5)
+
+        def mock_t3(*args, **kwargs):
+            query_counts[Tier.T3] += 1
+            return []
+
+        monkeypatch.setattr("watercooler_memory.tier_strategy._query_t1", mock_t1)
+        monkeypatch.setattr("watercooler_memory.tier_strategy._query_t2", mock_t2)
+        monkeypatch.setattr("watercooler_memory.tier_strategy._query_t3", mock_t3)
+
+        # Force T1 start so the path is T1->T2->T3
+        result = orchestrator.query("rare entity lookup", intent=QueryIntent.LOOKUP)
+
+        assert query_counts[Tier.T1] == 1, f"T1 queried {query_counts[Tier.T1]} times"
+        assert query_counts[Tier.T2] <= 1, f"T2 queried {query_counts[Tier.T2]} times"
+        assert query_counts[Tier.T3] <= 1, f"T3 queried {query_counts[Tier.T3]} times"
+        assert len(result.tiers_queried) == len(set(result.tiers_queried))
+
 
 class TestPartialTierAvailability:
     """Tests for escalation with partially available tiers."""
