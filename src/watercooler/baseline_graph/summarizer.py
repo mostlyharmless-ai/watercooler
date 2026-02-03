@@ -192,11 +192,14 @@ def is_llm_service_available(config: Optional[SummarizerConfig] = None) -> bool:
 
         with httpx.Client(timeout=5.0) as client:
             if is_anthropic:
-                # Anthropic doesn't have /models, check /messages with empty body
+                # Anthropic doesn't have /models endpoint. Use GET on /messages
+                # which returns 405 Method Not Allowed - confirms API is reachable
+                # without triggering actual completions (avoids rate limits/charges)
                 url = f"{api_base.rstrip('/')}/messages"
-                response = client.post(url, headers=headers, json={})
-                # 400 (bad request) means API is reachable and auth works
-                return response.status_code in (200, 400)
+                response = client.get(url, headers=headers)
+                # 405 = API reachable, method not allowed (expected for GET on POST endpoint)
+                # 400 = API reachable, bad request (also acceptable)
+                return response.status_code in (200, 400, 405)
             else:
                 url = f"{api_base.rstrip('/')}/models"
                 response = client.get(url, headers=headers)

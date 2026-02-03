@@ -113,14 +113,16 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                         else:
                             headers["Authorization"] = f"Bearer {llm_api_key}"
                     with httpx.Client(timeout=5.0) as client:
-                        # Anthropic doesn't have /models endpoint, check base URL
+                        # Anthropic doesn't have /models endpoint
                         if is_anthropic:
-                            # For Anthropic, just verify we can reach the API
-                            # A 401 with valid structure means API is reachable
+                            # Use GET on /messages which returns 405 Method Not Allowed
+                            # This confirms API is reachable without triggering actual
+                            # completions (avoids rate limits and potential charges)
                             url = f"{llm_base.rstrip('/')}/messages"
-                            response = client.post(url, headers=headers, json={})
-                            # 400 (bad request) or 200 means API is reachable and auth works
-                            if response.status_code in (200, 400):
+                            response = client.get(url, headers=headers)
+                            # 405 = API reachable, method not allowed (expected)
+                            # 400 = API reachable, bad request (also acceptable)
+                            if response.status_code in (200, 400, 405):
                                 llm_available = True
                                 log_debug(f"[GRAPH] LLM service available at {llm_base}")
                             else:
