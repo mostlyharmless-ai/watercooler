@@ -64,15 +64,19 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
     try:
         # Check LLM service if summaries requested
         if graph_config.generate_summaries:
-            llm_base = getattr(graph_config, 'summarizer_api_base', None)
-            if not llm_base:
-                from watercooler.baseline_graph.summarizer import SummarizerConfig
-                llm_base = SummarizerConfig.from_env().api_base
+            from watercooler.baseline_graph.summarizer import SummarizerConfig
+            llm_config = SummarizerConfig.from_env()
+            llm_base = getattr(graph_config, 'summarizer_api_base', None) or llm_config.api_base
+            llm_api_key = llm_config.api_key
             if llm_base:
                 try:
+                    headers = {}
+                    # Add auth header for external APIs (not needed for local llama-server)
+                    if llm_api_key and llm_api_key not in ("", "local"):
+                        headers["Authorization"] = f"Bearer {llm_api_key}"
                     with httpx.Client(timeout=2.0) as client:
                         url = f"{llm_base.rstrip('/')}/models"
-                        response = client.get(url)
+                        response = client.get(url, headers=headers)
                         if 200 <= response.status_code < 300:
                             llm_available = True
                             log_debug(f"[GRAPH] LLM service available at {llm_base}")
@@ -83,15 +87,19 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
 
         # Check embedding service if embeddings requested
         if graph_config.generate_embeddings:
-            embed_base = getattr(graph_config, 'embedding_api_base', None)
-            if not embed_base:
-                from watercooler.baseline_graph.sync import EmbeddingConfig
-                embed_base = EmbeddingConfig.from_env().api_base
+            from watercooler.baseline_graph.sync import EmbeddingConfig
+            embed_config = EmbeddingConfig.from_env()
+            embed_base = getattr(graph_config, 'embedding_api_base', None) or embed_config.api_base
+            embed_api_key = embed_config.api_key
             if embed_base:
                 try:
+                    headers = {}
+                    # Add auth header for external APIs (not needed for local llama-server)
+                    if embed_api_key and embed_api_key not in ("", "local"):
+                        headers["Authorization"] = f"Bearer {embed_api_key}"
                     with httpx.Client(timeout=2.0) as client:
                         url = f"{embed_base.rstrip('/')}/models"
-                        response = client.get(url)
+                        response = client.get(url, headers=headers)
                         if 200 <= response.status_code < 300:
                             embed_available = True
                             log_debug(f"[GRAPH] Embedding service available at {embed_base}")

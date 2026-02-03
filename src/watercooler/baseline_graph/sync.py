@@ -249,6 +249,7 @@ class EmbeddingConfig:
 
     api_base: str = field(default_factory=_get_default_embedding_api_base)
     model: str = field(default_factory=_get_default_embedding_model)
+    api_key: str = ""
     timeout: float = 30.0
     max_text_chars: int = DEFAULT_EMBEDDING_TEXT_MAX_CHARS
 
@@ -268,6 +269,7 @@ class EmbeddingConfig:
         return cls(
             api_base=embed_config.api_base,
             model=embed_config.model,
+            api_key=embed_config.api_key,
             timeout=timeout,
         )
 
@@ -306,11 +308,16 @@ def generate_embedding(
         import httpx
         url = f"{config.api_base.rstrip('/')}/embeddings"
 
+        # Add auth header for external APIs (not needed for local llama-server)
+        headers = {"Content-Type": "application/json"}
+        if config.api_key and config.api_key not in ("", "local"):
+            headers["Authorization"] = f"Bearer {config.api_key}"
+
         with httpx.Client(timeout=config.timeout) as client:
             response = client.post(url, json={
                 "model": config.model,
                 "input": text[:2000],
-            })
+            }, headers=headers)
             response.raise_for_status()
             data = response.json()
 

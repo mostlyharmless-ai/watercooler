@@ -713,10 +713,14 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
     )
 
     # Resolve api_base: LLM_API_BASE > BASELINE_GRAPH_API_BASE > TOML > default
+    # Note: TOML values are respected as-is, including external APIs like OpenAI.
+    # The previous check that rejected OpenAI values was incorrect - it conflated
+    # "pydantic schema default" with "user didn't set anything".
+    # See thread: debug-model-service-options for analysis.
     api_base = (
         os.getenv("LLM_API_BASE")
         or os.getenv("BASELINE_GRAPH_API_BASE")
-        or (mem.llm.api_base if mem.llm.api_base != "https://api.openai.com/v1" else None)
+        or mem.llm.api_base
         or _BASELINE_GRAPH_DEFAULT_LLM_API_BASE
     )
 
@@ -724,7 +728,7 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
     model = (
         os.getenv("LLM_MODEL")
         or os.getenv("BASELINE_GRAPH_MODEL")
-        or (mem.llm.model if mem.llm.model != "gpt-4o-mini" else None)
+        or mem.llm.model
         or _BASELINE_GRAPH_DEFAULT_LLM_MODEL
     )
 
