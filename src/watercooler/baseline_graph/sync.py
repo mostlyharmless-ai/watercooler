@@ -236,6 +236,12 @@ def _get_default_embedding_model() -> str:
     return resolve_baseline_graph_embedding_config().model
 
 
+def _get_default_embedding_api_key() -> str:
+    """Get default embedding API key from unified config (checks env vars first)."""
+    from watercooler.memory_config import resolve_baseline_graph_embedding_config
+    return resolve_baseline_graph_embedding_config().api_key
+
+
 @dataclass
 class EmbeddingConfig:
     """Embedding server configuration for real-time sync.
@@ -249,7 +255,7 @@ class EmbeddingConfig:
 
     api_base: str = field(default_factory=_get_default_embedding_api_base)
     model: str = field(default_factory=_get_default_embedding_model)
-    api_key: str = ""
+    api_key: str = field(default_factory=_get_default_embedding_api_key)
     timeout: float = 30.0
     max_text_chars: int = DEFAULT_EMBEDDING_TEXT_MAX_CHARS
 
@@ -281,8 +287,12 @@ def is_embedding_available(config: Optional[EmbeddingConfig] = None) -> bool:
     try:
         import httpx
         url = f"{config.api_base.rstrip('/')}/models"
+        headers = {}
+        # Add auth header for external APIs (not needed for local llama-server)
+        if config.api_key and config.api_key not in ("", "local"):
+            headers["Authorization"] = f"Bearer {config.api_key}"
         with httpx.Client(timeout=5.0) as client:
-            response = client.get(url)
+            response = client.get(url, headers=headers)
             return response.status_code == 200
     except Exception as e:
         logger.debug(f"Embedding service not available: {e}")

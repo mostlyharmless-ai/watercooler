@@ -64,6 +64,15 @@ def _get_default_embedding_dim() -> int:
             return 1024
 
 
+def _get_default_embedding_api_key() -> str:
+    """Get default embedding API key from unified config."""
+    try:
+        from watercooler.memory_config import resolve_baseline_graph_embedding_config
+        return resolve_baseline_graph_embedding_config().api_key
+    except ImportError:
+        return os.environ.get("EMBEDDING_API_KEY", "")
+
+
 @dataclass
 class LLMConfig:
     """LLM server configuration.
@@ -104,6 +113,7 @@ class EmbeddingConfig:
 
     api_base: str = field(default_factory=_get_default_embedding_api_base)
     model: str = field(default_factory=_get_default_embedding_model)
+    api_key: str = field(default_factory=_get_default_embedding_api_key)
     timeout: float = 60.0
     embedding_dim: int = field(default_factory=_get_default_embedding_dim)
 
@@ -113,6 +123,7 @@ class EmbeddingConfig:
         return cls(
             api_base=_get_default_embedding_api_base(),
             model=_get_default_embedding_model(),
+            api_key=_get_default_embedding_api_key(),
             timeout=float(os.environ.get("EMBEDDING_TIMEOUT", 60.0)),
             embedding_dim=_get_default_embedding_dim(),
         )
