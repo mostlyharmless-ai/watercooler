@@ -69,6 +69,19 @@ def stub_memory_api_keys(monkeypatch: pytest.MonkeyPatch) -> Generator[None, Non
 
 
 @pytest.fixture
+def clean_api_keys(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Clear all API keys for complete test isolation."""
+    api_keys = [
+        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
+        "GEMINI_API_KEY", "GROQ_API_KEY", "VOYAGE_API_KEY",
+        "LLM_API_KEY", "EMBEDDING_API_KEY", "DEEPSEEK_API_KEY",
+    ]
+    for key in api_keys:
+        monkeypatch.delenv(key, raising=False)
+    yield
+
+
+@pytest.fixture
 def stub_local_memory_servers(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Configure memory backends to use local server endpoints with stub keys.
 
@@ -125,4 +138,3 @@ def memory_test_env(
     """
     monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
     yield
-
