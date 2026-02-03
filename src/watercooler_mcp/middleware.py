@@ -9,7 +9,8 @@ import sys
 import json
 import time
 from typing import Callable, TypeVar
-from urllib.parse import urlparse
+
+from watercooler.memory_config import is_anthropic_url
 
 from .config import (
     ThreadContext,
@@ -41,26 +42,14 @@ _service_availability_cache: dict[str, tuple[bool, bool, float]] = {}
 # Key format: f"{llm_base}|{embed_base}", Value: (llm_available, embed_available, timestamp)
 
 
-def _is_anthropic_url(url: str | None) -> bool:
-    """Check if URL is an Anthropic API endpoint using proper URL parsing.
+def clear_service_availability_cache() -> None:
+    """Clear the service availability cache.
 
-    Args:
-        url: API base URL to check
-
-    Returns:
-        True if the URL hostname ends with 'anthropic.com'
+    Call this when service configuration changes (e.g., after updating
+    credentials.toml or environment variables) to force re-checking
+    service availability on the next write operation.
     """
-    if not url:
-        return False
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-        hostname_lower = hostname.lower()
-        return hostname_lower == "anthropic.com" or hostname_lower.endswith(".anthropic.com")
-    except Exception:
-        return False
+    _service_availability_cache.clear()
 
 
 def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
@@ -114,7 +103,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
             if llm_base:
                 try:
                     headers = {}
-                    is_anthropic = _is_anthropic_url(llm_base)
+                    is_anthropic = is_anthropic_url(llm_base)
                     # Add auth header for external APIs (not needed for local llama-server)
                     if llm_api_key and llm_api_key not in ("", "local"):
                         if is_anthropic:

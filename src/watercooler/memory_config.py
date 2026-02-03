@@ -225,6 +225,38 @@ _EMBEDDING_PROVIDER_DOMAINS: dict[str, tuple[str, str]] = {
 }
 
 
+def is_anthropic_url(url: str | None) -> bool:
+    """Check if URL is an Anthropic API endpoint using proper URL parsing.
+
+    This is a shared utility for detecting Anthropic URLs across the codebase.
+    Uses proper hostname parsing to avoid false positives from substring matching
+    (e.g., 'not-anthropic.com.evil.net' would incorrectly match).
+
+    Args:
+        url: API base URL to check
+
+    Returns:
+        True if the URL hostname ends with 'anthropic.com'
+
+    Example:
+        >>> is_anthropic_url("https://api.anthropic.com/v1")
+        True
+        >>> is_anthropic_url("https://api.openai.com/v1")
+        False
+    """
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        hostname_lower = hostname.lower()
+        return hostname_lower == "anthropic.com" or hostname_lower.endswith(".anthropic.com")
+    except Exception:
+        return False
+
+
 def _validate_api_url(url: str | None) -> str | None:
     """Validate that a string is a valid HTTP(S) URL.
 

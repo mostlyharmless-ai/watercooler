@@ -9,24 +9,10 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+
+from watercooler.memory_config import is_anthropic_url
 
 logger = logging.getLogger(__name__)
-
-
-def _is_anthropic_url(url: str | None) -> bool:
-    """Check if URL is an Anthropic API endpoint using proper URL parsing."""
-    if not url:
-        return False
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-        hostname_lower = hostname.lower()
-        return hostname_lower == "anthropic.com" or hostname_lower.endswith(".anthropic.com")
-    except Exception:
-        return False
 
 
 def _get_default_api_base() -> str:
@@ -192,7 +178,7 @@ def is_llm_service_available(config: Optional[SummarizerConfig] = None) -> bool:
 
     try:
         api_base = config.api_base or ""
-        is_anthropic = _is_anthropic_url(api_base)
+        is_anthropic = is_anthropic_url(api_base)
         headers = {}
 
         # Add auth header for external APIs (not needed for local llama-server)

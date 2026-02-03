@@ -33,6 +33,8 @@ from ..entry_episode_index import EntryEpisodeIndex, IndexConfig
 
 import os
 
+from watercooler.memory_config import is_anthropic_url
+
 # Resolve package root from this file's location
 # graphiti.py is at: src/watercooler_memory/backends/graphiti.py
 # Package root is 4 levels up: watercooler-cloud/
@@ -819,7 +821,7 @@ class GraphitiBackend(MemoryBackend):
 
         # Configure LLM client (supports OpenAI, Anthropic, local servers, DeepSeek, etc.)
         llm_api_base = self.config.llm_api_base or ""
-        is_anthropic = "anthropic.com" in llm_api_base.lower()
+        is_anthropic = is_anthropic_url(llm_api_base)
 
         if is_anthropic:
             # Use native Anthropic client for Anthropic API
