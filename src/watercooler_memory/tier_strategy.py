@@ -124,19 +124,32 @@ def load_tier_config(
     threads_dir: Optional[Path] = None,
     code_path: Optional[Path] = None,
 ) -> TierConfig:
-    """Load tier configuration from environment and TOML config.
+    """Load tier configuration from unified config system.
 
-    Priority (highest first):
-        1. Environment variables (WATERCOOLER_TIER_T*_ENABLED)
-        2. TOML config (memory.backend = "graphiti" enables T2)
+    Uses the unified config system with proper priority chain:
+        1. Environment variables (WATERCOOLER_TIER_T*_ENABLED, etc.)
+        2. TOML config (memory.tiers.*)
         3. Built-in defaults
 
     Environment Variables:
         WATERCOOLER_TIER_T1_ENABLED: "1" to enable T1 (default: "1")
-        WATERCOOLER_TIER_T2_ENABLED: "1" to enable T2 (requires Graphiti)
+        WATERCOOLER_TIER_T2_ENABLED: "1" to enable T2 (auto-enables with graphiti backend)
         WATERCOOLER_TIER_T3_ENABLED: "1" to enable T3 (expensive, opt-in)
         WATERCOOLER_TIER_MAX_TIERS: Maximum tiers to query (default: "2")
         WATERCOOLER_TIER_MIN_RESULTS: Min results for sufficiency (default: "3")
+        WATERCOOLER_TIER_MIN_CONFIDENCE: Min confidence score (default: "0.5")
+
+    TOML Config (config.toml):
+        [memory.tiers]
+        t1_enabled = true
+        t2_enabled = true
+        t3_enabled = false
+        max_tiers = 2
+        min_results = 3
+        min_confidence = 0.5
+        t1_limit = 10
+        t2_limit = 10
+        t3_limit = 5
 
     Args:
         threads_dir: Path to threads directory
@@ -145,29 +158,35 @@ def load_tier_config(
     Returns:
         TierConfig instance
     """
-    # Check if Graphiti is enabled via env var
-    graphiti_env = os.getenv("WATERCOOLER_GRAPHITI_ENABLED", "0") == "1"
-
-    # Also check TOML config: memory.backend = "graphiti"
-    graphiti_toml = False
     try:
-        from watercooler.memory_config import get_memory_backend
-        graphiti_toml = get_memory_backend() == "graphiti"
+        from watercooler.memory_config import resolve_tier_config
+        resolved = resolve_tier_config()
+        return TierConfig(
+            t1_enabled=resolved.t1_enabled,
+            t2_enabled=resolved.t2_enabled,
+            t3_enabled=resolved.t3_enabled,
+            max_tiers=resolved.max_tiers,
+            min_results=resolved.min_results,
+            min_confidence=resolved.min_confidence,
+            t1_limit=resolved.t1_limit,
+            t2_limit=resolved.t2_limit,
+            t3_limit=resolved.t3_limit,
+            threads_dir=threads_dir,
+            code_path=code_path,
+        )
     except ImportError:
-        pass
-
-    # T2 is enabled if either env var or TOML config enables Graphiti
-    graphiti_enabled = graphiti_env or graphiti_toml
-
-    return TierConfig(
-        t1_enabled=os.getenv("WATERCOOLER_TIER_T1_ENABLED", "1") == "1",
-        t2_enabled=os.getenv("WATERCOOLER_TIER_T2_ENABLED", "1" if graphiti_enabled else "0") == "1",
-        t3_enabled=os.getenv("WATERCOOLER_TIER_T3_ENABLED", "0") == "1",
-        max_tiers=_get_int_env("WATERCOOLER_TIER_MAX_TIERS", DEFAULT_MAX_TIERS),
-        min_results=_get_int_env("WATERCOOLER_TIER_MIN_RESULTS", DEFAULT_MIN_RESULTS),
-        threads_dir=threads_dir,
-        code_path=code_path,
-    )
+        logger.warning("watercooler.memory_config not available, using env vars only")
+        # Fallback to env vars only
+        graphiti_env = os.getenv("WATERCOOLER_GRAPHITI_ENABLED", "0") == "1"
+        return TierConfig(
+            t1_enabled=os.getenv("WATERCOOLER_TIER_T1_ENABLED", "1") == "1",
+            t2_enabled=os.getenv("WATERCOOLER_TIER_T2_ENABLED", "1" if graphiti_env else "0") == "1",
+            t3_enabled=os.getenv("WATERCOOLER_TIER_T3_ENABLED", "0") == "1",
+            max_tiers=_get_int_env("WATERCOOLER_TIER_MAX_TIERS", DEFAULT_MAX_TIERS),
+            min_results=_get_int_env("WATERCOOLER_TIER_MIN_RESULTS", DEFAULT_MIN_RESULTS),
+            threads_dir=threads_dir,
+            code_path=code_path,
+        )
 
 
 # ============================================================================
@@ -554,22 +573,24 @@ def _query_t3(
         List of TierEvidence from T3
     """
     try:
-        from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
+        from watercooler_memory.backends.leanrag import LeanRAGBackend
     except ImportError:
         logger.warning("T3: LeanRAG backend not available")
         return []
 
-    # LeanRAG requires specific configuration
-    leanrag_path = os.getenv("LEANRAG_PATH")
-    if not leanrag_path:
-        logger.debug("T3: LEANRAG_PATH not set")
+    # Use unified config loader (parallel to T2's load_graphiti_config)
+    try:
+        from watercooler_mcp.memory import load_leanrag_config
+    except ImportError:
+        logger.warning("T3: watercooler_mcp.memory not available")
+        return []
+
+    config = load_leanrag_config(code_path=code_path)
+    if config is None:
+        logger.debug("T3: LeanRAG not configured")
         return []
 
     try:
-        config = LeanRAGConfig(
-            leanrag_path=Path(leanrag_path),
-            work_dir=code_path,
-        )
         backend = LeanRAGBackend(config)
     except Exception as e:
         logger.warning(f"T3: Backend initialization failed: {e}")
@@ -682,11 +703,15 @@ class TierOrchestrator:
                 logger.debug("T2 disabled: watercooler_mcp.memory not available")
 
         if self.config.t3_enabled:
-            # T3 needs LeanRAG path
-            if os.getenv("LEANRAG_PATH"):
-                self._available_tiers.append(Tier.T3)
-            else:
-                logger.debug("T3 disabled: LEANRAG_PATH not set")
+            # T3 needs LeanRAG configuration (parallel to T2's Graphiti check)
+            try:
+                from watercooler_mcp.memory import load_leanrag_config
+                if load_leanrag_config(self.config.code_path) is not None:
+                    self._available_tiers.append(Tier.T3)
+                else:
+                    logger.debug("T3 disabled: LeanRAG not configured")
+            except ImportError:
+                logger.debug("T3 disabled: watercooler_mcp.memory not available")
 
     @property
     def available_tiers(self) -> list[Tier]:

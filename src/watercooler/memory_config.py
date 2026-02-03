@@ -87,6 +87,7 @@ class ResolvedLLMConfig:
     model: str
     timeout: float
     max_tokens: int
+    context_size: int
     # Prompt configuration
     system_prompt: str = ""
     prompt_prefix: str = ""
@@ -101,7 +102,8 @@ class ResolvedLLMConfig:
         return (
             f"ResolvedLLMConfig(api_key='{_redact_key(self.api_key)}', "
             f"api_base='{self.api_base}', model='{self.model}', "
-            f"timeout={self.timeout}, max_tokens={self.max_tokens})"
+            f"timeout={self.timeout}, max_tokens={self.max_tokens}, "
+            f"context_size={self.context_size})"
         )
 
 
@@ -267,12 +269,23 @@ def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
     else:
         max_tokens = mem.llm.max_tokens
 
+    # Resolve context_size: env > shared (only used for local llama-server auto-start)
+    context_size_str = os.getenv("LLM_CONTEXT_SIZE")
+    if context_size_str:
+        try:
+            context_size = int(context_size_str)
+        except ValueError:
+            context_size = mem.llm.context_size
+    else:
+        context_size = mem.llm.context_size
+
     return ResolvedLLMConfig(
         api_key=api_key,
         api_base=api_base,
         model=model,
         timeout=timeout,
         max_tokens=max_tokens,
+        context_size=context_size,
     )
 
 
@@ -519,6 +532,148 @@ def get_leanrag_max_workers() -> int:
     return config.full().memory.leanrag.max_workers
 
 
+def get_leanrag_path() -> str | None:
+    """Get the path to LeanRAG installation.
+
+    Priority (highest first):
+    1. LEANRAG_PATH environment variable
+    2. TOML config: memory.leanrag.path
+
+    Returns:
+        Path to LeanRAG installation directory, or None if not configured
+    """
+    path = os.getenv("LEANRAG_PATH") or config.full().memory.leanrag.path
+    return path if path else None
+
+
+@dataclass(frozen=True)
+class ResolvedTierConfig:
+    """Resolved tier orchestration configuration.
+
+    All settings have env vars that override TOML values.
+    """
+
+    t1_enabled: bool
+    t2_enabled: bool
+    t3_enabled: bool
+    max_tiers: int
+    min_results: int
+    min_confidence: float
+    t1_limit: int
+    t2_limit: int
+    t3_limit: int
+
+    def __repr__(self) -> str:
+        enabled = []
+        if self.t1_enabled:
+            enabled.append("T1")
+        if self.t2_enabled:
+            enabled.append("T2")
+        if self.t3_enabled:
+            enabled.append("T3")
+        return (
+            f"ResolvedTierConfig(enabled=[{', '.join(enabled)}], "
+            f"max_tiers={self.max_tiers}, min_results={self.min_results})"
+        )
+
+
+def _parse_bool_env(env_var: str, default: bool) -> bool:
+    """Parse boolean from environment variable.
+
+    Args:
+        env_var: Environment variable name
+        default: Default value if env var not set
+
+    Returns:
+        Parsed boolean value
+    """
+    value = os.getenv(env_var, "").lower()
+    if value in ("1", "true", "yes"):
+        return True
+    if value in ("0", "false", "no"):
+        return False
+    return default
+
+
+def resolve_tier_config() -> ResolvedTierConfig:
+    """Resolve tier orchestration config with proper priority chain.
+
+    Priority (highest first):
+    1. Environment variables (WATERCOOLER_TIER_T*_ENABLED, etc.)
+    2. TOML config (memory.tiers.*)
+    3. Built-in defaults
+
+    Special cases:
+    - T2 auto-enables if memory.backend = "graphiti" and env var not explicitly set
+    - T3 is opt-in by default (requires explicit enable)
+
+    Returns:
+        ResolvedTierConfig with all settings resolved
+    """
+    cfg = config.full()
+    tiers = cfg.memory.tiers
+
+    # Check if Graphiti is enabled (for T2 auto-enable)
+    graphiti_enabled = get_memory_backend() == "graphiti"
+
+    # T1: env > TOML > default (True)
+    t1_enabled = _parse_bool_env("WATERCOOLER_TIER_T1_ENABLED", tiers.t1_enabled)
+
+    # T2: env > TOML > auto-enable if graphiti backend
+    # If env var is set, use it. Otherwise use TOML value, but also enable if graphiti is backend
+    t2_env = os.getenv("WATERCOOLER_TIER_T2_ENABLED", "").lower()
+    if t2_env in ("1", "true", "yes"):
+        t2_enabled = True
+    elif t2_env in ("0", "false", "no"):
+        t2_enabled = False
+    else:
+        t2_enabled = tiers.t2_enabled or graphiti_enabled
+
+    # T3: env > TOML > default (False - opt-in)
+    t3_enabled = _parse_bool_env("WATERCOOLER_TIER_T3_ENABLED", tiers.t3_enabled)
+
+    # max_tiers: env > TOML > default (2)
+    max_tiers = _safe_int(
+        os.getenv("WATERCOOLER_TIER_MAX_TIERS"),
+        tiers.max_tiers,
+        1,
+        3,
+    )
+
+    # min_results: env > TOML > default (3)
+    min_results = _safe_int(
+        os.getenv("WATERCOOLER_TIER_MIN_RESULTS"),
+        tiers.min_results,
+        1,
+        100,
+    )
+
+    # min_confidence: env > TOML > default (0.5)
+    min_confidence = _safe_float(
+        os.getenv("WATERCOOLER_TIER_MIN_CONFIDENCE"),
+        tiers.min_confidence,
+        0.0,
+        1.0,
+    )
+
+    # Limits: TOML only (env vars would be too verbose)
+    t1_limit = tiers.t1_limit
+    t2_limit = tiers.t2_limit
+    t3_limit = tiers.t3_limit
+
+    return ResolvedTierConfig(
+        t1_enabled=t1_enabled,
+        t2_enabled=t2_enabled,
+        t3_enabled=t3_enabled,
+        max_tiers=max_tiers,
+        min_results=min_results,
+        min_confidence=min_confidence,
+        t1_limit=t1_limit,
+        t2_limit=t2_limit,
+        t3_limit=t3_limit,
+    )
+
+
 # =============================================================================
 # Baseline Graph Configuration
 # These functions support both unified LLM_API_* vars and legacy BASELINE_GRAPH_* vars
@@ -578,9 +733,15 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
     timeout = _safe_float(os.getenv("LLM_TIMEOUT"), mem.llm.timeout, 1.0, 600.0)
     max_tokens = _safe_int(os.getenv("LLM_MAX_TOKENS"), mem.llm.max_tokens, 1, 32768)
 
+    # Resolve context_size: env > TOML (only used for local llama-server auto-start)
+    # Bounds: 512-131072 tokens
+    context_size = _safe_int(os.getenv("LLM_CONTEXT_SIZE"), mem.llm.context_size, 512, 131072)
+
     # Resolve prompt configuration from env/TOML
     system_prompt = os.getenv("LLM_SYSTEM_PROMPT") or mem.llm.system_prompt
     prompt_prefix = os.getenv("LLM_PROMPT_PREFIX") or mem.llm.prompt_prefix
+
+    # Resolve summary prompts from env/TOML
     summary_prompt = os.getenv("LLM_SUMMARY_PROMPT") or mem.llm.summary_prompt
     thread_summary_prompt = os.getenv("LLM_THREAD_SUMMARY_PROMPT") or mem.llm.thread_summary_prompt
 
@@ -594,6 +755,7 @@ def resolve_baseline_graph_llm_config() -> ResolvedLLMConfig:
         model=model,
         timeout=timeout,
         max_tokens=max_tokens,
+        context_size=context_size,
         system_prompt=system_prompt,
         prompt_prefix=prompt_prefix,
         summary_prompt=summary_prompt,

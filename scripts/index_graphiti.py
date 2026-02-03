@@ -631,19 +631,23 @@ Examples:
     timings: dict[str, float] = {}
     total_start = time.perf_counter()
 
-    # Check for LLM API key (supports local LLM servers)
-    llm_api_key = os.environ.get("LLM_API_KEY")
-    if not llm_api_key:
-        print("Error: LLM_API_KEY environment variable not set", file=sys.stderr)
-        print("For local LLM: export LLM_API_KEY=local", file=sys.stderr)
-        print("For OpenAI: export LLM_API_KEY=sk-...", file=sys.stderr)
+    # Load config from unified config system (config.toml + env vars)
+    try:
+        config = GraphitiConfig.from_unified()
+    except Exception as e:
+        print(f"Error loading config: {e}", file=sys.stderr)
+        print("\nEnsure ~/.watercooler/config.toml exists with [memory.llm] and [memory.embedding] sections,", file=sys.stderr)
+        print("or set environment variables: LLM_API_KEY, EMBEDDING_API_KEY", file=sys.stderr)
         return 1
 
-    # Check for embedding API key
-    embedding_api_key = os.environ.get("EMBEDDING_API_KEY")
-    if not embedding_api_key:
-        print("Error: EMBEDDING_API_KEY environment variable not set", file=sys.stderr)
-        print("For local embeddings: export EMBEDDING_API_KEY=local", file=sys.stderr)
+    if not config.llm_api_key:
+        print("Error: LLM API key not configured", file=sys.stderr)
+        print("Set in ~/.watercooler/config.toml [memory.llm] or via LLM_API_KEY env var", file=sys.stderr)
+        return 1
+
+    if not config.embedding_api_key:
+        print("Error: Embedding API key not configured", file=sys.stderr)
+        print("Set in ~/.watercooler/config.toml [memory.embedding] or via EMBEDDING_API_KEY env var", file=sys.stderr)
         return 1
 
     # Determine thread list
@@ -704,21 +708,13 @@ Examples:
     database_name = _derive_database_name(code_path)
     print(f"Database: {database_name} (derived from {code_path.name})")
 
-    # Set up Graphiti backend with LLM/embedding configuration
+    # Update config with database and work_dir
     work_dir = Path(args.work_dir) if args.work_dir else Path.home() / ".watercooler" / "graphiti"
-    config = GraphitiConfig(
-        work_dir=work_dir,
-        test_mode=False,
-        database=database_name,
-        # LLM configuration (from environment)
-        llm_api_key=llm_api_key,
-        llm_api_base=os.environ.get("LLM_API_BASE"),
-        llm_model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
-        # Embedding configuration (from environment)
-        embedding_api_key=embedding_api_key,
-        embedding_api_base=os.environ.get("EMBEDDING_API_BASE"),
-        embedding_model=os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small"),
-    )
+    config.work_dir = work_dir
+    config.database = database_name
+    config.test_mode = False
+
+    print(f"Config: LLM={config.llm_model}, Embedding={config.embedding_model}")
     backend = GraphitiBackend(config)
 
     # Check health

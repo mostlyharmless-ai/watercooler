@@ -604,7 +604,8 @@ class ValidationConfig(BaseModel):
 class LLMServiceConfig(BaseModel):
     """LLM service configuration for memory backends.
 
-    Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT, LLM_MAX_TOKENS
+    Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT, LLM_MAX_TOKENS,
+                   LLM_CONTEXT_SIZE
     """
 
     api_key: str = Field(
@@ -628,6 +629,11 @@ class LLMServiceConfig(BaseModel):
         default=512,
         ge=1,
         description="Maximum tokens for LLM response",
+    )
+    context_size: int = Field(
+        default=8192,
+        ge=512,
+        description="Context window size for local llama-server auto-start (ignored for external APIs). Env: LLM_CONTEXT_SIZE",
     )
     # Prompt configuration for summarization
     system_prompt: str = Field(
@@ -793,6 +799,12 @@ class LeanRAGBackendConfig(BaseModel):
     These override shared [memory.llm] and [memory.embedding] settings.
     """
 
+    # Path to LeanRAG installation
+    path: str = Field(
+        default="",
+        description="Path to LeanRAG installation directory. Env override: LEANRAG_PATH",
+    )
+
     # LLM overrides (empty = use shared)
     llm_api_key: str = Field(
         default="",
@@ -829,6 +841,64 @@ class LeanRAGBackendConfig(BaseModel):
     )
 
 
+class TierOrchestrationConfig(BaseModel):
+    """Multi-tier memory query orchestration configuration.
+
+    Controls which memory tiers are enabled and escalation behavior.
+    Environment variables override TOML settings.
+
+    Env overrides:
+        WATERCOOLER_TIER_T1_ENABLED, WATERCOOLER_TIER_T2_ENABLED,
+        WATERCOOLER_TIER_T3_ENABLED, WATERCOOLER_TIER_MAX_TIERS,
+        WATERCOOLER_TIER_MIN_RESULTS
+    """
+
+    t1_enabled: bool = Field(
+        default=True,
+        description="Enable T1 (Baseline) tier - JSONL graph with keyword/semantic search",
+    )
+    t2_enabled: bool = Field(
+        default=True,
+        description="Enable T2 (Graphiti) tier - FalkorDB temporal graph. Auto-enabled when memory.backend='graphiti'",
+    )
+    t3_enabled: bool = Field(
+        default=False,
+        description="Enable T3 (LeanRAG) tier - Hierarchical clustering with multi-hop reasoning. Expensive, opt-in.",
+    )
+    max_tiers: int = Field(
+        default=2,
+        ge=1,
+        le=3,
+        description="Maximum number of tiers to query before stopping (budget control)",
+    )
+    min_results: int = Field(
+        default=3,
+        ge=1,
+        description="Minimum results required before considering a tier sufficient",
+    )
+    min_confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Minimum average confidence score for sufficiency",
+    )
+    t1_limit: int = Field(
+        default=10,
+        ge=1,
+        description="Maximum results to fetch from T1",
+    )
+    t2_limit: int = Field(
+        default=10,
+        ge=1,
+        description="Maximum results to fetch from T2",
+    )
+    t3_limit: int = Field(
+        default=5,
+        ge=1,
+        description="Maximum results to fetch from T3",
+    )
+
+
 class MemoryConfig(BaseModel):
     """Memory backend configuration.
 
@@ -850,6 +920,9 @@ class MemoryConfig(BaseModel):
     llm: LLMServiceConfig = Field(default_factory=LLMServiceConfig)
     embedding: EmbeddingServiceConfig = Field(default_factory=EmbeddingServiceConfig)
     database: MemoryDatabaseConfig = Field(default_factory=MemoryDatabaseConfig)
+
+    # Tier orchestration
+    tiers: TierOrchestrationConfig = Field(default_factory=TierOrchestrationConfig)
 
     # Backend-specific overrides
     graphiti: GraphitiBackendConfig = Field(default_factory=GraphitiBackendConfig)

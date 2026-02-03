@@ -10,6 +10,8 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock
 from pathlib import Path
 
+import os
+
 from watercooler_memory.backends import (
     LeanRAGBackend,
     LeanRAGConfig,
@@ -523,3 +525,195 @@ class TestNormalization:
         extra_keys = set(node["extra"].keys())
         leaked_keys = core_keys & extra_keys
         assert not leaked_keys, f"Core keys leaked into extra: {leaked_keys}"
+
+
+class TestApplyConfigToEnv:
+    """Tests for _apply_config_to_env() environment variable bridge.
+
+    LeanRAG expects specific env vars (see external/LeanRAG/config.yaml):
+    - DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEEPSEEK_BASE_URL (LLM via OpenAI client)
+    - GLM_BASE_URL, GLM_MODEL (embeddings via raw HTTP - no auth)
+    - FALKORDB_HOST, FALKORDB_PORT, FALKORDB_PASSWORD
+    """
+
+    def test_sets_env_vars_from_config(self, tmp_path, monkeypatch):
+        """Test that config values are bridged to LeanRAG's expected env vars."""
+        # Clear any existing env vars
+        env_vars_to_clear = [
+            "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL",
+            "GLM_BASE_URL", "GLM_MODEL",
+            "FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD",
+        ]
+        for var in env_vars_to_clear:
+            monkeypatch.delenv(var, raising=False)
+
+        # Patch _validate_config to skip LeanRAG installation checks
+        monkeypatch.setattr(LeanRAGBackend, '_validate_config', lambda self: None)
+
+        # Create config with all fields populated
+        leanrag_dir = tmp_path / "leanrag"
+        leanrag_dir.mkdir()
+
+        config = LeanRAGConfig(
+            leanrag_path=leanrag_dir,
+            llm_api_key="test-llm-key",
+            llm_api_base="https://api.deepseek.com/v1",
+            llm_model="deepseek-chat",
+            # Note: No embedding_api_key - LeanRAG embeddings use raw HTTP without auth
+            embedding_api_base="https://api.glm.com/v1",
+            embedding_model="glm-embedding",
+            falkordb_host="falkor.example.com",
+            falkordb_port=6380,
+            falkordb_password="secret123",
+        )
+
+        # Create backend (triggers _apply_config_to_env)
+        backend = LeanRAGBackend(config)
+
+        # Verify LLM env vars (DEEPSEEK_*)
+        assert os.environ["DEEPSEEK_API_KEY"] == "test-llm-key"
+        assert os.environ["DEEPSEEK_MODEL"] == "deepseek-chat"
+        assert os.environ["DEEPSEEK_BASE_URL"] == "https://api.deepseek.com/v1"
+
+        # Verify embedding env vars (GLM_* - no API key, LeanRAG uses raw HTTP)
+        assert os.environ["GLM_MODEL"] == "glm-embedding"
+        assert os.environ["GLM_BASE_URL"] == "https://api.glm.com/v1"
+
+        # Verify database env vars
+        assert os.environ["FALKORDB_HOST"] == "falkor.example.com"
+        assert os.environ["FALKORDB_PORT"] == "6380"
+        assert os.environ["FALKORDB_PASSWORD"] == "secret123"
+
+    def test_respects_existing_env_vars(self, tmp_path, monkeypatch):
+        """Test that existing env vars are not overwritten."""
+        # Set existing env vars (simulating user override)
+        monkeypatch.setenv("DEEPSEEK_MODEL", "user-override-model")
+        monkeypatch.setenv("GLM_BASE_URL", "https://user-override.com/v1")
+        # Clear others
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("GLM_MODEL", raising=False)
+
+        # Patch _validate_config to skip LeanRAG installation checks
+        monkeypatch.setattr(LeanRAGBackend, '_validate_config', lambda self: None)
+
+        leanrag_dir = tmp_path / "leanrag"
+        leanrag_dir.mkdir()
+
+        config = LeanRAGConfig(
+            leanrag_path=leanrag_dir,
+            llm_api_key="config-llm-key",
+            llm_model="config-model",  # Should NOT overwrite existing
+            embedding_api_base="https://config.com/v1",  # Should NOT overwrite existing
+            embedding_model="config-embed-model",  # Should be set (no existing)
+        )
+
+        # Create backend (triggers _apply_config_to_env)
+        backend = LeanRAGBackend(config)
+
+        # Existing env vars should be preserved
+        assert os.environ["DEEPSEEK_MODEL"] == "user-override-model"
+        assert os.environ["GLM_BASE_URL"] == "https://user-override.com/v1"
+
+        # New env vars should be set
+        assert os.environ["DEEPSEEK_API_KEY"] == "config-llm-key"
+        assert os.environ["GLM_MODEL"] == "config-embed-model"
+
+    def test_skips_none_values(self, tmp_path, monkeypatch):
+        """Test that None config values don't set env vars."""
+        # Clear all env vars
+        env_vars_to_clear = [
+            "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL",
+            "GLM_BASE_URL", "GLM_MODEL",
+            "FALKORDB_PASSWORD",
+        ]
+        for var in env_vars_to_clear:
+            monkeypatch.delenv(var, raising=False)
+
+        # Patch _validate_config to skip LeanRAG installation checks
+        monkeypatch.setattr(LeanRAGBackend, '_validate_config', lambda self: None)
+
+        leanrag_dir = tmp_path / "leanrag"
+        leanrag_dir.mkdir()
+
+        # Create config with minimal fields (others default to None)
+        config = LeanRAGConfig(
+            leanrag_path=leanrag_dir,
+            llm_api_key="only-key-set",
+            # All other optional fields are None
+        )
+
+        # Create backend (triggers _apply_config_to_env)
+        backend = LeanRAGBackend(config)
+
+        # Only llm_api_key should be set
+        assert os.environ.get("DEEPSEEK_API_KEY") == "only-key-set"
+
+        # None values should NOT be set as env vars
+        assert os.environ.get("DEEPSEEK_MODEL") is None
+        assert os.environ.get("DEEPSEEK_BASE_URL") is None
+        assert os.environ.get("GLM_MODEL") is None
+        assert os.environ.get("GLM_BASE_URL") is None
+        assert os.environ.get("FALKORDB_PASSWORD") is None
+
+    def test_bridges_standard_env_vars_to_leanrag(self, tmp_path, monkeypatch):
+        """Test that standard watercooler env vars are bridged to LeanRAG equivalents.
+
+        Equivalence mapping:
+            LLM_API_KEY      → DEEPSEEK_API_KEY
+            LLM_MODEL        → DEEPSEEK_MODEL
+            LLM_API_BASE     → DEEPSEEK_BASE_URL
+            EMBEDDING_MODEL  → GLM_MODEL
+            EMBEDDING_API_BASE → GLM_BASE_URL
+        """
+        # Clear LeanRAG-specific env vars
+        for var in ["DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL",
+                    "GLM_MODEL", "GLM_BASE_URL"]:
+            monkeypatch.delenv(var, raising=False)
+
+        # Set standard watercooler env vars
+        monkeypatch.setenv("LLM_API_KEY", "standard-llm-key")
+        monkeypatch.setenv("LLM_MODEL", "standard-llm-model")
+        monkeypatch.setenv("LLM_API_BASE", "https://standard-llm.com/v1")
+        monkeypatch.setenv("EMBEDDING_MODEL", "standard-embed-model")
+        monkeypatch.setenv("EMBEDDING_API_BASE", "https://standard-embed.com/v1")
+
+        # Patch _validate_config to skip LeanRAG installation checks
+        monkeypatch.setattr(LeanRAGBackend, '_validate_config', lambda self: None)
+
+        leanrag_dir = tmp_path / "leanrag"
+        leanrag_dir.mkdir()
+
+        # Create minimal config (env vars should take precedence)
+        config = LeanRAGConfig(leanrag_path=leanrag_dir)
+
+        # Create backend (triggers _apply_config_to_env)
+        backend = LeanRAGBackend(config)
+
+        # Verify standard vars were bridged to LeanRAG equivalents
+        assert os.environ["DEEPSEEK_API_KEY"] == "standard-llm-key"
+        assert os.environ["DEEPSEEK_MODEL"] == "standard-llm-model"
+        assert os.environ["DEEPSEEK_BASE_URL"] == "https://standard-llm.com/v1"
+        assert os.environ["GLM_MODEL"] == "standard-embed-model"
+        assert os.environ["GLM_BASE_URL"] == "https://standard-embed.com/v1"
+
+    def test_leanrag_vars_take_precedence_over_standard(self, tmp_path, monkeypatch):
+        """Test that LeanRAG-specific env vars take precedence over standard ones."""
+        # Set both standard and LeanRAG-specific env vars
+        monkeypatch.setenv("LLM_MODEL", "standard-model")
+        monkeypatch.setenv("DEEPSEEK_MODEL", "leanrag-specific-model")
+
+        monkeypatch.setenv("EMBEDDING_MODEL", "standard-embed")
+        monkeypatch.setenv("GLM_MODEL", "leanrag-specific-embed")
+
+        # Patch _validate_config to skip LeanRAG installation checks
+        monkeypatch.setattr(LeanRAGBackend, '_validate_config', lambda self: None)
+
+        leanrag_dir = tmp_path / "leanrag"
+        leanrag_dir.mkdir()
+
+        config = LeanRAGConfig(leanrag_path=leanrag_dir)
+        backend = LeanRAGBackend(config)
+
+        # LeanRAG-specific vars should NOT be overwritten
+        assert os.environ["DEEPSEEK_MODEL"] == "leanrag-specific-model"
+        assert os.environ["GLM_MODEL"] == "leanrag-specific-embed"

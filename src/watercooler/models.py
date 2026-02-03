@@ -429,6 +429,12 @@ LLM_GGUF_MODELS: dict[str, LLMGGUFModelSpec | str] = {
         "context": 40960,
         "size_mb": 400,  # ~400 MB, smallest viable summarizer with /no_think
     },
+    "qwen3-instruct:30b": {                                                                                                     
+        "hf_repo": "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF",                                                                  
+        "hf_file": "Qwen3-30B-A3B-Instruct-2507-Q8_0.gguf",                                                           
+        "context": 32768,                                                                                                       
+        "size_mb": 32000,  # estimate for Q8_0                                                                                  
+    },
     # Llama 3.2 models
     "llama3.2:3b": {
         "hf_repo": "hugging-quants/Llama-3.2-3B-Instruct-Q8_0-GGUF",

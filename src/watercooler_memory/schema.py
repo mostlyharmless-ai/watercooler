@@ -234,6 +234,73 @@ class EntityNode:
 
 
 @dataclass
+class DocumentNode:
+    """Graph node representing an ingested reference document.
+
+    Documents are standalone files (white papers, reference docs) that
+    are ingested separately from watercooler threads.
+
+    Attributes:
+        doc_id: Hash of file path + content.
+        file_path: Source file path.
+        title: Document title.
+        doc_type: Type classification ("whitepaper", "reference", "generic").
+        metadata: Additional metadata (authors, year, source).
+        chunk_ids: Child chunk IDs.
+        summary: Generated summary (None until computed).
+        embedding: Vector embedding (None until computed).
+        ingestion_time: When this document was ingested.
+    """
+
+    doc_id: str
+    file_path: str
+    title: str
+    doc_type: str = "generic"
+    metadata: dict = field(default_factory=dict)
+    chunk_ids: list[str] = field(default_factory=list)
+    summary: str = ""
+    embedding: Optional[list[float]] = None
+    ingestion_time: str = field(default_factory=_utc_now_iso)
+
+    @property
+    def node_id(self) -> str:
+        """Unique identifier for this node in the graph."""
+        return f"document:{self.doc_id}"
+
+
+@dataclass
+class DocumentChunkNode:
+    """Graph node representing a chunk from a document.
+
+    Similar to ChunkNode but for standalone documents rather than entries.
+
+    Attributes:
+        chunk_id: Hash-based identifier.
+        doc_id: Parent document ID.
+        index: Position within document.
+        text: Chunk text content.
+        token_count: Number of tokens.
+        section_path: Section breadcrumb if available.
+        embedding: Vector embedding (None until computed).
+        ingestion_time: When this chunk was created.
+    """
+
+    chunk_id: str
+    doc_id: str
+    index: int
+    text: str
+    token_count: int
+    section_path: Optional[str] = None
+    embedding: Optional[list[float]] = None
+    ingestion_time: str = field(default_factory=_utc_now_iso)
+
+    @property
+    def node_id(self) -> str:
+        """Unique identifier for this node in the graph."""
+        return f"doc_chunk:{self.chunk_id}"
+
+
+@dataclass
 class Edge:
     """Directed edge connecting two nodes in the graph.
 
