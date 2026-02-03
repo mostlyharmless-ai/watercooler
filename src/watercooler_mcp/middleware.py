@@ -65,9 +65,11 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
         # Check LLM service if summaries requested
         if graph_config.generate_summaries:
             from watercooler.baseline_graph.summarizer import SummarizerConfig
+            from watercooler.memory_config import _get_provider_api_key
             llm_config = SummarizerConfig.from_env()
             llm_base = getattr(graph_config, 'summarizer_api_base', None) or llm_config.api_base
-            llm_api_key = llm_config.api_key
+            # Resolve API key based on actual llm_base URL, not default config
+            llm_api_key = _get_provider_api_key(llm_base) if llm_base else llm_config.api_key
             if llm_base:
                 try:
                     headers = {}
@@ -107,9 +109,11 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
         # Check embedding service if embeddings requested
         if graph_config.generate_embeddings:
             from watercooler.baseline_graph.sync import EmbeddingConfig
+            from watercooler.memory_config import _get_embedding_provider_api_key
             embed_config = EmbeddingConfig.from_env()
             embed_base = getattr(graph_config, 'embedding_api_base', None) or embed_config.api_base
-            embed_api_key = embed_config.api_key
+            # Resolve API key based on actual embed_base URL, not default config
+            embed_api_key = _get_embedding_provider_api_key(embed_base) if embed_base else embed_config.api_key
             if embed_base:
                 try:
                     headers = {}

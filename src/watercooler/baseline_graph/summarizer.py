@@ -164,7 +164,7 @@ def is_llm_service_available(config: Optional[SummarizerConfig] = None) -> bool:
         config: Summarizer configuration (uses env defaults if None)
 
     Returns:
-        True if the LLM service responds to a models list request
+        True if the LLM service responds to a health check request
     """
     config = config or SummarizerConfig.from_env()
 
@@ -175,14 +175,30 @@ def is_llm_service_available(config: Optional[SummarizerConfig] = None) -> bool:
         return False
 
     try:
-        url = f"{config.api_base.rstrip('/')}/models"
+        api_base = config.api_base or ""
+        is_anthropic = "anthropic.com" in api_base.lower()
         headers = {}
+
         # Add auth header for external APIs (not needed for local llama-server)
         if config.api_key and config.api_key not in ("", "local"):
-            headers["Authorization"] = f"Bearer {config.api_key}"
+            if is_anthropic:
+                # Anthropic uses x-api-key header
+                headers["x-api-key"] = config.api_key
+                headers["anthropic-version"] = "2023-06-01"
+            else:
+                headers["Authorization"] = f"Bearer {config.api_key}"
+
         with httpx.Client(timeout=5.0) as client:
-            response = client.get(url, headers=headers)
-            return response.status_code == 200
+            if is_anthropic:
+                # Anthropic doesn't have /models, check /messages with empty body
+                url = f"{api_base.rstrip('/')}/messages"
+                response = client.post(url, headers=headers, json={})
+                # 400 (bad request) means API is reachable and auth works
+                return response.status_code in (200, 400)
+            else:
+                url = f"{api_base.rstrip('/')}/models"
+                response = client.get(url, headers=headers)
+                return response.status_code == 200
     except Exception as e:
         logger.debug(f"LLM service not available at {config.api_base}: {e}")
         return False
