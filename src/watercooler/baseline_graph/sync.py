@@ -78,6 +78,7 @@ from watercooler.baseline_graph.summarizer import (
     summarize_entry,
     summarize_thread,
 )
+from watercooler.path_resolver import derive_group_id
 
 logger = logging.getLogger(__name__)
 
@@ -360,22 +361,16 @@ _falkordb_available: bool = False
 def _get_group_id_for_threads_dir(threads_dir: Path) -> str:
     """Derive group_id from threads directory path.
 
+    Uses unified derive_group_id() from path_resolver for consistent
+    sanitization across all backends.
+
     Handles two layouts:
     1. Paired repos: /path/to/watercooler-site-threads → watercooler_site
     2. Embedded dirs: /path/to/repo/threads/ → repo
 
-    Sanitizes to be FalkorDB-compatible (underscores, lowercase).
+    Sanitizes to be FalkorDB-compatible (underscores, lowercase, alphanumeric).
     """
-    dir_name = threads_dir.name
-
-    # Paired repo pattern: name ends with -threads (e.g., watercooler-site-threads)
-    if dir_name.endswith("-threads"):
-        name = dir_name[:-8]  # Strip "-threads" suffix
-    else:
-        # Embedded threads dir: use parent repo name
-        name = threads_dir.parent.name
-
-    return name.replace("-", "_").lower() or "watercooler"
+    return derive_group_id(threads_dir=threads_dir)
 
 
 def store_entry_embedding_to_falkordb(

@@ -99,6 +99,11 @@ def validate_safe_path(
 
 # Local application imports
 from watercooler.config_facade import config
+from watercooler.path_resolver import (
+    get_threads_suffix,
+    derive_threads_repo_name,
+    derive_code_repo_from_threads,
+)
 
 from .auth import is_hosted_mode
 from .config import (
@@ -172,13 +177,9 @@ def _require_context_hosted(
     owner, repo_name = repo.split("/", 1)
     branch = http_ctx.effective_branch
 
-    # Threads suffix for deriving threads repo from code repo
-    # Hardcoded default - config.full().common.threads_suffix requires TOML loading
-    threads_suffix = "-threads"
-
-    # Derive threads repo name from code repo name
+    # Derive threads repo name from code repo name using config-aware function
     # e.g., "watercooler-site" -> "watercooler-site-threads"
-    threads_repo_name = f"{repo_name}{threads_suffix}"
+    threads_repo_name = derive_threads_repo_name(repo_name)
 
     # Construct ThreadContext for hosted mode
     # - threads_dir uses a sentinel path to indicate hosted mode
@@ -276,9 +277,11 @@ def _require_context(code_path: str) -> tuple[str | None, ThreadContext | None]:
         return ("Invalid code_path: could not resolve path", None)
 
     # Detect if a threads repo was passed instead of a code repo
-    if code_path_obj.name.endswith("-threads"):
-        # Check if a matching code repo exists (same path without -threads suffix)
-        potential_code_repo = code_path_obj.parent / code_path_obj.name[:-8]  # Remove "-threads"
+    threads_suffix = get_threads_suffix()
+    if code_path_obj.name.endswith(threads_suffix):
+        # Check if a matching code repo exists (same path without threads suffix)
+        code_repo_name = derive_code_repo_from_threads(code_path_obj.name, threads_suffix)
+        potential_code_repo = code_path_obj.parent / code_repo_name
         if potential_code_repo.exists() and potential_code_repo.is_dir():
             return (
                 f"Error: code_path appears to be a threads repo, not a code repo.\n"

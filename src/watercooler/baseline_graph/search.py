@@ -24,6 +24,7 @@ from typing import Any, Iterator, List, Literal, Optional, Tuple
 
 from . import storage
 from .reader import get_graph_dir, GraphEntry, GraphThread, _node_to_entry, _node_to_thread
+from watercooler.path_resolver import derive_group_id
 
 logger = logging.getLogger(__name__)
 
@@ -188,13 +189,8 @@ def _get_falkordb_store(threads_dir: Path):
     try:
         from .falkordb_entries import get_falkordb_entry_store
 
-        # Derive group_id from threads_dir (handles paired repos like foo-threads)
-        dir_name = threads_dir.name
-        if dir_name.endswith("-threads"):
-            group_id = dir_name[:-8].replace("-", "_").lower()
-        else:
-            group_id = threads_dir.parent.name.replace("-", "_").lower()
-        group_id = group_id or "watercooler"
+        # Use unified group_id derivation from path_resolver
+        group_id = derive_group_id(threads_dir=threads_dir)
 
         return get_falkordb_entry_store(group_id)
     except Exception as e:

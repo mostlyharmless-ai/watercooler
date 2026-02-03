@@ -32,8 +32,10 @@ from . import (
 from ..entry_episode_index import EntryEpisodeIndex, IndexConfig
 
 import os
+import sys
 
 from watercooler.memory_config import is_anthropic_url
+from watercooler.path_resolver import derive_group_id
 
 # Resolve package root from this file's location
 # graphiti.py is at: src/watercooler_memory/backends/graphiti.py
@@ -150,10 +152,16 @@ def _ensure_graphiti_available() -> None:
 def _derive_database_name(code_path: Path | str | None) -> str:
     """Derive database name from project directory.
 
+    Uses unified derive_group_id() from path_resolver for consistent
+    sanitization across all backends.
+
     Converts project directory name to a valid FalkorDB database name:
     - Replaces hyphens with underscores (FalkorDB doesn't like hyphens)
     - Converts to lowercase
     - Falls back to 'watercooler' if no code_path provided
+
+    Note: Does NOT remove dots or other special chars to preserve
+    compatibility with existing migrated FalkorDB data.
 
     Args:
         code_path: Path to the project directory
@@ -161,16 +169,7 @@ def _derive_database_name(code_path: Path | str | None) -> str:
     Returns:
         Sanitized database name (e.g., 'watercooler_cloud')
     """
-    if code_path is None:
-        return "watercooler"
-
-    path = Path(code_path) if isinstance(code_path, str) else code_path
-    name = path.resolve().name  # Get directory name
-    # Sanitize: replace hyphens with underscores, lowercase
-    sanitized = name.replace("-", "_").lower()
-    # Remove any non-alphanumeric except underscores
-    sanitized = "".join(c if c.isalnum() or c == "_" else "_" for c in sanitized)
-    return sanitized or "watercooler"
+    return derive_group_id(code_path=Path(code_path) if code_path else None)
 
 
 @dataclass

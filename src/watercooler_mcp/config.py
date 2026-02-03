@@ -27,6 +27,8 @@ from watercooler.path_resolver import (
     _extract_repo_path,
     _split_namespace_repo,
     _compose_local_threads_path,
+    derive_threads_repo_name,
+    get_threads_suffix,
 )
 
 from .provisioning import is_auto_provision_requested
@@ -151,11 +153,12 @@ def _branch_has_upstream(code_root: Optional[Path], branch: Optional[str]) -> bo
 
 
 def _compose_threads_slug_from_code(code_repo: str) -> str:
+    """Compose threads repository slug from code repository path.
+
+    Uses config-aware suffix (default: "-threads").
+    """
     namespace, repo = _split_namespace_repo(code_repo)
-    if repo.endswith("-threads"):
-        slug_repo = repo
-    else:
-        slug_repo = f"{repo}-threads"
+    slug_repo = derive_threads_repo_name(repo)
     if namespace:
         return f"{namespace}/{slug_repo}"
     return slug_repo
@@ -273,9 +276,11 @@ def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
             else:
                 threads_dir = _resolve_path(base / "_local")
         elif git_details.root is not None:
-            threads_dir = _resolve_path(git_details.root.parent / f"{git_details.root.name}-threads")
+            threads_name = derive_threads_repo_name(git_details.root.name)
+            threads_dir = _resolve_path(git_details.root.parent / threads_name)
         elif normalized_root is not None:
-            threads_dir = _resolve_path(normalized_root.parent / f"{normalized_root.name}-threads")
+            threads_name = derive_threads_repo_name(normalized_root.name)
+            threads_dir = _resolve_path(normalized_root.parent / threads_name)
         elif threads_slug:
             local_name = threads_slug.split("/")[-1]
             threads_dir = _resolve_path(base / local_name)
