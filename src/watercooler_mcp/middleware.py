@@ -166,11 +166,11 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
         # Cache the result
         _service_availability_cache[cache_key] = (llm_available, embed_available, time.time())
         return (llm_available, embed_available)
-    except (ImportError, AttributeError) as e:
-        # ImportError: config modules missing
-        # AttributeError: config objects malformed
-        # Let ValueError/OSError propagate for debugging (indicates real config issues)
-        log_debug(f"[GRAPH] Service check failed: {e}")
+    except Exception as e:
+        # Gracefully handle all errors - service checks should never crash writes
+        # Common causes: ImportError (config modules missing), AttributeError (malformed config),
+        # ValueError (invalid config values), OSError (file access issues)
+        log_debug(f"[GRAPH] Service check failed: {type(e).__name__}: {e}")
         # Cache the failure too (to avoid retrying immediately)
         _service_availability_cache[cache_key] = (False, False, time.time())
         return (False, False)

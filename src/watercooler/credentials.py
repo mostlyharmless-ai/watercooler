@@ -313,15 +313,27 @@ def _migrate_json_to_toml(json_path: Path, toml_path: Path) -> bool:
 
 
 def _load_toml_credentials(path: Path) -> Dict[str, Any]:
-    """Load credentials from TOML file."""
+    """Load credentials from TOML file.
+
+    Uses bounded read to prevent OOM from maliciously large files.
+    """
     if tomllib is None:
         raise RuntimeError(
             "TOML support requires Python 3.11+ or 'tomli' package. "
             "Install with: pip install tomli"
         )
 
+    # Use bounded read to prevent OOM attacks (same protection as JSON migration)
     with open(path, "rb") as f:
-        return tomllib.load(f)
+        content = f.read(_MAX_JSON_SIZE_BYTES + 1)
+
+    if len(content) > _MAX_JSON_SIZE_BYTES:
+        raise ValueError(
+            f"Credentials file too large (>{_MAX_JSON_SIZE_BYTES} bytes). "
+            f"Maximum allowed: {_MAX_JSON_SIZE_BYTES} bytes."
+        )
+
+    return tomllib.loads(content.decode("utf-8"))
 
 
 def load_credentials(auto_migrate: bool = True) -> Credentials:
