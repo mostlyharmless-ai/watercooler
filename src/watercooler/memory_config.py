@@ -187,21 +187,41 @@ def get_memory_backend() -> str:
 # Provider domain mappings for URL-based detection
 # Maps hostname suffixes to (provider_name, env_var_name)
 _LLM_PROVIDER_DOMAINS: dict[str, tuple[str, str]] = {
+    # OpenAI and Azure OpenAI
     "openai.com": ("openai", "OPENAI_API_KEY"),
     "openai.azure.com": ("openai", "OPENAI_API_KEY"),
+    # Major cloud providers
     "anthropic.com": ("anthropic", "ANTHROPIC_API_KEY"),
     "googleapis.com": ("google", "GOOGLE_API_KEY"),
     "generativelanguage.googleapis.com": ("google", "GOOGLE_API_KEY"),
+    # Inference providers
     "groq.com": ("groq", "GROQ_API_KEY"),
     "deepseek.com": ("deepseek", "DEEPSEEK_API_KEY"),
+    "together.xyz": ("together", "TOGETHER_API_KEY"),
+    "api.together.ai": ("together", "TOGETHER_API_KEY"),
+    "mistral.ai": ("mistral", "MISTRAL_API_KEY"),
+    "cohere.ai": ("cohere", "COHERE_API_KEY"),
+    "cohere.com": ("cohere", "COHERE_API_KEY"),
+    "perplexity.ai": ("perplexity", "PERPLEXITY_API_KEY"),
+    "fireworks.ai": ("fireworks", "FIREWORKS_API_KEY"),
 }
 
 _EMBEDDING_PROVIDER_DOMAINS: dict[str, tuple[str, str]] = {
+    # OpenAI and Azure OpenAI
     "openai.com": ("openai", "OPENAI_API_KEY"),
     "openai.azure.com": ("openai", "OPENAI_API_KEY"),
+    # Embedding specialists
     "voyageai.com": ("voyage", "VOYAGE_API_KEY"),
+    "cohere.ai": ("cohere", "COHERE_API_KEY"),
+    "cohere.com": ("cohere", "COHERE_API_KEY"),
+    # Cloud providers with embedding support
     "googleapis.com": ("google", "GOOGLE_API_KEY"),
     "generativelanguage.googleapis.com": ("google", "GOOGLE_API_KEY"),
+    # Inference providers with embedding support
+    "together.xyz": ("together", "TOGETHER_API_KEY"),
+    "api.together.ai": ("together", "TOGETHER_API_KEY"),
+    "mistral.ai": ("mistral", "MISTRAL_API_KEY"),
+    "fireworks.ai": ("fireworks", "FIREWORKS_API_KEY"),
 }
 
 

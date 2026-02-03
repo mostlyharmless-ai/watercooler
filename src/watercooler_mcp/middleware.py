@@ -123,7 +123,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                             headers["anthropic-version"] = "2023-06-01"
                         else:
                             headers["Authorization"] = f"Bearer {llm_api_key}"
-                    with httpx.Client(timeout=2.0) as client:
+                    with httpx.Client(timeout=5.0) as client:
                         # Anthropic doesn't have /models endpoint, check base URL
                         if is_anthropic:
                             # For Anthropic, just verify we can reach the API
@@ -161,7 +161,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                     # Add auth header for external APIs (not needed for local llama-server)
                     if embed_api_key and embed_api_key not in ("", "local"):
                         headers["Authorization"] = f"Bearer {embed_api_key}"
-                    with httpx.Client(timeout=2.0) as client:
+                    with httpx.Client(timeout=5.0) as client:
                         url = f"{embed_base.rstrip('/')}/models"
                         response = client.get(url, headers=headers)
                         if 200 <= response.status_code < 300:
@@ -175,11 +175,10 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
         # Cache the result
         _service_availability_cache[cache_key] = (llm_available, embed_available, time.time())
         return (llm_available, embed_available)
-    except (ImportError, AttributeError, ValueError, OSError) as e:
+    except (ImportError, AttributeError) as e:
         # ImportError: config modules missing
         # AttributeError: config objects malformed
-        # ValueError: config parsing failed
-        # OSError: network/file issues
+        # Let ValueError/OSError propagate for debugging (indicates real config issues)
         log_debug(f"[GRAPH] Service check failed: {e}")
         # Cache the failure too (to avoid retrying immediately)
         _service_availability_cache[cache_key] = (False, False, time.time())

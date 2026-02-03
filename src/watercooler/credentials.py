@@ -207,86 +207,105 @@ def _migrate_json_to_toml(json_path: Path, toml_path: Path) -> bool:
         return False
 
     try:
-        # Check if migration already in progress or completed (prevents race condition)
+        # Use atomic lock file to prevent race conditions during migration
+        # O_CREAT|O_EXCL fails if file exists, providing atomic check-and-create
+        lock_path = json_path.with_suffix(".json.migrating")
         backup_path = json_path.with_suffix(".json.bak")
+
+        # If backup exists, migration already completed
         if backup_path.exists():
-            # Another process already migrated, skip
             return False
 
-        # Use bounded read to prevent OOM from maliciously large files
-        # (TOCTOU-safe: read limited bytes, then check actual size)
-        with open(json_path, "r") as f:
-            content = f.read(_MAX_JSON_SIZE_BYTES + 1)
-
-        if len(content) > _MAX_JSON_SIZE_BYTES:
-            warnings.warn(
-                f"Credentials file too large (>{_MAX_JSON_SIZE_BYTES} bytes). "
-                f"Maximum allowed: {_MAX_JSON_SIZE_BYTES} bytes. Skipping migration.",
-                UserWarning,
-            )
+        # Try to create lock file atomically
+        try:
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(lock_fd)
+        except FileExistsError:
+            # Another process is migrating, skip
             return False
 
-        # Parse JSON from bounded content
-        data = json.loads(content)
+        try:
+            # Use bounded read to prevent OOM from maliciously large files
+            # (TOCTOU-safe: read limited bytes, then check actual size)
+            with open(json_path, "r") as f:
+                content = f.read(_MAX_JSON_SIZE_BYTES + 1)
 
-        # Convert to TOML structure
-        toml_data: Dict[str, Any] = {}
+            if len(content) > _MAX_JSON_SIZE_BYTES:
+                warnings.warn(
+                    f"Credentials file too large (>{_MAX_JSON_SIZE_BYTES} bytes). "
+                    f"Maximum allowed: {_MAX_JSON_SIZE_BYTES} bytes. Skipping migration.",
+                    UserWarning,
+                )
+                return False
 
-        # Map known JSON fields to TOML structure
-        if "github_token" in data:
-            if "github" not in toml_data:
-                toml_data["github"] = {}
-            toml_data["github"]["token"] = data["github_token"]
+            # Parse JSON from bounded content
+            data = json.loads(content)
 
-        if "github_ssh_key" in data or "ssh_key" in data:
-            if "github" not in toml_data:
-                toml_data["github"] = {}
-            toml_data["github"]["ssh_key"] = data.get("github_ssh_key", data.get("ssh_key", ""))
+            # Convert to TOML structure
+            toml_data: Dict[str, Any] = {}
 
-        if "session_secret" in data:
-            if "dashboard" not in toml_data:
-                toml_data["dashboard"] = {}
-            toml_data["dashboard"]["session_secret"] = data["session_secret"]
+            # Map known JSON fields to TOML structure
+            if "github_token" in data:
+                if "github" not in toml_data:
+                    toml_data["github"] = {}
+                toml_data["github"]["token"] = data["github_token"]
 
-        # Handle nested structures
-        if "github" in data and isinstance(data["github"], dict):
-            if "github" not in toml_data:
-                toml_data["github"] = {}
-            toml_data["github"].update(data["github"])
+            if "github_ssh_key" in data or "ssh_key" in data:
+                if "github" not in toml_data:
+                    toml_data["github"] = {}
+                toml_data["github"]["ssh_key"] = data.get("github_ssh_key", data.get("ssh_key", ""))
 
-        if "dashboard" in data and isinstance(data["dashboard"], dict):
-            if "dashboard" not in toml_data:
-                toml_data["dashboard"] = {}
-            toml_data["dashboard"].update(data["dashboard"])
+            if "session_secret" in data:
+                if "dashboard" not in toml_data:
+                    toml_data["dashboard"] = {}
+                toml_data["dashboard"]["session_secret"] = data["session_secret"]
 
-        # Write TOML
-        toml_path.parent.mkdir(parents=True, exist_ok=True)
+            # Handle nested structures
+            if "github" in data and isinstance(data["github"], dict):
+                if "github" not in toml_data:
+                    toml_data["github"] = {}
+                toml_data["github"].update(data["github"])
 
-        doc = tomlkit.document()
-        doc.add(tomlkit.comment(" Watercooler Credentials"))
-        doc.add(tomlkit.comment(" Auto-migrated from credentials.json"))
-        doc.add(tomlkit.comment(" Keep this file secure - do not commit to version control"))
-        doc.add(tomlkit.nl())
+            if "dashboard" in data and isinstance(data["dashboard"], dict):
+                if "dashboard" not in toml_data:
+                    toml_data["dashboard"] = {}
+                toml_data["dashboard"].update(data["dashboard"])
 
-        for section, values in toml_data.items():
-            if isinstance(values, dict):
-                table = tomlkit.table()
-                for key, value in values.items():
-                    table.add(key, value)
-                doc.add(section, table)
-            else:
-                doc.add(section, values)
+            # Write TOML
+            toml_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(toml_path, "w") as f:
-            f.write(tomlkit.dumps(doc))
+            doc = tomlkit.document()
+            doc.add(tomlkit.comment(" Watercooler Credentials"))
+            doc.add(tomlkit.comment(" Auto-migrated from credentials.json"))
+            doc.add(tomlkit.comment(" Keep this file secure - do not commit to version control"))
+            doc.add(tomlkit.nl())
 
-        # Secure permissions
-        _secure_file_permissions(toml_path)
+            for section, values in toml_data.items():
+                if isinstance(values, dict):
+                    table = tomlkit.table()
+                    for key, value in values.items():
+                        table.add(key, value)
+                    doc.add(section, table)
+                else:
+                    doc.add(section, values)
 
-        # Rename old file to .bak (backup_path defined at start of function)
-        json_path.rename(backup_path)
+            with open(toml_path, "w") as f:
+                f.write(tomlkit.dumps(doc))
 
-        return True
+            # Secure permissions
+            _secure_file_permissions(toml_path)
+
+            # Rename old file to .bak
+            json_path.rename(backup_path)
+
+            return True
+
+        finally:
+            # Always clean up lock file
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     except (json.JSONDecodeError, OSError, KeyError) as e:
         warnings.warn(f"Failed to migrate credentials: {e}", UserWarning)
