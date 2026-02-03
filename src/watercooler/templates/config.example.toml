@@ -478,6 +478,45 @@ auto_detect_services = true
 # For OpenAI: gpt-4o-mini, gpt-4o, etc.
 #
 # model = "qwen3:1.7b"
+#
+# .............................................................................
+# PROVIDER EXAMPLES - Uncomment ONE api_base + model pair to switch providers
+# API keys go in credentials.toml under the matching provider section
+# .............................................................................
+#
+# --- OpenAI gpt-4o-mini (fast, reliable, low cost) ---
+# api_base = "https://api.openai.com/v1"
+# model = "gpt-4o-mini"  # $0.15/$0.60 per 1M tokens
+#
+# --- OpenAI gpt-4o (highest quality) ---
+# api_base = "https://api.openai.com/v1"
+# model = "gpt-4o"  # $2.50/$10 per 1M tokens
+#
+# --- DeepSeek (very cheap) ---
+# api_base = "https://api.deepseek.com/v1"
+# model = "deepseek-chat"  # ~$0.14/$0.28 per 1M tokens
+#
+# --- Anthropic Claude 3 Haiku (quality alternative) ---
+# api_base = "https://api.anthropic.com/v1"
+# model = "claude-3-haiku-20240307"  # $0.25/$1.25 per 1M tokens
+#
+# --- Groq (free tier, very fast inference) ---
+# api_base = "https://api.groq.com/openai/v1"
+# model = "llama-3.1-8b-instant"  # Free tier available
+#
+# --- Together.ai (many model options) ---
+# api_base = "https://api.together.xyz/v1"
+# model = "meta-llama/Llama-3.1-8B-Instruct"  # Pay-per-use
+#
+# --- Local llama-server (free, requires GPU) ---
+# api_base = "http://localhost:8000/v1"
+# model = "qwen3:1.7b"  # Fast, auto /no_think prefix
+#
+# --- Local llama-server (higher quality) ---
+# api_base = "http://localhost:8000/v1"
+# model = "qwen2.5:3b"  # Higher quality, slightly slower
+#
+# .............................................................................
 
 # Request timeout in seconds
 # Env: LLM_TIMEOUT
@@ -588,6 +627,43 @@ auto_detect_services = true
 # Embedding model name
 # Env: EMBEDDING_MODEL
 # model = "bge-m3"
+#
+# .............................................................................
+# PROVIDER EXAMPLES - Uncomment ONE api_base + model + dim set to switch
+# API keys go in credentials.toml under the matching provider section
+# .............................................................................
+#
+# --- OpenAI text-embedding-3-small (cheap, good quality) ---
+# api_base = "https://api.openai.com/v1"
+# model = "text-embedding-3-small"  # $0.02 per 1M tokens
+# dim = 1536
+#
+# --- OpenAI text-embedding-3-large (higher quality) ---
+# api_base = "https://api.openai.com/v1"
+# model = "text-embedding-3-large"  # $0.13 per 1M tokens
+# dim = 3072
+#
+# --- Voyage AI voyage-3-lite (optimized for search) ---
+# api_base = "https://api.voyageai.com/v1"
+# model = "voyage-3-lite"  # $0.02 per 1M tokens
+# dim = 512
+#
+# --- Cohere embed-english-v3 (free tier available) ---
+# api_base = "https://api.cohere.ai/v1"
+# model = "embed-english-v3.0"
+# dim = 1024
+#
+# --- Local llama-server bge-m3 (free, requires GPU) ---
+# api_base = "http://localhost:8080/v1"
+# model = "bge-m3"
+# dim = 1024
+#
+# --- Local llama-server nomic-embed-text (smaller, faster) ---
+# api_base = "http://localhost:8080/v1"
+# model = "nomic-embed-text:latest"
+# dim = 768
+#
+# .............................................................................
 
 # Embedding vector dimension
 # Env: EMBEDDING_DIM
