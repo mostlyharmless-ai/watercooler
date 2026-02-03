@@ -9,6 +9,17 @@ allowed-tools:
 
 Question: $ARGUMENTS
 
+## Argument Safety
+
+When constructing JSON for `mcp-cli call`, **never** interpolate `$ARGUMENTS` directly into a JSON string.
+Instead, use `jq` for safe construction:
+
+```bash
+mcp-cli call watercooler-cloud/watercooler_smart_query "$(jq -n --arg q "$ARGUMENTS" '{query: $q}')"
+```
+
+This prevents JSON injection from user input containing quotes, backslashes, or control characters.
+
 ## Steps
 
 1. **Check schema first** (mandatory):
@@ -16,9 +27,9 @@ Question: $ARGUMENTS
    mcp-cli info watercooler-cloud/watercooler_smart_query
    ```
 
-2. **Execute query**:
+2. **Execute query** (sanitize user input — do not interpolate `$ARGUMENTS` directly into JSON):
    ```bash
-   mcp-cli call watercooler-cloud/watercooler_smart_query '{"query": "<natural language question>"}'
+   mcp-cli call watercooler-cloud/watercooler_smart_query "$(jq -n --arg q "<natural language question>" '{query: $q}')"
    ```
 
 3. **Present answer** with:

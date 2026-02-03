@@ -9,6 +9,19 @@ allowed-tools:
 
 Find content related to: $ARGUMENTS
 
+## Argument Safety
+
+When constructing JSON for `mcp-cli call`, **never** interpolate `$ARGUMENTS` directly into a JSON string.
+Use `jq` for safe construction:
+
+```bash
+# For entry IDs
+mcp-cli call watercooler-cloud/watercooler_find_similar "$(jq -n --arg id "$ARGUMENTS" '{entry_id: $id}')"
+
+# For descriptions
+mcp-cli call watercooler-cloud/watercooler_search "$(jq -n --arg q "$ARGUMENTS" '{query: $q, mode: "entries", semantic: true}')"
+```
+
 ## Steps
 
 1. **Determine argument type**:
@@ -22,9 +35,9 @@ Find content related to: $ARGUMENTS
    mcp-cli info watercooler-cloud/watercooler_find_similar
    ```
 
-   Execute:
+   Execute (use `jq` for safe JSON):
    ```bash
-   mcp-cli call watercooler-cloud/watercooler_find_similar '{"entry_id": "<ulid>"}'
+   mcp-cli call watercooler-cloud/watercooler_find_similar "$(jq -n --arg id "<ulid>" '{entry_id: $id}')"
    ```
 
 3. **For Description** - Use semantic search:
@@ -34,13 +47,9 @@ Find content related to: $ARGUMENTS
    mcp-cli info watercooler-cloud/watercooler_search
    ```
 
-   Execute:
+   Execute (use `jq` for safe JSON):
    ```bash
-   mcp-cli call watercooler-cloud/watercooler_search '{
-     "query": "<description>",
-     "mode": "entries",
-     "semantic": true
-   }'
+   mcp-cli call watercooler-cloud/watercooler_search "$(jq -n --arg q "<description>" '{query: $q, mode: "entries", semantic: true}')"
    ```
 
 4. **Present results**:

@@ -105,33 +105,47 @@ Markdown files go to the corresponding watercooler threads repository in a `refs
 
 ### 2.1 Find Threads Repository
 
-The threads repo is parallel to the code repo with `-threads` suffix:
+The threads repo is parallel to the code repo with `-threads` suffix.
+
+**Detection strategy** (try in order):
+
+1. **Git remote** (most reliable): Derive from `git remote get-url origin`
+   ```bash
+   # Extract repo name from git remote
+   repo_name=$(basename -s .git "$(git remote get-url origin 2>/dev/null)")
+   threads_dir="$(dirname "$(pwd)")/${repo_name}-threads"
+   ls -d "$threads_dir" 2>/dev/null
+   ```
+
+2. **Directory name convention**: Check sibling directory
+   ```bash
+   repo_name=$(basename "$(pwd)")
+   threads_dir="$(dirname "$(pwd)")/${repo_name}-threads"
+   ls -d "$threads_dir" 2>/dev/null
+   ```
+
+3. **Fallback**: Use `refs/` in the current project (see 2.3)
 
 | Code Project | Threads Repo |
 |--------------|--------------|
-| `/home/user/projects/Gist` | `/home/user/projects/Gist-threads` |
-| `/home/user/projects/watercooler-cloud` | `/home/user/projects/watercooler-cloud-threads` |
-
-```bash
-# Get current project directory name
-basename $(pwd)
-
-# Check if threads repo exists
-ls -d ../$(basename $(pwd))-threads 2>/dev/null
-```
+| `~/projects/Gist` | `~/projects/Gist-threads` |
+| `~/projects/watercooler-cloud` | `~/projects/watercooler-cloud-threads` |
 
 ### 2.2 Create refs/ Directory
 
 ```bash
-mkdir -p /path/to/project-name-threads/refs
+mkdir -p "$threads_dir/refs"
 ```
 
 ### 2.3 Fallback
 
-If no `-threads` repo exists, create `refs/` in the current project:
+If no `-threads` repo is found, **inform the user** that reference files will be stored
+locally, then create `refs/` in the current project:
 ```bash
 mkdir -p refs
 ```
+
+Note: A local `refs/` directory may not be gitignored. Check `.gitignore` before committing.
 
 ---
 

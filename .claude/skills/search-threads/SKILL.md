@@ -20,31 +20,61 @@ Parse these filters from arguments:
 - `agent:X` - Filter by agent name
 - Remaining text becomes the search query
 
+## Argument Safety & Parsing Rules
+
+### Tokenization
+
+1. Split `$ARGUMENTS` on whitespace into tokens
+2. A token is a **filter** if it matches `^(role|type|after|before|thread|status|agent):[^\s]+$`
+3. The filter key is everything before the first `:`, the value is everything after
+4. All non-filter tokens are joined with spaces to form the **query text**
+
+### Edge Cases
+
+- `role:planner:advanced` → key=`role`, value=`planner:advanced` (first colon splits)
+- Multiple values for same key → last one wins
+- Empty value (`role:`) → ignore, treat entire token as query text
+- No query text → search with filters only (empty query string)
+
+### Safe JSON Construction
+
+**Never** interpolate filter values or query text directly into JSON strings.
+Use `jq` for safe construction:
+
+```bash
+jq -n \
+  --arg q "<query text>" \
+  --arg role "<role or empty>" \
+  --arg type "<type or empty>" \
+  --arg topic "<thread or empty>" \
+  --arg after "<after or empty>" \
+  --arg before "<before or empty>" \
+  '{query: $q, mode: "entries"} +
+   (if $role != "" then {filters: {role: $role}} else {} end) +
+   (if $type != "" then {filters: {type: $type}} else {} end) +
+   (if $topic != "" then {filters: {topic: $topic}} else {} end) +
+   (if $after != "" then {filters: {after: $after}} else {} end) +
+   (if $before != "" then {filters: {before: $before}} else {} end)'
+```
+
 ## Steps
 
 1. **Parse arguments** into filters and query text
 
-   Extract filter tokens (key:value pairs) and collect remaining text as the query.
-   Only include filter keys that were explicitly provided — omit keys with no value.
+   Apply the tokenization rules above. Extract filter tokens (key:value pairs) and
+   collect remaining text as the query. Only include filter keys that were explicitly
+   provided — omit keys with no value.
 
 2. **Check schema**:
    ```bash
    mcp-cli info watercooler-cloud/watercooler_search
    ```
 
-3. **Build and execute search**:
+3. **Build and execute search** (use `jq` for safe JSON — see Argument Safety above):
    ```bash
-   mcp-cli call watercooler-cloud/watercooler_search '{
-     "query": "<search text>",
-     "mode": "entries",
-     "filters": {
-       "role": "<if specified>",
-       "type": "<if specified>",
-       "topic": "<if thread: specified>",
-       "after": "<if specified>",
-       "before": "<if specified>"
-     }
-   }'
+   mcp-cli call watercooler-cloud/watercooler_search "$(jq -n \
+     --arg q "<search text>" \
+     '{query: $q, mode: "entries", filters: {<only include specified filters>}}')"
    ```
 
 4. **Present results**:

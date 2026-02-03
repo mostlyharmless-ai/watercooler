@@ -195,7 +195,22 @@ Avoid re-downloading papers already present.
 
 ## Phase 5: Web Search for Topic Papers
 
-Execute multiple search strategies based on the multi-disciplinary analysis from Phase 3:
+### Search Budget
+
+Limit searches to a maximum of **8 WebSearch calls** per invocation to avoid rate limits
+and excessive latency. Prioritize searches in this order:
+
+1. **Explicit references** from the thread (arXiv IDs, DOIs) — resolve these first, no search needed
+2. **Broad conceptual** (2-3 searches) — highest topic coverage per query
+3. **Cross-domain** (1-2 searches) — bridge disciplines for unique finds
+4. **Foundational + recent** (1-2 searches) — cover historical and state-of-art
+5. **Venue-targeted** (0-1 searches) — only when strong domain signals exist
+
+If the budget is exhausted, report remaining topics as "not searched" in the results.
+
+### Search Strategies
+
+Execute search strategies based on the multi-disciplinary analysis from Phase 3:
 
 ### 5.1 Broad Conceptual Searches
 

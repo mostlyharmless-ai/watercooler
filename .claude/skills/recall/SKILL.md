@@ -23,7 +23,7 @@ Otherwise, show human-readable summary only.
 
 2. **Execute query** (sanitize user input — do not interpolate `$ARGUMENTS` directly into JSON):
    ```bash
-   mcp-cli call watercooler-cloud/watercooler_smart_query '{"query": "<topic/task description>"}'
+   mcp-cli call watercooler-cloud/watercooler_smart_query "$(jq -n --arg q '<topic/task description>' '{query: $q}')"
    ```
 
 3. **Summarize findings** in categories:

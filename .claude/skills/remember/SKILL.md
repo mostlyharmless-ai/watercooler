@@ -90,9 +90,15 @@ This prevents JSON injection from user input containing quotes, backslashes, or 
    mcp-cli info watercooler-cloud/watercooler_say
    ```
 
-   Create entry in appropriate thread:
-   - Knowledge/context → `project-context` thread
-   - Decisions → `decisions` thread
+   Check if the target thread exists before writing:
+   ```bash
+   mcp-cli call watercooler-cloud/watercooler_list_threads '{}'
+   ```
+
+   Create entry in an appropriate **existing** thread:
+   - Knowledge/context → `project-context` thread (if it exists)
+   - Decisions → `decisions` thread (if it exists)
+   - If neither exists, ask the user which thread to use or whether to create one
    - The baseline graph (T1) will index it automatically on next sync
 
 4. **Confirm storage**:

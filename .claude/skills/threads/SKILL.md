@@ -55,9 +55,15 @@ Arguments: $ARGUMENTS
 
 ### Mode 3: Filter by Status
 
-1. Parse status from arguments (`open`, `closed`)
-2. List threads and filter results by status
-3. Present filtered list
+1. Parse status from arguments (case-insensitive: `open`/`OPEN`, `closed`/`CLOSED`)
+2. List all threads using `watercooler_list_threads` (same as Mode 1)
+3. Filter results client-side by matching the thread `status` field
+4. Present filtered list using the same format as Mode 1
+
+### `--raw` Flag
+
+When `--raw` is present (in any mode), show the full JSON response after the
+human-readable summary. This is consistent with the `recall` skill behavior.
 
 ## Example Invocations
 
