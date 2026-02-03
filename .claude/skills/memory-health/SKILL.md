@@ -13,22 +13,22 @@ Check memory system health and configuration.
 
 1. **Check diagnose schema**:
    ```bash
-   mcp-cli info watercooler-mcp/watercooler_diagnose_memory
+   mcp-cli info watercooler-cloud/watercooler_diagnose_memory
    ```
 
 2. **Run memory diagnostics**:
    ```bash
-   mcp-cli call watercooler-mcp/watercooler_diagnose_memory '{}'
+   mcp-cli call watercooler-cloud/watercooler_diagnose_memory '{}'
    ```
 
 3. **Check graph health schema**:
    ```bash
-   mcp-cli info watercooler-mcp/watercooler_graph_health
+   mcp-cli info watercooler-cloud/watercooler_graph_health
    ```
 
 4. **Run graph health check**:
    ```bash
-   mcp-cli call watercooler-mcp/watercooler_graph_health '{}'
+   mcp-cli call watercooler-cloud/watercooler_graph_health '{}'
    ```
 
 5. **Report status**:

@@ -67,6 +67,15 @@ For each PDF:
 
 ## Phase 1: Resolve Input
 
+### 1.0 Validate Input Path
+
+Before processing, validate that the path:
+- Does **not** contain `..` components (path traversal)
+- Resolves to a location within or below the project directory
+- Is not an absolute path outside the project tree
+
+Reject and report an error for any path that fails validation.
+
 ### 1.1 Single PDF
 
 If input is a `.pdf` file path:

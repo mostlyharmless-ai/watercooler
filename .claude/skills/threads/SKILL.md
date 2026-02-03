@@ -22,12 +22,12 @@ Arguments: $ARGUMENTS
 
 1. **Check schema**:
    ```bash
-   mcp-cli info watercooler-mcp/watercooler_list_threads
+   mcp-cli info watercooler-cloud/watercooler_list_threads
    ```
 
 2. **Execute**:
    ```bash
-   mcp-cli call watercooler-mcp/watercooler_list_threads '{}'
+   mcp-cli call watercooler-cloud/watercooler_list_threads '{}'
    ```
 
 3. **Present results**:
@@ -39,12 +39,12 @@ Arguments: $ARGUMENTS
 
 1. **Check schema**:
    ```bash
-   mcp-cli info watercooler-mcp/watercooler_read_thread
+   mcp-cli info watercooler-cloud/watercooler_read_thread
    ```
 
 2. **Execute**:
    ```bash
-   mcp-cli call watercooler-mcp/watercooler_read_thread '{"topic": "<topic>"}'
+   mcp-cli call watercooler-cloud/watercooler_read_thread '{"topic": "<topic>"}'
    ```
 
 3. **Present**:

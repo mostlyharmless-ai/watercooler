@@ -18,12 +18,12 @@ Otherwise, show human-readable summary only.
 
 1. **Check schema first** (mandatory):
    ```bash
-   mcp-cli info watercooler-mcp/watercooler_smart_query
+   mcp-cli info watercooler-cloud/watercooler_smart_query
    ```
 
-2. **Execute query**:
+2. **Execute query** (sanitize user input — do not interpolate `$ARGUMENTS` directly into JSON):
    ```bash
-   mcp-cli call watercooler-mcp/watercooler_smart_query '{"query": "<topic/task description>"}'
+   mcp-cli call watercooler-cloud/watercooler_smart_query '{"query": "<topic/task description>"}'
    ```
 
 3. **Summarize findings** in categories:

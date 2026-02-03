@@ -13,12 +13,12 @@ Question: $ARGUMENTS
 
 1. **Check schema first** (mandatory):
    ```bash
-   mcp-cli info watercooler-mcp/watercooler_smart_query
+   mcp-cli info watercooler-cloud/watercooler_smart_query
    ```
 
 2. **Execute query**:
    ```bash
-   mcp-cli call watercooler-mcp/watercooler_smart_query '{"query": "<natural language question>"}'
+   mcp-cli call watercooler-cloud/watercooler_smart_query '{"query": "<natural language question>"}'
    ```
 
 3. **Present answer** with:

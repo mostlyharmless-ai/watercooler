@@ -251,16 +251,24 @@ Convert abstract URL to PDF:
 - `arxiv.org/abs/XXXX.XXXXX` → `https://arxiv.org/pdf/XXXX.XXXXX.pdf`
 
 ```bash
-curl -L -o "docs/<author>-<year>-<short-title>.pdf" "https://arxiv.org/pdf/<id>.pdf"
+curl -L --max-filesize 50000000 --max-redirs 3 -o "docs/<author>-<year>-<short-title>.pdf" "https://arxiv.org/pdf/<id>.pdf"
 ```
 
 ### 6.3 Download Direct PDFs
 
 ```bash
-curl -L -o "docs/<author>-<year>-<short-title>.pdf" "<url>"
+curl -L --max-filesize 50000000 --max-redirs 3 -o "docs/<author>-<year>-<short-title>.pdf" "<url>"
 ```
 
-### 6.4 Note Paywalled Sources
+### 6.4 Download Safety
+
+- **Always** use `--max-filesize 50000000` (50MB) to prevent unbounded downloads
+- **Always** use `--max-redirs 3` to prevent redirect loops
+- **Only download from trusted domains**: arxiv.org, openreview.net, aclanthology.org, proceedings.mlr.press
+- **Validate filenames**: Reject paths containing `..` or absolute paths
+- **Never** interpolate user input directly into shell commands — use variables or `jq` for JSON construction
+
+### 6.5 Note Paywalled Sources
 
 Cannot auto-download — report to user:
 - IEEE Xplore (`ieeexplore.ieee.org`)
@@ -268,7 +276,7 @@ Cannot auto-download — report to user:
 - Springer (`link.springer.com`)
 - Elsevier (`sciencedirect.com`)
 
-### 6.5 Naming Convention
+### 6.6 Naming Convention
 
 `<first-author-lastname>-<year>-<short-title>.pdf`
 

@@ -24,14 +24,17 @@ Parse these filters from arguments:
 
 1. **Parse arguments** into filters and query text
 
+   Extract filter tokens (key:value pairs) and collect remaining text as the query.
+   Only include filter keys that were explicitly provided — omit keys with no value.
+
 2. **Check schema**:
    ```bash
-   mcp-cli info watercooler-mcp/watercooler_search
+   mcp-cli info watercooler-cloud/watercooler_search
    ```
 
 3. **Build and execute search**:
    ```bash
-   mcp-cli call watercooler-mcp/watercooler_search '{
+   mcp-cli call watercooler-cloud/watercooler_search '{
      "query": "<search text>",
      "mode": "entries",
      "filters": {
