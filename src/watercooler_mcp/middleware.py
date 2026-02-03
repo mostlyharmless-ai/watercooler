@@ -9,6 +9,7 @@ import sys
 import json
 import time
 from typing import Callable, TypeVar
+from urllib.parse import urlparse
 
 from .config import (
     ThreadContext,
@@ -34,6 +35,33 @@ from .helpers import _should_auto_branch, _build_commit_footers
 # structural data first, then projects to markdown. Enrichment (summaries/embeddings)
 # runs after the structural write if services are available.
 
+# Service availability cache (TTL-based to avoid HTTP checks on every write)
+_SERVICE_CACHE_TTL_SECONDS = 60.0  # Cache results for 60 seconds
+_service_availability_cache: dict[str, tuple[bool, bool, float]] = {}
+# Key format: f"{llm_base}|{embed_base}", Value: (llm_available, embed_available, timestamp)
+
+
+def _is_anthropic_url(url: str | None) -> bool:
+    """Check if URL is an Anthropic API endpoint using proper URL parsing.
+
+    Args:
+        url: API base URL to check
+
+    Returns:
+        True if the URL hostname ends with 'anthropic.com'
+    """
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        hostname_lower = hostname.lower()
+        return hostname_lower == "anthropic.com" or hostname_lower.endswith(".anthropic.com")
+    except Exception:
+        return False
+
 
 def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
     """Check which enrichment services are available.
@@ -58,6 +86,19 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
     if not graph_config.generate_summaries and not graph_config.generate_embeddings:
         return (False, False)
 
+    # Build cache key from service URLs
+    llm_base_for_cache = getattr(graph_config, 'summarizer_api_base', '') or ''
+    embed_base_for_cache = getattr(graph_config, 'embedding_api_base', '') or ''
+    cache_key = f"{llm_base_for_cache}|{embed_base_for_cache}"
+
+    # Check cache first (avoid HTTP requests on every write)
+    now = time.time()
+    if cache_key in _service_availability_cache:
+        cached_llm, cached_embed, cached_time = _service_availability_cache[cache_key]
+        if now - cached_time < _SERVICE_CACHE_TTL_SECONDS:
+            log_debug(f"[GRAPH] Using cached service availability (age: {now - cached_time:.1f}s)")
+            return (cached_llm, cached_embed)
+
     llm_available = False
     embed_available = False
 
@@ -73,7 +114,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
             if llm_base:
                 try:
                     headers = {}
-                    is_anthropic = "anthropic.com" in llm_base.lower()
+                    is_anthropic = _is_anthropic_url(llm_base)
                     # Add auth header for external APIs (not needed for local llama-server)
                     if llm_api_key and llm_api_key not in ("", "local"):
                         if is_anthropic:
@@ -131,6 +172,8 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                 except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError):
                     log_debug(f"[GRAPH] Cannot connect to embedding service at {embed_base}")
 
+        # Cache the result
+        _service_availability_cache[cache_key] = (llm_available, embed_available, time.time())
         return (llm_available, embed_available)
     except (ImportError, AttributeError, ValueError, OSError) as e:
         # ImportError: config modules missing
@@ -138,6 +181,8 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
         # ValueError: config parsing failed
         # OSError: network/file issues
         log_debug(f"[GRAPH] Service check failed: {e}")
+        # Cache the failure too (to avoid retrying immediately)
+        _service_availability_cache[cache_key] = (False, False, time.time())
         return (False, False)
 
 

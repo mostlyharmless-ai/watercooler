@@ -207,19 +207,27 @@ def _migrate_json_to_toml(json_path: Path, toml_path: Path) -> bool:
         return False
 
     try:
-        # Check file size to prevent OOM from maliciously large files
-        file_size = json_path.stat().st_size
-        if file_size > _MAX_JSON_SIZE_BYTES:
+        # Check if migration already in progress or completed (prevents race condition)
+        backup_path = json_path.with_suffix(".json.bak")
+        if backup_path.exists():
+            # Another process already migrated, skip
+            return False
+
+        # Use bounded read to prevent OOM from maliciously large files
+        # (TOCTOU-safe: read limited bytes, then check actual size)
+        with open(json_path, "r") as f:
+            content = f.read(_MAX_JSON_SIZE_BYTES + 1)
+
+        if len(content) > _MAX_JSON_SIZE_BYTES:
             warnings.warn(
-                f"Credentials file too large ({file_size} bytes). "
+                f"Credentials file too large (>{_MAX_JSON_SIZE_BYTES} bytes). "
                 f"Maximum allowed: {_MAX_JSON_SIZE_BYTES} bytes. Skipping migration.",
                 UserWarning,
             )
             return False
 
-        # Read JSON
-        with open(json_path, "r") as f:
-            data = json.load(f)
+        # Parse JSON from bounded content
+        data = json.loads(content)
 
         # Convert to TOML structure
         toml_data: Dict[str, Any] = {}
@@ -275,8 +283,7 @@ def _migrate_json_to_toml(json_path: Path, toml_path: Path) -> bool:
         # Secure permissions
         _secure_file_permissions(toml_path)
 
-        # Rename old file to .bak
-        backup_path = json_path.with_suffix(".json.bak")
+        # Rename old file to .bak (backup_path defined at start of function)
         json_path.rename(backup_path)
 
         return True

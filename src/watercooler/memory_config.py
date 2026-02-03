@@ -12,12 +12,16 @@ regardless of whether it's set via environment variables or TOML files.
 
 from __future__ import annotations
 
+import logging
 import os
 import warnings
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 from .config_facade import config
+
+logger = logging.getLogger(__name__)
 
 
 def _redact_key(key: str) -> str:
@@ -176,44 +180,121 @@ def get_memory_backend() -> str:
     return os.getenv("WATERCOOLER_MEMORY_BACKEND") or config.full().memory.backend
 
 
-def _get_provider_api_key(api_base: str) -> str | None:
-    """Get provider-specific API key based on api_base URL.
+# =============================================================================
+# Provider Detection (shared by LLM and Embedding config resolution)
+# =============================================================================
 
-    Priority:
-    1. Provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
-    2. Provider-specific credentials.toml section
+# Provider domain mappings for URL-based detection
+# Maps hostname suffixes to (provider_name, env_var_name)
+_LLM_PROVIDER_DOMAINS: dict[str, tuple[str, str]] = {
+    "openai.com": ("openai", "OPENAI_API_KEY"),
+    "openai.azure.com": ("openai", "OPENAI_API_KEY"),
+    "anthropic.com": ("anthropic", "ANTHROPIC_API_KEY"),
+    "googleapis.com": ("google", "GOOGLE_API_KEY"),
+    "generativelanguage.googleapis.com": ("google", "GOOGLE_API_KEY"),
+    "groq.com": ("groq", "GROQ_API_KEY"),
+    "deepseek.com": ("deepseek", "DEEPSEEK_API_KEY"),
+}
+
+_EMBEDDING_PROVIDER_DOMAINS: dict[str, tuple[str, str]] = {
+    "openai.com": ("openai", "OPENAI_API_KEY"),
+    "openai.azure.com": ("openai", "OPENAI_API_KEY"),
+    "voyageai.com": ("voyage", "VOYAGE_API_KEY"),
+    "googleapis.com": ("google", "GOOGLE_API_KEY"),
+    "generativelanguage.googleapis.com": ("google", "GOOGLE_API_KEY"),
+}
+
+
+def _validate_api_url(url: str | None) -> str | None:
+    """Validate that a string is a valid HTTP(S) URL.
+
+    Args:
+        url: URL string to validate
+
+    Returns:
+        The URL if valid, None if invalid or empty
+
+    Logs a warning for invalid URLs (helps users catch typos).
+    """
+    if not url:
+        return None
+
+    try:
+        parsed = urlparse(url)
+        # Must have scheme and netloc (hostname)
+        if parsed.scheme not in ("http", "https"):
+            logger.warning(f"Invalid URL scheme '{parsed.scheme}' in: {url}")
+            return None
+        if not parsed.netloc:
+            logger.warning(f"Missing hostname in URL: {url}")
+            return None
+        return url
+    except Exception as e:
+        logger.warning(f"Failed to parse URL '{url}': {e}")
+        return None
+
+
+def _detect_provider_from_url(
+    api_base: str | None,
+    provider_domains: dict[str, tuple[str, str]],
+) -> tuple[str | None, str | None]:
+    """Detect provider and env var name from API base URL.
+
+    Uses proper URL parsing to extract hostname and match against known
+    provider domains. This is safer than substring matching which could
+    have false positives (e.g., 'not-openai.com.evil.net').
+
+    Args:
+        api_base: The API base URL to analyze
+        provider_domains: Mapping of domain suffixes to (provider, env_var)
+
+    Returns:
+        Tuple of (provider_name, env_var_name), or (None, None) if not detected
+    """
+    if not api_base:
+        return (None, None)
+
+    try:
+        parsed = urlparse(api_base)
+        hostname = parsed.hostname
+        if not hostname:
+            return (None, None)
+
+        hostname_lower = hostname.lower()
+
+        # Check each known provider domain
+        for domain_suffix, (provider, env_key) in provider_domains.items():
+            # Match exact domain or subdomain (e.g., 'api.openai.com' ends with 'openai.com')
+            if hostname_lower == domain_suffix or hostname_lower.endswith(f".{domain_suffix}"):
+                return (provider, env_key)
+
+        # No match - log debug for non-localhost URLs (helps catch typos)
+        if not hostname_lower.startswith("localhost") and not hostname_lower.startswith("127."):
+            logger.debug(f"Unknown provider for URL: {api_base}")
+
+        return (None, None)
+    except Exception:
+        return (None, None)
+
+
+def _get_provider_api_key_impl(
+    api_base: str | None,
+    provider_domains: dict[str, tuple[str, str]],
+) -> str | None:
+    """Shared implementation for getting provider API key.
 
     Args:
         api_base: The resolved API base URL
+        provider_domains: Mapping of domain suffixes to (provider, env_var)
 
     Returns:
         API key from env var or credentials.toml, or None if not found
     """
     from .credentials import get_provider_api_key as get_creds_api_key
 
-    api_base_lower = api_base.lower() if api_base else ""
+    provider, env_key = _detect_provider_from_url(api_base, provider_domains)
 
-    # Detect provider and env key from URL
-    provider = None
-    env_key = None
-
-    if "openai.com" in api_base_lower or "openai.azure.com" in api_base_lower:
-        provider = "openai"
-        env_key = "OPENAI_API_KEY"
-    elif "anthropic.com" in api_base_lower:
-        provider = "anthropic"
-        env_key = "ANTHROPIC_API_KEY"
-    elif "googleapis.com" in api_base_lower or "generativelanguage" in api_base_lower:
-        provider = "google"
-        env_key = "GOOGLE_API_KEY"
-    elif "groq.com" in api_base_lower:
-        provider = "groq"
-        env_key = "GROQ_API_KEY"
-    elif "deepseek.com" in api_base_lower:
-        provider = "deepseek"
-        env_key = "DEEPSEEK_API_KEY"
-
-    if not provider:
+    if not provider or not env_key:
         return None
 
     # 1. Check provider-specific env var first
@@ -233,6 +314,21 @@ def _get_provider_api_key(api_base: str) -> str | None:
         return key
 
     return None
+
+
+def _get_provider_api_key(api_base: str | None) -> str | None:
+    """Get provider-specific API key for LLM based on api_base URL.
+
+    Uses proper URL parsing for secure provider detection.
+    See _LLM_PROVIDER_DOMAINS for supported providers.
+
+    Args:
+        api_base: The resolved API base URL
+
+    Returns:
+        API key from env var or credentials.toml, or None if not found
+    """
+    return _get_provider_api_key_impl(api_base, _LLM_PROVIDER_DOMAINS)
 
 
 def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
@@ -320,12 +416,11 @@ def resolve_llm_config(backend: str = "graphiti") -> ResolvedLLMConfig:
     )
 
 
-def _get_embedding_provider_api_key(api_base: str) -> str | None:
+def _get_embedding_provider_api_key(api_base: str | None) -> str | None:
     """Get provider-specific API key for embeddings based on api_base URL.
 
-    Priority:
-    1. Provider-specific env vars (OPENAI_API_KEY, VOYAGE_API_KEY, etc.)
-    2. Provider-specific credentials.toml section
+    Uses proper URL parsing for secure provider detection.
+    See _EMBEDDING_PROVIDER_DOMAINS for supported providers.
 
     Args:
         api_base: The resolved API base URL
@@ -333,44 +428,7 @@ def _get_embedding_provider_api_key(api_base: str) -> str | None:
     Returns:
         API key from env var or credentials.toml, or None if not found
     """
-    from .credentials import get_provider_api_key as get_creds_api_key
-
-    api_base_lower = api_base.lower() if api_base else ""
-
-    # Detect provider and env key from URL
-    provider = None
-    env_key = None
-
-    if "openai.com" in api_base_lower or "openai.azure.com" in api_base_lower:
-        provider = "openai"
-        env_key = "OPENAI_API_KEY"
-    elif "voyageai.com" in api_base_lower:
-        provider = "voyage"
-        env_key = "VOYAGE_API_KEY"
-    elif "googleapis.com" in api_base_lower or "generativelanguage" in api_base_lower:
-        provider = "google"
-        env_key = "GOOGLE_API_KEY"
-
-    if not provider:
-        return None
-
-    # 1. Check provider-specific env var first
-    key = os.getenv(env_key)
-    if key:
-        return key
-
-    # Also check GEMINI_API_KEY as fallback for Google
-    if provider == "google":
-        key = os.getenv("GEMINI_API_KEY")
-        if key:
-            return key
-
-    # 2. Check credentials.toml
-    key = get_creds_api_key(provider)
-    if key:
-        return key
-
-    return None
+    return _get_provider_api_key_impl(api_base, _EMBEDDING_PROVIDER_DOMAINS)
 
 
 def resolve_embedding_config(backend: str = "graphiti") -> ResolvedEmbeddingConfig:
