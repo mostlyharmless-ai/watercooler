@@ -862,6 +862,7 @@ def _load_thread_context_for_arc_check(
         ball=meta.get("ball"),
         entries=parsed_entries,
         summary=meta.get("summary"),
+        last_updated=meta.get("last_updated", ""),
     )
 
     return parsed, new_entry_parsed
