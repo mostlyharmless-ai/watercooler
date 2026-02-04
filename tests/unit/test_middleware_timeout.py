@@ -101,7 +101,7 @@ async def test_fast_tool_completes_normally():
 
 
 @pytest.mark.anyio
-async def test_timeout_raises_descriptive_error():
+async def test_timeout_raises_descriptive_error(monkeypatch):
     """Tool exceeding timeout should raise TimeoutError with descriptive message."""
 
     async def run(self, arguments):
@@ -112,17 +112,13 @@ async def test_timeout_raises_descriptive_error():
     _instrument(Tool)
     tool = Tool("watercooler_health")
 
-    original_default = _mw._DEFAULT_TOOL_TIMEOUT
-    _mw._DEFAULT_TOOL_TIMEOUT = 0.05
-    try:
-        with pytest.raises(TimeoutError, match=r"Tool 'watercooler_health' timed out"):
-            await Tool.run(tool, {})
-    finally:
-        _mw._DEFAULT_TOOL_TIMEOUT = original_default
+    monkeypatch.setattr(_mw, "_DEFAULT_TOOL_TIMEOUT", 0.05)
+    with pytest.raises(TimeoutError, match=r"Tool 'watercooler_health' timed out"):
+        await Tool.run(tool, {})
 
 
 @pytest.mark.anyio
-async def test_timeout_error_message_includes_server_alive():
+async def test_timeout_error_message_includes_server_alive(monkeypatch):
     """Timeout error message should mention server is still running."""
 
     async def run(self, arguments):
@@ -133,17 +129,12 @@ async def test_timeout_error_message_includes_server_alive():
     _instrument(Tool)
     tool = Tool("watercooler_graph_health")
 
-    original_timeout = _TOOL_TIMEOUTS.get("watercooler_graph_health")
-    _TOOL_TIMEOUTS["watercooler_graph_health"] = 0.05
-    try:
-        with pytest.raises(TimeoutError) as exc_info:
-            await Tool.run(tool, {})
-        msg = str(exc_info.value)
-        assert "watercooler_graph_health" in msg
-        assert "server is still running" in msg
-    finally:
-        if original_timeout is not None:
-            _TOOL_TIMEOUTS["watercooler_graph_health"] = original_timeout
+    monkeypatch.setitem(_mw._TOOL_TIMEOUTS, "watercooler_graph_health", 0.05)
+    with pytest.raises(TimeoutError) as exc_info:
+        await Tool.run(tool, {})
+    msg = str(exc_info.value)
+    assert "watercooler_graph_health" in msg
+    assert "server is still running" in msg
 
 
 @pytest.mark.anyio
@@ -195,7 +186,7 @@ async def test_default_timeout_applies_for_unmapped_tool():
 
 
 @pytest.mark.anyio
-async def test_timeout_logged_via_log_action():
+async def test_timeout_logged_via_log_action(monkeypatch):
     """Timeout events should be logged with outcome='timeout' and timeout_s."""
 
     async def run(self, arguments):
@@ -206,31 +197,25 @@ async def test_timeout_logged_via_log_action():
     _instrument(Tool)
     tool = Tool("watercooler_health")
 
-    original_default = _mw._DEFAULT_TOOL_TIMEOUT
-    _mw._DEFAULT_TOOL_TIMEOUT = 0.05
+    monkeypatch.setattr(_mw, "_DEFAULT_TOOL_TIMEOUT", 0.05)
 
     logged_calls = []
-    original_log_action = _mw.log_action
 
     def capture_log_action(*args, **kwargs):
         logged_calls.append((args, kwargs))
 
-    _mw.log_action = capture_log_action
-    try:
-        with pytest.raises(TimeoutError):
-            await Tool.run(tool, {})
+    monkeypatch.setattr(_mw, "log_action", capture_log_action)
+    with pytest.raises(TimeoutError):
+        await Tool.run(tool, {})
 
-        tool_logs = [
-            (a, kw) for a, kw in logged_calls if a and a[0] == "mcp.tool"
-        ]
-        assert len(tool_logs) == 1
-        _, kwargs = tool_logs[0]
-        assert kwargs["outcome"] == "timeout"
-        assert kwargs["timeout_s"] == 0.05
-        assert kwargs["tool_name"] == "watercooler_health"
-    finally:
-        _mw._DEFAULT_TOOL_TIMEOUT = original_default
-        _mw.log_action = original_log_action
+    tool_logs = [
+        (a, kw) for a, kw in logged_calls if a and a[0] == "mcp.tool"
+    ]
+    assert len(tool_logs) == 1
+    _, kwargs = tool_logs[0]
+    assert kwargs["outcome"] == "timeout"
+    assert kwargs["timeout_s"] == 0.05
+    assert kwargs["tool_name"] == "watercooler_health"
 
 
 @pytest.mark.anyio

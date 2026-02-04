@@ -106,7 +106,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                     headers = {}
                     is_anthropic = is_anthropic_url(llm_base)
                     # Add auth header for external APIs (not needed for local llama-server)
-                    if llm_api_key and llm_api_key not in ("", "local"):
+                    if llm_api_key and llm_api_key not in ("", "local", "LOCAL_NO_KEY"):
                         if is_anthropic:
                             # Anthropic uses x-api-key header
                             headers["x-api-key"] = llm_api_key
@@ -151,7 +151,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                 try:
                     headers = {}
                     # Add auth header for external APIs (not needed for local llama-server)
-                    if embed_api_key and embed_api_key not in ("", "local"):
+                    if embed_api_key and embed_api_key not in ("", "local", "LOCAL_NO_KEY"):
                         headers["Authorization"] = f"Bearer {embed_api_key}"
                     with httpx.Client(timeout=5.0) as client:
                         url = f"{embed_base.rstrip('/')}/models"
@@ -230,7 +230,12 @@ def setup_instrumentation() -> None:
                 )
                 return result
             except asyncio.TimeoutError:
+                # asyncio.wait_for cancels the wrapped coroutine on timeout.
+                # This is safe: current tools are stateless HTTP calls with no
+                # partial-commit cleanup needed.
                 outcome = "timeout"
+                # On Python 3.11+ asyncio.TimeoutError IS TimeoutError, but we
+                # re-raise as TimeoutError explicitly for 3.10 compat and clarity.
                 raise TimeoutError(
                     f"Tool '{tool_name}' timed out after {timeout:.0f}s. "
                     f"The server is still running. You can retry or try a "
