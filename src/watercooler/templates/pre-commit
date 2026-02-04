@@ -2,6 +2,8 @@
 # Watercooler pre-commit hook for threads repositories
 # Prevents committing files that exceed GitHub's 100MB limit
 
+set -e
+
 # Configuration
 MAX_FILE_SIZE_MB=100
 WARN_FILE_SIZE_MB=50
@@ -13,9 +15,12 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Track if we should block the commit
-BLOCK_COMMIT=0
-WARNED=0
+# Create secure temp file for signaling (avoids race conditions)
+BLOCK_FLAG=$(mktemp "${TMPDIR:-/tmp}/watercooler-precommit.XXXXXX")
+trap 'rm -f "$BLOCK_FLAG"' EXIT
+
+# Initialize flag file as empty (no block)
+echo "0" > "$BLOCK_FLAG"
 
 # Get list of files staged for commit (using -z for null-delimited output)
 # This handles filenames with spaces, newlines, and special characters
@@ -50,30 +55,17 @@ echo -n "$STAGED_FILES" | while IFS= read -r -d '' FILE; do
         echo "GitHub rejects files larger than 100MB."
         echo "Consider using Git LFS or adding to .gitignore."
         echo ""
-        BLOCK_COMMIT=1
+        # Signal block via temp file
+        echo "1" > "$BLOCK_FLAG"
     elif [ "$FILE_SIZE" -gt "$WARN_FILE_SIZE_BYTES" ]; then
         FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
         echo -e "${YELLOW}WARNING: Large file detected:${NC}"
         echo -e "  ${FILE} (${FILE_SIZE_MB}MB)"
-        WARNED=1
     fi
 done
 
-# Note: Variables set in subshell (while loop) don't persist.
-# Re-check by running the same logic in main shell for the final decision.
-BLOCK_COMMIT=0
-echo -n "$STAGED_FILES" | while IFS= read -r -d '' FILE; do
-    if [ -f "$FILE" ]; then
-        FILE_SIZE=$(wc -c < "$FILE" 2>/dev/null | tr -d ' ')
-        if [ -n "$FILE_SIZE" ] && [ "$FILE_SIZE" -gt "$MAX_FILE_SIZE_BYTES" ]; then
-            # Use a flag file to signal blocking since we're in a subshell
-            touch /tmp/.watercooler_block_commit_$$
-        fi
-    fi
-done
-
-if [ -f /tmp/.watercooler_block_commit_$$ ]; then
-    rm -f /tmp/.watercooler_block_commit_$$
+# Check if we should block
+if [ "$(cat "$BLOCK_FLAG")" = "1" ]; then
     echo -e "${RED}Commit blocked due to oversized files.${NC}"
     echo ""
     echo "To bypass this check (not recommended):"

@@ -48,9 +48,14 @@ def get_template_path(template_name: str) -> Path:
 
     Returns:
         Path to the template file
+
+    Note:
+        Uses files("watercooler").joinpath("templates") because there's both
+        a templates.py module and a templates/ directory in the watercooler
+        package. Using "watercooler.templates" would conflict with the module.
     """
-    templates = files("watercooler.templates")
-    return templates.joinpath(template_name)  # type: ignore
+    watercooler_pkg = files("watercooler")
+    return watercooler_pkg.joinpath("templates", template_name)  # type: ignore
 
 
 def ensure_gitignore(repo_path: Path) -> Tuple[bool, List[str]]:
