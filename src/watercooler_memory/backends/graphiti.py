@@ -1783,7 +1783,8 @@ class GraphitiBackend(MemoryBackend):
         for result in results:
             result.setdefault("id", result.get("uuid"))  # Required by CoreResult
             result.setdefault("backend", "graphiti")  # Required by CoreResult
-            result.setdefault("content", None)  # Facts don't have content
+            result.setdefault("content", result.get("fact"))  # Map fact text to content
+            result.setdefault("name", result.get("fact", "")[:100] if result.get("fact") else None)
             result.setdefault("source", None)  # Source tracking not applicable to edges
             result.setdefault("metadata", {})  # Additional metadata
             result.setdefault("extra", {})  # Backend-specific fields
@@ -2002,7 +2003,9 @@ class GraphitiBackend(MemoryBackend):
                 
                 results.append({
                     "uuid": edge.uuid,
+                    "name": edge.name,  # Relation name (e.g. "IMPLEMENTS")
                     "fact": edge.fact,
+                    "content": edge.fact,  # CoreResult-compliant: map fact text to content
                     "source_node_uuid": edge.source_node_uuid,
                     "target_node_uuid": edge.target_node_uuid,
                     "valid_at": edge.valid_at.isoformat() if edge.valid_at else None,

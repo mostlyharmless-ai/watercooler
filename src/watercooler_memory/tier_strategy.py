@@ -592,7 +592,7 @@ def _query_t2(
             evidence.append(TierEvidence(
                 tier=Tier.T2,
                 id=fact.get("id", ""),
-                content=fact.get("content") or fact.get("summary", ""),
+                content=fact.get("content") or fact.get("fact") or fact.get("summary", ""),
                 score=fact.get("score", 0.0) or 0.0,
                 name=fact.get("name"),
                 provenance={
@@ -698,7 +698,7 @@ def _query_t3(
             evidence.append(TierEvidence(
                 tier=Tier.T3,
                 id=fact.get("id", ""),
-                content=fact.get("content") or fact.get("summary", ""),
+                content=fact.get("content") or fact.get("fact") or fact.get("summary", ""),
                 score=fact.get("score", 0.0) or 0.0,
                 name=fact.get("name"),
                 provenance={
