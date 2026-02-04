@@ -78,6 +78,7 @@ from watercooler.baseline_graph.summarizer import (
     summarize_entry,
     summarize_thread,
 )
+from watercooler.memory_config import AUTH_SKIP_SENTINELS
 from watercooler.path_resolver import derive_group_id
 
 logger = logging.getLogger(__name__)
@@ -291,7 +292,7 @@ def is_embedding_available(config: Optional[EmbeddingConfig] = None) -> bool:
         url = f"{config.api_base.rstrip('/')}/models"
         headers = {}
         # Add auth header for external APIs (not needed for local llama-server)
-        if config.api_key and config.api_key not in ("", "local", "LOCAL_NO_KEY"):
+        if config.api_key and config.api_key not in AUTH_SKIP_SENTINELS:
             headers["Authorization"] = f"Bearer {config.api_key}"
         with httpx.Client(timeout=5.0) as client:
             response = client.get(url, headers=headers)
@@ -322,7 +323,7 @@ def generate_embedding(
 
         # Add auth header for external APIs (not needed for local llama-server)
         headers = {"Content-Type": "application/json"}
-        if config.api_key and config.api_key not in ("", "local", "LOCAL_NO_KEY"):
+        if config.api_key and config.api_key not in AUTH_SKIP_SENTINELS:
             headers["Authorization"] = f"Bearer {config.api_key}"
 
         with httpx.Client(timeout=config.timeout) as client:

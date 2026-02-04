@@ -266,6 +266,8 @@ class GraphitiConfig:
 
         return cls(
             llm_api_key=llm.api_key,
+            # Pass through any resolved URL; converts empty string to None so
+            # the graphiti_core client applies its own default (api.openai.com).
             llm_api_base=llm.api_base or None,
             llm_model=llm.model,
             embedding_api_key=embedding.api_key,

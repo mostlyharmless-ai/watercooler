@@ -169,10 +169,10 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
 
     return GraphitiConfig(
         llm_api_key=llm_api_key,
-        llm_api_base=llm.api_base if llm.api_base != "https://api.openai.com/v1" else None,
+        llm_api_base=llm.api_base or None,
         llm_model=llm.model,
         embedding_api_key=embedding_api_key,
-        embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
+        embedding_api_base=embedding.api_base or None,
         embedding_model=embedding.model,
         falkordb_host=db.host,
         falkordb_port=db.port,

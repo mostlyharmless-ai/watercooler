@@ -11,7 +11,7 @@ import json
 import time
 from typing import Callable, TypeVar
 
-from watercooler.memory_config import is_anthropic_url
+from watercooler.memory_config import is_anthropic_url, AUTH_SKIP_SENTINELS
 
 from .config import (
     ThreadContext,
@@ -106,7 +106,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                     headers = {}
                     is_anthropic = is_anthropic_url(llm_base)
                     # Add auth header for external APIs (not needed for local llama-server)
-                    if llm_api_key and llm_api_key not in ("", "local", "LOCAL_NO_KEY"):
+                    if llm_api_key and llm_api_key not in AUTH_SKIP_SENTINELS:
                         if is_anthropic:
                             # Anthropic uses x-api-key header
                             headers["x-api-key"] = llm_api_key
@@ -151,7 +151,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                 try:
                     headers = {}
                     # Add auth header for external APIs (not needed for local llama-server)
-                    if embed_api_key and embed_api_key not in ("", "local", "LOCAL_NO_KEY"):
+                    if embed_api_key and embed_api_key not in AUTH_SKIP_SENTINELS:
                         headers["Authorization"] = f"Bearer {embed_api_key}"
                     with httpx.Client(timeout=5.0) as client:
                         url = f"{embed_base.rstrip('/')}/models"
@@ -417,9 +417,13 @@ def run_with_sync(
                 # Always sync to memory backend, independent of enrichment.
                 # This ensures Graphiti/LeanRAG indexing runs on every write,
                 # even when enrichment is skipped, disabled, or fails.
+                #
+                # Safety: enrichment (above) is synchronous and completes before
+                # this point, so the graph entry is fully written when we read it.
                 try:
                     from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
-                    sync_entry_to_memory_backend(context.threads_dir, topic, entry_id)
+                    if sync_entry_to_memory_backend(context.threads_dir, topic, entry_id):
+                        log_debug(f"[GRAPH] Memory sync submitted for {topic}/{entry_id}")
                 except Exception as mem_err:
                     log_warning(f"[GRAPH] Memory sync failed for {topic}/{entry_id}: {mem_err}")
 
