@@ -7,6 +7,27 @@ from typing import Generator
 
 import pytest
 
+# Re-export testing utilities from watercooler.testing
+# These are now available to all tests via conftest.py
+from watercooler.testing import (
+    clean_config,
+    isolated_config,
+    mock_env_vars,
+    mock_watercooler_env,
+    temp_config,
+    temp_threads_dir,
+)
+
+# Make pytest aware of these fixtures
+__all__ = [
+    "clean_config",
+    "isolated_config",
+    "mock_env_vars",
+    "mock_watercooler_env",
+    "temp_config",
+    "temp_threads_dir",
+]
+
 
 def pytest_sessionstart(session):  # type: ignore[override]
     root = Path(__file__).resolve().parents[1]

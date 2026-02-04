@@ -229,23 +229,34 @@ def mock_watercooler_env():
 
 
 @pytest.fixture
-def isolated_config(tmp_path):
+def isolated_config(tmp_path, monkeypatch):
     """Provide completely isolated config for testing.
 
     Creates temporary directories for threads, templates,
-    and config files. Useful for integration tests.
+    and config files. Redirects HOME to prevent user config
+    from affecting tests. Useful for integration tests.
+
+    This fixture provides comprehensive isolation:
+    - Creates .watercooler dir to stop upward config search
+    - Redirects HOME to temp dir (no user config loaded)
+    - Clears XDG_CONFIG_HOME
+    - Sets WATERCOOLER_DIR and WATERCOOLER_TEMPLATES
+    - Resets config cache before and after
 
     Args:
         tmp_path: pytest's tmp_path fixture
+        monkeypatch: pytest's monkeypatch fixture
 
     Yields:
-        dict: Paths for threads_dir, templates_dir, config_dir
+        dict: Paths for threads_dir, templates_dir, config_dir, tmp_path
 
     Example:
         def test_integration(isolated_config):
             threads_dir = isolated_config["threads_dir"]
-            # Work with isolated environment
+            # Work with completely isolated environment
     """
+    from .config_facade import config
+
     # Create isolated directories
     threads_dir = tmp_path / "threads"
     templates_dir = tmp_path / "templates"
@@ -255,15 +266,22 @@ def isolated_config(tmp_path):
     templates_dir.mkdir()
     config_dir.mkdir()
 
+    # Redirect HOME to temp dir so no user config is loaded
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Clear XDG dirs that might be checked
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
     # Set up environment
     with mock_env_vars(
         WATERCOOLER_DIR=str(threads_dir),
         WATERCOOLER_TEMPLATES=str(templates_dir)
     ):
         with temp_config(threads_dir=threads_dir):
+            config.reset()
             yield {
                 "threads_dir": threads_dir,
                 "templates_dir": templates_dir,
                 "config_dir": config_dir,
                 "tmp_path": tmp_path
             }
+            config.reset()
