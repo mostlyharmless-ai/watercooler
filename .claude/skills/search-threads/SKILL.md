@@ -49,12 +49,16 @@ jq -n \
   --arg topic "<thread or empty>" \
   --arg after "<after or empty>" \
   --arg before "<before or empty>" \
+  --arg status "<status or empty>" \
+  --arg agent "<agent or empty>" \
   '{query: $q, mode: "entries"} +
    (if $role != "" then {filters: {role: $role}} else {} end) +
    (if $type != "" then {filters: {type: $type}} else {} end) +
    (if $topic != "" then {filters: {topic: $topic}} else {} end) +
    (if $after != "" then {filters: {after: $after}} else {} end) +
-   (if $before != "" then {filters: {before: $before}} else {} end)'
+   (if $before != "" then {filters: {before: $before}} else {} end) +
+   (if $status != "" then {filters: {status: $status}} else {} end) +
+   (if $agent != "" then {filters: {agent: $agent}} else {} end)'
 ```
 
 ## Steps
