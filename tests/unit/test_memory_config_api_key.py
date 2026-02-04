@@ -16,24 +16,8 @@ import pytest
 from watercooler.memory_config import _is_localhost_url
 from watercooler_mcp import memory
 
-
-@pytest.fixture
-def isolated_config(tmp_path, monkeypatch, clean_api_keys):
-    """Isolate tests from user AND project config.
-
-    Prevents user's ~/.watercooler/config.toml from affecting tests
-    and stops project config discovery walking up to user's home.
-    """
-    watercooler_dir = tmp_path / ".watercooler"
-    watercooler_dir.mkdir()
-
-    from watercooler.config_facade import config
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    monkeypatch.chdir(tmp_path)
-    config.reset()
-    yield tmp_path
-    config.reset()
+# Note: isolated_config fixture is provided by conftest.py (from watercooler.testing)
+# Tests that need API key clearing should also use clean_api_keys fixture
 
 
 class TestIsLocalhostUrl:
@@ -85,7 +69,7 @@ class TestIsLocalhostUrl:
 class TestLocalhostLlmNoKeyRequired:
     """Test that localhost LLM endpoints don't require API keys."""
 
-    def test_localhost_llm_no_key_succeeds(self, monkeypatch, isolated_config):
+    def test_localhost_llm_no_key_succeeds(self, monkeypatch, isolated_config, clean_api_keys):
         """load_graphiti_config() succeeds with localhost LLM + no key."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
@@ -99,7 +83,7 @@ class TestLocalhostLlmNoKeyRequired:
         assert result is not None
         assert result.llm_api_key == "LOCAL_NO_KEY"
 
-    def test_localhost_127_llm_no_key_succeeds(self, monkeypatch, isolated_config):
+    def test_localhost_127_llm_no_key_succeeds(self, monkeypatch, isolated_config, clean_api_keys):
         """load_graphiti_config() succeeds with 127.0.0.1 LLM + no key."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
@@ -116,7 +100,7 @@ class TestLocalhostLlmNoKeyRequired:
 class TestLocalhostEmbeddingNoKeyRequired:
     """Test that localhost embedding endpoints don't require API keys."""
 
-    def test_localhost_embedding_no_key_succeeds(self, monkeypatch, isolated_config):
+    def test_localhost_embedding_no_key_succeeds(self, monkeypatch, isolated_config, clean_api_keys):
         """load_graphiti_config() succeeds with localhost embedding + no key."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
@@ -129,7 +113,7 @@ class TestLocalhostEmbeddingNoKeyRequired:
         assert result is not None
         assert result.embedding_api_key == "LOCAL_NO_KEY"
 
-    def test_both_localhost_no_keys(self, monkeypatch, isolated_config):
+    def test_both_localhost_no_keys(self, monkeypatch, isolated_config, clean_api_keys):
         """load_graphiti_config() succeeds with both endpoints on localhost + no keys."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
@@ -148,7 +132,7 @@ class TestLocalhostEmbeddingNoKeyRequired:
 class TestRemoteEndpointRequiresKey:
     """Test that remote endpoints still require API keys."""
 
-    def test_remote_llm_no_key_returns_none(self, monkeypatch, isolated_config):
+    def test_remote_llm_no_key_returns_none(self, monkeypatch, isolated_config, clean_api_keys):
         """load_graphiti_config() returns None for remote LLM with no key."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
@@ -161,7 +145,7 @@ class TestRemoteEndpointRequiresKey:
         result = memory.load_graphiti_config()
         assert result is None
 
-    def test_remote_embedding_no_key_returns_none(self, monkeypatch, isolated_config):
+    def test_remote_embedding_no_key_returns_none(self, monkeypatch, isolated_config, clean_api_keys):
         """load_graphiti_config() returns None for remote embedding with no key."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
@@ -178,7 +162,7 @@ class TestRemoteEndpointRequiresKey:
 class TestDiagnoseMemoryErrorMessage:
     """Test that diagnose_memory error message references credentials.toml."""
 
-    def test_config_issue_references_credentials(self, monkeypatch, isolated_config):
+    def test_config_issue_references_credentials(self, monkeypatch, isolated_config, clean_api_keys):
         """config_issue message mentions credentials.toml, not config.toml api_key."""
         from watercooler.config_facade import config as cfg
         from watercooler_mcp.tools.memory import _diagnose_memory_impl

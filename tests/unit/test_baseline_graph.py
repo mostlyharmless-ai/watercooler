@@ -59,17 +59,13 @@ from watercooler.models import (
 class TestSummarizerConfig:
     """Tests for SummarizerConfig."""
 
-    def test_defaults(self, monkeypatch, tmp_path):
+    def test_defaults(self, monkeypatch, isolated_config):
         """Test default configuration values.
 
-        Uses isolated config to avoid loading user's ~/.watercooler/config.toml.
+        Uses isolated_config fixture to avoid loading user's ~/.watercooler/config.toml.
         """
-        # Isolate from user config
         from watercooler.config_facade import config
-        config_dir = tmp_path / ".watercooler"
-        config_dir.mkdir()
-        (config_dir / "config.toml").write_text("")
-        monkeypatch.setenv("HOME", str(tmp_path))
+
         # Clear env vars that might override defaults
         monkeypatch.delenv("LLM_API_BASE", raising=False)
         monkeypatch.delenv("LLM_MODEL", raising=False)
@@ -79,19 +75,16 @@ class TestSummarizerConfig:
         monkeypatch.delenv("BASELINE_GRAPH_API_KEY", raising=False)
         config.reset()
 
-        try:
-            summarizer_config = SummarizerConfig()
-            assert summarizer_config.api_base == "http://localhost:8000/v1"  # llama-server port
-            assert summarizer_config.model == "qwen3:1.7b"
-            assert summarizer_config.api_key == ""  # Empty for local llama-server
-            assert summarizer_config.timeout == 30.0
-            assert summarizer_config.max_tokens == 256
-            assert summarizer_config.extractive_max_chars == 200
-            assert summarizer_config.include_headers is True
-            assert summarizer_config.max_headers == 3
-            assert summarizer_config.prefer_extractive is False
-        finally:
-            config.reset()
+        summarizer_config = SummarizerConfig()
+        assert summarizer_config.api_base == "http://localhost:8000/v1"  # llama-server port
+        assert summarizer_config.model == "qwen3:1.7b"
+        assert summarizer_config.api_key == ""  # Empty for local llama-server
+        assert summarizer_config.timeout == 30.0
+        assert summarizer_config.max_tokens == 256
+        assert summarizer_config.extractive_max_chars == 200
+        assert summarizer_config.include_headers is True
+        assert summarizer_config.max_headers == 3
+        assert summarizer_config.prefer_extractive is False
 
     def test_from_config_dict(self):
         """Test creating config from dictionary."""
@@ -115,28 +108,22 @@ class TestSummarizerConfig:
         assert config.include_headers is False
         assert config.prefer_extractive is True
 
-    def test_from_config_dict_empty(self, monkeypatch, tmp_path):
+    def test_from_config_dict_empty(self, monkeypatch, isolated_config):
         """Test creating config from empty dictionary uses defaults.
 
-        Uses isolated config to avoid loading user's ~/.watercooler/config.toml.
+        Uses isolated_config fixture to avoid loading user's ~/.watercooler/config.toml.
         """
         from watercooler.config_facade import config
-        config_dir = tmp_path / ".watercooler"
-        config_dir.mkdir()
-        (config_dir / "config.toml").write_text("")
-        monkeypatch.setenv("HOME", str(tmp_path))
+
         monkeypatch.delenv("LLM_API_BASE", raising=False)
         monkeypatch.delenv("LLM_MODEL", raising=False)
         monkeypatch.delenv("BASELINE_GRAPH_API_BASE", raising=False)
         monkeypatch.delenv("BASELINE_GRAPH_MODEL", raising=False)
         config.reset()
 
-        try:
-            summarizer_config = SummarizerConfig.from_config_dict({})
-            assert summarizer_config.api_base == "http://localhost:8000/v1"  # llama-server port
-            assert summarizer_config.model == "qwen3:1.7b"
-        finally:
-            config.reset()
+        summarizer_config = SummarizerConfig.from_config_dict({})
+        assert summarizer_config.api_base == "http://localhost:8000/v1"  # llama-server port
+        assert summarizer_config.model == "qwen3:1.7b"
 
     def test_from_env(self):
         """Test creating config from environment variables."""

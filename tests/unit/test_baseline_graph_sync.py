@@ -789,47 +789,31 @@ def test_should_auto_start_services_disabled_by_default(monkeypatch):
     assert not _should_auto_start_services()
 
 
-def test_should_auto_start_services_enabled_via_env(monkeypatch, tmp_path):
+def test_should_auto_start_services_enabled_via_env(monkeypatch, isolated_config):
     """Test _should_auto_start_services returns True when env var set."""
     from watercooler.baseline_graph.sync import _should_auto_start_services
     from watercooler.config_facade import config
 
-    # Isolate from user config
-    config_dir = tmp_path / ".watercooler"
-    config_dir.mkdir()
-    (config_dir / "config.toml").write_text("")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    config.reset()
-
-    try:
-        for value in ["1", "true", "True", "TRUE", "yes", "YES"]:
-            monkeypatch.setenv("WATERCOOLER_AUTO_START_SERVICES", value)
-            assert _should_auto_start_services(), f"Expected True for {value}"
-    finally:
-        config.reset()
+    # isolated_config provides HOME redirect and config.reset()
+    for value in ["1", "true", "True", "TRUE", "yes", "YES"]:
+        monkeypatch.setenv("WATERCOOLER_AUTO_START_SERVICES", value)
+        config.reset()  # Reload config with new env var
+        assert _should_auto_start_services(), f"Expected True for {value}"
 
 
-def test_should_auto_start_services_disabled_for_other_values(monkeypatch, tmp_path):
+def test_should_auto_start_services_disabled_for_other_values(monkeypatch, isolated_config):
     """Test _should_auto_start_services returns False for non-truthy values."""
     from watercooler.baseline_graph.sync import _should_auto_start_services
     from watercooler.config_facade import config
 
-    # Isolate from user config
-    config_dir = tmp_path / ".watercooler"
-    config_dir.mkdir()
-    (config_dir / "config.toml").write_text("")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    config.reset()
-
-    try:
-        for value in ["0", "false", "no", "maybe"]:
-            monkeypatch.setenv("WATERCOOLER_AUTO_START_SERVICES", value)
-            assert not _should_auto_start_services(), f"Expected False for {value}"
-    finally:
-        config.reset()
+    # isolated_config provides HOME redirect and config.reset()
+    for value in ["0", "false", "no", "maybe"]:
+        monkeypatch.setenv("WATERCOOLER_AUTO_START_SERVICES", value)
+        config.reset()  # Reload config with new env var
+        assert not _should_auto_start_services(), f"Expected False for {value}"
 
 
-def test_should_auto_start_services_enabled_via_toml_config(monkeypatch, tmp_path):
+def test_should_auto_start_services_enabled_via_toml_config(monkeypatch, isolated_config):
     """Test _should_auto_start_services reads from TOML config when env var not set."""
     from watercooler.baseline_graph.sync import _should_auto_start_services
     from watercooler.config_facade import config
@@ -838,43 +822,29 @@ def test_should_auto_start_services_enabled_via_toml_config(monkeypatch, tmp_pat
     monkeypatch.delenv("WATERCOOLER_AUTO_START_SERVICES", raising=False)
 
     # Create a test config file with auto_start_services = true
-    config_dir = tmp_path / ".watercooler"
-    config_dir.mkdir()
-    config_file = config_dir / "config.toml"
+    config_file = isolated_config["config_dir"] / "config.toml"
     config_file.write_text("""
 [mcp.graph]
 auto_start_services = true
 """)
 
-    # Override HOME to use our temp config
-    monkeypatch.setenv("HOME", str(tmp_path))
-
     # Reset config cache to pick up new config
     config.reset()
 
-    try:
-        assert _should_auto_start_services(), "Expected True from TOML config"
-    finally:
-        # Reset again to restore normal state
-        config.reset()
+    assert _should_auto_start_services(), "Expected True from TOML config"
 
 
-def test_should_auto_start_services_env_overrides_toml(monkeypatch, tmp_path):
+def test_should_auto_start_services_env_overrides_toml(monkeypatch, isolated_config):
     """Test env var takes priority over TOML config."""
     from watercooler.baseline_graph.sync import _should_auto_start_services
     from watercooler.config_facade import config
 
     # Create a test config file with auto_start_services = true
-    config_dir = tmp_path / ".watercooler"
-    config_dir.mkdir()
-    config_file = config_dir / "config.toml"
+    config_file = isolated_config["config_dir"] / "config.toml"
     config_file.write_text("""
 [mcp.graph]
 auto_start_services = true
 """)
-
-    # Override HOME to use our temp config
-    monkeypatch.setenv("HOME", str(tmp_path))
 
     # Set env var to false - should override TOML
     monkeypatch.setenv("WATERCOOLER_AUTO_START_SERVICES", "false")
@@ -882,11 +852,7 @@ auto_start_services = true
     # Reset config cache to pick up new config
     config.reset()
 
-    try:
-        assert not _should_auto_start_services(), "Expected env var to override TOML"
-    finally:
-        # Reset again to restore normal state
-        config.reset()
+    assert not _should_auto_start_services(), "Expected env var to override TOML"
 
 
 def test_try_auto_start_service_disabled_returns_false(monkeypatch):
