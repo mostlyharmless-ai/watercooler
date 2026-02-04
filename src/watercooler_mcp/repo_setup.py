@@ -13,7 +13,6 @@ These safeguards prevent common issues like:
 
 from __future__ import annotations
 
-import os
 import stat
 from pathlib import Path
 from typing import List, Tuple
