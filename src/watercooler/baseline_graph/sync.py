@@ -1267,6 +1267,12 @@ def enrich_graph_entry(
         processes enrich the same topic concurrently. The lock is held during
         the read-modify-write cycle.
 
+    Execution Model:
+        This function runs synchronously. The middleware relies on this —
+        memory sync (sync_entry_to_memory_backend) reads the entry from
+        the graph after enrichment completes. If enrichment is ever made
+        async, the middleware call ordering must be revisited.
+
     Args:
         threads_dir: Threads directory
         topic: Thread topic
@@ -2973,7 +2979,7 @@ def sync_entry_to_memory_backend(
     try:
         entry_node = get_entry_node_from_graph(threads_dir, entry_id, topic)
         if not entry_node:
-            logger.debug(f"MEMORY: Entry not found for sync: {topic}/{entry_id}")
+            logger.warning(f"MEMORY: Entry not found in graph for sync: {topic}/{entry_id}")
             return False
         return sync_to_memory_backend(
             threads_dir=threads_dir,

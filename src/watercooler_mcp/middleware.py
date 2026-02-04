@@ -420,12 +420,10 @@ def run_with_sync(
                 #
                 # Safety: enrichment (above) is synchronous and completes before
                 # this point, so the graph entry is fully written when we read it.
-                try:
-                    from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
-                    if sync_entry_to_memory_backend(context.threads_dir, topic, entry_id):
-                        log_debug(f"[GRAPH] Memory sync submitted for {topic}/{entry_id}")
-                except Exception as mem_err:
-                    log_warning(f"[GRAPH] Memory sync failed for {topic}/{entry_id}: {mem_err}")
+                # The helper is defensive (catches all exceptions internally).
+                from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+                if sync_entry_to_memory_backend(context.threads_dir, topic, entry_id):
+                    log_debug(f"[GRAPH] Memory sync submitted for {topic}/{entry_id}")
 
             return result
 
