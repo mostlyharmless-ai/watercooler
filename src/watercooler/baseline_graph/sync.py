@@ -160,6 +160,7 @@ class EnrichResult:
             "threads_processed": self.threads_processed,
             "entries_processed": self.entries_processed,
             "summaries_generated": self.summaries_generated,
+            "thread_summaries_generated": self.thread_summaries_generated,
             "embeddings_generated": self.embeddings_generated,
             "skipped": self.skipped,
             "errors": self.errors[:20],  # Limit errors in output
