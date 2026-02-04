@@ -132,6 +132,11 @@ def stub_local_memory_servers(monkeypatch: pytest.MonkeyPatch) -> Generator[None
     monkeypatch.setenv("DEEPSEEK_API_KEY", "not-needed-for-local")
     monkeypatch.setenv("DEEPSEEK_MODEL", "local")
 
+    # FalkorDB config (local instance, no auth for local dev)
+    monkeypatch.setenv("FALKORDB_HOST", "localhost")
+    monkeypatch.setenv("FALKORDB_PORT", "6379")
+    monkeypatch.setenv("FALKORDB_PASSWORD", "")
+
     yield
 
 

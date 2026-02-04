@@ -370,12 +370,17 @@ class TestLeanRAGSmoke:
     """Smoke tests for LeanRAG backend with real FalkorDB."""
 
     @pytest.fixture
-    def leanrag_backend(self, tmp_path: Path) -> Generator[LeanRAGBackend, None, None]:
+    def leanrag_backend(
+        self, tmp_path: Path, stub_local_memory_servers
+    ) -> Generator[LeanRAGBackend, None, None]:
         """LeanRAG backend with unique working directory per test for isolation.
 
         Uses pytest's tmp_path fixture to create a unique directory per test.
         This avoids Milvus-lite file lock issues that occur when multiple tests
         share the same work directory.
+
+        Uses stub_local_memory_servers to set required env vars (GLM_MODEL, etc.)
+        that LeanRAG's config.yaml substitution requires.
 
         Why unique directories per test:
         - Milvus-lite uses SQLite under the hood with file locks
@@ -410,7 +415,13 @@ class TestLeanRAGSmoke:
             print(f"FalkorDB cleanup skipped: {e}")
 
         config = LeanRAGConfig(work_dir=work_dir, test_mode=True)
-        backend = LeanRAGBackend(config)
+        try:
+            backend = LeanRAGBackend(config)
+        except ValueError as e:
+            # LeanRAG's config.yaml has many required env vars without defaults
+            if "Environment variable" in str(e) and "is not set" in str(e):
+                pytest.skip(f"LeanRAG environment not fully configured: {e}")
+            raise
 
         print(f"\n*** LeanRAG working directory: {work_dir.absolute()} ***\n")
 
@@ -568,6 +579,7 @@ class TestGraphitiSmoke:
         from watercooler_memory.backends.graphiti import (
             GraphitiBackend,
             GraphitiConfig,
+            ConfigError,
         )
 
         # Ensure OpenAI API key is set (required for Graphiti)
@@ -575,7 +587,13 @@ class TestGraphitiSmoke:
             pytest.skip("OPENAI_API_KEY not set - required for Graphiti")
 
         config = GraphitiConfig(work_dir=tmp_path / "pytest__graphiti_work", test_mode=True)
-        backend = GraphitiBackend(config)
+        try:
+            backend = GraphitiBackend(config)
+        except ConfigError as e:
+            # Graphiti requires neo4j module and other dependencies
+            if "No module named" in str(e):
+                pytest.skip(f"Graphiti dependencies not installed: {e}")
+            raise
         yield backend
 
     def test_healthcheck(self, graphiti_backend):
@@ -923,7 +941,8 @@ class TestMultiBackendComparison:
         reason="Backend comparison requires both backends fully implemented",
     )
     def test_same_query_both_backends(
-        self, minimal_corpus, minimal_chunks, sample_queries, tmp_path
+        self, minimal_corpus, minimal_chunks, sample_queries, tmp_path,
+        stub_local_memory_servers
     ):
         """Same query should return results from both backends."""
         import os
@@ -942,7 +961,8 @@ class TestMultiBackendComparison:
             leanrag = LeanRAGBackend(
                 LeanRAGConfig(work_dir=tmp_path / "leanrag", test_mode=True)
             )
-        except (ConfigError, FileNotFoundError) as e:
+        except (ConfigError, FileNotFoundError, ValueError) as e:
+            # ValueError from LeanRAG config.yaml env var substitution
             pytest.skip(f"LeanRAG backend not available: {e}")
 
         try:

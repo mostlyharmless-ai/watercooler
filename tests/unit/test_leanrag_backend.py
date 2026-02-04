@@ -538,11 +538,16 @@ class TestApplyConfigToEnv:
 
     def test_sets_env_vars_from_config(self, tmp_path, monkeypatch):
         """Test that config values are bridged to LeanRAG's expected env vars."""
-        # Clear any existing env vars
+        # Clear any existing env vars (both LeanRAG vars and standard Watercooler vars
+        # that get bridged by _apply_config_to_env)
         env_vars_to_clear = [
+            # LeanRAG-specific vars
             "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL",
             "GLM_BASE_URL", "GLM_MODEL",
             "FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD",
+            # Standard Watercooler vars that bridge to LeanRAG vars
+            "LLM_API_KEY", "LLM_MODEL", "LLM_API_BASE",
+            "EMBEDDING_MODEL", "EMBEDDING_API_BASE",
         ]
         for var in env_vars_to_clear:
             monkeypatch.delenv(var, raising=False)
@@ -620,11 +625,15 @@ class TestApplyConfigToEnv:
 
     def test_skips_none_values(self, tmp_path, monkeypatch):
         """Test that None config values don't set env vars."""
-        # Clear all env vars
+        # Clear all env vars (both LeanRAG and standard Watercooler vars)
         env_vars_to_clear = [
+            # LeanRAG-specific vars
             "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL",
             "GLM_BASE_URL", "GLM_MODEL",
             "FALKORDB_PASSWORD",
+            # Standard Watercooler vars that bridge to LeanRAG vars
+            "LLM_API_KEY", "LLM_MODEL", "LLM_API_BASE",
+            "EMBEDDING_MODEL", "EMBEDDING_API_BASE",
         ]
         for var in env_vars_to_clear:
             monkeypatch.delenv(var, raising=False)

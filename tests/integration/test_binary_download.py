@@ -214,7 +214,7 @@ class TestDownloadIntegration:
         os.environ.get("CI") == "true",
         reason="Skip large download in CI"
     )
-    def test_full_download_verify_cycle(self, tmp_path, monkeypatch):
+    def test_full_download_verify_cycle(self, isolated_config, monkeypatch):
         """Test complete download and verification of llama-server.
 
         This downloads the actual binary and verifies the checksum.
@@ -229,10 +229,9 @@ class TestDownloadIntegration:
         monkeypatch.setenv("WATERCOOLER_LLAMA_SERVER_VERIFY", "strict")
         monkeypatch.setenv("WATERCOOLER_LLAMA_SERVER_RELEASE", "b7896")
 
-        # Override bin directory by redirecting HOME
-        # The download function uses Path.home() / ".watercooler" / "bin"
-        monkeypatch.setenv("HOME", str(tmp_path))
-        bin_dir = tmp_path / ".watercooler" / "bin"
+        # isolated_config already sets HOME to tmp_path, so Path.home() / ".watercooler" / "bin"
+        # will resolve correctly
+        bin_dir = isolated_config["tmp_path"] / ".watercooler" / "bin"
 
         try:
             result = _download_llama_server()
