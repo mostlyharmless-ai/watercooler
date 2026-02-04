@@ -79,10 +79,12 @@ class TestLoadGraphitiConfig:
         assert result is None
 
     def test_load_config_missing_embedding_api_key(self, monkeypatch, isolated_config):
-        """Test config loading fails gracefully without EMBEDDING_API_KEY (and no fallback)."""
+        """Test config loading fails gracefully without EMBEDDING_API_KEY for remote endpoint."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
+        # Use a remote endpoint so localhost tolerance doesn't apply
+        monkeypatch.setenv("EMBEDDING_API_BASE", "https://api.openai.com/v1")
         monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # Clear fallback too
         cfg.reset()  # Force reload with new env vars
