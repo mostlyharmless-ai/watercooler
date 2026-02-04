@@ -277,3 +277,69 @@ class TestGraphitiConfigWithIndex:
         """Test disabling index tracking."""
         config = GraphitiConfig(track_entry_episodes=False)
         assert config.track_entry_episodes is False
+
+
+class TestGraphitiConfigFromUnified:
+    """Test GraphitiConfig.from_unified() URL passthrough behavior."""
+
+    def _make_resolved_llm(self, api_base: str = "https://api.openai.com/v1"):
+        """Build a mock ResolvedLLMConfig."""
+        mock = MagicMock()
+        mock.api_key = "sk-test"
+        mock.api_base = api_base
+        mock.model = "gpt-4o-mini"
+        return mock
+
+    def _make_resolved_embedding(self, api_base: str = "https://api.openai.com/v1"):
+        """Build a mock ResolvedEmbeddingConfig."""
+        mock = MagicMock()
+        mock.api_key = "sk-test"
+        mock.api_base = api_base
+        mock.model = "text-embedding-3-small"
+        mock.dim = 1024
+        return mock
+
+    def _make_resolved_db(self):
+        """Build a mock ResolvedDatabaseConfig."""
+        mock = MagicMock()
+        mock.host = "localhost"
+        mock.port = 6379
+        mock.username = ""
+        mock.password = ""
+        return mock
+
+    def test_from_unified_preserves_openai_url(self):
+        """from_unified() must not strip the OpenAI base URL to None."""
+        with patch("watercooler.memory_config.resolve_llm_config", return_value=self._make_resolved_llm("https://api.openai.com/v1")), \
+             patch("watercooler.memory_config.resolve_embedding_config", return_value=self._make_resolved_embedding("https://api.openai.com/v1")), \
+             patch("watercooler.memory_config.resolve_database_config", return_value=self._make_resolved_db()), \
+             patch("watercooler.memory_config.get_graphiti_reranker", return_value="rrf"), \
+             patch("watercooler.memory_config.get_graphiti_track_entry_episodes", return_value=True):
+            config = GraphitiConfig.from_unified()
+
+        assert config.llm_api_base == "https://api.openai.com/v1"
+        assert config.embedding_api_base == "https://api.openai.com/v1"
+
+    def test_from_unified_preserves_custom_url(self):
+        """from_unified() preserves non-OpenAI base URLs."""
+        with patch("watercooler.memory_config.resolve_llm_config", return_value=self._make_resolved_llm("http://localhost:8000/v1")), \
+             patch("watercooler.memory_config.resolve_embedding_config", return_value=self._make_resolved_embedding("http://localhost:8080/v1")), \
+             patch("watercooler.memory_config.resolve_database_config", return_value=self._make_resolved_db()), \
+             patch("watercooler.memory_config.get_graphiti_reranker", return_value="rrf"), \
+             patch("watercooler.memory_config.get_graphiti_track_entry_episodes", return_value=True):
+            config = GraphitiConfig.from_unified()
+
+        assert config.llm_api_base == "http://localhost:8000/v1"
+        assert config.embedding_api_base == "http://localhost:8080/v1"
+
+    def test_from_unified_empty_url_becomes_none(self):
+        """from_unified() converts empty string api_base to None."""
+        with patch("watercooler.memory_config.resolve_llm_config", return_value=self._make_resolved_llm("")), \
+             patch("watercooler.memory_config.resolve_embedding_config", return_value=self._make_resolved_embedding("")), \
+             patch("watercooler.memory_config.resolve_database_config", return_value=self._make_resolved_db()), \
+             patch("watercooler.memory_config.get_graphiti_reranker", return_value="rrf"), \
+             patch("watercooler.memory_config.get_graphiti_track_entry_episodes", return_value=True):
+            config = GraphitiConfig.from_unified()
+
+        assert config.llm_api_base is None
+        assert config.embedding_api_base is None

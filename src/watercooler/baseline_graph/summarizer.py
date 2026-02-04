@@ -182,7 +182,7 @@ def is_llm_service_available(config: Optional[SummarizerConfig] = None) -> bool:
         headers = {}
 
         # Add auth header for external APIs (not needed for local llama-server)
-        if config.api_key and config.api_key not in ("", "local"):
+        if config.api_key and config.api_key not in ("", "local", "LOCAL_NO_KEY"):
             if is_anthropic:
                 # Anthropic uses x-api-key header
                 headers["x-api-key"] = config.api_key
@@ -442,7 +442,7 @@ def _call_llm(
         "Content-Type": "application/json",
     }
     # Add authorization header for non-local endpoints (local llama-server doesn't need it)
-    if config.api_key and config.api_key not in ("", "local"):
+    if config.api_key and config.api_key not in ("", "local", "LOCAL_NO_KEY"):
         headers["Authorization"] = f"Bearer {config.api_key}"
 
     try:
