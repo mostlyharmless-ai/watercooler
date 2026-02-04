@@ -78,6 +78,7 @@ from watercooler.baseline_graph.summarizer import (
     summarize_entry,
     summarize_thread,
 )
+from watercooler.memory_config import AUTH_SKIP_SENTINELS
 from watercooler.path_resolver import derive_group_id
 
 logger = logging.getLogger(__name__)
@@ -291,7 +292,7 @@ def is_embedding_available(config: Optional[EmbeddingConfig] = None) -> bool:
         url = f"{config.api_base.rstrip('/')}/models"
         headers = {}
         # Add auth header for external APIs (not needed for local llama-server)
-        if config.api_key and config.api_key not in ("", "local"):
+        if config.api_key and config.api_key not in AUTH_SKIP_SENTINELS:
             headers["Authorization"] = f"Bearer {config.api_key}"
         with httpx.Client(timeout=5.0) as client:
             response = client.get(url, headers=headers)
@@ -322,7 +323,7 @@ def generate_embedding(
 
         # Add auth header for external APIs (not needed for local llama-server)
         headers = {"Content-Type": "application/json"}
-        if config.api_key and config.api_key not in ("", "local"):
+        if config.api_key and config.api_key not in AUTH_SKIP_SENTINELS:
             headers["Authorization"] = f"Bearer {config.api_key}"
 
         with httpx.Client(timeout=config.timeout) as client:
@@ -1266,6 +1267,12 @@ def enrich_graph_entry(
         processes enrich the same topic concurrently. The lock is held during
         the read-modify-write cycle.
 
+    Execution Model:
+        This function runs synchronously. The middleware relies on this —
+        memory sync (sync_entry_to_memory_backend) reads the entry from
+        the graph after enrichment completes. If enrichment is ever made
+        async, the middleware call ordering must be revisited.
+
     Args:
         threads_dir: Threads directory
         topic: Thread topic
@@ -1416,19 +1423,10 @@ def enrich_graph_entry(
 
             logger.debug(f"Enrichment complete for {topic}/{entry_id}")
 
-        # Call memory backend hook (non-blocking - errors logged, never raise)
-        # This enables Graphiti/LeanRAG indexing after entry enrichment
-        sync_to_memory_backend(
-            threads_dir=threads_dir,
-            topic=topic,
-            entry_id=entry_id,
-            entry_body=body,
-            entry_title=title,
-            timestamp=entry_node.get("timestamp"),
-            agent=entry_node.get("agent"),
-            role=entry_node.get("role"),
-            entry_type=entry_type,
-        )
+        # NOTE: Memory backend sync (Graphiti/LeanRAG) is now handled by the
+        # middleware via sync_entry_to_memory_backend(), independent of enrichment.
+        # This ensures indexing runs on every write, even when enrichment is
+        # skipped or disabled.
 
         return EnrichmentResult(
             success=True,
@@ -2957,6 +2955,45 @@ def sync_to_memory_backend(
 
     except Exception as e:
         logger.warning(f"MEMORY: Sync failed for {topic}/{entry_id}: {e}")
+        return False
+
+
+def sync_entry_to_memory_backend(
+    threads_dir: Path,
+    topic: str,
+    entry_id: str,
+) -> bool:
+    """Sync an entry to the memory backend, reading data from the graph.
+
+    This is independent of enrichment — it ensures Graphiti/LeanRAG indexing
+    happens on every write, even when enrichment is skipped or disabled.
+
+    Args:
+        threads_dir: Threads directory
+        topic: Thread topic
+        entry_id: Entry ID to sync
+
+    Returns:
+        True if sync was submitted, False if entry not found or sync disabled
+    """
+    try:
+        entry_node = get_entry_node_from_graph(threads_dir, entry_id, topic)
+        if not entry_node:
+            logger.warning(f"MEMORY: Entry not found in graph for sync: {topic}/{entry_id}")
+            return False
+        return sync_to_memory_backend(
+            threads_dir=threads_dir,
+            topic=topic,
+            entry_id=entry_id,
+            entry_body=entry_node.get("body", ""),
+            entry_title=entry_node.get("title"),
+            timestamp=entry_node.get("timestamp"),
+            agent=entry_node.get("agent"),
+            role=entry_node.get("role"),
+            entry_type=entry_node.get("entry_type"),
+        )
+    except Exception as e:
+        logger.warning(f"MEMORY: sync_entry_to_memory_backend failed for {topic}/{entry_id}: {e}")
         return False
 
 

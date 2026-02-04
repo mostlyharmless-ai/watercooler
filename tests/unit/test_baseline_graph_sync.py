@@ -1687,3 +1687,183 @@ def test_should_update_thread_summary_no_embeddings_doesnt_trigger():
         previous_entry_embedding=None,
     )
     assert result is False
+
+
+# ============================================================================
+# Decoupled Memory Sync Tests (sync_entry_to_memory_backend)
+# ============================================================================
+
+
+def test_sync_entry_to_memory_backend_calls_sync(threads_dir: Path, sample_thread: Path, monkeypatch):
+    """Test sync_entry_to_memory_backend reads entry from graph and calls sync_to_memory_backend."""
+    from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+    # First, write the thread to graph so entry nodes exist
+    sync_thread_to_graph(threads_dir, "test-topic")
+
+    memory_calls = []
+
+    def mock_sync_to_memory(**kwargs):
+        memory_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.sync_to_memory_backend",
+        lambda **kwargs: mock_sync_to_memory(**kwargs),
+    )
+
+    result = sync_entry_to_memory_backend(
+        threads_dir, "test-topic", "01TEST00000000000000000001"
+    )
+
+    assert result is True
+    assert len(memory_calls) == 1
+    assert memory_calls[0]["topic"] == "test-topic"
+    assert memory_calls[0]["entry_id"] == "01TEST00000000000000000001"
+    assert "entry_body" in memory_calls[0]
+
+
+def test_sync_entry_to_memory_backend_missing_entry(threads_dir: Path, monkeypatch):
+    """Test sync_entry_to_memory_backend returns False for missing entry."""
+    from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+    result = sync_entry_to_memory_backend(
+        threads_dir, "nonexistent-topic", "nonexistent-entry"
+    )
+
+    assert result is False
+
+
+def test_sync_entry_to_memory_backend_handles_exception(threads_dir: Path, monkeypatch):
+    """Test sync_entry_to_memory_backend handles exceptions gracefully."""
+    from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+    def raise_error(*args, **kwargs):
+        raise RuntimeError("graph read error")
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.get_entry_node_from_graph",
+        raise_error,
+    )
+
+    result = sync_entry_to_memory_backend(threads_dir, "test-topic", "entry-1")
+
+    assert result is False
+
+
+def test_enrich_graph_entry_does_not_call_sync_to_memory(threads_dir: Path, sample_thread: Path, monkeypatch):
+    """Test enrich_graph_entry no longer calls sync_to_memory_backend directly.
+
+    Memory sync is now handled independently by the middleware via
+    sync_entry_to_memory_backend().
+    """
+    from watercooler.baseline_graph.sync import enrich_graph_entry
+
+    # Write the thread to graph first
+    sync_thread_to_graph(threads_dir, "test-topic")
+
+    memory_calls = []
+
+    def mock_sync_to_memory(*args, **kwargs):
+        memory_calls.append(True)
+        return True
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.sync_to_memory_backend",
+        mock_sync_to_memory,
+    )
+    # Mock services as unavailable so enrichment generates nothing
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.is_llm_service_available",
+        lambda config=None: False,
+    )
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.is_embedding_available",
+        lambda config=None: False,
+    )
+
+    result = enrich_graph_entry(
+        threads_dir=threads_dir,
+        topic="test-topic",
+        entry_id="01TEST00000000000000000001",
+        generate_summaries=True,
+        generate_embeddings=True,
+    )
+
+    # Enrichment returns noop (services unavailable)
+    assert result.is_noop
+    # sync_to_memory_backend should NOT have been called
+    assert len(memory_calls) == 0
+
+
+def test_enrich_graph_entry_with_services_does_not_call_sync_to_memory(
+    threads_dir: Path, sample_thread: Path, monkeypatch
+):
+    """Test enrich_graph_entry doesn't call sync_to_memory even when enrichment succeeds."""
+    from watercooler.baseline_graph.sync import enrich_graph_entry
+
+    # Write the thread to graph first
+    sync_thread_to_graph(threads_dir, "test-topic")
+
+    memory_calls = []
+
+    def mock_sync_to_memory(*args, **kwargs):
+        memory_calls.append(True)
+        return True
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.sync_to_memory_backend",
+        mock_sync_to_memory,
+    )
+    # Mock LLM as available and returning a summary
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.is_llm_service_available",
+        lambda config=None: True,
+    )
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.summarize_entry",
+        lambda *args, **kwargs: "mock summary for testing",
+    )
+    # No embeddings
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.is_embedding_available",
+        lambda config=None: False,
+    )
+
+    result = enrich_graph_entry(
+        threads_dir=threads_dir,
+        topic="test-topic",
+        entry_id="01TEST00000000000000000001",
+        generate_summaries=True,
+        generate_embeddings=False,
+    )
+
+    assert result.success
+    assert result.summary_generated
+    # sync_to_memory_backend should NOT have been called from enrich_graph_entry
+    assert len(memory_calls) == 0
+
+
+# ============================================================================
+# LOCAL_NO_KEY Sentinel Tests
+# ============================================================================
+
+
+def test_is_embedding_available_local_no_key_sentinel():
+    """Test is_embedding_available skips auth header for LOCAL_NO_KEY sentinel."""
+    config = EmbeddingConfig(
+        api_base="http://localhost:1/v1",
+        api_key="LOCAL_NO_KEY",
+    )
+    # Should return False (no server) but not crash due to auth header
+    assert not is_embedding_available(config)
+
+
+def test_is_llm_service_available_local_no_key_sentinel():
+    """Test is_llm_service_available skips auth header for LOCAL_NO_KEY sentinel."""
+    config = SummarizerConfig(
+        api_base="http://localhost:1/v1",
+        api_key="LOCAL_NO_KEY",
+    )
+    # Should return False (no server) but not crash due to auth header
+    assert not is_llm_service_available(config)

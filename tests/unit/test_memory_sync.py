@@ -791,3 +791,73 @@ class TestGraphitiSyncCallbackChunking:
 
                 # With chunking enabled, chunked should be called
                 mock_simple.assert_not_called()
+
+
+class TestSyncEntryToMemoryBackend:
+    """Tests for the sync_entry_to_memory_backend helper function."""
+
+    def test_returns_true_when_entry_exists(self, tmp_path, monkeypatch):
+        """Test sync_entry_to_memory_backend returns True when entry is found."""
+        from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+        # Mock get_entry_node_from_graph to return a valid entry
+        monkeypatch.setattr(
+            "watercooler.baseline_graph.sync.get_entry_node_from_graph",
+            lambda threads_dir, entry_id, topic: {
+                "body": "Test body",
+                "title": "Test title",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "agent": "claude",
+                "role": "implementer",
+                "entry_type": "Note",
+            },
+        )
+
+        sync_calls = []
+
+        def mock_sync(**kwargs):
+            sync_calls.append(kwargs)
+            return True
+
+        monkeypatch.setattr(
+            "watercooler.baseline_graph.sync.sync_to_memory_backend",
+            lambda **kwargs: mock_sync(**kwargs),
+        )
+
+        result = sync_entry_to_memory_backend(tmp_path, "test-topic", "entry-1")
+
+        assert result is True
+        assert len(sync_calls) == 1
+        assert sync_calls[0]["topic"] == "test-topic"
+        assert sync_calls[0]["entry_id"] == "entry-1"
+        assert sync_calls[0]["entry_body"] == "Test body"
+        assert sync_calls[0]["entry_title"] == "Test title"
+
+    def test_returns_false_when_entry_not_found(self, tmp_path, monkeypatch):
+        """Test sync_entry_to_memory_backend returns False for missing entries."""
+        from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+        monkeypatch.setattr(
+            "watercooler.baseline_graph.sync.get_entry_node_from_graph",
+            lambda threads_dir, entry_id, topic: None,
+        )
+
+        result = sync_entry_to_memory_backend(tmp_path, "test-topic", "missing-entry")
+
+        assert result is False
+
+    def test_handles_exception_gracefully(self, tmp_path, monkeypatch):
+        """Test sync_entry_to_memory_backend catches exceptions."""
+        from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+        def raise_error(*args, **kwargs):
+            raise RuntimeError("graph explosion")
+
+        monkeypatch.setattr(
+            "watercooler.baseline_graph.sync.get_entry_node_from_graph",
+            raise_error,
+        )
+
+        result = sync_entry_to_memory_backend(tmp_path, "test-topic", "entry-1")
+
+        assert result is False

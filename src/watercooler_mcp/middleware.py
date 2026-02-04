@@ -11,7 +11,7 @@ import json
 import time
 from typing import Callable, TypeVar
 
-from watercooler.memory_config import is_anthropic_url
+from watercooler.memory_config import is_anthropic_url, AUTH_SKIP_SENTINELS
 
 from .config import (
     ThreadContext,
@@ -106,7 +106,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                     headers = {}
                     is_anthropic = is_anthropic_url(llm_base)
                     # Add auth header for external APIs (not needed for local llama-server)
-                    if llm_api_key and llm_api_key not in ("", "local", "LOCAL_NO_KEY"):
+                    if llm_api_key and llm_api_key not in AUTH_SKIP_SENTINELS:
                         if is_anthropic:
                             # Anthropic uses x-api-key header
                             headers["x-api-key"] = llm_api_key
@@ -151,7 +151,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                 try:
                     headers = {}
                     # Add auth header for external APIs (not needed for local llama-server)
-                    if embed_api_key and embed_api_key not in ("", "local", "LOCAL_NO_KEY"):
+                    if embed_api_key and embed_api_key not in AUTH_SKIP_SENTINELS:
                         headers["Authorization"] = f"Bearer {embed_api_key}"
                     with httpx.Client(timeout=5.0) as client:
                         url = f"{embed_base.rstrip('/')}/models"
@@ -366,54 +366,64 @@ def run_with_sync(
 
                     if not wants_enrichment:
                         log_debug(f"[GRAPH] Enrichment not configured, skipping for {topic}/{entry_id}")
-                        return result
-
-                    llm_available, embed_available = _check_enrichment_services_available(graph_config)
-
-                    # Only attempt enrichment for services that are actually available
-                    do_summaries = graph_config.generate_summaries and llm_available
-                    do_embeddings = graph_config.generate_embeddings and embed_available
-
-                    if do_summaries or do_embeddings:
-                        # Run enrichment - add summaries/embeddings to existing entry
-                        from watercooler.baseline_graph.sync import enrich_graph_entry
-
-                        enrich_result = enrich_graph_entry(
-                            threads_dir=context.threads_dir,
-                            topic=topic,
-                            entry_id=entry_id,
-                            generate_summaries=do_summaries,
-                            generate_embeddings=do_embeddings,
-                        )
-                        if enrich_result.success:
-                            if enrich_result.is_noop:
-                                log_debug(f"[GRAPH] No enrichment needed for {topic}/{entry_id}")
-                            else:
-                                generated = []
-                                if enrich_result.summary_generated:
-                                    generated.append("summary")
-                                if enrich_result.embedding_generated:
-                                    generated.append("embedding")
-                                log_debug(f"[GRAPH] Enrichment complete for {topic}/{entry_id}: {', '.join(generated)}")
-                        else:
-                            log_warning(f"[GRAPH] Enrichment failed for {topic}/{entry_id}: {enrich_result.error_message}")
-
-                        # Log partial enrichment if some services were unavailable
-                        if graph_config.generate_summaries and not llm_available:
-                            log_debug(f"[GRAPH] LLM unavailable, skipping summary for {topic}/{entry_id}")
-                        if graph_config.generate_embeddings and not embed_available:
-                            log_debug(f"[GRAPH] Embedding service unavailable, skipping embedding for {topic}/{entry_id}")
                     else:
-                        # No services available - log and continue without enrichment
-                        # Entry is already saved (by graph-first write), just without
-                        # summaries/embeddings. Use watercooler_backfill_graph later.
-                        log_warning(
-                            f"[GRAPH] Enrichment services unavailable for {topic}/{entry_id}. "
-                            f"Entry saved without summary/embedding. Run backfill to add later."
-                        )
+                        llm_available, embed_available = _check_enrichment_services_available(graph_config)
+
+                        # Only attempt enrichment for services that are actually available
+                        do_summaries = graph_config.generate_summaries and llm_available
+                        do_embeddings = graph_config.generate_embeddings and embed_available
+
+                        if do_summaries or do_embeddings:
+                            # Run enrichment - add summaries/embeddings to existing entry
+                            from watercooler.baseline_graph.sync import enrich_graph_entry
+
+                            enrich_result = enrich_graph_entry(
+                                threads_dir=context.threads_dir,
+                                topic=topic,
+                                entry_id=entry_id,
+                                generate_summaries=do_summaries,
+                                generate_embeddings=do_embeddings,
+                            )
+                            if enrich_result.success:
+                                if enrich_result.is_noop:
+                                    log_debug(f"[GRAPH] No enrichment needed for {topic}/{entry_id}")
+                                else:
+                                    generated = []
+                                    if enrich_result.summary_generated:
+                                        generated.append("summary")
+                                    if enrich_result.embedding_generated:
+                                        generated.append("embedding")
+                                    log_debug(f"[GRAPH] Enrichment complete for {topic}/{entry_id}: {', '.join(generated)}")
+                            else:
+                                log_warning(f"[GRAPH] Enrichment failed for {topic}/{entry_id}: {enrich_result.error_message}")
+
+                            # Log partial enrichment if some services were unavailable
+                            if graph_config.generate_summaries and not llm_available:
+                                log_debug(f"[GRAPH] LLM unavailable, skipping summary for {topic}/{entry_id}")
+                            if graph_config.generate_embeddings and not embed_available:
+                                log_debug(f"[GRAPH] Embedding service unavailable, skipping embedding for {topic}/{entry_id}")
+                        else:
+                            # No services available - log and continue without enrichment
+                            # Entry is already saved (by graph-first write), just without
+                            # summaries/embeddings. Use watercooler_backfill_graph later.
+                            log_warning(
+                                f"[GRAPH] Enrichment services unavailable for {topic}/{entry_id}. "
+                                f"Entry saved without summary/embedding. Run backfill to add later."
+                            )
                 except Exception as graph_err:
                     # Enrichment failure is logged but doesn't block the write
                     log_warning(f"[GRAPH] Enrichment failed for {topic}/{entry_id}: {graph_err}")
+
+                # Always sync to memory backend, independent of enrichment.
+                # This ensures Graphiti/LeanRAG indexing runs on every write,
+                # even when enrichment is skipped, disabled, or fails.
+                #
+                # Safety: enrichment (above) is synchronous and completes before
+                # this point, so the graph entry is fully written when we read it.
+                # The helper is defensive (catches all exceptions internally).
+                from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+                if sync_entry_to_memory_backend(context.threads_dir, topic, entry_id):
+                    log_debug(f"[GRAPH] Memory sync submitted for {topic}/{entry_id}")
 
             return result
 

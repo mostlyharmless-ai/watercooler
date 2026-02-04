@@ -23,6 +23,11 @@ from .config_facade import config
 
 logger = logging.getLogger(__name__)
 
+# Sentinel values that indicate a local/test API key — skip auth headers for these.
+# Used across summarizer, sync, and middleware to avoid sending bogus Authorization
+# headers to local servers (llama.cpp, Ollama, etc.) that don't expect them.
+AUTH_SKIP_SENTINELS = ("", "local", "LOCAL_NO_KEY")
+
 
 def _redact_key(key: str) -> str:
     """Redact API key for safe logging/repr.

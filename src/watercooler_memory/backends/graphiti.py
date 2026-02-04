@@ -266,10 +266,12 @@ class GraphitiConfig:
 
         return cls(
             llm_api_key=llm.api_key,
-            llm_api_base=llm.api_base if llm.api_base != "https://api.openai.com/v1" else None,
+            # Pass through any resolved URL; converts empty string to None so
+            # the graphiti_core client applies its own default (api.openai.com).
+            llm_api_base=llm.api_base or None,
             llm_model=llm.model,
             embedding_api_key=embedding.api_key,
-            embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
+            embedding_api_base=embedding.api_base or None,
             embedding_model=embedding.model,
             embedding_dim=embedding.dim,
             falkordb_host=db.host,
