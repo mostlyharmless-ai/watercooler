@@ -631,6 +631,40 @@ def _try_auto_start_service(service_type: str, api_base: str) -> bool:
 # ============================================================================
 
 
+def _normalize_entry_id(entry_id: str) -> str:
+    """Normalize entry ID by removing 'entry:' prefix if present.
+
+    Args:
+        entry_id: Entry ID, possibly with 'entry:' prefix
+
+    Returns:
+        Clean entry ID without prefix
+    """
+    return entry_id.replace("entry:", "", 1) if entry_id.startswith("entry:") else entry_id
+
+
+def _entries_for_summarization(
+    entries: Dict[str, Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Convert graph entries to format suitable for thread summarization.
+
+    Args:
+        entries: Dict of entry nodes from graph storage
+
+    Returns:
+        List of entry dicts sorted by index, with fields needed for summarization
+    """
+    return [
+        {
+            "title": e.get("title", ""),
+            "body": e.get("summary") or e.get("body", ""),
+            "entry_type": e.get("entry_type", "Note"),
+            "agent": e.get("agent", ""),
+        }
+        for e in sorted(entries.values(), key=lambda x: x.get("index", 0))
+    ]
+
+
 def _get_embedding_divergence_threshold() -> float:
     """Get embedding divergence threshold from config.
 
@@ -646,17 +680,27 @@ def _get_embedding_divergence_threshold() -> float:
     env_val = os.environ.get("WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD", "")
     if env_val:
         try:
-            return float(env_val)
+            threshold = float(env_val)
+            if not (0.0 <= threshold <= 1.0):
+                logger.warning(
+                    f"Invalid WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD={threshold}, "
+                    f"must be 0.0-1.0. Using default 0.6."
+                )
+            else:
+                return threshold
         except ValueError:
-            pass
+            logger.warning(
+                f"Invalid WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD='{env_val}', "
+                f"must be numeric. Using default 0.6."
+            )
 
     # Fall back to TOML config
     try:
         from watercooler.config_facade import config
         cfg = config.full()
         return cfg.mcp.graph.embedding_divergence_threshold
-    except Exception:
-        pass
+    except (ImportError, AttributeError, KeyError) as e:
+        logger.debug(f"Could not load embedding_divergence_threshold from config: {e}")
 
     return 0.6  # Default
 
@@ -770,8 +814,8 @@ def _get_previous_entry_embedding(
     # Find current entry index
     current_index = None
     for eid, entry in entries.items():
-        entry_id_clean = eid.replace("entry:", "") if eid.startswith("entry:") else eid
-        if entry_id_clean == current_entry_id or eid == f"entry:{current_entry_id}":
+        entry_id_clean = _normalize_entry_id(eid)
+        if entry_id_clean == current_entry_id:
             current_index = entry.get("index")
             break
 
@@ -782,8 +826,8 @@ def _get_previous_entry_embedding(
     prev_entry_id = None
     for eid, entry in entries.items():
         if entry.get("index") == current_index - 1:
-            # Extract clean entry ID
-            prev_entry_id = eid.replace("entry:", "") if eid.startswith("entry:") else entry.get("entry_id", eid)
+            # Extract clean entry ID (prefer entry_id from data, fall back to key)
+            prev_entry_id = _normalize_entry_id(entry.get("entry_id") or eid)
             break
 
     if not prev_entry_id:
@@ -798,8 +842,8 @@ def _get_previous_entry_embedding(
             embedding = store.get_embedding(prev_entry_id)
             if embedding:
                 return embedding
-    except Exception:
-        pass
+    except (ImportError, ConnectionError, RuntimeError) as e:
+        logger.debug(f"FalkorDB unavailable for embedding lookup: {e}")
 
     # Fall back to search index
     for index_entry in storage.load_search_index(graph_dir):
@@ -836,7 +880,7 @@ def _load_thread_context_for_arc_check(
     new_entry_parsed = None
 
     for eid, entry_data in sorted(entries.items(), key=lambda x: x[1].get("index", 0)):
-        entry_id_clean = eid.replace("entry:", "") if eid.startswith("entry:") else entry_data.get("entry_id", eid)
+        entry_id_clean = _normalize_entry_id(entry_data.get("entry_id") or eid)
         pe = ParsedEntry(
             entry_id=entry_id_clean,
             agent=entry_data.get("agent", ""),
@@ -900,15 +944,7 @@ def regenerate_thread_summary(
         return False
 
     # Prepare entries for summarization, preferring existing entry summaries
-    entries_for_summary = [
-        {
-            "title": e.get("title", ""),
-            "body": e.get("summary") or e.get("body", ""),  # Use entry summary if available
-            "entry_type": e.get("entry_type", "Note"),
-            "agent": e.get("agent", ""),
-        }
-        for e in sorted(entries.values(), key=lambda x: x.get("index", 0))
-    ]
+    entries_for_summary = _entries_for_summarization(entries)
 
     new_summary = summarize_thread(
         entries_for_summary,
@@ -1360,15 +1396,7 @@ def enrich_graph_entry(
 
                         if update_thread_summary:
                             # Prepare entries for summarization
-                            entries_for_summary = [
-                                {
-                                    "title": e.get("title", ""),
-                                    "body": e.get("summary") or e.get("body", ""),
-                                    "entry_type": e.get("entry_type", "Note"),
-                                    "agent": e.get("agent", ""),
-                                }
-                                for e in sorted(entries.values(), key=lambda x: x.get("index", 0))
-                            ]
+                            entries_for_summary = _entries_for_summarization(entries)
                             new_thread_summary = summarize_thread(
                                 entries_for_summary,
                                 thread_title=meta.get("title", topic),
@@ -1377,7 +1405,7 @@ def enrich_graph_entry(
                             if new_thread_summary:
                                 meta["summary"] = new_thread_summary
                                 thread_summary_updated = True
-                                logger.debug(f"Updated thread summary for {topic} (arc change)")
+                                logger.info(f"Updated thread summary for {topic} (arc change)")
 
             # Write back atomically (summary only, not embedding)
             storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
@@ -1577,7 +1605,7 @@ def sync_entry_to_graph(
                     config=summarizer_config,
                 )
                 if parsed.summary:
-                    logger.debug(f"Updated thread summary for {topic} (arc change)")
+                    logger.info(f"Updated thread summary for {topic} (arc change)")
             elif prev_thread_summary:
                 # Preserve existing thread summary
                 parsed.summary = prev_thread_summary
