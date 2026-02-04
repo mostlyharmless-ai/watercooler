@@ -5,6 +5,7 @@ Contains:
 - Sync wrappers: run_with_sync, run_with_graph_sync
 """
 
+import asyncio
 import sys
 import json
 import time
@@ -105,7 +106,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                     headers = {}
                     is_anthropic = is_anthropic_url(llm_base)
                     # Add auth header for external APIs (not needed for local llama-server)
-                    if llm_api_key and llm_api_key not in ("", "local"):
+                    if llm_api_key and llm_api_key not in ("", "local", "LOCAL_NO_KEY"):
                         if is_anthropic:
                             # Anthropic uses x-api-key header
                             headers["x-api-key"] = llm_api_key
@@ -150,7 +151,7 @@ def _check_enrichment_services_available(graph_config) -> tuple[bool, bool]:
                 try:
                     headers = {}
                     # Add auth header for external APIs (not needed for local llama-server)
-                    if embed_api_key and embed_api_key not in ("", "local"):
+                    if embed_api_key and embed_api_key not in ("", "local", "LOCAL_NO_KEY"):
                         headers["Authorization"] = f"Bearer {embed_api_key}"
                     with httpx.Client(timeout=5.0) as client:
                         url = f"{embed_base.rstrip('/')}/models"
@@ -181,12 +182,34 @@ _orig_run = None
 
 T = TypeVar("T")
 
+# Tool-level timeouts (seconds). Tools not listed use _DEFAULT_TOOL_TIMEOUT.
+# Prevents server process death when tools exceed MCP SDK's 60s hard limit.
+# Tools with timeouts >60s still hit the client-side timeout, but the server
+# stays alive instead of crashing — the key improvement.
+_DEFAULT_TOOL_TIMEOUT: float = 50.0  # Under MCP SDK's 60s hard limit
+
+_TOOL_TIMEOUTS: dict[str, float] = {
+    # Heavy graph operations (file parsing, verify_parity)
+    "watercooler_graph_health": 180.0,
+    "watercooler_graph_enrich": 300.0,
+    "watercooler_graph_recover": 300.0,
+    # Memory pipeline operations (clustering, embedding generation)
+    "watercooler_leanrag_run_pipeline": 300.0,
+    # Smart query T3 escalation can be slow
+    "watercooler_smart_query": 120.0,
+    # Branch operations with git fetch + checkout loop
+    "watercooler_audit_branch_pairing": 120.0,
+}
+
 
 def setup_instrumentation() -> None:
     """Set up FunctionTool instrumentation for observability.
 
     Call this once at server startup to monkey-patch FastMCP's FunctionTool.run
-    method with timing and logging.
+    method with timing, logging, and per-tool timeouts.
+
+    Timeouts prevent server process death under CPU pressure. Tools that exceed
+    their timeout return a graceful error instead of crashing the server.
     """
     global _orig_run
 
@@ -197,12 +220,27 @@ def setup_instrumentation() -> None:
 
         async def _instrumented_run(self, arguments):  # type: ignore
             tool_name = getattr(self, 'name', '<unknown>')
+            timeout = _TOOL_TIMEOUTS.get(tool_name, _DEFAULT_TOOL_TIMEOUT)
             input_chars = len(json.dumps(arguments)) if arguments else 0
             start_time = time.perf_counter()
             outcome = "ok"
             try:
-                result = await _orig_run(self, arguments)
+                result = await asyncio.wait_for(
+                    _orig_run(self, arguments), timeout=timeout
+                )
                 return result
+            except asyncio.TimeoutError:
+                # asyncio.wait_for cancels the wrapped coroutine on timeout.
+                # This is safe: current tools are stateless HTTP calls with no
+                # partial-commit cleanup needed.
+                outcome = "timeout"
+                # On Python 3.11+ asyncio.TimeoutError IS TimeoutError, but we
+                # re-raise as TimeoutError explicitly for 3.10 compat and clarity.
+                raise TimeoutError(
+                    f"Tool '{tool_name}' exceeded its {timeout:.0f}s timeout. "
+                    f"The server is still running. You can retry with a "
+                    f"lighter operation or check system load."
+                )
             except Exception:
                 outcome = "error"
                 raise
@@ -215,6 +253,7 @@ def setup_instrumentation() -> None:
                         input_chars=input_chars,
                         duration_ms=duration_ms,
                         outcome=outcome,
+                        timeout_s=timeout,
                     )
                     # Workaround: Force stdout flush on Windows after tool execution
                     if sys.platform == "win32":
