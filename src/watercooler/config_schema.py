@@ -316,6 +316,20 @@ class GraphConfig(BaseModel):
         description="Auto-start LLM/embedding services if unavailable (requires ServerManager)",
     )
 
+    # Arc change detection for thread summaries
+    embedding_divergence_threshold: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Cosine similarity threshold for thread summary regeneration. "
+                    "When a new entry's embedding similarity to the previous entry "
+                    "falls below this threshold, it indicates a significant topic "
+                    "shift ('arc change') and triggers automatic thread summary "
+                    "regeneration. Lower values (0.4-0.5) reduce summary churn, "
+                    "higher values (0.7-0.8) trigger more responsive updates. "
+                    "Override with WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD env var.",
+    )
+
 
 class ServiceProvisionConfig(BaseModel):
     """Auto-provisioning configuration for external services.
