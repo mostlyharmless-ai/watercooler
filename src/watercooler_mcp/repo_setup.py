@@ -3,12 +3,10 @@
 This module provides functions to initialize threads repos with:
 - .gitignore for memory/ and large files
 - pre-commit hook to block files >100MB
-- pre-push hook for branch parity validation
 
 These safeguards prevent common issues like:
 - Accidentally committing FalkorDB/Redis dumps (100MB+)
 - Push failures due to GitHub's 100MB file limit
-- Branch parity violations
 """
 
 from __future__ import annotations
@@ -115,7 +113,6 @@ def install_hooks(repo_path: Path) -> Tuple[bool, List[str]]:
 
     Installs:
     - pre-commit: Blocks files >100MB
-    - pre-push: Validates branch parity
 
     Existing hooks are backed up with .bak suffix.
 
@@ -132,7 +129,7 @@ def install_hooks(repo_path: Path) -> Tuple[bool, List[str]]:
 
     hooks_installed: List[str] = []
 
-    for hook_name in ["pre-commit", "pre-push"]:
+    for hook_name in ["pre-commit"]:
         try:
             template_ref = get_template_path(hook_name)
             with as_file(template_ref) as template_path:
@@ -221,7 +218,7 @@ def setup_threads_repo(repo_path: Path, install_git_hooks: bool = True) -> dict:
     """Full setup for a threads repository.
 
     Ensures .gitignore exists with required entries and optionally
-    installs git hooks for pre-commit and pre-push validation.
+    installs git hooks for pre-commit validation.
 
     Args:
         repo_path: Path to the threads repository

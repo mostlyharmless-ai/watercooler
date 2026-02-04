@@ -17,8 +17,9 @@ NC='\033[0m' # No Color
 BLOCK_COMMIT=0
 WARNED=0
 
-# Get list of files staged for commit
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+# Get list of files staged for commit (using -z for null-delimited output)
+# This handles filenames with spaces, newlines, and special characters
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM -z)
 
 if [ -z "$STAGED_FILES" ]; then
     exit 0
@@ -26,14 +27,15 @@ fi
 
 echo "Checking staged files for size limits..."
 
-for FILE in $STAGED_FILES; do
+# Process null-delimited file list safely
+echo -n "$STAGED_FILES" | while IFS= read -r -d '' FILE; do
     # Skip if file doesn't exist (deleted file)
     if [ ! -f "$FILE" ]; then
         continue
     fi
 
-    # Get file size
-    FILE_SIZE=$(stat -f%z "$FILE" 2>/dev/null || stat -c%s "$FILE" 2>/dev/null)
+    # Get file size using wc -c (portable across macOS and Linux)
+    FILE_SIZE=$(wc -c < "$FILE" 2>/dev/null | tr -d ' ')
 
     if [ -z "$FILE_SIZE" ]; then
         continue
@@ -57,7 +59,21 @@ for FILE in $STAGED_FILES; do
     fi
 done
 
-if [ "$BLOCK_COMMIT" -eq 1 ]; then
+# Note: Variables set in subshell (while loop) don't persist.
+# Re-check by running the same logic in main shell for the final decision.
+BLOCK_COMMIT=0
+echo -n "$STAGED_FILES" | while IFS= read -r -d '' FILE; do
+    if [ -f "$FILE" ]; then
+        FILE_SIZE=$(wc -c < "$FILE" 2>/dev/null | tr -d ' ')
+        if [ -n "$FILE_SIZE" ] && [ "$FILE_SIZE" -gt "$MAX_FILE_SIZE_BYTES" ]; then
+            # Use a flag file to signal blocking since we're in a subshell
+            touch /tmp/.watercooler_block_commit_$$
+        fi
+    fi
+done
+
+if [ -f /tmp/.watercooler_block_commit_$$ ]; then
+    rm -f /tmp/.watercooler_block_commit_$$
     echo -e "${RED}Commit blocked due to oversized files.${NC}"
     echo ""
     echo "To bypass this check (not recommended):"
@@ -67,12 +83,6 @@ if [ "$BLOCK_COMMIT" -eq 1 ]; then
     echo "  echo 'memory/' >> .gitignore"
     echo "  git reset HEAD <file>"
     exit 1
-fi
-
-if [ "$WARNED" -eq 1 ]; then
-    echo ""
-    echo "Large files will slow down git operations."
-    echo "Consider using .gitignore for data files."
 fi
 
 exit 0
