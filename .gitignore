@@ -239,6 +239,9 @@ cloudflare-worker/.cache/
 # Secrets and sensitive data
 .secrets/
 
+# Serena project config and memories (local dev context)
+.serena/
+
 # Scratch/notes file
 .scratch.txt
 
