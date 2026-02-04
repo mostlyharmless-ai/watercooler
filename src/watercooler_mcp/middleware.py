@@ -237,9 +237,9 @@ def setup_instrumentation() -> None:
                 # On Python 3.11+ asyncio.TimeoutError IS TimeoutError, but we
                 # re-raise as TimeoutError explicitly for 3.10 compat and clarity.
                 raise TimeoutError(
-                    f"Tool '{tool_name}' timed out after {timeout:.0f}s. "
-                    f"The server is still running. You can retry or try a "
-                    f"lighter operation."
+                    f"Tool '{tool_name}' exceeded its {timeout:.0f}s timeout. "
+                    f"The server is still running. You can retry with a "
+                    f"lighter operation or check system load."
                 )
             except Exception:
                 outcome = "error"

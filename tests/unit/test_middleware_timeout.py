@@ -63,7 +63,7 @@ def test_default_timeout_applies_to_unknown_tool():
 
 @pytest.fixture(autouse=True)
 def _reset_orig_run():
-    """Reset _orig_run between tests."""
+    """Reset _orig_run between tests to prevent recursive wrapping."""
     saved = _mw._orig_run
     _mw._orig_run = None
     yield
@@ -113,7 +113,7 @@ async def test_timeout_raises_descriptive_error(monkeypatch):
     tool = Tool("watercooler_health")
 
     monkeypatch.setattr(_mw, "_DEFAULT_TOOL_TIMEOUT", 0.05)
-    with pytest.raises(TimeoutError, match=r"Tool 'watercooler_health' timed out"):
+    with pytest.raises(TimeoutError, match=r"Tool 'watercooler_health' exceeded its"):
         await Tool.run(tool, {})
 
 
@@ -135,6 +135,7 @@ async def test_timeout_error_message_includes_server_alive(monkeypatch):
     msg = str(exc_info.value)
     assert "watercooler_graph_health" in msg
     assert "server is still running" in msg
+    assert "0s timeout" in msg  # Verify timeout value appears in message
 
 
 @pytest.mark.anyio
