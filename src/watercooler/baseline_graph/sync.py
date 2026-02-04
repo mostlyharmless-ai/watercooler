@@ -160,6 +160,7 @@ class EnrichResult:
             "threads_processed": self.threads_processed,
             "entries_processed": self.entries_processed,
             "summaries_generated": self.summaries_generated,
+            "thread_summaries_generated": self.thread_summaries_generated,
             "embeddings_generated": self.embeddings_generated,
             "skipped": self.skipped,
             "errors": self.errors[:20],  # Limit errors in output
@@ -630,10 +631,87 @@ def _try_auto_start_service(service_type: str, api_base: str) -> bool:
 # ============================================================================
 
 
+def _normalize_entry_id(entry_id: str) -> str:
+    """Normalize entry ID by removing 'entry:' prefix if present.
+
+    Args:
+        entry_id: Entry ID, possibly with 'entry:' prefix
+
+    Returns:
+        Clean entry ID without prefix
+    """
+    return entry_id.replace("entry:", "", 1) if entry_id.startswith("entry:") else entry_id
+
+
+def _entries_for_summarization(
+    entries: Dict[str, Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Convert graph entries to format suitable for thread summarization.
+
+    Args:
+        entries: Dict of entry nodes from graph storage
+
+    Returns:
+        List of entry dicts sorted by index, with fields needed for summarization
+    """
+    return [
+        {
+            "title": e.get("title", ""),
+            "body": e.get("summary") or e.get("body", ""),
+            "entry_type": e.get("entry_type", "Note"),
+            "agent": e.get("agent", ""),
+        }
+        for e in sorted(entries.values(), key=lambda x: x.get("index", 0))
+    ]
+
+
+def _get_embedding_divergence_threshold() -> float:
+    """Get embedding divergence threshold from config.
+
+    Priority:
+    1. Environment variable: WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD
+    2. TOML config: mcp.graph.embedding_divergence_threshold
+    3. Default: 0.6
+
+    Returns:
+        Threshold value (0.0-1.0). Similarity below this triggers arc change.
+    """
+    # Check env var first
+    env_val = os.environ.get("WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD", "")
+    if env_val:
+        try:
+            threshold = float(env_val)
+            if not (0.0 <= threshold <= 1.0):
+                logger.warning(
+                    f"Invalid WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD={threshold}, "
+                    f"must be 0.0-1.0. Using default 0.6."
+                )
+            else:
+                return threshold
+        except ValueError:
+            logger.warning(
+                f"Invalid WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD='{env_val}', "
+                f"must be numeric. Using default 0.6."
+            )
+
+    # Fall back to TOML config
+    try:
+        from watercooler.config_facade import config
+        cfg = config.full()
+        return cfg.mcp.graph.embedding_divergence_threshold
+    except (ImportError, AttributeError, KeyError) as e:
+        logger.debug(f"Could not load embedding_divergence_threshold from config: {e}")
+
+    return 0.6  # Default
+
+
 def should_update_thread_summary(
     parsed: ParsedThread,
     new_entry: ParsedEntry,
     previous_entry_count: int,
+    new_entry_embedding: Optional[List[float]] = None,
+    previous_entry_embedding: Optional[List[float]] = None,
+    embedding_divergence_threshold: Optional[float] = None,
 ) -> bool:
     """Determine if thread summary should be regenerated.
 
@@ -642,11 +720,16 @@ def should_update_thread_summary(
     - Decision entries (major milestones)
     - Significant growth (50%+ more entries)
     - First few entries (establishing context)
+    - Semantic divergence (new entry embedding diverges from previous)
 
     Args:
         parsed: Parsed thread with all entries
         new_entry: The newly added entry
         previous_entry_count: Entry count before this addition
+        new_entry_embedding: Optional embedding vector for new entry
+        previous_entry_embedding: Optional embedding vector for previous entry
+        embedding_divergence_threshold: Cosine similarity threshold (default from config).
+            Similarity below this indicates significant topic shift.
 
     Returns:
         True if thread summary should be regenerated
@@ -669,6 +752,18 @@ def should_update_thread_summary(
     # Every 10th entry
     if len(parsed.entries) % 10 == 0:
         return True
+
+    # Semantic divergence check - if new entry embedding diverges significantly
+    # from previous entry, the thread arc has changed
+    if new_entry_embedding and previous_entry_embedding:
+        from watercooler.baseline_graph.search import _cosine_similarity
+        threshold = embedding_divergence_threshold if embedding_divergence_threshold is not None else _get_embedding_divergence_threshold()
+        similarity = _cosine_similarity(new_entry_embedding, previous_entry_embedding)
+        if similarity < threshold:
+            logger.debug(
+                f"Embedding divergence detected: similarity={similarity:.3f} < threshold={threshold:.3f}"
+            )
+            return True
 
     return False
 
@@ -693,6 +788,177 @@ def get_previous_thread_state(
         return meta.get("entry_count", 0), meta.get("summary")
 
     return 0, None
+
+
+def _get_previous_entry_embedding(
+    threads_dir: Path,
+    graph_dir: Path,
+    topic: str,
+    current_entry_id: str,
+    entries: Dict[str, Dict[str, Any]],
+) -> Optional[List[float]]:
+    """Get embedding of the entry immediately before the current one.
+
+    Tries FalkorDB first, falls back to search-index.jsonl.
+
+    Args:
+        threads_dir: Threads directory
+        graph_dir: Graph directory for file storage
+        topic: Thread topic
+        current_entry_id: ID of the current entry
+        entries: Dict of entries from graph
+
+    Returns:
+        Embedding vector of previous entry, or None if not found
+    """
+    # Find current entry index
+    current_index = None
+    for eid, entry in entries.items():
+        entry_id_clean = _normalize_entry_id(eid)
+        if entry_id_clean == current_entry_id:
+            current_index = entry.get("index")
+            break
+
+    if current_index is None or current_index <= 0:
+        return None
+
+    # Find entry with index = current_index - 1
+    prev_entry_id = None
+    for eid, entry in entries.items():
+        if entry.get("index") == current_index - 1:
+            # Extract clean entry ID (prefer entry_id from data, fall back to key)
+            prev_entry_id = _normalize_entry_id(entry.get("entry_id") or eid)
+            break
+
+    if not prev_entry_id:
+        return None
+
+    # Try FalkorDB first
+    try:
+        from .falkordb_entries import get_falkordb_entry_store
+        group_id = _get_group_id_for_threads_dir(threads_dir)
+        store = get_falkordb_entry_store(group_id)
+        if store:
+            embedding = store.get_embedding(prev_entry_id)
+            if embedding:
+                return embedding
+    except (ImportError, ConnectionError, RuntimeError) as e:
+        logger.debug(f"FalkorDB unavailable for embedding lookup: {e}")
+
+    # Fall back to search index
+    for index_entry in storage.load_search_index(graph_dir):
+        if index_entry.get("entry_id") == prev_entry_id:
+            return index_entry.get("embedding")
+
+    return None
+
+
+def _load_thread_context_for_arc_check(
+    graph_dir: Path,
+    topic: str,
+    entry_id: str,
+    entries: Dict[str, Dict[str, Any]],
+) -> tuple[Optional[ParsedThread], Optional[ParsedEntry]]:
+    """Load minimal thread context from graph for arc change check.
+
+    Constructs ParsedThread and ParsedEntry objects from graph data
+    for use with should_update_thread_summary().
+
+    Args:
+        graph_dir: Graph directory
+        topic: Thread topic
+        entry_id: Target entry ID
+        entries: Dict of entries from graph
+
+    Returns:
+        Tuple of (parsed_thread, new_entry) or (None, None) if not found
+    """
+    meta = storage.load_thread_meta(graph_dir, topic) or {}
+
+    # Convert entries dict to list of ParsedEntry
+    parsed_entries = []
+    new_entry_parsed = None
+
+    for eid, entry_data in sorted(entries.items(), key=lambda x: x[1].get("index", 0)):
+        entry_id_clean = _normalize_entry_id(entry_data.get("entry_id") or eid)
+        pe = ParsedEntry(
+            entry_id=entry_id_clean,
+            agent=entry_data.get("agent", ""),
+            timestamp=entry_data.get("timestamp", ""),
+            role=entry_data.get("role", ""),
+            entry_type=entry_data.get("entry_type", "Note"),
+            title=entry_data.get("title", ""),
+            body=entry_data.get("body", ""),
+            index=entry_data.get("index", 0),
+            summary=entry_data.get("summary"),
+        )
+        parsed_entries.append(pe)
+        if entry_id_clean == entry_id:
+            new_entry_parsed = pe
+
+    if not new_entry_parsed:
+        return None, None
+
+    parsed = ParsedThread(
+        topic=topic,
+        title=meta.get("title", topic),
+        status=meta.get("status", "OPEN"),
+        ball=meta.get("ball"),
+        entries=parsed_entries,
+        summary=meta.get("summary"),
+        last_updated=meta.get("last_updated", ""),
+    )
+
+    return parsed, new_entry_parsed
+
+
+def regenerate_thread_summary(
+    threads_dir: Path,
+    topic: str,
+    summarizer_config: Optional[SummarizerConfig] = None,
+) -> bool:
+    """Regenerate thread summary from existing entry summaries.
+
+    Args:
+        threads_dir: Threads directory
+        topic: Thread topic
+        summarizer_config: LLM config for summarization (uses default if None)
+
+    Returns:
+        True if summary was regenerated successfully
+    """
+    graph_dir = storage.ensure_graph_dir(threads_dir)
+    meta = storage.load_thread_meta(graph_dir, topic) or {}
+    entries = storage.load_thread_entries_dict(graph_dir, topic)
+    edges = storage.load_thread_edges(graph_dir, topic)
+
+    if not entries:
+        logger.debug(f"No entries found for thread {topic}, skipping summary regeneration")
+        return False
+
+    if summarizer_config is None:
+        summarizer_config = create_summarizer_config()
+
+    if not is_llm_service_available(summarizer_config):
+        logger.debug(f"LLM service unavailable, cannot regenerate summary for {topic}")
+        return False
+
+    # Prepare entries for summarization, preferring existing entry summaries
+    entries_for_summary = _entries_for_summarization(entries)
+
+    new_summary = summarize_thread(
+        entries_for_summary,
+        thread_title=meta.get("title", topic),
+        config=summarizer_config,
+    )
+
+    if new_summary:
+        meta["summary"] = new_summary
+        storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+        logger.info(f"Regenerated thread summary for {topic}")
+        return True
+
+    return False
 
 
 # ============================================================================
@@ -1076,6 +1342,7 @@ def enrich_graph_entry(
         # Update entry node in graph with enrichment data
         # Use locking to prevent race conditions during read-modify-write
         lp = lock_path_for_topic(topic, threads_dir)
+        thread_summary_updated = False
         with AdvisoryLock(lp, timeout=30, ttl=120, force_break=False):
             graph_dir = storage.ensure_graph_dir(threads_dir)
             entries = storage.load_thread_entries_dict(graph_dir, topic)
@@ -1097,6 +1364,48 @@ def enrich_graph_entry(
             # Load existing meta and edges (we only update entries for summary)
             meta = storage.load_thread_meta(graph_dir, topic) or {}
             edges = storage.load_thread_edges(graph_dir, topic)
+
+            # Check if thread summary needs update (arc change detection)
+            # Only check if we have summaries enabled and LLM is available
+            if generate_summaries:
+                summarizer_config = create_summarizer_config()
+                if is_llm_service_available(summarizer_config):
+                    # Get previous thread state
+                    prev_entry_count = meta.get("entry_count", 0)
+
+                    # Get previous entry embedding for divergence check
+                    prev_entry_embedding = None
+                    if new_embedding:
+                        prev_entry_embedding = _get_previous_entry_embedding(
+                            threads_dir, graph_dir, topic, entry_id, entries
+                        )
+
+                    # Create minimal ParsedThread/ParsedEntry for arc change check
+                    parsed, new_entry_parsed = _load_thread_context_for_arc_check(
+                        graph_dir, topic, entry_id, entries
+                    )
+
+                    if parsed and new_entry_parsed:
+                        update_thread_summary = should_update_thread_summary(
+                            parsed,
+                            new_entry_parsed,
+                            prev_entry_count,
+                            new_entry_embedding=new_embedding,
+                            previous_entry_embedding=prev_entry_embedding,
+                        )
+
+                        if update_thread_summary:
+                            # Prepare entries for summarization
+                            entries_for_summary = _entries_for_summarization(entries)
+                            new_thread_summary = summarize_thread(
+                                entries_for_summary,
+                                thread_title=meta.get("title", topic),
+                                config=summarizer_config,
+                            )
+                            if new_thread_summary:
+                                meta["summary"] = new_thread_summary
+                                thread_summary_updated = True
+                                logger.info(f"Updated thread summary for {topic} (arc change)")
 
             # Write back atomically (summary only, not embedding)
             storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
@@ -1296,7 +1605,7 @@ def sync_entry_to_graph(
                     config=summarizer_config,
                 )
                 if parsed.summary:
-                    logger.debug(f"Updated thread summary for {topic} (arc change)")
+                    logger.info(f"Updated thread summary for {topic} (arc change)")
             elif prev_thread_summary:
                 # Preserve existing thread summary
                 parsed.summary = prev_thread_summary
@@ -1924,6 +2233,7 @@ def enrich_graph(
     threads_dir: Path,
     summaries: bool = True,
     embeddings: bool = True,
+    thread_summaries: bool = False,
     mode: str = "missing",  # "missing" | "selective" | "all"
     topics: Optional[List[str]] = None,
     batch_size: int = 10,
@@ -1943,8 +2253,13 @@ def enrich_graph(
 
     Args:
         threads_dir: Threads directory
-        summaries: Whether to generate/regenerate summaries
+        summaries: Whether to generate/regenerate entry summaries
         embeddings: Whether to generate/regenerate embeddings
+        thread_summaries: Whether to regenerate thread summaries. When True:
+            - mode="missing": Only generates for threads without summaries
+            - mode="selective" or "all": Regenerates regardless of existing values
+            This allows explicit control over thread summary regeneration independent
+            of entry summaries.
         mode: Processing mode - "missing", "selective", or "all"
         topics: Topics to process (required for "selective" mode)
         batch_size: Number of items to process before writing
@@ -1967,6 +2282,10 @@ def enrich_graph(
 
         # Process only 5 entries (for testing)
         enrich_graph(threads_dir, summaries=True, embeddings=True, limit=5)
+
+        # Force regenerate thread summaries for specific topics
+        enrich_graph(threads_dir, thread_summaries=True, summaries=False, embeddings=False,
+                     mode="selective", topics=["my-topic"])
     """
     result = EnrichResult(dry_run=dry_run)
     graph_dir = storage.get_graph_dir(threads_dir)
@@ -1989,7 +2308,7 @@ def enrich_graph(
     embedding_available = False
 
     if not dry_run:
-        if summaries:
+        if summaries or thread_summaries:
             llm_available = is_llm_service_available()
             if not llm_available:
                 logger.warning("LLM service not available, skipping summary enrichment")
@@ -2004,7 +2323,7 @@ def enrich_graph(
             return result
 
     # Get summarizer config
-    config = create_summarizer_config() if summaries else None
+    config = create_summarizer_config() if (summaries or thread_summaries) else None
 
     # Determine which topics to process
     all_topics = storage.list_thread_topics(graph_dir)
@@ -2138,14 +2457,24 @@ def enrich_graph(
                 if progress_callback:
                     progress_callback(entries_seen, total_entries, f"{topic}/{entry_raw_id}")
 
-            # Generate thread summary if enabled (summaries flag controls both entry and thread)
-            if summaries:
+            # Generate thread summary if enabled
+            # thread_summaries=True enables explicit thread summary regeneration
+            # summaries=True enables entry summaries but also generates thread summaries in "missing" mode
+            if thread_summaries or summaries:
                 has_thread_summary = bool(meta.get("summary"))
-                should_do_thread_summary = (
-                    mode == "all" or
-                    mode == "selective" or
-                    (mode == "missing" and not has_thread_summary)
-                )
+
+                # Determine if we should generate thread summary
+                # thread_summaries=True: explicit control, follows mode
+                # summaries=True without thread_summaries: only fills missing (backward compatible)
+                if thread_summaries:
+                    should_do_thread_summary = (
+                        mode == "all" or
+                        mode == "selective" or
+                        (mode == "missing" and not has_thread_summary)
+                    )
+                else:
+                    # Legacy behavior: summaries flag only fills missing thread summaries
+                    should_do_thread_summary = (mode == "missing" and not has_thread_summary)
 
                 if should_do_thread_summary:
                     if dry_run:

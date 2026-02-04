@@ -978,6 +978,7 @@ def _graph_enrich_impl(
     code_path: str = "",
     summaries: bool = True,
     embeddings: bool = True,
+    thread_summaries: bool = False,
     mode: str = "missing",
     topics: str = "",
     batch_size: int = 10,
@@ -995,8 +996,14 @@ def _graph_enrich_impl(
 
     Args:
         code_path: Path to code repository (for resolving threads dir).
-        summaries: Whether to generate/regenerate summaries. Default: True.
+        summaries: Whether to generate/regenerate entry summaries. Default: True.
         embeddings: Whether to generate/regenerate embeddings. Default: True.
+        thread_summaries: Whether to regenerate thread summaries. When True with
+            mode="missing", only generates for threads without summaries. With
+            mode="selective" or mode="all", regenerates thread summaries regardless
+            of existing values. Use this to force-regenerate summaries when many
+            entries have been added, entry summaries have been improved, or you
+            want a fresh summary reflecting current state. Default: False.
         mode: Processing mode - "missing", "selective", or "all". Default: "missing".
         topics: Comma-separated list of topics (required for "selective" mode).
         batch_size: Number of items to process before writing. Default: 10.
@@ -1014,6 +1021,13 @@ def _graph_enrich_impl(
 
         # Full refresh of all embeddings
         graph_enrich(embeddings=True, summaries=False, mode="all")
+
+        # Force regenerate thread summary for specific topic
+        graph_enrich(thread_summaries=True, summaries=False, embeddings=False,
+                     mode="selective", topics="my-topic")
+
+        # Regenerate all thread summaries (batch refresh)
+        graph_enrich(thread_summaries=True, summaries=False, embeddings=False, mode="all")
     """
     try:
         from watercooler.baseline_graph.sync import enrich_graph
@@ -1042,6 +1056,7 @@ def _graph_enrich_impl(
                 threads_dir=threads_dir,
                 summaries=summaries,
                 embeddings=embeddings,
+                thread_summaries=thread_summaries,
                 mode=mode,
                 topics=topic_list,
                 batch_size=validated_batch_size,

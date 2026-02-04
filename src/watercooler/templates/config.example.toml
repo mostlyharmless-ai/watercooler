@@ -350,6 +350,22 @@ auto_detect_services = true
 # Env: WATERCOOLER_AUTO_START_SERVICES
 # auto_start_services = false
 
+# Embedding divergence threshold for thread summary regeneration
+# When a new entry's embedding similarity to the previous entry falls below
+# this threshold, it indicates a significant topic shift ("arc change") and
+# triggers automatic thread summary regeneration.
+#
+# Values interpretation (threshold = similarity must fall BELOW to trigger):
+#   1.0 = triggers on almost any change (maximum sensitivity)
+#   0.6 = moderate threshold (default - recommended)
+#   0.4 = only major topic shifts trigger (low sensitivity)
+#   0.0 = never triggers based on divergence alone
+#
+# Set lower (0.4-0.5) to reduce summary churn, higher (0.7-0.8) for more
+# responsive updates when topics shift within a thread.
+# Env: WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD
+# embedding_divergence_threshold = 0.6
+
 
 # =============================================================================
 # DASHBOARD SETTINGS
@@ -875,6 +891,7 @@ auto_detect_services = true
 # mcp.graph.generate_embeddings  WATERCOOLER_GRAPH_EMBEDDINGS
 # mcp.graph.auto_detect_services WATERCOOLER_GRAPH_AUTO_DETECT
 # mcp.graph.auto_start_services  WATERCOOLER_AUTO_START_SERVICES
+# mcp.graph.embedding_divergence_threshold WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD
 # validation.on_write            WATERCOOLER_VALIDATE_ON_WRITE
 # validation.fail_on_violation   WATERCOOLER_FAIL_ON_VIOLATION
 #
