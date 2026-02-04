@@ -17,8 +17,14 @@ from watercooler_memory.backends import UnsupportedOperationError
 
 
 @pytest.fixture
-def leanrag_backend():
-    """Create LeanRAG backend with test-run database."""
+def leanrag_backend(stub_local_memory_servers):
+    """Create LeanRAG backend with test-run database.
+
+    Uses stub_local_memory_servers to set required env vars (GLM_MODEL, etc.)
+    that LeanRAG's config.yaml substitution requires.
+    """
+    import os
+
     project_root = Path(__file__).parent.parent.parent
     leanrag_path = project_root / "external/LeanRAG"
 
@@ -41,7 +47,13 @@ def leanrag_backend():
         work_dir=Path.home() / ".watercooler/leanrag/test-run",
         leanrag_path=leanrag_path,
     )
-    return LeanRAGBackend(config)
+    try:
+        return LeanRAGBackend(config)
+    except ValueError as e:
+        # LeanRAG's config.yaml has many required env vars without defaults
+        if "Environment variable" in str(e) and "is not set" in str(e):
+            pytest.skip(f"LeanRAG environment not fully configured: {e}")
+        raise
 
 
 @pytest.fixture

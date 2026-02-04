@@ -378,16 +378,11 @@ class TestTierConfig:
             assert config.max_tiers == 1
             assert config.min_results == 5
 
-    def test_t2_requires_graphiti(self, monkeypatch, tmp_path) -> None:
+    def test_t2_requires_graphiti(self, monkeypatch, isolated_config) -> None:
         """T2 should only be enabled if Graphiti is configured or env var set."""
         from watercooler.config_facade import config as cfg_facade
 
-        # Set up isolated config environment (empty config dir)
-        config_dir = tmp_path / ".watercooler"
-        config_dir.mkdir()
-        monkeypatch.setenv("HOME", str(tmp_path))
-
-        # Clear any T2 env var overrides
+        # Clear any T2 env var overrides (isolated_config already provides config isolation)
         monkeypatch.delenv("WATERCOOLER_GRAPHITI_ENABLED", raising=False)
         monkeypatch.delenv("WATERCOOLER_TIER_T2_ENABLED", raising=False)
 

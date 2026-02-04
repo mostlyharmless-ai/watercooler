@@ -10,35 +10,12 @@ import pytest
 from watercooler_mcp import memory
 
 
-@pytest.fixture
-def isolated_config(tmp_path, monkeypatch, clean_api_keys):
-    """Isolate tests from user AND project config.
-
-    This prevents both:
-    - User's ~/.watercooler/config.toml from affecting tests (via HOME redirect)
-    - Project config discovery walking up to user's home (via .watercooler dir + chdir)
-
-    Uses the shared clean_api_keys fixture from conftest.py to clear all
-    provider API keys before config loading.
-    """
-    # Create .watercooler dir to stop project config upward search
-    watercooler_dir = tmp_path / ".watercooler"
-    watercooler_dir.mkdir()
-
-    from watercooler.config_facade import config
-    # Redirect HOME to temp dir so no user config is loaded
-    monkeypatch.setenv("HOME", str(tmp_path))
-    # Also clear XDG dirs that might be checked
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    # Change working directory to temp dir to affect project config discovery
-    monkeypatch.chdir(tmp_path)
-    config.reset()
-    yield tmp_path
-    config.reset()
+# Note: isolated_config fixture is now provided by conftest.py (from watercooler.testing)
+# It provides complete isolation: HOME redirect, XDG_CONFIG_HOME clearing, config.reset()
 
 
 @pytest.fixture
-def mock_env_disabled(monkeypatch, isolated_config):
+def mock_env_disabled(monkeypatch, isolated_config, clean_api_keys):
     """Mock environment with Graphiti disabled."""
     from watercooler.config_facade import config
     monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
@@ -48,7 +25,7 @@ def mock_env_disabled(monkeypatch, isolated_config):
 
 
 @pytest.fixture
-def mock_env_enabled(monkeypatch, isolated_config):
+def mock_env_enabled(monkeypatch, isolated_config, clean_api_keys):
     """Mock environment with Graphiti enabled and required API keys."""
     from watercooler.config_facade import config
     monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
