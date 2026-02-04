@@ -5,6 +5,7 @@ Contains:
 - Sync wrappers: run_with_sync, run_with_graph_sync
 """
 
+import asyncio
 import sys
 import json
 import time
@@ -181,12 +182,34 @@ _orig_run = None
 
 T = TypeVar("T")
 
+# Tool-level timeouts (seconds). Tools not listed use _DEFAULT_TOOL_TIMEOUT.
+# Prevents server process death when tools exceed MCP SDK's 60s hard limit.
+# Tools with timeouts >60s still hit the client-side timeout, but the server
+# stays alive instead of crashing — the key improvement.
+_DEFAULT_TOOL_TIMEOUT: float = 50.0  # Under MCP SDK's 60s hard limit
+
+_TOOL_TIMEOUTS: dict[str, float] = {
+    # Heavy graph operations (file parsing, verify_parity)
+    "watercooler_graph_health": 180.0,
+    "watercooler_graph_enrich": 300.0,
+    "watercooler_graph_recover": 300.0,
+    # Memory pipeline operations (clustering, embedding generation)
+    "watercooler_leanrag_run_pipeline": 300.0,
+    # Smart query T3 escalation can be slow
+    "watercooler_smart_query": 120.0,
+    # Branch operations with git fetch + checkout loop
+    "watercooler_audit_branch_pairing": 120.0,
+}
+
 
 def setup_instrumentation() -> None:
     """Set up FunctionTool instrumentation for observability.
 
     Call this once at server startup to monkey-patch FastMCP's FunctionTool.run
-    method with timing and logging.
+    method with timing, logging, and per-tool timeouts.
+
+    Timeouts prevent server process death under CPU pressure. Tools that exceed
+    their timeout return a graceful error instead of crashing the server.
     """
     global _orig_run
 
@@ -197,12 +220,22 @@ def setup_instrumentation() -> None:
 
         async def _instrumented_run(self, arguments):  # type: ignore
             tool_name = getattr(self, 'name', '<unknown>')
+            timeout = _TOOL_TIMEOUTS.get(tool_name, _DEFAULT_TOOL_TIMEOUT)
             input_chars = len(json.dumps(arguments)) if arguments else 0
             start_time = time.perf_counter()
             outcome = "ok"
             try:
-                result = await _orig_run(self, arguments)
+                result = await asyncio.wait_for(
+                    _orig_run(self, arguments), timeout=timeout
+                )
                 return result
+            except asyncio.TimeoutError:
+                outcome = "timeout"
+                raise TimeoutError(
+                    f"Tool '{tool_name}' timed out after {timeout:.0f}s. "
+                    f"The server is still running. You can retry or try a "
+                    f"lighter operation."
+                )
             except Exception:
                 outcome = "error"
                 raise
@@ -215,6 +248,7 @@ def setup_instrumentation() -> None:
                         input_chars=input_chars,
                         duration_ms=duration_ms,
                         outcome=outcome,
+                        timeout_s=timeout,
                     )
                     # Workaround: Force stdout flush on Windows after tool execution
                     if sys.platform == "win32":
