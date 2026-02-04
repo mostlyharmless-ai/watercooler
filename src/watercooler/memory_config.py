@@ -286,6 +286,34 @@ def _validate_api_url(url: str | None) -> str | None:
         return None
 
 
+def _is_localhost_url(url: str) -> bool:
+    """Check if URL points to a localhost endpoint.
+
+    Localhost endpoints typically don't require API keys (e.g., llama-server,
+    local embedding servers). This helper is used to skip API key validation
+    for local services.
+
+    Note: A similar function exists in watercooler_mcp.startup but lives here
+    in the core lib so watercooler_mcp.memory can import it without pulling in
+    the full startup module (which has heavy MCP dependencies). Docker-internal
+    hostnames (e.g., host.docker.internal) are intentionally not treated as
+    localhost — users in those environments should set an explicit API key or
+    use env vars.
+
+    Args:
+        url: URL string to check
+
+    Returns:
+        True if the URL points to localhost, 127.0.0.1, ::1, or 0.0.0.0
+    """
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+    except Exception:
+        return False
+
+
 def _detect_provider_from_url(
     api_base: str | None,
     provider_domains: dict[str, tuple[str, str]],

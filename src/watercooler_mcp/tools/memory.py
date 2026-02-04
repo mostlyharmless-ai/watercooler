@@ -259,7 +259,8 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
             diagnostics["config_issue"] = (
                 "Graphiti not enabled. Either set WATERCOOLER_GRAPHITI_ENABLED=1, "
                 "or configure [memory] backend = 'graphiti' in config.toml. "
-                "Also ensure [memory.llm].api_key and [memory.embedding].api_key are set."
+                "Also ensure API keys are configured via LLM_API_KEY / EMBEDDING_API_KEY "
+                "env vars or ~/.watercooler/credentials.toml (see credentials.example.toml)."
             )
 
         # Check backend initialization

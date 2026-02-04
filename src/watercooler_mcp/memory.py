@@ -25,6 +25,7 @@ from watercooler.memory_config import (
     resolve_database_config,
     get_graphiti_reranker,
     get_leanrag_path,
+    _is_localhost_url,
 )
 
 # Import unified derive_group_id from path_resolver
@@ -129,19 +130,23 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
 
     # Resolve LLM configuration using unified config
     llm = resolve_llm_config("graphiti")
-    if not llm.api_key:
+    llm_is_local = _is_localhost_url(llm.api_base)
+    if not llm.api_key and not llm_is_local:
         log_warning(
-            "MEMORY: Graphiti enabled but LLM_API_KEY not set. "
-            "Memory queries will fail. Set LLM_API_KEY or configure [memory.llm].api_key in config.toml."
+            "MEMORY: Graphiti enabled but LLM API key not set. "
+            "Memory queries will fail. Set LLM_API_KEY env var, add key to "
+            "~/.watercooler/credentials.toml, or use a localhost endpoint."
         )
         return None
 
     # Resolve embedding configuration using unified config
     embedding = resolve_embedding_config("graphiti")
-    if not embedding.api_key:
+    embedding_is_local = _is_localhost_url(embedding.api_base)
+    if not embedding.api_key and not embedding_is_local:
         log_warning(
-            "MEMORY: Graphiti enabled but EMBEDDING_API_KEY not set. "
-            "Memory queries will fail. Set EMBEDDING_API_KEY or configure [memory.embedding].api_key in config.toml."
+            "MEMORY: Graphiti enabled but embedding API key not set. "
+            "Memory queries will fail. Set EMBEDDING_API_KEY env var, add key to "
+            "~/.watercooler/credentials.toml, or use a localhost endpoint."
         )
         return None
 
@@ -157,11 +162,16 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
         database = _derive_database_name(code_path)
 
     # Return backend's GraphitiConfig with all fields
+    # For localhost endpoints without keys, pass a sentinel placeholder
+    # (local servers like llama-server don't need real API keys)
+    llm_api_key = llm.api_key or ("LOCAL_NO_KEY" if llm_is_local else "")
+    embedding_api_key = embedding.api_key or ("LOCAL_NO_KEY" if embedding_is_local else "")
+
     return GraphitiConfig(
-        llm_api_key=llm.api_key,
+        llm_api_key=llm_api_key,
         llm_api_base=llm.api_base if llm.api_base != "https://api.openai.com/v1" else None,
         llm_model=llm.model,
-        embedding_api_key=embedding.api_key,
+        embedding_api_key=embedding_api_key,
         embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
         embedding_model=embedding.model,
         falkordb_host=db.host,
