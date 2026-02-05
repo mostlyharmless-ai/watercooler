@@ -2653,6 +2653,7 @@ class MemorySyncCallback(Protocol):
         backend_config: Dict[str, Any],
         log: logging.Logger,
         dry_run: bool = False,
+        entry_summary: str = "",
     ) -> bool:
         """Sync an entry to a memory backend.
 
@@ -2669,6 +2670,8 @@ class MemorySyncCallback(Protocol):
             backend_config: Backend configuration dict
             log: Logger instance
             dry_run: If True, simulate without actual sync
+            entry_summary: Enriched summary (if available). Backends may
+                prefer this over entry_body when configured.
 
         Returns:
             True on success, False on failure
@@ -2894,6 +2897,7 @@ def sync_to_memory_backend(
     role: Optional[str] = None,
     entry_type: Optional[str] = None,
     dry_run: bool = False,
+    entry_summary: str = "",
 ) -> bool:
     """Sync an entry to the configured memory backend using registered callbacks.
 
@@ -2912,6 +2916,8 @@ def sync_to_memory_backend(
         role: Optional agent role
         entry_type: Optional entry type (Note, Plan, etc.)
         dry_run: If True, simulate without actual sync
+        entry_summary: Enriched summary (if available). Backends may
+            prefer this over entry_body when configured.
 
     Returns:
         True if sync was submitted/simulated, False if disabled or no callback
@@ -2949,6 +2955,7 @@ def sync_to_memory_backend(
             config,
             logger,
             dry_run,
+            entry_summary,
         )
         logger.debug(f"MEMORY: Submitted {backend} sync for {topic}/{entry_id}")
         return True
@@ -2991,6 +2998,7 @@ def sync_entry_to_memory_backend(
             agent=entry_node.get("agent"),
             role=entry_node.get("role"),
             entry_type=entry_node.get("entry_type"),
+            entry_summary=entry_node.get("summary", ""),
         )
     except Exception as e:
         logger.warning(f"MEMORY: sync_entry_to_memory_backend failed for {topic}/{entry_id}: {e}")

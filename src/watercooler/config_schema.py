@@ -799,6 +799,14 @@ class GraphitiBackendConfig(BaseModel):
         le=256,
         description="Token overlap between chunks for context continuity",
     )
+    use_summary: bool = Field(
+        default=False,
+        description=(
+            "Send enriched summary to Graphiti instead of raw body. "
+            "Requires enrichment with generate_summaries=true. "
+            "Falls back to raw body when summary is empty."
+        ),
+    )
 
 
 class LeanRAGBackendConfig(BaseModel):
