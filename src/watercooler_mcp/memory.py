@@ -264,13 +264,13 @@ def load_leanrag_config(code_path: str | Path | None = None) -> Optional["LeanRA
         config = LeanRAGConfig.from_unified()
         config.leanrag_path = leanrag_path_obj
 
-        # Derive database name consistently with Graphiti and index_leanrag.py
-        # Uses the same pattern as load_graphiti_config:
-        # 1. Check backend-specific env var override
-        # 2. Fall back to _derive_database_name(code_path)
+        # Derive database name with leanrag_ prefix to avoid collision
+        # with Graphiti backend in the same FalkorDB instance.
+        # Graphiti uses "watercooler_cloud", LeanRAG uses "leanrag_watercooler_cloud".
+        # Explicit WATERCOOLER_LEANRAG_DATABASE overrides are respected as-is.
         database = os.getenv("WATERCOOLER_LEANRAG_DATABASE")
         if not database:
-            database = _derive_database_name(code_path)
+            database = f"leanrag_{_derive_database_name(code_path)}"
 
         # Set work_dir to ~/.watercooler/{database_name}
         # LeanRAG uses work_dir.name as FalkorDB graph name
