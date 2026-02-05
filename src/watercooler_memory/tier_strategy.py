@@ -444,6 +444,55 @@ def evaluate_sufficiency(
     return True, "Sufficient results"
 
 
+def evaluate_dual_stream_sufficiency(
+    evidence: list[TierEvidence],
+    min_results: int = DEFAULT_MIN_RESULTS,
+    min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    total_results: Optional[int] = None,
+) -> tuple[bool, str]:
+    """Evaluate sufficiency for dual-stream tiers (T2/T3).
+
+    Dual-stream tiers run separate searches for entities and facts.
+    Checks each stream independently — either meeting min_results with
+    min_confidence is sufficient. Falls back to combined evaluation.
+
+    Uses endswith() matching for node_type to handle both T2 ('entity'/'fact')
+    and T3 ('hierarchical_entity'/'hierarchical_fact') metadata values.
+
+    Args:
+        evidence: List of evidence items to evaluate
+        min_results: Minimum number of results required
+        min_confidence: Minimum average confidence score
+        total_results: Optional total result count for the quantity check
+
+    Returns:
+        Tuple of (is_sufficient, reason)
+    """
+    if not evidence:
+        return False, "No results found"
+
+    entities = [e for e in evidence if e.metadata.get("node_type", "").endswith("entity")]
+    facts = [e for e in evidence if e.metadata.get("node_type", "").endswith("fact")]
+
+    for stream_name, stream in [("Entity", entities), ("Fact", facts)]:
+        if len(stream) >= min_results:
+            avg = sum(e.score for e in stream) / len(stream)
+            if avg >= min_confidence:
+                return True, f"{stream_name} stream sufficient ({len(stream)} results, avg {avg:.2f})"
+
+    # Neither stream alone sufficient — check combined as fallback
+    combined_count = total_results if total_results is not None else len(evidence)
+    if combined_count >= min_results and evidence:
+        avg = sum(e.score for e in evidence) / len(evidence)
+        if avg >= min_confidence:
+            return True, f"Combined streams sufficient ({combined_count} results, avg {avg:.2f})"
+
+    entity_info = f"entities: {len(entities)}"
+    fact_info = f"facts: {len(facts)}"
+    avg_info = f"combined avg: {sum(e.score for e in evidence) / max(len(evidence), 1):.2f}" if evidence else "no evidence"
+    return False, f"Insufficient ({entity_info}, {fact_info}, {avg_info})"
+
+
 # ============================================================================
 # Tier Adapters
 # ============================================================================
@@ -890,13 +939,21 @@ class TierOrchestrator:
             # all evidence if current tier returned nothing (for cross-tier queries)
             evidence_for_eval = tier_evidence if tier_evidence else result.evidence
 
-            # Check sufficiency
-            is_sufficient, reason = evaluate_sufficiency(
-                evidence_for_eval,
-                min_results=self.config.min_results,
-                min_confidence=self.config.min_confidence,
-                total_results=result.result_count,
-            )
+            # Check sufficiency — use dual-stream for T2/T3 (entities + facts)
+            if tier in (Tier.T2, Tier.T3):
+                is_sufficient, reason = evaluate_dual_stream_sufficiency(
+                    evidence_for_eval,
+                    min_results=self.config.min_results,
+                    min_confidence=self.config.min_confidence,
+                    total_results=result.result_count,
+                )
+            else:
+                is_sufficient, reason = evaluate_sufficiency(
+                    evidence_for_eval,
+                    min_results=self.config.min_results,
+                    min_confidence=self.config.min_confidence,
+                    total_results=result.result_count,
+                )
 
             if is_sufficient:
                 result.sufficient = True
@@ -1076,6 +1133,7 @@ __all__ = [
     # Functions
     "detect_intent",
     "evaluate_sufficiency",
+    "evaluate_dual_stream_sufficiency",
     "smart_query",
     "get_leanrag_level_mode",
     # Orchestrator
