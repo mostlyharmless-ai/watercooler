@@ -294,6 +294,26 @@ Smart query automatically escalates through memory tiers if initial results are 
 
 Most queries are satisfied by T1/T2. T3 is opt-in for complex analysis.
 
+### When do thread summaries get regenerated?
+
+Thread summaries update automatically when:
+1. **Entry count threshold**: First few entries (≤3), or every 5th entry
+2. **Arc change detection**: When entry types shift (e.g., Plan → Decision → Closure)
+3. **Embedding divergence**: When new entry's embedding diverges significantly from previous entry
+
+The embedding divergence threshold is configurable:
+```bash
+# Environment variable (default: 0.6, range: 0.0-1.0)
+WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD=0.5
+```
+
+Lower values (0.4-0.5) reduce summary churn. Higher values (0.7-0.8) trigger more frequent updates when topics shift.
+
+To force-regenerate thread summaries:
+```python
+watercooler_graph_enrich(thread_summaries=True, mode="selective", topics="my-topic")
+```
+
 ### How do I recall context before starting work?
 
 Use the recall pattern:
