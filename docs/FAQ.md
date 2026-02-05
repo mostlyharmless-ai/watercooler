@@ -307,7 +307,15 @@ The embedding divergence threshold is configurable:
 WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD=0.5
 ```
 
-Lower values (0.4-0.5) reduce summary churn. Higher values (0.7-0.8) trigger more frequent updates when topics shift.
+**Tuning guide:**
+| Threshold | Sensitivity | Use case |
+|-----------|-------------|----------|
+| 0.3-0.4 | Very high | Regenerate on small topic shifts (higher LLM cost) |
+| 0.5-0.6 | Balanced | Detect moderate divergence (recommended) |
+| 0.7-0.8 | Conservative | Only regenerate on major shifts (lower cost) |
+| 0.9+ | Minimal | Mostly rely on entry count triggers |
+
+**Rule of thumb**: Start with default (0.6). Lower to 0.5 if summaries feel stale. Raise to 0.7 if LLM costs are high.
 
 To force-regenerate thread summaries:
 ```python
