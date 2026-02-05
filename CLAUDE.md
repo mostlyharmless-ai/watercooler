@@ -584,3 +584,18 @@ When Claude uses Watercooler MCP tools:
 5. **Choose correct types**: Use `Decision` for decisions, `Plan` for plans, `PR` for PRs, `Closure` for closures
 6. **Manage ball appropriately**: Use `say` for normal back-and-forth, `ack` to keep ball, `handoff` for explicit coordination
 7. **Recall context proactively**: Before starting significant work, use `watercooler_smart_query` or `watercooler_search` to recall relevant prior decisions and context
+
+### mcp-cli Invocation Safety
+
+When invoking watercooler tools via `mcp-cli` in Bash, follow these rules:
+
+**Safe patterns:**
+- `jq` command substitution (PREFERRED): `mcp-cli call tool "$(jq -n --arg k 'v' '{key: $k}')"`
+- Pipe from file: `cat /tmp/payload.json | mcp-cli call tool -`
+- Inline JSON (small payloads): `mcp-cli call tool '{"key": "value"}'`
+
+**Broken pattern (NEVER USE):**
+- File redirection: `mcp-cli call tool - < /tmp/payload.json` — causes `JSON Parse error: Unexpected EOF`
+
+This is a `mcp-cli` binary limitation. The `jq` command substitution pattern is the
+convention across all skills in this repository.

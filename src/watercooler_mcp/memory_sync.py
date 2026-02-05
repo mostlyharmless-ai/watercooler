@@ -303,6 +303,7 @@ def _graphiti_sync_callback(
     backend_config: Dict[str, Any],
     log: logging.Logger,
     dry_run: bool = False,
+    entry_summary: str = "",
 ) -> bool:
     """Sync entry to Graphiti backend.
 
@@ -325,6 +326,9 @@ def _graphiti_sync_callback(
         backend_config: Backend configuration dict
         log: Logger instance
         dry_run: If True, simulate without actual sync
+        entry_summary: Enriched summary from graph enrichment. Used as
+            episode content instead of entry_body when use_summary is
+            configured and summary is non-empty.
 
     Returns:
         True on success, False on failure
@@ -334,11 +338,21 @@ def _graphiti_sync_callback(
         return True
 
     try:
-        # Import chunking config helpers
+        # Import config helpers
         from watercooler.memory_config import (
             get_graphiti_chunk_config,
             get_graphiti_chunk_on_sync,
+            get_graphiti_use_summary,
         )
+
+        # Resolve content: use enriched summary if configured and available
+        content = entry_body
+        if get_graphiti_use_summary() and entry_summary:
+            content = entry_summary
+            log.debug(
+                f"MEMORY: Using enriched summary for {topic}/{entry_id} "
+                f"({len(entry_summary)} chars vs {len(entry_body)} raw)"
+            )
 
         # Derive code_path from threads_dir
         # threads_dir: /path/to/project-threads -> code_path: /path/to/project
@@ -362,7 +376,7 @@ def _graphiti_sync_callback(
             max_tokens, overlap = get_graphiti_chunk_config()
             result = asyncio.run(
                 _call_graphiti_add_episode_chunked(
-                    content=entry_body,
+                    content=content,
                     topic=topic,
                     entry_id=entry_id,
                     timestamp=timestamp,
@@ -375,7 +389,7 @@ def _graphiti_sync_callback(
         else:
             result = asyncio.run(
                 _call_graphiti_add_episode(
-                    content=entry_body,
+                    content=content,
                     topic=topic,
                     entry_id=entry_id,
                     timestamp=timestamp,
@@ -425,6 +439,7 @@ def _leanrag_sync_callback(
     backend_config: Dict[str, Any],
     log: logging.Logger,
     dry_run: bool = False,
+    entry_summary: str = "",
 ) -> bool:
     """Sync entry to LeanRAG backend.
 
@@ -449,6 +464,7 @@ def _leanrag_sync_callback(
         backend_config: Backend configuration dict
         log: Logger instance
         dry_run: If True, simulate without actual sync
+        entry_summary: Enriched summary (unused by LeanRAG, protocol compliance)
 
     Returns:
         True on success, False on failure

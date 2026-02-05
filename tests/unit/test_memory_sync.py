@@ -617,6 +617,51 @@ class TestChunkConfigHelpers:
         assert overlap == 64  # default
 
 
+class TestUseSummaryConfigHelper:
+    """Tests for get_graphiti_use_summary() config accessor."""
+
+    def test_default_is_false(self, monkeypatch):
+        """Test default use_summary value (False)."""
+        from watercooler.memory_config import get_graphiti_use_summary
+
+        monkeypatch.delenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", raising=False)
+        assert get_graphiti_use_summary() is False
+
+    def test_env_true(self, monkeypatch):
+        """Test use_summary enabled via env var."""
+        from watercooler.memory_config import get_graphiti_use_summary
+
+        for val in ("1", "true", "yes"):
+            monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", val)
+            assert get_graphiti_use_summary() is True
+
+    def test_env_false(self, monkeypatch):
+        """Test use_summary explicitly disabled via env var."""
+        from watercooler.memory_config import get_graphiti_use_summary
+
+        for val in ("0", "false", "no"):
+            monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", val)
+            assert get_graphiti_use_summary() is False
+
+    def test_env_case_insensitive(self, monkeypatch):
+        """Test that env var parsing is case-insensitive."""
+        from watercooler.memory_config import get_graphiti_use_summary
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", "TRUE")
+        assert get_graphiti_use_summary() is True
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", "False")
+        assert get_graphiti_use_summary() is False
+
+    def test_unrecognized_env_falls_back_to_config(self, monkeypatch):
+        """Test that unrecognized env values fall back to config default."""
+        from watercooler.memory_config import get_graphiti_use_summary
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", "maybe")
+        # Config default is False
+        assert get_graphiti_use_summary() is False
+
+
 class TestCallGraphitiAddEpisodeChunked:
     """Tests for _call_graphiti_add_episode_chunked function."""
 
@@ -793,6 +838,133 @@ class TestGraphitiSyncCallbackChunking:
                 mock_simple.assert_not_called()
 
 
+class TestGraphitiSyncCallbackSummary:
+    """Tests for summary resolution in _graphiti_sync_callback."""
+
+    def test_uses_raw_body_by_default(self, monkeypatch):
+        """Test that raw body is used when use_summary is disabled (default)."""
+        from watercooler_mcp.memory_sync import _graphiti_sync_callback
+
+        monkeypatch.delenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", raising=False)
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "false")
+
+        log = MagicMock()
+        captured_content = []
+
+        with patch(
+            "watercooler_mcp.memory_sync._call_graphiti_add_episode"
+        ) as mock_simple:
+            async def capture_call(*args, **kwargs):
+                captured_content.append(kwargs.get("content", args[0] if args else None))
+                return {"success": True, "episode_uuid": "test-uuid"}
+
+            mock_simple.side_effect = capture_call
+
+            try:
+                _graphiti_sync_callback(
+                    threads_dir=Path("/tmp/test-threads"),
+                    topic="test",
+                    entry_id="e1",
+                    entry_body="Raw body text",
+                    entry_title="Test",
+                    timestamp="2025-01-01T00:00:00Z",
+                    agent="claude",
+                    role="implementer",
+                    entry_type="Note",
+                    backend_config={"backend": "graphiti"},
+                    log=log,
+                    dry_run=False,
+                    entry_summary="Enriched summary text",
+                )
+            except Exception:
+                pass
+
+            # Verify _call_graphiti_add_episode was called with raw body
+            mock_simple.assert_called_once()
+            call_kwargs = mock_simple.call_args
+            assert call_kwargs.kwargs.get("content") == "Raw body text"
+
+    def test_uses_summary_when_configured(self, monkeypatch):
+        """Test that summary is used when use_summary is enabled."""
+        from watercooler_mcp.memory_sync import _graphiti_sync_callback
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", "true")
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "false")
+
+        log = MagicMock()
+
+        with patch(
+            "watercooler_mcp.memory_sync._call_graphiti_add_episode"
+        ) as mock_simple:
+            async def return_success(*args, **kwargs):
+                return {"success": True, "episode_uuid": "test-uuid"}
+
+            mock_simple.side_effect = return_success
+
+            try:
+                _graphiti_sync_callback(
+                    threads_dir=Path("/tmp/test-threads"),
+                    topic="test",
+                    entry_id="e1",
+                    entry_body="Raw body text",
+                    entry_title="Test",
+                    timestamp="2025-01-01T00:00:00Z",
+                    agent="claude",
+                    role="implementer",
+                    entry_type="Note",
+                    backend_config={"backend": "graphiti"},
+                    log=log,
+                    dry_run=False,
+                    entry_summary="Enriched summary text",
+                )
+            except Exception:
+                pass
+
+            mock_simple.assert_called_once()
+            call_kwargs = mock_simple.call_args
+            assert call_kwargs.kwargs.get("content") == "Enriched summary text"
+
+    def test_falls_back_to_body_when_summary_empty(self, monkeypatch):
+        """Test fallback to raw body when summary is empty string."""
+        from watercooler_mcp.memory_sync import _graphiti_sync_callback
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", "true")
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "false")
+
+        log = MagicMock()
+
+        with patch(
+            "watercooler_mcp.memory_sync._call_graphiti_add_episode"
+        ) as mock_simple:
+            async def return_success(*args, **kwargs):
+                return {"success": True, "episode_uuid": "test-uuid"}
+
+            mock_simple.side_effect = return_success
+
+            try:
+                _graphiti_sync_callback(
+                    threads_dir=Path("/tmp/test-threads"),
+                    topic="test",
+                    entry_id="e1",
+                    entry_body="Raw body text",
+                    entry_title="Test",
+                    timestamp="2025-01-01T00:00:00Z",
+                    agent="claude",
+                    role="implementer",
+                    entry_type="Note",
+                    backend_config={"backend": "graphiti"},
+                    log=log,
+                    dry_run=False,
+                    entry_summary="",  # Empty summary
+                )
+            except Exception:
+                pass
+
+            mock_simple.assert_called_once()
+            call_kwargs = mock_simple.call_args
+            assert call_kwargs.kwargs.get("content") == "Raw body text"
+
+
 class TestSyncEntryToMemoryBackend:
     """Tests for the sync_entry_to_memory_backend helper function."""
 
@@ -800,7 +972,7 @@ class TestSyncEntryToMemoryBackend:
         """Test sync_entry_to_memory_backend returns True when entry is found."""
         from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
 
-        # Mock get_entry_node_from_graph to return a valid entry
+        # Mock get_entry_node_from_graph to return a valid entry with summary
         monkeypatch.setattr(
             "watercooler.baseline_graph.sync.get_entry_node_from_graph",
             lambda threads_dir, entry_id, topic: {
@@ -810,6 +982,7 @@ class TestSyncEntryToMemoryBackend:
                 "agent": "claude",
                 "role": "implementer",
                 "entry_type": "Note",
+                "summary": "Enriched summary of test body",
             },
         )
 
@@ -832,6 +1005,7 @@ class TestSyncEntryToMemoryBackend:
         assert sync_calls[0]["entry_id"] == "entry-1"
         assert sync_calls[0]["entry_body"] == "Test body"
         assert sync_calls[0]["entry_title"] == "Test title"
+        assert sync_calls[0]["entry_summary"] == "Enriched summary of test body"
 
     def test_returns_false_when_entry_not_found(self, tmp_path, monkeypatch):
         """Test sync_entry_to_memory_backend returns False for missing entries."""

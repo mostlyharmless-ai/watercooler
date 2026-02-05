@@ -20,6 +20,25 @@ mcp-cli call watercooler-cloud/watercooler_graphiti_add_episode "$(jq -n --arg c
 
 This prevents JSON injection from user input containing quotes, backslashes, or control characters.
 
+For the T1 fallback (`watercooler_say`), the same principle applies — note that `$BODY`
+is a variable you construct (not raw `$ARGUMENTS`):
+
+```bash
+mcp-cli call watercooler-cloud/watercooler_say "$(jq -n \
+  --arg topic 'project-context' \
+  --arg title '<GENERATED: concise descriptive title>' \
+  --arg body "$BODY" \
+  --arg role 'scribe' \
+  --arg entry_type 'Note' \
+  --arg code_path '<repo-root>' \
+  --arg agent_func 'Claude Code:opus-4-5:scribe' \
+  '{topic: $topic, title: $title, body: $body, role: $role, entry_type: $entry_type, code_path: $code_path, agent_func: $agent_func}')"
+```
+
+**IMPORTANT**: Never use `mcp-cli call tool - < /tmp/file.json` — file redirection
+to stdin does not work with `mcp-cli`. Always use `jq` command substitution or pipe
+(`cat file.json | mcp-cli call tool -`) instead.
+
 ## Decision Tree
 
 ```
@@ -35,15 +54,16 @@ This prevents JSON injection from user input containing quotes, backslashes, or 
           │       │
     ┌─────▼─────┐ │
     │ Add via    │ │
-    │ graphiti_  │ │
-    │ add_episode│ │
-    └─────┬─────┘ │
-          │    ┌──▼──────────┐
-          │    │ Fallback:    │
-          │    │ watercooler_ │
-          │    │ say → thread │
-          │    │ entry (T1)   │
-          │    └──┬──────────┘
+    │ graphiti_  │ ┌──▼──────────┐
+    │ add_episode│ │ Prepare:     │
+    └─────┬─────┘ │ title + body │
+          │       └──┬──────────┘
+          │          │
+          │    ┌─────▼─────────┐
+          │    │ watercooler_   │
+          │    │ say → thread   │
+          │    │ entry (T1)     │
+          │    └──┬────────────┘
           │       │
     ┌─────▼───────▼─────┐
     │ Confirm storage:   │
@@ -95,7 +115,30 @@ This prevents JSON injection from user input containing quotes, backslashes, or 
    mcp-cli call watercooler-cloud/watercooler_list_threads '{}'
    ```
 
-   Create entry in an appropriate **existing** thread:
+   Prepare the entry content:
+   - **Title**: Generate a concise, descriptive title (5-12 words). Do NOT use
+     the placeholder `Memory: <brief summary>`. Examples:
+     - "PostgreSQL chosen over MongoDB for ACID compliance"
+     - "API rate limit is 100 requests per minute"
+     - "Legacy auth uses JWT tokens in localStorage"
+   - **Body**: Structure the content clearly. For short facts, keep as-is.
+     For longer content (3+ sentences), organize with context and key takeaways.
+     Always include `Spec: scribe` as the first line of the body.
+
+   Assign the prepared body to `BODY` and create the entry (use `jq` for safe JSON construction):
+   ```bash
+   mcp-cli call watercooler-cloud/watercooler_say "$(jq -n \
+     --arg topic '<thread-topic>' \
+     --arg title '<GENERATED: concise descriptive title>' \
+     --arg body "$BODY" \
+     --arg role 'scribe' \
+     --arg entry_type 'Note' \
+     --arg code_path '<repo-root>' \
+     --arg agent_func 'Claude Code:opus-4-5:scribe' \
+     '{topic: $topic, title: $title, body: $body, role: $role, entry_type: $entry_type, code_path: $code_path, agent_func: $agent_func}')"
+   ```
+
+   Thread selection:
    - Knowledge/context → `project-context` thread (if it exists)
    - Decisions → `decisions` thread (if it exists)
    - If neither exists, ask the user which thread to use or whether to create one

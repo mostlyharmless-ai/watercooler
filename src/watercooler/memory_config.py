@@ -666,6 +666,29 @@ def get_graphiti_track_entry_episodes() -> bool:
     return config.full().memory.graphiti.track_entry_episodes
 
 
+def get_graphiti_use_summary() -> bool:
+    """Whether to send enriched summary to Graphiti instead of raw body.
+
+    When enabled and a non-empty summary is available, the summary is sent
+    as episode content instead of the raw entry body. Falls back to raw body
+    when summary is empty (e.g., LLM unavailable during enrichment).
+
+    Priority (highest first):
+    1. WATERCOOLER_GRAPHITI_USE_SUMMARY env var
+    2. TOML config: memory.graphiti.use_summary
+    3. Default: False
+
+    Returns:
+        True if summary should be preferred over raw body
+    """
+    env = os.getenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", "").lower()
+    if env in ("1", "true", "yes"):
+        return True
+    if env in ("0", "false", "no"):
+        return False
+    return config.full().memory.graphiti.use_summary
+
+
 def get_graphiti_chunk_on_sync() -> bool:
     """Get whether to chunk entries when syncing to Graphiti.
 
