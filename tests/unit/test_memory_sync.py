@@ -1035,3 +1035,226 @@ class TestSyncEntryToMemoryBackend:
         result = sync_entry_to_memory_backend(tmp_path, "test-topic", "entry-1")
 
         assert result is False
+
+
+class TestMiddlewareMemorySync:
+    """Tests for memory sync decoupled from enrichment in middleware.
+
+    Verifies that sync_to_memory_backend is called from
+    middleware.operation_with_graph_sync() independently of enrichment.
+    """
+
+    def _run_middleware(
+        self,
+        tmp_path,
+        topic="test-topic",
+        entry_id="entry-123",
+        wants_enrichment=True,
+        llm_available=False,
+        embed_available=False,
+        enrich_result=None,
+        entry_node=None,
+    ):
+        """Helper to run middleware with mocked dependencies.
+
+        Returns (result, mock_sync_to_memory, mock_enrich) for assertions.
+        """
+        from watercooler_mcp.middleware import run_with_sync
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir(exist_ok=True)
+
+        context = MagicMock()
+        context.threads_dir = threads_dir
+        context.code_root = tmp_path / "code"
+
+        # Default entry node
+        if entry_node is None:
+            entry_node = {
+                "body": "test body",
+                "title": "Test Title",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "agent": "claude",
+                "role": "implementer",
+                "entry_type": "Note",
+            }
+
+        # Default enrich result (noop)
+        if enrich_result is None:
+            from watercooler.baseline_graph.sync import EnrichmentResult
+            enrich_result = EnrichmentResult.noop()
+
+        # Mock graph config
+        mock_graph_config = MagicMock()
+        mock_graph_config.generate_summaries = wants_enrichment
+        mock_graph_config.generate_embeddings = False
+
+        mock_wc_config = MagicMock()
+        mock_wc_config.mcp.graph = mock_graph_config
+
+        # We need a sync manager to trigger the graph sync path.
+        # When get_git_sync_manager_from_context returns None,
+        # run_with_sync just returns operation() without the graph sync wrapper.
+        mock_sync_manager = MagicMock()
+
+        def fake_with_sync(op, commit_msg, **kwargs):
+            return op()
+
+        mock_sync_manager.with_sync = fake_with_sync
+
+        mock_preflight_result = MagicMock()
+        mock_preflight_result.can_proceed = True
+        mock_preflight_result.auto_fixed = False
+
+        with patch("watercooler_mcp.middleware.get_git_sync_manager_from_context", return_value=mock_sync_manager), \
+             patch("watercooler_mcp.middleware.get_watercooler_config", return_value=mock_wc_config), \
+             patch("watercooler_mcp.middleware._check_enrichment_services_available", return_value=(llm_available, embed_available)), \
+             patch("watercooler_mcp.middleware.run_preflight", return_value=mock_preflight_result), \
+             patch("watercooler_mcp.middleware.acquire_parity_lock") as mock_parity_lock, \
+             patch("watercooler_mcp.middleware.acquire_topic_lock") as mock_topic_lock, \
+             patch("watercooler.baseline_graph.sync.enrich_graph_entry", return_value=enrich_result) as mock_enrich, \
+             patch("watercooler.baseline_graph.writer.get_entry_node_from_graph", return_value=entry_node) as mock_get_entry, \
+             patch("watercooler.baseline_graph.sync.sync_to_memory_backend") as mock_sync:
+
+            result = run_with_sync(
+                context=context,
+                commit_title="test commit",
+                operation=lambda: "test-result",
+                topic=topic,
+                entry_id=entry_id,
+            )
+
+            return result, mock_sync, mock_enrich
+
+    def test_memory_sync_called_when_enrichment_not_configured(self, tmp_path):
+        """Memory sync should fire even when enrichment is disabled."""
+        result, mock_sync, _ = self._run_middleware(
+            tmp_path,
+            wants_enrichment=False,
+        )
+        assert result == "test-result"
+        mock_sync.assert_called_once()
+
+    def test_memory_sync_called_when_enrichment_services_unavailable(self, tmp_path):
+        """Memory sync should fire even when LLM/embedding services are down."""
+        result, mock_sync, _ = self._run_middleware(
+            tmp_path,
+            wants_enrichment=True,
+            llm_available=False,
+            embed_available=False,
+        )
+        assert result == "test-result"
+        mock_sync.assert_called_once()
+
+    def test_memory_sync_called_when_enrichment_noop(self, tmp_path):
+        """Memory sync should fire even when enrichment returns noop."""
+        from watercooler.baseline_graph.sync import EnrichmentResult
+
+        result, mock_sync, _ = self._run_middleware(
+            tmp_path,
+            wants_enrichment=True,
+            llm_available=True,
+            embed_available=False,
+            enrich_result=EnrichmentResult.noop(),
+        )
+        assert result == "test-result"
+        mock_sync.assert_called_once()
+
+    def test_memory_sync_failure_does_not_block_write(self, tmp_path):
+        """Memory sync failure should not prevent write from completing."""
+        from watercooler_mcp.middleware import run_with_sync
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir(exist_ok=True)
+
+        context = MagicMock()
+        context.threads_dir = threads_dir
+        context.code_root = tmp_path / "code"
+
+        mock_graph_config = MagicMock()
+        mock_graph_config.generate_summaries = False
+        mock_graph_config.generate_embeddings = False
+        mock_wc_config = MagicMock()
+        mock_wc_config.mcp.graph = mock_graph_config
+
+        mock_sync_manager = MagicMock()
+        mock_sync_manager.with_sync = lambda op, msg, **kw: op()
+
+        mock_preflight_result = MagicMock()
+        mock_preflight_result.can_proceed = True
+        mock_preflight_result.auto_fixed = False
+
+        entry_node = {"body": "test", "title": "T", "timestamp": None,
+                      "agent": "a", "role": "r", "entry_type": "Note"}
+
+        with patch("watercooler_mcp.middleware.get_git_sync_manager_from_context", return_value=mock_sync_manager), \
+             patch("watercooler_mcp.middleware.get_watercooler_config", return_value=mock_wc_config), \
+             patch("watercooler_mcp.middleware._check_enrichment_services_available", return_value=(False, False)), \
+             patch("watercooler_mcp.middleware.run_preflight", return_value=mock_preflight_result), \
+             patch("watercooler_mcp.middleware.acquire_parity_lock"), \
+             patch("watercooler_mcp.middleware.acquire_topic_lock"), \
+             patch("watercooler.baseline_graph.writer.get_entry_node_from_graph", return_value=entry_node), \
+             patch("watercooler.baseline_graph.sync.sync_to_memory_backend", side_effect=RuntimeError("sync boom")):
+
+            result = run_with_sync(
+                context=context,
+                commit_title="test",
+                operation=lambda: "success",
+                topic="t",
+                entry_id="e1",
+            )
+
+        assert result == "success"
+
+    def test_memory_sync_not_called_without_entry_id(self, tmp_path):
+        """Memory sync should NOT be called when entry_id is None."""
+        from watercooler_mcp.middleware import run_with_sync
+
+        context = MagicMock()
+        context.threads_dir = tmp_path
+        context.code_root = tmp_path
+
+        with patch("watercooler_mcp.middleware.get_git_sync_manager_from_context", return_value=None):
+            with patch("watercooler.baseline_graph.sync.sync_to_memory_backend") as mock_sync:
+                result = run_with_sync(
+                    context=context,
+                    commit_title="test",
+                    operation=lambda: "ok",
+                    topic="t",
+                    entry_id=None,
+                )
+
+        assert result == "ok"
+        mock_sync.assert_not_called()
+
+    def test_enrich_no_longer_calls_memory_sync(self, tmp_path):
+        """enrich_graph_entry should NOT call sync_to_memory_backend."""
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir(exist_ok=True)
+
+        # Create a mock entry node
+        entry_node = {
+            "body": "test body",
+            "title": "Test",
+            "entry_type": "Note",
+            "summary": "",
+        }
+
+        # Patch where the name is looked up (sync module imports it at top level)
+        with patch("watercooler.baseline_graph.sync.get_entry_node_from_graph", return_value=entry_node), \
+             patch("watercooler.baseline_graph.sync.sync_to_memory_backend") as mock_sync:
+
+            result = enrich_graph_entry(
+                threads_dir=threads_dir,
+                topic="test-topic",
+                entry_id="e1",
+                generate_summaries=False,
+                generate_embeddings=False,
+            )
+
+        # Should return noop since no enrichment requested
+        assert result.is_noop
+        # Memory sync should NOT be called from enrich_graph_entry anymore
+        mock_sync.assert_not_called()
