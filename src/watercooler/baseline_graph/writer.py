@@ -284,19 +284,6 @@ def upsert_entry_node(
         # Write all per-thread files atomically
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-        # Dual-write: Also append to monolithic format for backward compatibility
-        # Failures here should not fail the primary write (per-thread is canonical)
-        try:
-            monolithic_nodes = [meta, entries[entry_id]]
-            monolithic_edges = list(edges.values())
-            storage.append_to_monolithic_nodes(graph_dir, monolithic_nodes)
-            storage.append_to_monolithic_edges(graph_dir, monolithic_edges)
-        except Exception as dual_write_err:
-            logger.warning(
-                f"Dual-write to monolithic format failed for {topic}/{data.entry_id}: "
-                f"{dual_write_err}. Per-thread format is canonical; continuing."
-            )
-
         # NOTE: Embeddings are handled separately by sync.py enrichment.
         # They are stored in FalkorDB (with fallback to search-index.jsonl).
         # See sync.py:upsert_embedding() for embedding storage.
