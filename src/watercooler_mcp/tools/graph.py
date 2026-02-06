@@ -390,6 +390,8 @@ async def _search_graphiti_impl(
                 "id": r.get("uuid", ""),
                 "score": r.get("score", 0.0),
                 "fact": r.get("fact", ""),
+                "content": r.get("content", r.get("fact", "")),
+                "name": r.get("name", ""),
                 "source_node": r.get("source_node_uuid", ""),
                 "target_node": r.get("target_node_uuid", ""),
             }
