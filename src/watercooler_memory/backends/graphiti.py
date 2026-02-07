@@ -242,6 +242,16 @@ def _normalize_json_response(
                 if isinstance(item, dict) else item
                 for item in value
             ]
+        elif inner_model is not None and isinstance(value, dict):
+            # DeepSeek sometimes returns a single dict where list is expected
+            logger.info(
+                "json_object list coercion: wrapping single dict in list "
+                "for field '%s' in %s",
+                field_name, response_model.__name__,
+            )
+            remapped[field_name] = [
+                _normalize_json_response(value, inner_model),
+            ]
         elif (
             isinstance(value, dict)
             and isinstance(field_info.annotation, type)

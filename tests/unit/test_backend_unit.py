@@ -454,6 +454,51 @@ class TestNormalizeJsonResponse:
         assert "entities" in result
         assert result["entities"][0]["name"] == "foo"
 
+    def test_single_dict_coerced_to_list(self):
+        """Wrap a single dict in a list when list[Model] is expected."""
+        from pydantic import BaseModel
+
+        class NodeDuplicate(BaseModel):
+            id: int
+            name: str
+            duplicates: list[int]
+
+        class NodeResolutions(BaseModel):
+            entity_resolutions: list[NodeDuplicate]
+
+        # DeepSeek returns a single dict instead of a list
+        data = {
+            "entity_resolutions": {
+                "id": 0,
+                "name": "test entity",
+                "duplicates": [1, 2],
+            },
+        }
+        result = _normalize_json_response(data, NodeResolutions)
+        assert isinstance(result["entity_resolutions"], list)
+        assert len(result["entity_resolutions"]) == 1
+        assert result["entity_resolutions"][0]["name"] == "test entity"
+        # Validate it actually parses
+        parsed = NodeResolutions(**result)
+        assert parsed.entity_resolutions[0].id == 0
+
+    def test_single_dict_coerced_with_nested_remap(self):
+        """Wrap single dict in list AND remap nested field names."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+
+        class Outer(BaseModel):
+            items: list[Inner]
+
+        # Single dict with variant field name
+        data = {"items": {"entity_name": "foo"}}
+        result = _normalize_json_response(data, Outer)
+        assert isinstance(result["items"], list)
+        assert len(result["items"]) == 1
+        assert result["items"][0]["name"] == "foo"
+
 
 class TestGetListItemModel:
     """Unit tests for _get_list_item_model helper."""
