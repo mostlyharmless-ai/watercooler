@@ -196,15 +196,18 @@ def _normalize_json_response(
     """Remap response field names to match a Pydantic model schema.
 
     Without ``json_schema`` enforcement, LLMs may use synonymous field
-    names (e.g. ``entity_nodes`` instead of ``extracted_entities``).
+    names (e.g. ``entity_nodes`` instead of ``extracted_entities``,
+    ``entity_name`` instead of ``name`` inside nested objects).
     This detects required fields missing from *data* and remaps extra
-    keys that aren't in the model schema.
+    keys that aren't in the model schema, recursing into nested
+    Pydantic models within list fields.
     """
     from pydantic import BaseModel
 
     if not (isinstance(response_model, type) and issubclass(response_model, BaseModel)):
         return data
 
+    # --- top-level field remap ---
     required = {
         name for name, info in response_model.model_fields.items()
         if info.is_required()
@@ -213,23 +216,55 @@ def _normalize_json_response(
     missing = required - present
     extra = present - set(response_model.model_fields.keys())
 
-    if not missing or not extra:
-        return data
-
     remapped = dict(data)
-    extra_list = sorted(extra)
 
-    for m_field in sorted(missing):
-        if not extra_list:
-            break
-        e_field = extra_list.pop(0)
-        logger.info(
-            "json_object field remap: '%s' -> '%s' for %s",
-            e_field, m_field, response_model.__name__,
-        )
-        remapped[m_field] = remapped.pop(e_field)
+    if missing and extra:
+        extra_list = sorted(extra)
+        for m_field in sorted(missing):
+            if not extra_list:
+                break
+            e_field = extra_list.pop(0)
+            logger.info(
+                "json_object field remap: '%s' -> '%s' for %s",
+                e_field, m_field, response_model.__name__,
+            )
+            remapped[m_field] = remapped.pop(e_field)
+
+    # --- recurse into nested Pydantic models ---
+    for field_name, field_info in response_model.model_fields.items():
+        value = remapped.get(field_name)
+        if value is None:
+            continue
+        inner_model = _get_list_item_model(field_info.annotation)
+        if inner_model is not None and isinstance(value, list):
+            remapped[field_name] = [
+                _normalize_json_response(item, inner_model)
+                if isinstance(item, dict) else item
+                for item in value
+            ]
+        elif (
+            isinstance(value, dict)
+            and isinstance(field_info.annotation, type)
+            and issubclass(field_info.annotation, BaseModel)
+        ):
+            remapped[field_name] = _normalize_json_response(
+                value, field_info.annotation,
+            )
 
     return remapped
+
+
+def _get_list_item_model(annotation: Any) -> type | None:
+    """Extract the Pydantic model from a ``list[Model]`` annotation."""
+    from pydantic import BaseModel
+
+    origin = getattr(annotation, "__origin__", None)
+    if origin is not list:
+        return None
+    args = getattr(annotation, "__args__", ())
+    if args and isinstance(args[0], type) and issubclass(args[0], BaseModel):
+        return args[0]
+    return None
 
 
 class _JsonObjectOnlyClient:

@@ -6,7 +6,10 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from watercooler_memory.backends import BackendError, TransientError
-from watercooler_memory.backends.graphiti import GraphitiBackend, GraphitiConfig
+from watercooler_memory.backends.graphiti import (
+    GraphitiBackend, GraphitiConfig,
+    _normalize_json_response, _get_list_item_model,
+)
 from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
 
 
@@ -359,3 +362,115 @@ class TestGraphitiConfigMissingKeys:
 
         # Legacy key should be copied to llm_api_key
         assert backend.config.llm_api_key == "legacy-openai-key"
+
+
+class TestNormalizeJsonResponse:
+    """Unit tests for _normalize_json_response field remapping."""
+
+    def test_top_level_remap(self):
+        """Remap extra top-level fields to missing required fields."""
+        from pydantic import BaseModel
+
+        class MyModel(BaseModel):
+            name: str
+            value: int
+
+        data = {"entity_name": "foo", "value": 42}
+        result = _normalize_json_response(data, MyModel)
+        assert result == {"name": "foo", "value": 42}
+
+    def test_no_remap_when_all_present(self):
+        """No remapping when all required fields are present."""
+        from pydantic import BaseModel
+
+        class MyModel(BaseModel):
+            name: str
+            value: int
+
+        data = {"name": "foo", "value": 42}
+        result = _normalize_json_response(data, MyModel)
+        assert result == data
+
+    def test_nested_list_remap(self):
+        """Remap fields inside list items containing nested Pydantic models."""
+        from pydantic import BaseModel
+
+        class Entity(BaseModel):
+            name: str
+            entity_type_id: int
+
+        class Entities(BaseModel):
+            extracted_entities: list[Entity]
+
+        data = {
+            "extracted_entities": [
+                {"entity_name": "DeepSeek", "entity_type_id": 5},
+                {"entity_name": "branch", "entity_type_id": 3},
+            ]
+        }
+        result = _normalize_json_response(data, Entities)
+        assert result["extracted_entities"][0]["name"] == "DeepSeek"
+        assert result["extracted_entities"][1]["name"] == "branch"
+        # Original extra key should be gone
+        assert "entity_name" not in result["extracted_entities"][0]
+
+    def test_nested_list_no_remap_when_correct(self):
+        """No remapping for nested items when field names match."""
+        from pydantic import BaseModel
+
+        class Entity(BaseModel):
+            name: str
+
+        class Entities(BaseModel):
+            items: list[Entity]
+
+        data = {"items": [{"name": "correct"}]}
+        result = _normalize_json_response(data, Entities)
+        assert result == data
+
+    def test_non_pydantic_model_passthrough(self):
+        """Non-Pydantic models are returned as-is."""
+        data = {"foo": "bar"}
+        result = _normalize_json_response(data, dict)
+        assert result == data
+
+    def test_combined_top_and_nested_remap(self):
+        """Remap both top-level and nested fields in one pass."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+
+        class Outer(BaseModel):
+            entities: list[Inner]
+
+        # Top-level: entity_nodes -> entities; nested: entity_name -> name
+        data = {
+            "entity_nodes": [
+                {"entity_name": "foo"},
+            ]
+        }
+        result = _normalize_json_response(data, Outer)
+        assert "entities" in result
+        assert result["entities"][0]["name"] == "foo"
+
+
+class TestGetListItemModel:
+    """Unit tests for _get_list_item_model helper."""
+
+    def test_list_of_pydantic(self):
+        from pydantic import BaseModel
+
+        class Foo(BaseModel):
+            x: int
+
+        assert _get_list_item_model(list[Foo]) is Foo
+
+    def test_list_of_str(self):
+        assert _get_list_item_model(list[str]) is None
+
+    def test_plain_type(self):
+        assert _get_list_item_model(str) is None
+
+    def test_none_annotation(self):
+        assert _get_list_item_model(None) is None
