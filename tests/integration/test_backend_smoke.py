@@ -991,3 +991,65 @@ class TestMultiBackendComparison:
         # Results may differ (different retrieval strategies) but both valid
         print(f"LeanRAG returned {len(leanrag_results.results)} results")
         print(f"Graphiti returned {len(graphiti_results.results)} results")
+
+
+@pytest.mark.integration_falkor
+class TestMemorySyncCallPath:
+    """Verify sync_to_memory_backend accepts the parameter shape
+    used by the middleware call site.
+
+    This is a call-shape conformance test. Middleware-level integration
+    (operation_with_graph_sync invoking memory sync) and callback dispatch
+    are covered by unit tests in test_memory_sync.py.
+    """
+
+    @pytest.mark.skipif(
+        "os.environ.get('SKIP_GRAPHITI_INDEX') == '1'",
+        reason="Graphiti indexing requires OPENAI_API_KEY and FalkorDB",
+    )
+    def test_sync_to_memory_backend_dispatches(self, tmp_path):
+        """sync_to_memory_backend dispatches correctly with middleware call shape."""
+        from unittest.mock import patch, MagicMock
+        import watercooler.baseline_graph.sync as sync_mod
+
+        if "OPENAI_API_KEY" not in os.environ:
+            pytest.skip("OPENAI_API_KEY not set")
+
+        # Setup: create minimal graph-first thread structure
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        sync_called = []
+        original_sync = sync_mod.sync_to_memory_backend
+
+        def tracking_sync(*args, **kwargs):
+            sync_called.append(kwargs)
+            return original_sync(*args, **kwargs)
+
+        # Use the same parameter shape as middleware.operation_with_graph_sync
+        entry_node = {
+            "body": "Integration test: verifying memory backend dispatch after decoupling",
+            "title": "Memory Sync Dispatch Test",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "agent": "pytest",
+            "role": "tester",
+            "entry_type": "Note",
+        }
+
+        with patch.object(sync_mod, "sync_to_memory_backend", side_effect=tracking_sync):
+            sync_mod.sync_to_memory_backend(
+                threads_dir=threads_dir,
+                topic="integration-test",
+                entry_id="test-entry-1",
+                entry_body=entry_node["body"],
+                entry_title=entry_node["title"],
+                entry_summary=entry_node.get("summary", ""),
+                timestamp=entry_node["timestamp"],
+                agent=entry_node["agent"],
+                role=entry_node["role"],
+                entry_type=entry_node["entry_type"],
+            )
+
+        assert len(sync_called) == 1
+        assert sync_called[0]["topic"] == "integration-test"
+        assert sync_called[0]["entry_id"] == "test-entry-1"

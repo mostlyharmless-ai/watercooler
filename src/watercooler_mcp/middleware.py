@@ -355,6 +355,7 @@ def run_with_sync(
             result = operation()
 
             if topic and entry_id and context.threads_dir:
+                # Enrichment (summaries/embeddings) - optional, best-effort
                 try:
                     # Check if enrichment is configured and services are available
                     wc_config = get_watercooler_config()
@@ -414,16 +415,46 @@ def run_with_sync(
                     # Enrichment failure is logged but doesn't block the write
                     log_warning(f"[GRAPH] Enrichment failed for {topic}/{entry_id}: {graph_err}")
 
-                # Always sync to memory backend, independent of enrichment.
-                # This ensures Graphiti/LeanRAG indexing runs on every write,
-                # even when enrichment is skipped, disabled, or fails.
-                #
-                # Safety: enrichment (above) is synchronous and completes before
-                # this point, so the graph entry is fully written when we read it.
-                # The helper is defensive (catches all exceptions internally).
-                from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
-                if sync_entry_to_memory_backend(context.threads_dir, topic, entry_id):
-                    log_debug(f"[GRAPH] Memory sync submitted for {topic}/{entry_id}")
+                # Memory backend sync (T2: Graphiti/LeanRAG indexing)
+                # Runs independently of enrichment - memory backends need every
+                # entry regardless of summary/embedding availability.
+                # Note: enrichment runs synchronously above, so if it produced a
+                # summary the graph entry already contains it by this point;
+                # entry_summary will carry the enriched value to the backend.
+                try:
+                    from watercooler.baseline_graph.sync import sync_to_memory_backend
+                    from watercooler.baseline_graph.writer import get_entry_node_from_graph
+
+                    entry_node = get_entry_node_from_graph(
+                        context.threads_dir, entry_id, topic
+                    )
+                    if entry_node:
+                        synced = sync_to_memory_backend(
+                            threads_dir=context.threads_dir,
+                            topic=topic,
+                            entry_id=entry_id,
+                            entry_body=entry_node.get("body", ""),
+                            entry_title=entry_node.get("title"),
+                            entry_summary=entry_node.get("summary", ""),
+                            timestamp=entry_node.get("timestamp"),
+                            agent=entry_node.get("agent"),
+                            role=entry_node.get("role"),
+                            entry_type=entry_node.get("entry_type"),
+                        )
+                        if synced:
+                            log_debug(f"[MEMORY] Synced {topic}/{entry_id} to memory backend")
+                        else:
+                            log_debug(f"[MEMORY] Memory sync skipped for {topic}/{entry_id} (backend not active)")
+                    else:
+                        log_warning(
+                            f"[MEMORY] Entry not found in graph for memory sync: "
+                            f"{topic}/{entry_id}"
+                        )
+                except Exception as mem_err:
+                    log_warning(
+                        f"[MEMORY] Memory backend sync failed for "
+                        f"{topic}/{entry_id}: {mem_err}"
+                    )
 
             return result
 

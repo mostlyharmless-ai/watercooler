@@ -1423,10 +1423,8 @@ def enrich_graph_entry(
 
             logger.debug(f"Enrichment complete for {topic}/{entry_id}")
 
-        # NOTE: Memory backend sync (Graphiti/LeanRAG) is now handled by the
-        # middleware via sync_entry_to_memory_backend(), independent of enrichment.
-        # This ensures indexing runs on every write, even when enrichment is
-        # skipped or disabled.
+        # NOTE: Memory backend sync (Graphiti/LeanRAG) is handled by
+        # middleware.operation_with_graph_sync(), decoupled from enrichment.
 
         return EnrichmentResult(
             success=True,
@@ -1688,6 +1686,10 @@ def sync_entry_to_graph(
         logger.debug(f"Graph sync complete for {topic}/{entry.entry_id}")
 
         # Call memory backend hook (non-blocking - errors logged, never raise)
+        # WARNING: This is the deprecated sync path. New code should use
+        # enrich_graph_entry() via middleware.operation_with_graph_sync() which
+        # handles memory sync independently. If both paths fire for the same
+        # entry, it will be double-indexed.
         sync_to_memory_backend(
             threads_dir=threads_dir,
             topic=topic,

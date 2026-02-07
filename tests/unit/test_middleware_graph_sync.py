@@ -95,7 +95,16 @@ def _run_with_mocked_sync(
         "watercooler_mcp.middleware._build_commit_footers": MagicMock(return_value=[]),
         "watercooler_mcp.middleware._should_auto_branch": MagicMock(return_value=False),
         # Patch at the source module so the lazy import inside the closure picks it up
-        "watercooler.baseline_graph.sync.sync_entry_to_memory_backend": mock_memory_sync,
+        "watercooler.baseline_graph.sync.sync_to_memory_backend": mock_memory_sync,
+        "watercooler.baseline_graph.writer.get_entry_node_from_graph": MagicMock(return_value={
+            "body": "test body",
+            "title": "Test Title",
+            "summary": "",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "agent": "claude",
+            "role": "implementer",
+            "entry_type": "Note",
+        }),
     }
 
     # Optionally patch enrich_graph_entry (only needed when enrichment runs)
@@ -131,7 +140,7 @@ def _run_with_mocked_sync(
 
 
 class TestMemorySyncGuarantee:
-    """Verify sync_entry_to_memory_backend is called after every write path."""
+    """Verify sync_to_memory_backend is called after every write path."""
 
     def test_memory_sync_runs_when_enrichment_not_configured(self, fake_context):
         """Path A: enrichment flags are both False — memory sync still runs."""
@@ -143,9 +152,10 @@ class TestMemorySyncGuarantee:
         )
 
         assert result == "ok"
-        mock_mem.assert_called_once_with(
-            fake_context.threads_dir, "test-topic", "entry-001",
-        )
+        mock_mem.assert_called_once()
+        call_kw = mock_mem.call_args[1]
+        assert call_kw["topic"] == "test-topic"
+        assert call_kw["entry_id"] == "entry-001"
 
     def test_memory_sync_runs_when_services_unavailable(self, fake_context):
         """Path B: enrichment wanted but services unreachable — memory sync still runs."""
@@ -158,9 +168,10 @@ class TestMemorySyncGuarantee:
         )
 
         assert result == "ok"
-        mock_mem.assert_called_once_with(
-            fake_context.threads_dir, "test-topic", "entry-001",
-        )
+        mock_mem.assert_called_once()
+        call_kw = mock_mem.call_args[1]
+        assert call_kw["topic"] == "test-topic"
+        assert call_kw["entry_id"] == "entry-001"
 
     def test_memory_sync_runs_when_enrichment_is_noop(self, fake_context):
         """Path C: enrichment runs but produces nothing — memory sync still runs."""
@@ -176,9 +187,10 @@ class TestMemorySyncGuarantee:
         )
 
         assert result == "ok"
-        mock_mem.assert_called_once_with(
-            fake_context.threads_dir, "test-topic", "entry-001",
-        )
+        mock_mem.assert_called_once()
+        call_kw = mock_mem.call_args[1]
+        assert call_kw["topic"] == "test-topic"
+        assert call_kw["entry_id"] == "entry-001"
 
     def test_memory_sync_runs_when_enrichment_raises(self, fake_context):
         """Path D: enrichment raises an exception — memory sync still runs."""
@@ -192,6 +204,7 @@ class TestMemorySyncGuarantee:
         )
 
         assert result == "ok"
-        mock_mem.assert_called_once_with(
-            fake_context.threads_dir, "test-topic", "entry-001",
-        )
+        mock_mem.assert_called_once()
+        call_kw = mock_mem.call_args[1]
+        assert call_kw["topic"] == "test-topic"
+        assert call_kw["entry_id"] == "entry-001"
