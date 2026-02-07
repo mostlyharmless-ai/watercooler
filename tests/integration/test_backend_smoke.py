@@ -1043,6 +1043,7 @@ class TestMemorySyncCallPath:
                 entry_id="test-entry-1",
                 entry_body=entry_node["body"],
                 entry_title=entry_node["title"],
+                entry_summary=entry_node.get("summary", ""),
                 timestamp=entry_node["timestamp"],
                 agent=entry_node["agent"],
                 role=entry_node["role"],

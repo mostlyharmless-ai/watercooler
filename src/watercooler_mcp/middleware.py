@@ -418,6 +418,9 @@ def run_with_sync(
                 # Memory backend sync (T2: Graphiti/LeanRAG indexing)
                 # Runs independently of enrichment - memory backends need every
                 # entry regardless of summary/embedding availability.
+                # Note: enrichment runs synchronously above, so if it produced a
+                # summary the graph entry already contains it by this point;
+                # entry_summary will carry the enriched value to the backend.
                 try:
                     from watercooler.baseline_graph.sync import sync_to_memory_backend
                     from watercooler.baseline_graph.writer import get_entry_node_from_graph

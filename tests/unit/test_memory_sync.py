@@ -1227,6 +1227,28 @@ class TestMiddlewareMemorySync:
         assert result == "ok"
         mock_sync.assert_not_called()
 
+    def test_memory_sync_with_partial_entry_node(self, tmp_path):
+        """Memory sync should handle entry nodes with missing optional fields."""
+        partial_node = {
+            "body": "minimal body",
+            # title, timestamp, agent, role, entry_type, summary all missing
+        }
+        result, mock_sync, _ = self._run_middleware(
+            tmp_path,
+            wants_enrichment=False,
+            entry_node=partial_node,
+        )
+        assert result == "test-result"
+        mock_sync.assert_called_once()
+        call_kwargs = mock_sync.call_args[1]
+        assert call_kwargs["entry_body"] == "minimal body"
+        assert call_kwargs["entry_title"] is None
+        assert call_kwargs["entry_summary"] == ""
+        assert call_kwargs["timestamp"] is None
+        assert call_kwargs["agent"] is None
+        assert call_kwargs["role"] is None
+        assert call_kwargs["entry_type"] is None
+
     def test_enrich_no_longer_calls_memory_sync(self, tmp_path):
         """enrich_graph_entry should NOT call sync_to_memory_backend."""
         from watercooler.baseline_graph.sync import enrich_graph_entry
