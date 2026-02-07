@@ -432,6 +432,7 @@ def run_with_sync(
                             entry_id=entry_id,
                             entry_body=entry_node.get("body", ""),
                             entry_title=entry_node.get("title"),
+                            entry_summary=entry_node.get("summary", ""),
                             timestamp=entry_node.get("timestamp"),
                             agent=entry_node.get("agent"),
                             role=entry_node.get("role"),
@@ -442,7 +443,7 @@ def run_with_sync(
                         else:
                             log_debug(f"[MEMORY] Memory sync skipped for {topic}/{entry_id} (backend not active)")
                     else:
-                        log_debug(
+                        log_warning(
                             f"[MEMORY] Entry not found in graph for memory sync: "
                             f"{topic}/{entry_id}"
                         )
