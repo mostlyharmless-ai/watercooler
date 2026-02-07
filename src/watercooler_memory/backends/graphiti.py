@@ -190,6 +190,28 @@ def _derive_database_name(code_path: Path | str | None) -> str:
     return derive_group_id(code_path=Path(code_path) if code_path else None)
 
 
+def _best_extra_match(missing_field: str, extras: set[str]) -> str | None:
+    """Pick the extra field most likely to correspond to *missing_field*.
+
+    Preference order:
+    1. Suffix match  – ``entity_name`` ends with ``_name`` → matches ``name``
+    2. Substring match – the missing name appears somewhere in the extra
+    3. Alphabetical fallback (original behaviour)
+    """
+    suffix: list[str] = []
+    contains: list[str] = []
+    for e in sorted(extras):
+        if e.endswith(f"_{missing_field}") or e == missing_field:
+            suffix.append(e)
+        elif missing_field in e:
+            contains.append(e)
+    if suffix:
+        return suffix[0]
+    if contains:
+        return contains[0]
+    return sorted(extras)[0] if extras else None
+
+
 def _normalize_json_response(
     data: dict[str, Any], response_model: type,
 ) -> dict[str, Any]:
@@ -219,11 +241,14 @@ def _normalize_json_response(
     remapped = dict(data)
 
     if missing and extra:
-        extra_list = sorted(extra)
+        extra_remaining = set(extra)
         for m_field in sorted(missing):
-            if not extra_list:
+            if not extra_remaining:
                 break
-            e_field = extra_list.pop(0)
+            e_field = _best_extra_match(m_field, extra_remaining)
+            if e_field is None:
+                break
+            extra_remaining.discard(e_field)
             logger.info(
                 "json_object field remap: '%s' -> '%s' for %s",
                 e_field, m_field, response_model.__name__,

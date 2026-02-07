@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from watercooler_memory.backends import BackendError, TransientError
 from watercooler_memory.backends.graphiti import (
     GraphitiBackend, GraphitiConfig,
-    _normalize_json_response, _get_list_item_model,
+    _normalize_json_response, _get_list_item_model, _best_extra_match,
 )
 from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
 
@@ -498,6 +498,113 @@ class TestNormalizeJsonResponse:
         assert isinstance(result["items"], list)
         assert len(result["items"]) == 1
         assert result["items"][0]["name"] == "foo"
+
+
+class TestBestExtraMatch:
+    """Unit tests for _best_extra_match field similarity scoring."""
+
+    def test_suffix_match_preferred(self):
+        """entity_name should match 'name' over entity_id (suffix wins)."""
+        extras = {"entity_id", "entity_name", "entity_type_name"}
+        assert _best_extra_match("name", extras) == "entity_name"
+
+    def test_exact_match(self):
+        """Exact match should be picked."""
+        extras = {"name", "other_field"}
+        assert _best_extra_match("name", extras) == "name"
+
+    def test_substring_match_fallback(self):
+        """Substring containment is used when no suffix match."""
+        extras = {"xnamex", "other"}
+        assert _best_extra_match("name", extras) == "xnamex"
+
+    def test_alphabetical_fallback(self):
+        """Fall back to alphabetical when no similarity."""
+        extras = {"aaa", "bbb", "ccc"}
+        assert _best_extra_match("name", extras) == "aaa"
+
+    def test_empty_extras(self):
+        """Return None for empty extras set."""
+        assert _best_extra_match("name", set()) is None
+
+    def test_underscore_suffix(self):
+        """entity_name ends with _name → matches 'name'."""
+        extras = {"entity_name"}
+        assert _best_extra_match("name", extras) == "entity_name"
+
+    def test_entity_id_not_picked_for_name(self):
+        """Regression: entity_id must NOT be picked for 'name' field."""
+        extras = {"entity_id", "entity_name", "entity_type_description", "entity_type_name"}
+        result = _best_extra_match("name", extras)
+        assert result == "entity_name"
+        assert result != "entity_id"
+
+
+class TestNormalizeEntityIdRegression:
+    """Regression tests for DeepSeek returning entity_id in entities."""
+
+    def test_entity_with_entity_id_maps_correctly(self):
+        """entity_name→name, entity_id left as extra (not mapped to name)."""
+        from pydantic import BaseModel, Field
+
+        class ExtractedEntity(BaseModel):
+            name: str = Field(..., description="Entity name")
+            entity_type_id: int = Field(description="Entity type ID")
+
+        class ExtractedEntities(BaseModel):
+            extracted_entities: list[ExtractedEntity]
+
+        # Exact DeepSeek response format that caused the bug
+        data = {
+            "entity_nodes": [
+                {
+                    "entity_id": 0,
+                    "entity_name": "DeepSeek",
+                    "entity_type_id": 0,
+                    "entity_type_name": "Entity",
+                    "entity_type_description": "Default type",
+                },
+                {
+                    "entity_id": 1,
+                    "entity_name": "json_object",
+                    "entity_type_id": 0,
+                    "entity_type_name": "Entity",
+                    "entity_type_description": "Default type",
+                },
+            ]
+        }
+        result = _normalize_json_response(data, ExtractedEntities)
+        entities = result["extracted_entities"]
+
+        # name must be the string entity_name, NOT the int entity_id
+        assert entities[0]["name"] == "DeepSeek"
+        assert entities[1]["name"] == "json_object"
+        assert isinstance(entities[0]["name"], str)
+        assert isinstance(entities[1]["name"], str)
+
+        # Validate with Pydantic
+        parsed = ExtractedEntities(**result)
+        assert parsed.extracted_entities[0].name == "DeepSeek"
+        assert parsed.extracted_entities[0].entity_type_id == 0
+
+    def test_entity_without_entity_id_still_works(self):
+        """Normal case without entity_id should still remap correctly."""
+        from pydantic import BaseModel, Field
+
+        class ExtractedEntity(BaseModel):
+            name: str
+            entity_type_id: int
+
+        class ExtractedEntities(BaseModel):
+            extracted_entities: list[ExtractedEntity]
+
+        data = {
+            "entities": [
+                {"entity_name": "Foo", "entity_type_id": 0},
+            ]
+        }
+        result = _normalize_json_response(data, ExtractedEntities)
+        assert result["extracted_entities"][0]["name"] == "Foo"
 
 
 class TestGetListItemModel:
