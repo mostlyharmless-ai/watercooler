@@ -190,6 +190,48 @@ def _derive_database_name(code_path: Path | str | None) -> str:
     return derive_group_id(code_path=Path(code_path) if code_path else None)
 
 
+def _normalize_json_response(
+    data: dict[str, Any], response_model: type,
+) -> dict[str, Any]:
+    """Remap response field names to match a Pydantic model schema.
+
+    Without ``json_schema`` enforcement, LLMs may use synonymous field
+    names (e.g. ``entity_nodes`` instead of ``extracted_entities``).
+    This detects required fields missing from *data* and remaps extra
+    keys that aren't in the model schema.
+    """
+    from pydantic import BaseModel
+
+    if not (isinstance(response_model, type) and issubclass(response_model, BaseModel)):
+        return data
+
+    required = {
+        name for name, info in response_model.model_fields.items()
+        if info.is_required()
+    }
+    present = set(data.keys())
+    missing = required - present
+    extra = present - set(response_model.model_fields.keys())
+
+    if not missing or not extra:
+        return data
+
+    remapped = dict(data)
+    extra_list = sorted(extra)
+
+    for m_field in sorted(missing):
+        if not extra_list:
+            break
+        e_field = extra_list.pop(0)
+        logger.info(
+            "json_object field remap: '%s' -> '%s' for %s",
+            e_field, m_field, response_model.__name__,
+        )
+        remapped[m_field] = remapped.pop(e_field)
+
+    return remapped
+
+
 class _JsonObjectOnlyClient:
     """OpenAI-compatible LLM client that forces json_object response format.
 
@@ -200,6 +242,8 @@ class _JsonObjectOnlyClient:
 
     Graphiti prompts already include JSON format instructions, so the
     model output is correct even without strict schema enforcement.
+    The response is then normalised via :func:`_normalize_json_response`
+    to remap any variant field names back to the expected Pydantic schema.
     """
 
     def __new__(cls, **kwargs: Any) -> Any:  # type: ignore[override]
@@ -212,9 +256,14 @@ class _JsonObjectOnlyClient:
                 self, messages: Any, response_model: Any = None, **kw: Any,
             ) -> dict[str, Any]:
                 # Force json_object by dropping response_model
-                return await super()._generate_response(
+                raw = await super()._generate_response(
                     messages, response_model=None, **kw,
                 )
+                # Without json_schema enforcement, LLMs may use variant
+                # field names.  Remap to match the expected Pydantic model.
+                if response_model is not None:
+                    raw = _normalize_json_response(raw, response_model)
+                return raw
 
         return _Inner(**kwargs)
 
