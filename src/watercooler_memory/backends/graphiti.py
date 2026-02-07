@@ -40,6 +40,8 @@ from watercooler.path_resolver import derive_group_id
 # Providers whose OpenAI-compatible APIs do NOT support json_schema
 # structured outputs (response_format type). These need json_object fallback.
 _NO_STRUCTURED_OUTPUTS_DOMAINS = ("deepseek.com",)
+# DeepSeek max output tokens is 8192; graphiti_core defaults to 16384
+_DEEPSEEK_MAX_TOKENS = 8192
 
 
 def _needs_json_object_only(api_base: str | None) -> bool:
@@ -886,7 +888,10 @@ class GraphitiBackend(MemoryBackend):
             if _needs_json_object_only(llm_api_base):
                 # DeepSeek (and similar) don't support json_schema structured
                 # outputs. Use a thin wrapper that forces json_object mode.
-                llm_client = _JsonObjectOnlyClient(config=llm_config)
+                # Also cap max_tokens to 8192 (DeepSeek's output limit).
+                llm_client = _JsonObjectOnlyClient(
+                    config=llm_config, max_tokens=_DEEPSEEK_MAX_TOKENS,
+                )
                 logger.info(
                     "Using json_object-only LLM client for %s",
                     llm_api_base,
