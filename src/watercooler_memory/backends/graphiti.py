@@ -37,6 +37,22 @@ import sys
 from watercooler.memory_config import is_anthropic_url
 from watercooler.path_resolver import derive_group_id
 
+# Providers whose OpenAI-compatible APIs do NOT support json_schema
+# structured outputs (response_format type). These need json_object fallback.
+_NO_STRUCTURED_OUTPUTS_DOMAINS = ("deepseek.com",)
+
+
+def _needs_json_object_only(api_base: str | None) -> bool:
+    """Check if provider requires json_object mode (no structured outputs)."""
+    if not api_base:
+        return False
+    try:
+        from urllib.parse import urlparse
+        hostname = (urlparse(api_base).hostname or "").lower()
+        return any(hostname.endswith(d) for d in _NO_STRUCTURED_OUTPUTS_DOMAINS)
+    except Exception:
+        return False
+
 # Resolve package root from this file's location
 # graphiti.py is at: src/watercooler_memory/backends/graphiti.py
 # Package root is 4 levels up: watercooler-cloud/
@@ -170,6 +186,35 @@ def _derive_database_name(code_path: Path | str | None) -> str:
         Sanitized database name (e.g., 'watercooler_cloud')
     """
     return derive_group_id(code_path=Path(code_path) if code_path else None)
+
+
+class _JsonObjectOnlyClient:
+    """OpenAI-compatible LLM client that forces json_object response format.
+
+    Some providers (DeepSeek, etc.) reject OpenAI's json_schema structured
+    outputs with HTTP 400.  This thin wrapper delegates to
+    ``OpenAIGenericClient`` but clears ``response_model`` so the parent
+    always uses ``{"type": "json_object"}`` instead of ``json_schema``.
+
+    Graphiti prompts already include JSON format instructions, so the
+    model output is correct even without strict schema enforcement.
+    """
+
+    def __new__(cls, **kwargs: Any) -> Any:  # type: ignore[override]
+        from graphiti_core.llm_client.openai_generic_client import (
+            OpenAIGenericClient,
+        )
+
+        class _Inner(OpenAIGenericClient):
+            async def _generate_response(
+                self, messages: Any, response_model: Any = None, **kw: Any,
+            ) -> dict[str, Any]:
+                # Force json_object by dropping response_model
+                return await super()._generate_response(
+                    messages, response_model=None, **kw,
+                )
+
+        return _Inner(**kwargs)
 
 
 @dataclass
@@ -838,7 +883,16 @@ class GraphitiBackend(MemoryBackend):
                 model=self.config.llm_model,
                 base_url=self.config.llm_api_base,
             )
-            llm_client = OpenAIGenericClient(config=llm_config)
+            if _needs_json_object_only(llm_api_base):
+                # DeepSeek (and similar) don't support json_schema structured
+                # outputs. Use a thin wrapper that forces json_object mode.
+                llm_client = _JsonObjectOnlyClient(config=llm_config)
+                logger.info(
+                    "Using json_object-only LLM client for %s",
+                    llm_api_base,
+                )
+            else:
+                llm_client = OpenAIGenericClient(config=llm_config)
 
         # Configure embedder (supports OpenAI, local llama.cpp, etc.)
         # Check if embedding service needs auto-start
