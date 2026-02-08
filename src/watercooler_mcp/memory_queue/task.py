@@ -7,11 +7,14 @@ fields for retry tracking, backend targeting, and bulk job support.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class TaskStatus(str, Enum):
@@ -181,6 +184,8 @@ class MemoryTask:
         """
         import random
 
+        if len(error) > 500:
+            logger.debug("MEMORY_QUEUE: truncating error from %d to 500 chars", len(error))
         self.last_error = error[:500] if len(error) > 500 else error
         self.updated_at = time.time()
 

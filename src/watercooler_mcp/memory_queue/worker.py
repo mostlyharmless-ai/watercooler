@@ -174,6 +174,11 @@ class MemoryTaskWorker:
                 entities=result.get("entities_extracted"),
                 facts=result.get("facts_extracted", 0),
             )
+            logger.info(
+                "MEMORY_QUEUE: task %s completed (entry=%s, topic=%s, uuid=%s)",
+                task.task_id, task.entry_id, task.topic,
+                result.get("episode_uuid", ""),
+            )
 
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"

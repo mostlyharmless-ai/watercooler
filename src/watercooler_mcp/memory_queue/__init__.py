@@ -52,6 +52,8 @@ __all__ = [
     "DuplicateTaskError",
     "QueueFullError",
     "TaskNotFoundError",
+    # Constants
+    "VALID_BACKENDS",
     # Singleton API
     "init_memory_queue",
     "get_queue",
@@ -84,6 +86,7 @@ def init_memory_queue(
     queue_dir: Optional[Path] = None,
     poll_interval: float = 5.0,
     stale_timeout: float = 600.0,
+    max_depth: int = 5000,
     start_worker: bool = True,
 ) -> MemoryTaskQueue:
     """Initialise the singleton memory queue and (optionally) start the worker.
@@ -94,6 +97,7 @@ def init_memory_queue(
         queue_dir: Override persistence directory.
         poll_interval: Worker poll interval in seconds.
         stale_timeout: Seconds before a RUNNING task is considered stale.
+        max_depth: Maximum number of tasks before backpressure kicks in.
         start_worker: Whether to start the background worker thread.
 
     Returns:
@@ -105,7 +109,7 @@ def init_memory_queue(
         logger.debug("MEMORY_QUEUE: already initialised, skipping")
         return _queue
 
-    _queue = MemoryTaskQueue(queue_dir=queue_dir)
+    _queue = MemoryTaskQueue(queue_dir=queue_dir, max_depth=max_depth)
     _worker = MemoryTaskWorker(
         _queue,
         poll_interval=poll_interval,
