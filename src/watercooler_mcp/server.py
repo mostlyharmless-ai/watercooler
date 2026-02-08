@@ -153,6 +153,19 @@ register_memory_tools(mcp)
 from .memory_sync import init_memory_sync_callbacks
 init_memory_sync_callbacks()
 
+# Initialize persistent memory task queue (recovery + retry for fire-and-forget tasks)
+try:
+    from .memory_queue import init_memory_queue
+    init_memory_queue()
+    # Register backend executors with the queue worker
+    from .memory_sync import init_memory_queue_executors
+    init_memory_queue_executors()
+except Exception as _mq_err:
+    import logging as _mq_logging
+    _mq_logging.getLogger(__name__).warning(
+        "Could not initialise memory task queue: %s", _mq_err,
+    )
+
 # Re-export registered tools for test compatibility (must be after registration)
 health = _diagnostic_tools.health
 list_threads = _thread_query_tools.list_threads

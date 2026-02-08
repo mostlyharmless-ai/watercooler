@@ -2940,8 +2940,53 @@ def sync_to_memory_backend(
 
     callback = _memory_sync_callbacks[backend]
 
+    # Try persistent memory queue when explicitly enabled via env var.
+    # The queue provides retry, persistence, and dead-letter semantics.
+    # Falls back to the legacy ThreadPoolExecutor when not enabled or
+    # when the memory_queue package is not installed (core-lib-only).
+    if os.environ.get("WATERCOOLER_MEMORY_QUEUE", "").lower() in ("1", "true", "yes"):
+        try:
+            from watercooler_mcp.memory_queue import enqueue_memory_task, get_worker
+
+            worker = get_worker()
+            if (
+                worker is not None
+                and worker.is_running
+                and worker.has_executor(backend)
+            ):
+                threads_dir_str = str(threads_dir)
+                code_path = (
+                    threads_dir_str.removesuffix("-threads")
+                    if threads_dir_str.endswith("-threads")
+                    else threads_dir_str
+                )
+                content = entry_summary if entry_summary else entry_body
+
+                task_id = enqueue_memory_task(
+                    entry_id=entry_id,
+                    topic=topic,
+                    group_id=code_path,
+                    content=content,
+                    backend=backend,
+                    title=entry_title or "",
+                    timestamp=timestamp or "",
+                    source_description=f"{code_path} | thread:{topic}",
+                )
+                if task_id is not None:
+                    logger.debug(
+                        f"MEMORY: Queued {backend} sync for {topic}/{entry_id} (task={task_id})"
+                    )
+                    return True
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(
+                f"MEMORY: Queue enqueue failed for {topic}/{entry_id}: {e}, "
+                "falling back to executor"
+            )
+
+    # Legacy fallback: submit directly to thread pool (no retry/persistence)
     try:
-        # Submit to thread pool for fire-and-forget execution
         executor = _get_sync_executor()
         executor.submit(
             callback,
