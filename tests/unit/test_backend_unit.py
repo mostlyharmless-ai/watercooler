@@ -6,7 +6,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from watercooler_memory.backends import BackendError, TransientError
-from watercooler_memory.backends.graphiti import GraphitiBackend, GraphitiConfig
+from watercooler_memory.backends.graphiti import (
+    GraphitiBackend, GraphitiConfig,
+    _normalize_json_response, _get_list_item_model, _best_extra_match,
+    MAX_NORMALIZE_DEPTH,
+)
 from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
 
 
@@ -359,3 +363,338 @@ class TestGraphitiConfigMissingKeys:
 
         # Legacy key should be copied to llm_api_key
         assert backend.config.llm_api_key == "legacy-openai-key"
+
+
+class TestNormalizeJsonResponse:
+    """Unit tests for _normalize_json_response field remapping."""
+
+    def test_top_level_remap(self):
+        """Remap extra top-level fields to missing required fields."""
+        from pydantic import BaseModel
+
+        class MyModel(BaseModel):
+            name: str
+            value: int
+
+        data = {"entity_name": "foo", "value": 42}
+        result = _normalize_json_response(data, MyModel)
+        assert result == {"name": "foo", "value": 42}
+
+    def test_no_remap_when_all_present(self):
+        """No remapping when all required fields are present."""
+        from pydantic import BaseModel
+
+        class MyModel(BaseModel):
+            name: str
+            value: int
+
+        data = {"name": "foo", "value": 42}
+        result = _normalize_json_response(data, MyModel)
+        assert result == data
+
+    def test_nested_list_remap(self):
+        """Remap fields inside list items containing nested Pydantic models."""
+        from pydantic import BaseModel
+
+        class Entity(BaseModel):
+            name: str
+            entity_type_id: int
+
+        class Entities(BaseModel):
+            extracted_entities: list[Entity]
+
+        data = {
+            "extracted_entities": [
+                {"entity_name": "DeepSeek", "entity_type_id": 5},
+                {"entity_name": "branch", "entity_type_id": 3},
+            ]
+        }
+        result = _normalize_json_response(data, Entities)
+        assert result["extracted_entities"][0]["name"] == "DeepSeek"
+        assert result["extracted_entities"][1]["name"] == "branch"
+        # Original extra key should be gone
+        assert "entity_name" not in result["extracted_entities"][0]
+
+    def test_nested_list_no_remap_when_correct(self):
+        """No remapping for nested items when field names match."""
+        from pydantic import BaseModel
+
+        class Entity(BaseModel):
+            name: str
+
+        class Entities(BaseModel):
+            items: list[Entity]
+
+        data = {"items": [{"name": "correct"}]}
+        result = _normalize_json_response(data, Entities)
+        assert result == data
+
+    def test_non_pydantic_model_passthrough(self):
+        """Non-Pydantic models are returned as-is."""
+        data = {"foo": "bar"}
+        result = _normalize_json_response(data, dict)
+        assert result == data
+
+    def test_combined_top_and_nested_remap(self):
+        """Remap both top-level and nested fields in one pass."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+
+        class Outer(BaseModel):
+            entities: list[Inner]
+
+        # Top-level: entity_nodes -> entities; nested: entity_name -> name
+        data = {
+            "entity_nodes": [
+                {"entity_name": "foo"},
+            ]
+        }
+        result = _normalize_json_response(data, Outer)
+        assert "entities" in result
+        assert result["entities"][0]["name"] == "foo"
+
+    def test_single_dict_coerced_to_list(self):
+        """Wrap a single dict in a list when list[Model] is expected."""
+        from pydantic import BaseModel
+
+        class NodeDuplicate(BaseModel):
+            id: int
+            name: str
+            duplicates: list[int]
+
+        class NodeResolutions(BaseModel):
+            entity_resolutions: list[NodeDuplicate]
+
+        # DeepSeek returns a single dict instead of a list
+        data = {
+            "entity_resolutions": {
+                "id": 0,
+                "name": "test entity",
+                "duplicates": [1, 2],
+            },
+        }
+        result = _normalize_json_response(data, NodeResolutions)
+        assert isinstance(result["entity_resolutions"], list)
+        assert len(result["entity_resolutions"]) == 1
+        assert result["entity_resolutions"][0]["name"] == "test entity"
+        # Validate it actually parses
+        parsed = NodeResolutions(**result)
+        assert parsed.entity_resolutions[0].id == 0
+
+    def test_single_dict_coerced_with_nested_remap(self):
+        """Wrap single dict in list AND remap nested field names."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+
+        class Outer(BaseModel):
+            items: list[Inner]
+
+        # Single dict with variant field name
+        data = {"items": {"entity_name": "foo"}}
+        result = _normalize_json_response(data, Outer)
+        assert isinstance(result["items"], list)
+        assert len(result["items"]) == 1
+        assert result["items"][0]["name"] == "foo"
+
+
+class TestBestExtraMatch:
+    """Unit tests for _best_extra_match field similarity scoring."""
+
+    def test_suffix_match_preferred(self):
+        """entity_name should match 'name' over entity_id (suffix wins)."""
+        extras = {"entity_id", "entity_name", "entity_type_name"}
+        assert _best_extra_match("name", extras) == "entity_name"
+
+    def test_exact_match(self):
+        """Exact match should be picked."""
+        extras = {"name", "other_field"}
+        assert _best_extra_match("name", extras) == "name"
+
+    def test_substring_match_fallback(self):
+        """Substring containment is used when no suffix match."""
+        extras = {"xnamex", "other"}
+        assert _best_extra_match("name", extras) == "xnamex"
+
+    def test_alphabetical_fallback(self):
+        """Fall back to alphabetical when no similarity."""
+        extras = {"aaa", "bbb", "ccc"}
+        assert _best_extra_match("name", extras) == "aaa"
+
+    def test_empty_extras(self):
+        """Return None for empty extras set."""
+        assert _best_extra_match("name", set()) is None
+
+    def test_underscore_suffix(self):
+        """entity_name ends with _name → matches 'name'."""
+        extras = {"entity_name"}
+        assert _best_extra_match("name", extras) == "entity_name"
+
+    def test_entity_id_not_picked_for_name(self):
+        """Regression: entity_id must NOT be picked for 'name' field."""
+        extras = {"entity_id", "entity_name", "entity_type_description", "entity_type_name"}
+        result = _best_extra_match("name", extras)
+        assert result == "entity_name"
+        assert result != "entity_id"
+
+
+class TestNormalizeEntityIdRegression:
+    """Regression tests for DeepSeek returning entity_id in entities."""
+
+    def test_entity_with_entity_id_maps_correctly(self):
+        """entity_name→name, entity_id left as extra (not mapped to name)."""
+        from pydantic import BaseModel, Field
+
+        class ExtractedEntity(BaseModel):
+            name: str = Field(..., description="Entity name")
+            entity_type_id: int = Field(description="Entity type ID")
+
+        class ExtractedEntities(BaseModel):
+            extracted_entities: list[ExtractedEntity]
+
+        # Exact DeepSeek response format that caused the bug
+        data = {
+            "entity_nodes": [
+                {
+                    "entity_id": 0,
+                    "entity_name": "DeepSeek",
+                    "entity_type_id": 0,
+                    "entity_type_name": "Entity",
+                    "entity_type_description": "Default type",
+                },
+                {
+                    "entity_id": 1,
+                    "entity_name": "json_object",
+                    "entity_type_id": 0,
+                    "entity_type_name": "Entity",
+                    "entity_type_description": "Default type",
+                },
+            ]
+        }
+        result = _normalize_json_response(data, ExtractedEntities)
+        entities = result["extracted_entities"]
+
+        # name must be the string entity_name, NOT the int entity_id
+        assert entities[0]["name"] == "DeepSeek"
+        assert entities[1]["name"] == "json_object"
+        assert isinstance(entities[0]["name"], str)
+        assert isinstance(entities[1]["name"], str)
+
+        # Validate with Pydantic
+        parsed = ExtractedEntities(**result)
+        assert parsed.extracted_entities[0].name == "DeepSeek"
+        assert parsed.extracted_entities[0].entity_type_id == 0
+
+    def test_entity_without_entity_id_still_works(self):
+        """Normal case without entity_id should still remap correctly."""
+        from pydantic import BaseModel, Field
+
+        class ExtractedEntity(BaseModel):
+            name: str
+            entity_type_id: int
+
+        class ExtractedEntities(BaseModel):
+            extracted_entities: list[ExtractedEntity]
+
+        data = {
+            "entities": [
+                {"entity_name": "Foo", "entity_type_id": 0},
+            ]
+        }
+        result = _normalize_json_response(data, ExtractedEntities)
+        assert result["extracted_entities"][0]["name"] == "Foo"
+
+
+class TestGetListItemModel:
+    """Unit tests for _get_list_item_model helper."""
+
+    def test_list_of_pydantic(self):
+        from pydantic import BaseModel
+
+        class Foo(BaseModel):
+            x: int
+
+        assert _get_list_item_model(list[Foo]) is Foo
+
+    def test_list_of_str(self):
+        assert _get_list_item_model(list[str]) is None
+
+    def test_plain_type(self):
+        assert _get_list_item_model(str) is None
+
+    def test_none_annotation(self):
+        assert _get_list_item_model(None) is None
+
+
+class TestNormalizeDepthLimit:
+    """Tests for MAX_NORMALIZE_DEPTH guard in _normalize_json_response."""
+
+    def test_depth_limit_returns_data_as_is(self):
+        """At max depth, data is returned without modification."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+
+        data = {"entity_name": "foo"}
+        # Call at exactly the depth limit — should bail out
+        result = _normalize_json_response(data, Inner, _depth=MAX_NORMALIZE_DEPTH)
+        assert result == data  # No remapping applied
+        assert "entity_name" in result  # Extra key NOT remapped
+
+    def test_below_depth_limit_still_remaps(self):
+        """Just below the limit, normal remapping occurs."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+
+        data = {"entity_name": "foo"}
+        result = _normalize_json_response(data, Inner, _depth=MAX_NORMALIZE_DEPTH - 1)
+        assert result == {"name": "foo"}  # Remapping applied
+
+    def test_max_normalize_depth_is_reasonable(self):
+        """Sanity: the constant is high enough for real Graphiti responses (2-3 levels)."""
+        assert MAX_NORMALIZE_DEPTH >= 5
+
+
+class TestDictToListCoercionValidation:
+    """Tests for validation before wrapping a single dict in a list."""
+
+    def test_coercion_skipped_when_no_matching_keys(self):
+        """Dict with no keys matching target model fields is NOT coerced."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+            value: int
+
+        class Outer(BaseModel):
+            items: list[Inner]
+
+        # Dict has keys that don't match Inner's fields at all
+        data = {"items": {"totally_unrelated": "garbage", "xyz": 99}}
+        result = _normalize_json_response(data, Outer)
+        # Should NOT be wrapped in a list — left as original dict
+        assert isinstance(result["items"], dict)
+
+    def test_coercion_applied_when_keys_overlap(self):
+        """Dict with at least one matching key IS coerced to list."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+            value: int
+
+        class Outer(BaseModel):
+            items: list[Inner]
+
+        # Dict has "name" which matches Inner.name
+        data = {"items": {"name": "foo", "value": 42}}
+        result = _normalize_json_response(data, Outer)
+        assert isinstance(result["items"], list)
+        assert len(result["items"]) == 1
+        assert result["items"][0]["name"] == "foo"
