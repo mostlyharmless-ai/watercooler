@@ -1198,7 +1198,16 @@ async def _bulk_index_impl(
         JSON with task count and monitoring info.
     """
     try:
-        from ..memory_queue import get_queue, MemoryTask, enqueue_memory_task
+        from ..memory_queue import get_queue, MemoryTask, enqueue_memory_task, VALID_BACKENDS
+
+        if backend not in VALID_BACKENDS:
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Invalid backend {backend!r}",
+                    "valid_backends": sorted(VALID_BACKENDS),
+                }),
+            )])
 
         queue = get_queue()
         if queue is None:

@@ -181,7 +181,7 @@ class MemoryTask:
         """
         import random
 
-        self.last_error = error
+        self.last_error = error[:500] if len(error) > 500 else error
         self.updated_at = time.time()
 
         if self.attempt >= self.max_attempts:

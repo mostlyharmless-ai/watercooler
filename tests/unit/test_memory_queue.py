@@ -13,9 +13,11 @@ from watercooler_mcp.memory_queue import (
     MemoryTask,
     MemoryTaskQueue,
     MemoryTaskWorker,
+    QueueFullError,
     TaskNotFoundError,
     TaskStatus,
     TaskType,
+    VALID_BACKENDS,
     enqueue_memory_task,
     init_memory_queue,
     load_checkpoint,
@@ -469,3 +471,65 @@ class TestModuleAPI:
         # Clean up
         mq._queue = None
         mq._worker = None
+
+    def test_enqueue_invalid_backend_returns_none(self, tmp_path: Path):
+        import watercooler_mcp.memory_queue as mq
+        mq._queue = None
+        mq._worker = None
+
+        init_memory_queue(queue_dir=tmp_path / "q", start_worker=False)
+
+        result = enqueue_memory_task(
+            entry_id="E1", topic="foo", group_id="g1",
+            content="test", backend="nonexistent",
+        )
+        assert result is None
+
+        # Clean up
+        mq._queue = None
+        mq._worker = None
+
+    def test_enqueue_duplicate_returns_none(self, tmp_path: Path):
+        import watercooler_mcp.memory_queue as mq
+        mq._queue = None
+        mq._worker = None
+
+        init_memory_queue(queue_dir=tmp_path / "q", start_worker=False)
+
+        tid1 = enqueue_memory_task(
+            entry_id="E1", topic="foo", group_id="g1", content="test",
+        )
+        assert tid1 is not None
+
+        # Second enqueue with same entry_id+backend is a duplicate → None
+        tid2 = enqueue_memory_task(
+            entry_id="E1", topic="foo", group_id="g1", content="test",
+        )
+        assert tid2 is None
+
+        # Clean up
+        mq._queue = None
+        mq._worker = None
+
+
+# ================================================================== #
+# Review feedback: error truncation, queue depth, backend validation
+# ================================================================== #
+
+
+class TestReviewFeedback:
+    """Tests addressing PR #150 code-review feedback."""
+
+    def test_mark_failed_truncates_long_error(self):
+        t = MemoryTask(max_attempts=3)
+        t.mark_running()
+        long_error = "x" * 1000
+        t.mark_failed(long_error)
+        assert len(t.last_error) == 500
+
+    def test_enqueue_rejects_at_max_depth(self, tmp_path: Path):
+        queue = MemoryTaskQueue(queue_dir=tmp_path / "q", max_depth=2)
+        queue.enqueue(MemoryTask(entry_id="E1"), allow_duplicate=True)
+        queue.enqueue(MemoryTask(entry_id="E2"), allow_duplicate=True)
+        with pytest.raises(QueueFullError):
+            queue.enqueue(MemoryTask(entry_id="E3"), allow_duplicate=True)

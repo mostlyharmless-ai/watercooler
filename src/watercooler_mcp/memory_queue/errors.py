@@ -68,6 +68,13 @@ class DuplicateTaskError(MemoryQueueError):
 
 
 @dataclass
+class QueueFullError(MemoryQueueError):
+    """Queue has reached maximum depth; caller should retry after tasks drain."""
+
+    is_retryable: bool = True
+
+
+@dataclass
 class CheckpointError(MemoryQueueError):
     """Error saving or loading checkpoint state."""
 

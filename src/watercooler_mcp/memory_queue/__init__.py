@@ -14,6 +14,7 @@ thread, exponential-backoff retries, and dead-letter parking.
 
 from __future__ import annotations
 
+import atexit
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,6 +25,7 @@ from .errors import (
     CheckpointError,
     DuplicateTaskError,
     MemoryQueueError,
+    QueueFullError,
     TaskNotFoundError,
 )
 from .queue import DEFAULT_QUEUE_DIR, MemoryTaskQueue
@@ -48,6 +50,7 @@ __all__ = [
     "BackendUnavailableError",
     "CheckpointError",
     "DuplicateTaskError",
+    "QueueFullError",
     "TaskNotFoundError",
     # Singleton API
     "init_memory_queue",
@@ -59,6 +62,8 @@ __all__ = [
 # ------------------------------------------------------------------ #
 # Module-level singletons
 # ------------------------------------------------------------------ #
+
+VALID_BACKENDS = {"graphiti", "leanrag"}
 
 _queue: Optional[MemoryTaskQueue] = None
 _worker: Optional[MemoryTaskWorker] = None
@@ -110,11 +115,20 @@ def init_memory_queue(
     if start_worker:
         _worker.start()
 
+    atexit.register(_shutdown_worker)
+
     logger.info(
         "MEMORY_QUEUE: initialised (queue_dir=%s, depth=%d)",
         _queue._dir, _queue.depth(),
     )
     return _queue
+
+
+def _shutdown_worker() -> None:
+    """Atexit hook: gracefully stop the worker thread."""
+    if _worker is not None and _worker.is_running:
+        logger.info("MEMORY_QUEUE: shutting down worker (atexit)")
+        _worker.stop(timeout=5.0)
 
 
 def enqueue_memory_task(
@@ -139,6 +153,13 @@ def enqueue_memory_task(
         logger.debug("MEMORY_QUEUE: not initialised, skipping enqueue")
         return None
 
+    if backend not in VALID_BACKENDS:
+        logger.warning(
+            "MEMORY_QUEUE: invalid backend %r (valid: %s), skipping enqueue",
+            backend, ", ".join(sorted(VALID_BACKENDS)),
+        )
+        return None
+
     task = MemoryTask(
         backend=backend,
         entry_id=entry_id,
@@ -155,7 +176,10 @@ def enqueue_memory_task(
         task_id = _queue.enqueue(task)
     except DuplicateTaskError as e:
         logger.debug("MEMORY_QUEUE: skipped duplicate for %s: %s", entry_id, e)
-        return e.existing_task_id
+        return None
+    except QueueFullError as e:
+        logger.warning("MEMORY_QUEUE: queue full, skipping enqueue: %s", e)
+        return None
 
     # Wake worker to process immediately
     if _worker is not None:

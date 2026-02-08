@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .errors import DuplicateTaskError, TaskNotFoundError
+from .errors import DuplicateTaskError, QueueFullError, TaskNotFoundError
 from .task import MemoryTask, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -33,9 +33,10 @@ class MemoryTaskQueue:
 
     Args:
         queue_dir: Directory for persistence files (created if missing).
+        max_depth: Maximum number of active tasks before rejecting enqueue.
     """
 
-    def __init__(self, queue_dir: Path | None = None) -> None:
+    def __init__(self, queue_dir: Path | None = None, *, max_depth: int = 5000) -> None:
         self._dir = Path(queue_dir) if queue_dir else DEFAULT_QUEUE_DIR
         self._dir.mkdir(parents=True, exist_ok=True)
 
@@ -43,6 +44,7 @@ class MemoryTaskQueue:
         self._dead_letter_file = self._dir / "dead_letter.jsonl"
         self._stats_file = self._dir / "stats.json"
 
+        self._max_depth = max_depth
         self._lock = threading.Lock()
         self._tasks: Dict[str, MemoryTask] = {}
 
@@ -74,6 +76,12 @@ class MemoryTaskQueue:
             DuplicateTaskError: If an equivalent non-terminal task exists.
         """
         with self._lock:
+            if len(self._tasks) >= self._max_depth:
+                raise QueueFullError(
+                    message=f"Queue depth {len(self._tasks)} >= max {self._max_depth}",
+                    context={"depth": len(self._tasks), "max_depth": self._max_depth},
+                )
+
             if not allow_duplicate and task.entry_id:
                 dup = self._find_duplicate(task)
                 if dup is not None:
