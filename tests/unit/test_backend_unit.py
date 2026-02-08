@@ -9,6 +9,7 @@ from watercooler_memory.backends import BackendError, TransientError
 from watercooler_memory.backends.graphiti import (
     GraphitiBackend, GraphitiConfig,
     _normalize_json_response, _get_list_item_model, _best_extra_match,
+    MAX_NORMALIZE_DEPTH,
 )
 from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
 
@@ -626,3 +627,74 @@ class TestGetListItemModel:
 
     def test_none_annotation(self):
         assert _get_list_item_model(None) is None
+
+
+class TestNormalizeDepthLimit:
+    """Tests for MAX_NORMALIZE_DEPTH guard in _normalize_json_response."""
+
+    def test_depth_limit_returns_data_as_is(self):
+        """At max depth, data is returned without modification."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+
+        data = {"entity_name": "foo"}
+        # Call at exactly the depth limit — should bail out
+        result = _normalize_json_response(data, Inner, _depth=MAX_NORMALIZE_DEPTH)
+        assert result == data  # No remapping applied
+        assert "entity_name" in result  # Extra key NOT remapped
+
+    def test_below_depth_limit_still_remaps(self):
+        """Just below the limit, normal remapping occurs."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+
+        data = {"entity_name": "foo"}
+        result = _normalize_json_response(data, Inner, _depth=MAX_NORMALIZE_DEPTH - 1)
+        assert result == {"name": "foo"}  # Remapping applied
+
+    def test_max_normalize_depth_is_reasonable(self):
+        """Sanity: the constant is high enough for real Graphiti responses (2-3 levels)."""
+        assert MAX_NORMALIZE_DEPTH >= 5
+
+
+class TestDictToListCoercionValidation:
+    """Tests for validation before wrapping a single dict in a list."""
+
+    def test_coercion_skipped_when_no_matching_keys(self):
+        """Dict with no keys matching target model fields is NOT coerced."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+            value: int
+
+        class Outer(BaseModel):
+            items: list[Inner]
+
+        # Dict has keys that don't match Inner's fields at all
+        data = {"items": {"totally_unrelated": "garbage", "xyz": 99}}
+        result = _normalize_json_response(data, Outer)
+        # Should NOT be wrapped in a list — left as original dict
+        assert isinstance(result["items"], dict)
+
+    def test_coercion_applied_when_keys_overlap(self):
+        """Dict with at least one matching key IS coerced to list."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            name: str
+            value: int
+
+        class Outer(BaseModel):
+            items: list[Inner]
+
+        # Dict has "name" which matches Inner.name
+        data = {"items": {"name": "foo", "value": 42}}
+        result = _normalize_json_response(data, Outer)
+        assert isinstance(result["items"], list)
+        assert len(result["items"]) == 1
+        assert result["items"][0]["name"] == "foo"

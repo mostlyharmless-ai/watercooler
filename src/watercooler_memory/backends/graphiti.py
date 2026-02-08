@@ -193,10 +193,20 @@ def _derive_database_name(code_path: Path | str | None) -> str:
 def _best_extra_match(missing_field: str, extras: set[str]) -> str | None:
     """Pick the extra field most likely to correspond to *missing_field*.
 
-    Preference order:
-    1. Suffix match  – ``entity_name`` ends with ``_name`` → matches ``name``
-    2. Substring match – the missing name appears somewhere in the extra
-    3. Alphabetical fallback (original behaviour)
+    When DeepSeek (and similar providers) use ``json_object`` mode instead of
+    ``json_schema``, the LLM is free to choose its own field names.  Commonly
+    it prefixes every field with the parent concept (``entity_name`` instead of
+    ``name``, ``entity_nodes`` instead of ``extracted_entities``).
+
+    The heuristic ranks candidates in decreasing confidence:
+
+    1. **Suffix match** – ``entity_name`` ends with ``_name`` → strong signal
+       that the semantic meaning is "name".
+    2. **Substring match** – the target name appears *somewhere* inside the
+       candidate (weaker, but still useful for ``xnamex``-style variants).
+    3. **Alphabetical fallback** – deterministic tie-breaker when no textual
+       similarity exists.  This keeps behaviour stable across runs but is
+       essentially a guess; in practice the first two tiers catch real cases.
     """
     suffix: list[str] = []
     contains: list[str] = []
@@ -212,8 +222,14 @@ def _best_extra_match(missing_field: str, extras: set[str]) -> str | None:
     return sorted(extras)[0] if extras else None
 
 
+# Maximum recursion depth for _normalize_json_response.
+# Graphiti responses are 2-3 levels deep; this is a defensive ceiling.
+MAX_NORMALIZE_DEPTH = 10
+
+
 def _normalize_json_response(
     data: dict[str, Any], response_model: type,
+    *, _depth: int = 0,
 ) -> dict[str, Any]:
     """Remap response field names to match a Pydantic model schema.
 
@@ -223,7 +239,17 @@ def _normalize_json_response(
     This detects required fields missing from *data* and remaps extra
     keys that aren't in the model schema, recursing into nested
     Pydantic models within list fields.
+
+    The recursion is depth-limited to :data:`MAX_NORMALIZE_DEPTH` as a
+    defensive guard against pathological payloads; real Graphiti
+    responses never exceed 3 levels.
     """
+    if _depth >= MAX_NORMALIZE_DEPTH:
+        logger.warning(
+            "json_object normalize: hit depth limit (%d) for %s, returning as-is",
+            MAX_NORMALIZE_DEPTH, getattr(response_model, "__name__", response_model),
+        )
+        return data
     from pydantic import BaseModel
 
     if not (isinstance(response_model, type) and issubclass(response_model, BaseModel)):
@@ -263,27 +289,55 @@ def _normalize_json_response(
         inner_model = _get_list_item_model(field_info.annotation)
         if inner_model is not None and isinstance(value, list):
             remapped[field_name] = [
-                _normalize_json_response(item, inner_model)
+                _normalize_json_response(item, inner_model, _depth=_depth + 1)
                 if isinstance(item, dict) else item
                 for item in value
             ]
         elif inner_model is not None and isinstance(value, dict):
-            # DeepSeek sometimes returns a single dict where list is expected
-            logger.info(
-                "json_object list coercion: wrapping single dict in list "
-                "for field '%s' in %s",
-                field_name, response_model.__name__,
-            )
-            remapped[field_name] = [
-                _normalize_json_response(value, inner_model),
-            ]
+            # DeepSeek sometimes returns a single dict where list is expected.
+            # Validate the dict looks plausible before wrapping: it must have
+            # at least one key that either matches a model field directly OR
+            # could be remapped to one (e.g. entity_name → name).
+            model_fields = set(inner_model.model_fields.keys())
+            value_keys = set(value.keys())
+            has_direct = bool(value_keys & model_fields)
+            # Only count as remappable if there's a suffix or substring
+            # match — the alphabetical fallback in _best_extra_match is
+            # too loose for deciding whether to coerce dict→list.
+            has_remappable = False
+            if not has_direct:
+                for mf in model_fields:
+                    if mf in value_keys:
+                        continue
+                    for vk in value_keys:
+                        if vk.endswith(f"_{mf}") or vk == mf or mf in vk:
+                            has_remappable = True
+                            break
+                    if has_remappable:
+                        break
+            if not (has_direct or has_remappable) or not value:
+                logger.warning(
+                    "json_object list coercion: dict has no keys matching %s "
+                    "fields (%s), skipping coercion for '%s' in %s",
+                    inner_model.__name__, model_fields, field_name,
+                    response_model.__name__,
+                )
+            else:
+                logger.info(
+                    "json_object list coercion: wrapping single dict in list "
+                    "for field '%s' in %s",
+                    field_name, response_model.__name__,
+                )
+                remapped[field_name] = [
+                    _normalize_json_response(value, inner_model, _depth=_depth + 1),
+                ]
         elif (
             isinstance(value, dict)
             and isinstance(field_info.annotation, type)
             and issubclass(field_info.annotation, BaseModel)
         ):
             remapped[field_name] = _normalize_json_response(
-                value, field_info.annotation,
+                value, field_info.annotation, _depth=_depth + 1,
             )
 
     return remapped
@@ -1011,8 +1065,9 @@ class GraphitiBackend(MemoryBackend):
                 llm_client = _JsonObjectOnlyClient(
                     config=llm_config, max_tokens=_DEEPSEEK_MAX_TOKENS,
                 )
-                logger.info(
-                    "Using json_object-only LLM client for %s",
+                logger.warning(
+                    "Using json_object-only LLM client for %s "
+                    "(provider does not support json_schema structured outputs)",
                     llm_api_base,
                 )
             else:
