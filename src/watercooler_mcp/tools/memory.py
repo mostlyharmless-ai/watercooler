@@ -7,6 +7,8 @@ Tools:
 - watercooler_leanrag_run_pipeline: Run LeanRAG clustering pipeline
 - watercooler_clear_graph_group: Clear episodes for a group
 - watercooler_smart_query: Multi-tier intelligent query with auto-escalation
+- watercooler_memory_task_status: Check queue health, poll task status, recover
+- watercooler_bulk_index: Queue bulk thread indexing into memory backend
 
 Removed (use replacements):
 - watercooler_query_memory → watercooler_smart_query
@@ -40,6 +42,10 @@ clear_graph_group = None
 
 # Multi-tier orchestration
 smart_query = None
+
+# Memory task queue tools
+memory_task_status = None
+bulk_index = None
 
 
 async def _get_entity_edge_impl(
@@ -1083,6 +1089,223 @@ async def _smart_query_impl(
         )])
 
 
+# ============================================================================
+# Memory Task Queue Tools
+# ============================================================================
+
+
+async def _memory_task_status_impl(
+    ctx: Context,
+    task_id: str = "",
+    recover: bool = False,
+    retry_dead_letters: bool = False,
+) -> ToolResult:
+    """Check memory queue health, poll task status, or trigger recovery.
+
+    Args:
+        ctx: MCP context
+        task_id: Optional task ID to check. Empty = queue summary.
+        recover: If True, reset stale "running" tasks to "pending".
+        retry_dead_letters: If True, move dead-letter tasks back to queue.
+
+    Returns:
+        JSON with queue status or specific task details.
+    """
+    try:
+        from ..memory_queue import get_queue
+
+        queue = get_queue()
+        if queue is None:
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Memory queue not initialised",
+                    "hint": "Queue starts automatically with MCP server",
+                }),
+            )])
+
+        # Recovery actions
+        if recover:
+            count = queue.recover_stale()
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "action": "recover_stale",
+                    "recovered": count,
+                }),
+            )])
+
+        if retry_dead_letters:
+            count = queue.retry_dead_letters()
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "action": "retry_dead_letters",
+                    "re_enqueued": count,
+                }),
+            )])
+
+        # Specific task lookup
+        if task_id:
+            task = queue.get_task(task_id)
+            if task is None:
+                return ToolResult([TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": f"Task {task_id} not found in active queue",
+                        "hint": "Completed tasks are removed from the active queue",
+                    }),
+                )])
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps(task.to_dict(), indent=2),
+            )])
+
+        # Queue summary
+        summary = queue.status_summary()
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps(summary, indent=2),
+        )])
+
+    except Exception as e:
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({"error": str(e)}),
+        )])
+
+
+async def _bulk_index_impl(
+    ctx: Context,
+    code_path: str = "",
+    backend: str = "graphiti",
+    threads: str = "",
+    max_entries: int = 0,
+) -> ToolResult:
+    """Queue bulk indexing of threads into memory backend (paid tier onboarding).
+
+    Discovers threads, builds a manifest of entries, and enqueues them
+    as individual tasks for persistent background processing with retry.
+
+    Args:
+        ctx: MCP context
+        code_path: Repository root path (for group_id derivation).
+        backend: Target backend ("graphiti" or "leanrag").
+        threads: Comma-separated thread topics to index (empty = all).
+        max_entries: Max entries to queue (0 = unlimited, for testing).
+
+    Returns:
+        JSON with task count and monitoring info.
+    """
+    try:
+        from ..memory_queue import get_queue, MemoryTask, enqueue_memory_task
+
+        queue = get_queue()
+        if queue is None:
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Memory queue not initialised",
+                }),
+            )])
+
+        # Discover entries via watercooler library
+        from watercooler.commands import list_entries
+        from watercooler.path_resolver import resolve_threads_dir
+
+        threads_dir = resolve_threads_dir(code_path) if code_path else None
+        if threads_dir is None:
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Could not resolve threads directory",
+                    "hint": "Provide code_path to the repository root",
+                }),
+            )])
+
+        # Get list of thread topics
+        from watercooler.metadata import list_topics
+        all_topics = list_topics(threads_dir)
+
+        if threads:
+            selected = [t.strip() for t in threads.split(",")]
+            all_topics = [t for t in all_topics if t in selected]
+
+        # Derive group_id from code_path
+        threads_dir_str = str(threads_dir)
+        group_id = (
+            threads_dir_str.removesuffix("-threads")
+            if threads_dir_str.endswith("-threads")
+            else threads_dir_str
+        )
+
+        queued = 0
+        skipped = 0
+        errors = []
+
+        for topic in all_topics:
+            try:
+                entries = list_entries(topic, threads_dir)
+            except Exception as e:
+                errors.append(f"{topic}: {e}")
+                continue
+
+            for entry in entries:
+                if max_entries and queued >= max_entries:
+                    break
+
+                entry_id = entry.get("entry_id", "")
+                content = entry.get("body", "")
+                if not content:
+                    skipped += 1
+                    continue
+
+                task_id = enqueue_memory_task(
+                    entry_id=entry_id,
+                    topic=topic,
+                    group_id=group_id,
+                    content=content,
+                    backend=backend,
+                    title=entry.get("title", ""),
+                    timestamp=entry.get("timestamp", ""),
+                    source_description=f"{group_id} | thread:{topic} | bulk_index",
+                )
+                if task_id:
+                    queued += 1
+                else:
+                    skipped += 1
+
+            if max_entries and queued >= max_entries:
+                break
+
+        summary = queue.status_summary()
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({
+                "action": "bulk_index",
+                "topics_scanned": len(all_topics),
+                "entries_queued": queued,
+                "entries_skipped": skipped,
+                "errors": errors[:10],
+                "queue": summary,
+            }, indent=2),
+        )])
+
+    except ImportError as e:
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({
+                "error": f"Missing dependency: {e}",
+                "hint": "Bulk index requires the full watercooler package",
+            }),
+        )])
+    except Exception as e:
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({"error": str(e)}),
+        )])
+
+
 def register_memory_tools(mcp):
     """Register memory tools with the MCP server.
 
@@ -1099,6 +1322,7 @@ def register_memory_tools(mcp):
     global get_entity_edge, diagnose_memory
     global graphiti_add_episode, leanrag_run_pipeline, clear_graph_group
     global smart_query
+    global memory_task_status, bulk_index
 
     # Register tools and store references for testing
     get_entity_edge = mcp.tool(name="watercooler_get_entity_edge")(_get_entity_edge_impl)
@@ -1113,3 +1337,7 @@ def register_memory_tools(mcp):
 
     # Multi-tier orchestration
     smart_query = mcp.tool(name="watercooler_smart_query")(_smart_query_impl)
+
+    # Memory task queue tools
+    memory_task_status = mcp.tool(name="watercooler_memory_task_status")(_memory_task_status_impl)
+    bulk_index = mcp.tool(name="watercooler_bulk_index")(_bulk_index_impl)

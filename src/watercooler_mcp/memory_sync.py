@@ -616,6 +616,46 @@ def init_memory_sync_callbacks() -> None:
         logger.exception(f"MEMORY: Error registering sync callbacks: {e}")
 
 
+def init_memory_queue_executors() -> None:
+    """Register backend executors with the memory task queue worker.
+
+    Called after both init_memory_sync_callbacks() and init_memory_queue()
+    have completed. The executor adapts the existing _call_graphiti_add_episode
+    async function to the MemoryTask interface expected by the queue worker.
+    """
+    try:
+        from .memory_queue import get_worker, MemoryTask
+    except ImportError:
+        logger.debug("MEMORY: memory_queue package not available, skipping executor registration")
+        return
+
+    worker = get_worker()
+    if worker is None:
+        logger.debug("MEMORY: queue worker not initialised, skipping executor registration")
+        return
+
+    async def graphiti_executor(task: MemoryTask) -> Dict[str, Any]:
+        """Execute a Graphiti episode ingestion from a queued task."""
+        result = await _call_graphiti_add_episode(
+            content=task.content,
+            topic=task.topic,
+            entry_id=task.entry_id,
+            timestamp=task.timestamp,
+            title=task.title,
+            code_path=task.source_description.split("|")[0].strip() if "|" in task.source_description else "",
+        )
+        if not result.get("success", False):
+            raise RuntimeError(result.get("error", "Graphiti sync failed"))
+        return {
+            "episode_uuid": result.get("episode_uuid", ""),
+            "entities_extracted": result.get("entities_extracted", []),
+            "facts_extracted": result.get("facts_extracted", 0),
+        }
+
+    worker.register_executor("graphiti", graphiti_executor)
+    logger.info("MEMORY: Registered graphiti executor with memory task queue")
+
+
 def reset_callbacks() -> None:
     """Reset callback registration state (for testing).
 
