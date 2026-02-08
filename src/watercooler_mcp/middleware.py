@@ -195,6 +195,9 @@ _TOOL_TIMEOUTS: dict[str, float] = {
     "watercooler_graph_recover": 300.0,
     # Memory pipeline operations (clustering, embedding generation)
     "watercooler_leanrag_run_pipeline": 300.0,
+    # Graphiti episode ingestion (fire-and-forget returns fast, but config
+    # loading or backend init can stall — 120s safety net)
+    "watercooler_graphiti_add_episode": 120.0,
     # Smart query T3 escalation can be slow
     "watercooler_smart_query": 120.0,
     # Branch operations with git fetch + checkout loop

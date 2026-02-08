@@ -478,9 +478,10 @@ class TestGraphitiAddEpisodeE2E:
 
         result_data = json.loads(result.content[0].text)
 
+        # Fire-and-forget: returns immediately with "submitted" status
         assert result_data["success"] is True
-        assert result_data["episode_uuid"] == "ep-uuid-test"
-        assert "entities_extracted" in result_data
+        assert result_data["status"] == "submitted"
+        assert result_data["group_id"] == "auth-feature"
 
     async def test_add_episode_empty_content(
         self, mock_context: MagicMock

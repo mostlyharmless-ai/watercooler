@@ -414,50 +414,51 @@ async def _graphiti_add_episode_impl(
         episode_title = title if title else content[:50] + ("..." if len(content) > 50 else "")
         source_desc = source_description if source_description else "Direct episode via MCP tool"
 
-        # Add episode via backend
-        try:
-            result = await backend.add_episode_direct(
-                name=episode_title,
-                episode_body=content,
-                source_description=source_desc,
-                reference_time=ref_time,
-                group_id=group_id,
-                previous_episode_uuids=previous_episode_uuids,
-            )
+        # Fire-and-forget: spawn background task for the slow LLM+graph work.
+        # The graphiti pipeline (DeepSeek LLM calls + FalkorDB writes) takes
+        # 60-120s, which exceeds the middleware's default 50s tool timeout.
+        # Cancellation mid-flight corrupts FalkorDB connections and causes
+        # socket disconnects. By returning immediately, we avoid the timeout
+        # while matching the fire-and-forget pattern used by middleware memory
+        # sync (sync_to_memory_backend via ThreadPoolExecutor).
+        async def _do_add_episode():
+            try:
+                result = await backend.add_episode_direct(
+                    name=episode_title,
+                    episode_body=content,
+                    source_description=source_desc,
+                    reference_time=ref_time,
+                    group_id=group_id,
+                    previous_episode_uuids=previous_episode_uuids,
+                )
 
-            episode_uuid = result.get("episode_uuid", "unknown")
-            entities = result.get("entities_extracted", [])
-            facts_count = result.get("facts_extracted", 0)
+                episode_uuid = result.get("episode_uuid", "unknown")
 
-            # Track entry-episode mapping if entry_id provided
-            if entry_id and episode_uuid != "unknown":
-                backend.index_entry_as_episode(entry_id, episode_uuid, group_id)
+                # Track entry-episode mapping if entry_id provided
+                if entry_id and episode_uuid != "unknown":
+                    backend.index_entry_as_episode(entry_id, episode_uuid, group_id)
 
-            log_action(f"MEMORY: Added episode {episode_uuid} to group {group_id}")
+                log_action(
+                    f"MEMORY: Background episode added {episode_uuid} "
+                    f"to group {group_id} "
+                    f"(entities={len(result.get('entities_extracted', []))}, "
+                    f"facts={result.get('facts_extracted', 0)})"
+                )
+            except Exception as e:
+                log_error(f"MEMORY: Background add_episode failed: {e}")
 
-            return ToolResult(content=[TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": True,
-                    "episode_uuid": episode_uuid,
-                    "group_id": group_id,
-                    "entities_extracted": entities,
-                    "facts_extracted": facts_count,
-                    "entry_id": entry_id if entry_id else None,
-                    "message": f"Episode added to {group_id}",
-                }, indent=2)
-            )])
+        asyncio.create_task(_do_add_episode())
 
-        except Exception as e:
-            log_error(f"MEMORY: Failed to add episode: {e}")
-            return ToolResult(content=[TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": False,
-                    "error": f"Failed to add episode: {e}",
-                    "episode_uuid": None,
-                }, indent=2)
-            )])
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps({
+                "success": True,
+                "status": "submitted",
+                "group_id": group_id,
+                "entry_id": entry_id if entry_id else None,
+                "message": "Episode submitted for background processing",
+            }, indent=2)
+        )])
 
     except Exception as e:
         log_error(f"MEMORY: Unexpected error in graphiti_add_episode: {e}")

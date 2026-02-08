@@ -51,7 +51,7 @@ class TestGraphitiAddEpisodeTool:
         return MagicMock()
 
     async def test_add_episode_success(self, mock_graphiti_backend, mock_context):
-        """Test successful episode addition."""
+        """Test successful episode submission (fire-and-forget)."""
         from watercooler_mcp.tools.memory import _graphiti_add_episode_impl
 
         with patch(
@@ -71,12 +71,20 @@ class TestGraphitiAddEpisodeTool:
             result_text = result.content[0].text
             result_data = json.loads(result_text)
 
+            # Fire-and-forget: returns immediately with "submitted" status
             assert result_data["success"] is True
-            assert result_data["episode_uuid"] == "ep-uuid-12345"
-            assert "entities_extracted" in result_data
+            assert result_data["status"] == "submitted"
+            assert result_data["group_id"] == "auth-feature"
+            assert "background" in result_data["message"].lower()
+
+            # Let the background task run
+            await asyncio.sleep(0.05)
+
+            # Verify the backend was called in the background
+            mock_graphiti_backend.add_episode_direct.assert_called_once()
 
     async def test_add_episode_with_timestamp(self, mock_graphiti_backend, mock_context):
-        """Test episode addition with custom timestamp."""
+        """Test episode submission with custom timestamp."""
         from watercooler_mcp.tools.memory import _graphiti_add_episode_impl
 
         timestamp = "2025-01-15T10:00:00Z"
@@ -97,13 +105,17 @@ class TestGraphitiAddEpisodeTool:
 
             result_data = json.loads(result.content[0].text)
             assert result_data["success"] is True
+            assert result_data["status"] == "submitted"
 
-            # Verify timestamp was passed to backend
+            # Let the background task run
+            await asyncio.sleep(0.05)
+
+            # Verify timestamp was passed to backend in the background task
             call_args = mock_graphiti_backend.add_episode_direct.call_args
             assert call_args is not None
 
     async def test_add_episode_with_entry_id(self, mock_graphiti_backend, mock_context):
-        """Test episode addition with entry_id for provenance tracking."""
+        """Test episode submission with entry_id for provenance tracking."""
         from watercooler_mcp.tools.memory import _graphiti_add_episode_impl
 
         with patch(
@@ -122,8 +134,13 @@ class TestGraphitiAddEpisodeTool:
 
             result_data = json.loads(result.content[0].text)
             assert result_data["success"] is True
+            assert result_data["status"] == "submitted"
+            assert result_data["entry_id"] == "01ABC123"
 
-            # Verify entry-episode mapping was created
+            # Let the background task run
+            await asyncio.sleep(0.05)
+
+            # Verify entry-episode mapping was created in background
             mock_graphiti_backend.index_entry_as_episode.assert_called_once()
 
     async def test_add_episode_graphiti_disabled(self, mock_context):
