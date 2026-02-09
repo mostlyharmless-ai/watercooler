@@ -23,6 +23,7 @@ from watercooler.commands import (
     set_status,
     set_ball,
     append_entry,
+    list_entries,
     _bump_header,
     _header_split,
     _replace_header_line,
@@ -722,3 +723,80 @@ class TestIdempotency:
         assert result1 == result2
         # Content should match first creation
         assert "Original Title" in result1.read_text() or "idem-test" in result1.read_text()
+
+
+# ============================================================================
+# Test list_entries
+# ============================================================================
+
+
+class TestListEntries:
+    """Tests for list_entries function."""
+
+    def test_list_entries_returns_parsed_entries(self, threads_dir):
+        """Test list_entries extracts entry metadata correctly."""
+        thread_file = threads_dir / "le-test.md"
+        thread_file.write_text(
+            "# le-test — Thread\n"
+            "Status: OPEN\n"
+            "Ball: Claude (user)\n"
+            "Topic: le-test\n"
+            "Created: 2025-01-01T00:00:00Z\n"
+            "\n"
+            "---\n"
+            "Entry: Claude (user) 2025-01-01T12:00:00Z\n"
+            "Role: implementer\n"
+            "Type: Note\n"
+            "Title: First Entry\n"
+            "\n"
+            "Body of the first entry.\n"
+            "<!-- Entry-ID: 01AAAA0000000000AAAAAAAA01 -->\n"
+            "\n"
+            "---\n"
+            "Entry: Codex (user) 2025-01-01T13:00:00Z\n"
+            "Role: planner\n"
+            "Type: Plan\n"
+            "Title: Second Entry\n"
+            "\n"
+            "Body of the second entry.\n"
+            "<!-- Entry-ID: 01AAAA0000000000AAAAAAAA02 -->\n"
+        )
+
+        entries = list_entries("le-test", threads_dir)
+
+        assert len(entries) == 2
+        assert entries[0]["entry_id"] == "01AAAA0000000000AAAAAAAA01"
+        assert entries[0]["title"] == "First Entry"
+        assert entries[0]["timestamp"] == "2025-01-01T12:00:00Z"
+        assert "Body of the first entry." in entries[0]["body"]
+        assert entries[1]["entry_id"] == "01AAAA0000000000AAAAAAAA02"
+        assert entries[1]["title"] == "Second Entry"
+        assert entries[1]["timestamp"] == "2025-01-01T13:00:00Z"
+
+    def test_list_entries_missing_thread_raises(self, threads_dir):
+        """Test list_entries raises FileNotFoundError for missing threads."""
+        with pytest.raises(FileNotFoundError):
+            list_entries("nonexistent-topic", threads_dir)
+
+    def test_list_entries_coerces_none_to_empty_string(self, threads_dir):
+        """Test list_entries converts None values to empty strings."""
+        thread_file = threads_dir / "minimal.md"
+        thread_file.write_text(
+            "# minimal — Thread\n"
+            "Status: OPEN\n"
+            "Ball: Agent\n"
+            "Topic: minimal\n"
+            "Created: 2025-01-01T00:00:00Z\n"
+            "\n"
+            "---\n"
+            "Entry: Agent (user) 2025-01-01T12:00:00Z\n"
+            "\n"
+            "Minimal entry with no title or entry-id.\n"
+        )
+
+        entries = list_entries("minimal", threads_dir)
+
+        assert len(entries) == 1
+        assert entries[0]["entry_id"] == ""
+        assert entries[0]["title"] == ""
+        assert "Minimal entry" in entries[0]["body"]
