@@ -11,20 +11,16 @@ re-generating expensive API calls.
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 from .cache import EmbeddingCache
-
-# Try to import httpx for API calls
-try:
-    import httpx
-
-    HTTPX_AVAILABLE = True
-except ImportError:
-    httpx = None  # type: ignore
-    HTTPX_AVAILABLE = False
+from ._utils import (
+    _ensure_httpx,
+    _http_post_with_retry,
+    _HTTPX_AVAILABLE,
+    _resolve_embedding_field,
+)
 
 
 # Default configuration resolved via unified config
@@ -50,52 +46,27 @@ DEFAULT_DIM = 1024
 
 def _get_default_api_base() -> str:
     """Get default embedding API base from unified config."""
-    try:
-        from watercooler.memory_config import resolve_embedding_config
-        return resolve_embedding_config().api_base
-    except ImportError:
-        # Fallback if watercooler not available
-        return os.environ.get("EMBEDDING_API_BASE", "http://localhost:8080/v1")
+    return _resolve_embedding_field("api_base", "EMBEDDING_API_BASE", "http://localhost:8080/v1")
 
 
 def _get_default_model() -> str:
     """Get default embedding model from unified config."""
-    try:
-        from watercooler.memory_config import resolve_embedding_config
-        return resolve_embedding_config().model
-    except ImportError:
-        return os.environ.get("EMBEDDING_MODEL", "bge-m3")
+    return _resolve_embedding_field("model", "EMBEDDING_MODEL", "bge-m3")
 
 
 def _get_default_dim() -> int:
     """Get default embedding dimension from unified config."""
-    try:
-        from watercooler.memory_config import resolve_embedding_config
-        return resolve_embedding_config().dim
-    except ImportError:
-        dim_str = os.environ.get("EMBEDDING_DIM", "1024")
-        try:
-            return int(dim_str)
-        except ValueError:
-            return 1024
+    return _resolve_embedding_field("dim", "EMBEDDING_DIM", 1024)
 
 
 def _get_default_timeout() -> float:
     """Get default embedding timeout from unified config."""
-    try:
-        from watercooler.memory_config import resolve_embedding_config
-        return resolve_embedding_config().timeout
-    except ImportError:
-        return float(os.environ.get("EMBEDDING_TIMEOUT", DEFAULT_TIMEOUT))
+    return _resolve_embedding_field("timeout", "EMBEDDING_TIMEOUT", DEFAULT_TIMEOUT)
 
 
 def _get_default_batch_size() -> int:
     """Get default embedding batch_size from unified config."""
-    try:
-        from watercooler.memory_config import resolve_embedding_config
-        return resolve_embedding_config().batch_size
-    except ImportError:
-        return int(os.environ.get("EMBEDDING_BATCH_SIZE", DEFAULT_BATCH_SIZE))
+    return _resolve_embedding_field("batch_size", "EMBEDDING_BATCH_SIZE", DEFAULT_BATCH_SIZE)
 
 
 @dataclass
@@ -158,15 +129,6 @@ class EmbeddingError(Exception):
     """Error during embedding generation."""
 
     pass
-
-
-def _ensure_httpx():
-    """Ensure httpx is available."""
-    if not HTTPX_AVAILABLE:
-        raise ImportError(
-            "httpx is required for embedding generation. "
-            "Install with: pip install 'watercooler-cloud[memory]'"
-        )
 
 
 def embed_texts(
@@ -256,42 +218,24 @@ def _embed_batch(
         "model": config.model,
     }
 
-    last_error: Optional[Exception] = None
+    data = _http_post_with_retry(
+        url=url,
+        payload=payload,
+        headers=headers,
+        timeout=config.timeout,
+        max_retries=config.max_retries,
+        error_cls=EmbeddingError,
+    )
 
-    for attempt in range(config.max_retries):
-        try:
-            with httpx.Client(timeout=config.timeout) as client:
-                response = client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
+    # OpenAI-compatible format: {"data": [{"embedding": [...]}]}
+    if "data" not in data:
+        raise EmbeddingError(f"Unexpected response format: {data}")
 
-                data = response.json()
-
-                # OpenAI-compatible format: {"data": [{"embedding": [...]}]}
-                if "data" not in data:
-                    raise EmbeddingError(f"Unexpected response format: {data}")
-
-                # Sort by index to ensure correct order
-                sorted_data = sorted(data["data"], key=lambda x: x.get("index", 0))
-                return [item["embedding"] for item in sorted_data]
-
-        except httpx.HTTPStatusError as e:
-            last_error = EmbeddingError(
-                f"HTTP {e.response.status_code}: {e.response.text}"
-            )
-        except httpx.RequestError as e:
-            last_error = EmbeddingError(f"Request failed: {e}")
-        except KeyError as e:
-            last_error = EmbeddingError(f"Missing key in response: {e}")
-        except Exception as e:
-            last_error = EmbeddingError(f"Unexpected error: {e}")
-
-        # Exponential backoff
-        if attempt < config.max_retries - 1:
-            time.sleep(2**attempt)
-
-    raise last_error or EmbeddingError("Embedding failed with unknown error")
+    # Sort by index to ensure correct order
+    sorted_data = sorted(data["data"], key=lambda x: x.get("index", 0))
+    return [item["embedding"] for item in sorted_data]
 
 
 def is_httpx_available() -> bool:
     """Check if httpx is available for API calls."""
-    return HTTPX_AVAILABLE
+    return _HTTPX_AVAILABLE
