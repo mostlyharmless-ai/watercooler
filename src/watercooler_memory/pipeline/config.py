@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Optional
 import os
 
+from .._utils import _resolve_embedding_field, _resolve_llm_field
+
 # Load .env.pipeline from repo root if it exists
 def _load_env_pipeline() -> None:
     """Load .env.pipeline file if present."""
@@ -36,60 +38,32 @@ _load_env_pipeline()
 
 def _get_llm_api_key() -> str:
     """Get LLM API key from unified config."""
-    try:
-        from watercooler.memory_config import resolve_llm_config
-        return resolve_llm_config().api_key or ""
-    except ImportError:
-        return os.environ.get("LLM_API_KEY", "")
+    return _resolve_llm_field("api_key", "LLM_API_KEY", "") or ""
 
 
 def _get_llm_api_base() -> str:
     """Get LLM API base from unified config."""
-    try:
-        from watercooler.memory_config import resolve_llm_config
-        return resolve_llm_config().api_base
-    except ImportError:
-        return os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")
+    return _resolve_llm_field("api_base", "LLM_API_BASE", "https://api.openai.com/v1")
 
 
 def _get_llm_model() -> str:
     """Get LLM model from unified config."""
-    try:
-        from watercooler.memory_config import resolve_llm_config
-        return resolve_llm_config().model
-    except ImportError:
-        return os.environ.get("LLM_MODEL", "gpt-4o-mini")
+    return _resolve_llm_field("model", "LLM_MODEL", "gpt-4o-mini")
 
 
 def _get_embedding_api_base() -> str:
     """Get embedding API base from unified config."""
-    try:
-        from watercooler.memory_config import resolve_embedding_config
-        return resolve_embedding_config().api_base
-    except ImportError:
-        return os.environ.get("EMBEDDING_API_BASE", "http://localhost:8080/v1")
+    return _resolve_embedding_field("api_base", "EMBEDDING_API_BASE", "http://localhost:8080/v1")
 
 
 def _get_embedding_model() -> str:
     """Get embedding model from unified config."""
-    try:
-        from watercooler.memory_config import resolve_embedding_config
-        return resolve_embedding_config().model
-    except ImportError:
-        return os.environ.get("EMBEDDING_MODEL", "bge-m3")
+    return _resolve_embedding_field("model", "EMBEDDING_MODEL", "bge-m3")
 
 
 def _get_embedding_dim() -> int:
     """Get embedding dimension from unified config."""
-    try:
-        from watercooler.memory_config import resolve_embedding_config
-        return resolve_embedding_config().dim
-    except ImportError:
-        dim_str = os.environ.get("EMBEDDING_DIM", "1024")
-        try:
-            return int(dim_str)
-        except ValueError:
-            return 1024
+    return _resolve_embedding_field("dim", "EMBEDDING_DIM", 1024)
 
 
 @dataclass

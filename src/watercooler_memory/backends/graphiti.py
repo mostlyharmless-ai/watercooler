@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
-import subprocess
+import sys
 import tempfile
 import warnings
 from dataclasses import dataclass, field
@@ -31,9 +32,6 @@ from . import (
     TransientError,
 )
 from ..entry_episode_index import EntryEpisodeIndex, IndexConfig
-
-import os
-import sys
 
 from watercooler.memory_config import is_anthropic_url
 from watercooler.path_resolver import derive_group_id
