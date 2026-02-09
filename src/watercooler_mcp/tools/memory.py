@@ -19,6 +19,7 @@ Removed (use replacements):
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Optional, List
 
 from fastmcp import Context
@@ -1222,7 +1223,7 @@ async def _bulk_index_impl(
         from watercooler.commands import list_entries
         from watercooler.path_resolver import resolve_threads_dir
 
-        threads_dir = resolve_threads_dir(code_path) if code_path else None
+        threads_dir = resolve_threads_dir(code_root=Path(code_path)) if code_path else None
         if threads_dir is None:
             return ToolResult([TextContent(
                 type="text",
@@ -1233,8 +1234,7 @@ async def _bulk_index_impl(
             )])
 
         # Get list of thread topics
-        from watercooler.metadata import list_topics
-        all_topics = list_topics(threads_dir)
+        all_topics = [p.stem for p in sorted(threads_dir.glob("*.md"))]
 
         if threads:
             selected = [t.strip() for t in threads.split(",")]
