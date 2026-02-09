@@ -126,6 +126,7 @@ def _http_post_with_retry(
     last_error: Optional[Exception] = None
 
     for attempt in range(max_retries):
+        response = None
         try:
             with httpx.Client(timeout=timeout) as client:
                 response = client.post(url, json=payload, headers=headers)
@@ -139,7 +140,7 @@ def _http_post_with_retry(
             last_error = error_cls(f"Request failed: {e}")
         except ValueError as e:
             # JSON decode failure — response body wasn't valid JSON
-            body_snippet = getattr(response, "text", "")[:200]
+            body_snippet = response.text[:200] if response is not None else ""
             last_error = error_cls(
                 f"Invalid JSON in response: {e} — body: {body_snippet}"
             )
