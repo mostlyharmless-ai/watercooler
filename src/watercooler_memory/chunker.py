@@ -139,6 +139,13 @@ def _split_into_paragraphs(text: str) -> list[str]:
     return [p.strip() for p in paragraphs if p.strip()]
 
 
+def _apply_section_prefix(content: str, section_prefix: str, config: ChunkerConfig) -> str:
+    """Prepend section prefix to content when section context is enabled."""
+    if section_prefix and config.include_section_context:
+        return f"{section_prefix}\n\n{content}"
+    return content
+
+
 def _chunk_section_content(
     content: str,
     section_prefix: str,
@@ -183,31 +190,20 @@ def _chunk_section_content(
         if is_atomic:
             # Flush current chunk first
             if current_chunk:
-                chunk_content = "\n\n".join(current_chunk)
-                if section_prefix and config.include_section_context:
-                    chunk_text_str = f"{section_prefix}\n\n{chunk_content}"
-                else:
-                    chunk_text_str = chunk_content
+                chunk_text_str = _apply_section_prefix("\n\n".join(current_chunk), section_prefix, config)
                 chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
                 current_chunk = []
                 current_tokens = 0
 
             # Add atomic block as its own chunk (may exceed max if necessary)
-            if section_prefix and config.include_section_context:
-                chunk_text_str = f"{section_prefix}\n\n{para}"
-            else:
-                chunk_text_str = para
+            chunk_text_str = _apply_section_prefix(para, section_prefix, config)
             chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
             continue
 
         if para_tokens > available_tokens:
             # Flush current chunk
             if current_chunk:
-                chunk_content = "\n\n".join(current_chunk)
-                if section_prefix and config.include_section_context:
-                    chunk_text_str = f"{section_prefix}\n\n{chunk_content}"
-                else:
-                    chunk_text_str = chunk_content
+                chunk_text_str = _apply_section_prefix("\n\n".join(current_chunk), section_prefix, config)
                 chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
                 current_chunk = []
                 current_tokens = 0
@@ -222,11 +218,7 @@ def _chunk_section_content(
 
                 if sentence_tokens + sent_tokens > available_tokens:
                     if sentence_chunk:
-                        chunk_content = " ".join(sentence_chunk)
-                        if section_prefix and config.include_section_context:
-                            chunk_text_str = f"{section_prefix}\n\n{chunk_content}"
-                        else:
-                            chunk_text_str = chunk_content
+                        chunk_text_str = _apply_section_prefix(" ".join(sentence_chunk), section_prefix, config)
                         chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
                         # Overlap
                         overlap_tokens = 0
@@ -245,21 +237,13 @@ def _chunk_section_content(
                 sentence_tokens += sent_tokens
 
             if sentence_chunk:
-                chunk_content = " ".join(sentence_chunk)
-                if section_prefix and config.include_section_context:
-                    chunk_text_str = f"{section_prefix}\n\n{chunk_content}"
-                else:
-                    chunk_text_str = chunk_content
+                chunk_text_str = _apply_section_prefix(" ".join(sentence_chunk), section_prefix, config)
                 chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
 
         elif current_tokens + para_tokens > available_tokens:
             # Flush and start new chunk
             if current_chunk:
-                chunk_content = "\n\n".join(current_chunk)
-                if section_prefix and config.include_section_context:
-                    chunk_text_str = f"{section_prefix}\n\n{chunk_content}"
-                else:
-                    chunk_text_str = chunk_content
+                chunk_text_str = _apply_section_prefix("\n\n".join(current_chunk), section_prefix, config)
                 chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
 
             current_chunk = [para]
@@ -270,11 +254,7 @@ def _chunk_section_content(
 
     # Flush remaining
     if current_chunk:
-        chunk_content = "\n\n".join(current_chunk)
-        if section_prefix and config.include_section_context:
-            chunk_text_str = f"{section_prefix}\n\n{chunk_content}"
-        else:
-            chunk_text_str = chunk_content
+        chunk_text_str = _apply_section_prefix("\n\n".join(current_chunk), section_prefix, config)
         chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
 
     return chunks
@@ -346,10 +326,7 @@ def chunk_whitepaper(
             content_tokens = count_tokens(section.content, config.encoding_name)
             # Keep abstract as single chunk if under 1.5x max tokens
             if content_tokens <= config.max_tokens * 1.5:
-                if section_prefix:
-                    chunk_text_str = f"{section_prefix}\n\n{section.content}"
-                else:
-                    chunk_text_str = section.content
+                chunk_text_str = _apply_section_prefix(section.content, section_prefix, config)
                 chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
                 continue
 
