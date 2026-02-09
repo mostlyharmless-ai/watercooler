@@ -176,6 +176,23 @@ def is_memory_enabled() -> bool:
     return config.full().memory.enabled
 
 
+def is_memory_queue_enabled() -> bool:
+    """Check if persistent memory task queue is enabled.
+
+    Checks WATERCOOLER_MEMORY_QUEUE env var first,
+    then falls back to config.memory.queue_enabled.
+
+    Returns:
+        True if memory queue is enabled
+    """
+    env_value = os.getenv("WATERCOOLER_MEMORY_QUEUE", "").lower()
+    if env_value in ("1", "true", "yes"):
+        return True
+    if env_value in ("0", "false", "no"):
+        return False
+    return config.full().memory.queue_enabled
+
+
 def get_memory_backend() -> str:
     """Get the configured default memory backend.
 
