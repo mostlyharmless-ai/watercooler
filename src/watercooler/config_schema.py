@@ -926,6 +926,10 @@ class MemoryConfig(BaseModel):
         default="graphiti",
         description="Default memory backend",
     )
+    queue_enabled: bool = Field(
+        default=False,
+        description="Enable persistent memory task queue with retry and dead-letter semantics",
+    )
 
     # Shared service configs
     llm: LLMServiceConfig = Field(default_factory=LLMServiceConfig)
