@@ -6,7 +6,7 @@ from typing import Optional, List, Tuple, Dict, Any
 from .fs import write, thread_path, lock_path_for_topic, utcnow_iso, read_body, is_closed
 from .lock import AdvisoryLock
 from .baseline_graph.writer import get_thread_from_graph, get_entries_for_thread
-from .thread_entries import parse_thread_header
+from .thread_entries import parse_thread_header, parse_thread_entries
 from .agents import _counterpart_of, _canonical_agent, _default_agent_and_role
 from .path_resolver import load_template, resolve_templates_dir
 from .templates import _fill_template
@@ -494,6 +494,30 @@ def reindex(*, threads_dir: Path, out_file: Path | None = None, open_only: bool 
         lines.append(f"{updated} | {status} | {ball} | {newcol} | {title} | {rel}")
     write(out_path, "\n".join(lines) + "\n")
     return out_path
+
+
+def list_entries(topic: str, threads_dir: Path) -> list[dict[str, str]]:
+    """List parsed entries for a thread topic.
+
+    Args:
+        topic: Thread topic identifier.
+        threads_dir: Path to threads directory.
+
+    Returns:
+        List of dicts with keys: entry_id, title, body, timestamp.
+    """
+    tp = thread_path(topic, threads_dir)
+    text = tp.read_text(encoding="utf-8")
+    entries = parse_thread_entries(text)
+    return [
+        {
+            "entry_id": e.entry_id or "",
+            "title": e.title or "",
+            "body": e.body or "",
+            "timestamp": e.timestamp or "",
+        }
+        for e in entries
+    ]
 
 
 def search(*, threads_dir: Path, query: str) -> list[tuple[Path, int, str]]:
