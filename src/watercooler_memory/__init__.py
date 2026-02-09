@@ -7,7 +7,7 @@ entity extraction.
 The graph uses a hierarchical structure:
   Thread -> Entry -> Chunk
 
-With hyperedges for membership and temporal edges for sequencing.
+With temporal FOLLOWS edges for sequencing.
 
 Usage:
     from watercooler_memory import MemoryGraph, GraphConfig
@@ -79,13 +79,10 @@ if MEMORY_AVAILABLE:
         ThreadNode,
         EntryNode,
         ChunkNode,
-        EntityNode,
         DocumentNode,
         DocumentChunkNode,
         Edge,
-        Hyperedge,
         EdgeType,
-        HyperedgeType,
     )
     from watercooler_memory.graph import MemoryGraph, GraphConfig
     from watercooler_memory.parser import parse_thread_to_nodes, parse_threads_directory
@@ -122,13 +119,10 @@ else:
     ThreadNode = _StubClass  # type: ignore
     EntryNode = _StubClass  # type: ignore
     ChunkNode = _StubClass  # type: ignore
-    EntityNode = _StubClass  # type: ignore
     DocumentNode = _StubClass  # type: ignore
     DocumentChunkNode = _StubClass  # type: ignore
     Edge = _StubClass  # type: ignore
-    Hyperedge = _StubClass  # type: ignore
     EdgeType = _StubClass  # type: ignore
-    HyperedgeType = _StubClass  # type: ignore
 
     # Graph stubs
     MemoryGraph = _StubClass  # type: ignore
@@ -189,13 +183,10 @@ __all__ = [
     "ThreadNode",
     "EntryNode",
     "ChunkNode",
-    "EntityNode",
     "DocumentNode",
     "DocumentChunkNode",
     "Edge",
-    "Hyperedge",
     "EdgeType",
-    "HyperedgeType",
     # Graph
     "MemoryGraph",
     "GraphConfig",

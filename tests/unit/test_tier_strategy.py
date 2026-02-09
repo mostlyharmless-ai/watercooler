@@ -29,7 +29,7 @@ from watercooler_memory.tier_strategy import (
     _get_int_env,
     detect_intent,
     evaluate_sufficiency,
-    get_leanrag_level_mode,
+    _get_leanrag_level_mode,
     load_tier_config,
     smart_query,
 )
@@ -230,36 +230,36 @@ class TestLeanRAGLevelMode:
 
     def test_lookup_uses_base_level(self) -> None:
         """LOOKUP intent should use base entities for precision."""
-        assert get_leanrag_level_mode(QueryIntent.LOOKUP) == LEANRAG_LEVEL_MODE_BASE
+        assert _get_leanrag_level_mode(QueryIntent.LOOKUP) == LEANRAG_LEVEL_MODE_BASE
 
     def test_entity_search_uses_base_level(self) -> None:
         """ENTITY_SEARCH intent should use base entities for precision."""
-        assert get_leanrag_level_mode(QueryIntent.ENTITY_SEARCH) == LEANRAG_LEVEL_MODE_BASE
+        assert _get_leanrag_level_mode(QueryIntent.ENTITY_SEARCH) == LEANRAG_LEVEL_MODE_BASE
 
     def test_summarize_uses_clusters(self) -> None:
         """SUMMARIZE intent should use clusters for synthesis."""
-        assert get_leanrag_level_mode(QueryIntent.SUMMARIZE) == LEANRAG_LEVEL_MODE_CLUSTERS
+        assert _get_leanrag_level_mode(QueryIntent.SUMMARIZE) == LEANRAG_LEVEL_MODE_CLUSTERS
 
     def test_multi_hop_uses_clusters(self) -> None:
         """MULTI_HOP intent should use clusters for broader context."""
-        assert get_leanrag_level_mode(QueryIntent.MULTI_HOP) == LEANRAG_LEVEL_MODE_CLUSTERS
+        assert _get_leanrag_level_mode(QueryIntent.MULTI_HOP) == LEANRAG_LEVEL_MODE_CLUSTERS
 
     def test_temporal_uses_all_levels(self) -> None:
         """TEMPORAL intent should use all levels for completeness."""
-        assert get_leanrag_level_mode(QueryIntent.TEMPORAL) == LEANRAG_LEVEL_MODE_ALL
+        assert _get_leanrag_level_mode(QueryIntent.TEMPORAL) == LEANRAG_LEVEL_MODE_ALL
 
     def test_relational_uses_all_levels(self) -> None:
         """RELATIONAL intent should use all levels for completeness."""
-        assert get_leanrag_level_mode(QueryIntent.RELATIONAL) == LEANRAG_LEVEL_MODE_ALL
+        assert _get_leanrag_level_mode(QueryIntent.RELATIONAL) == LEANRAG_LEVEL_MODE_ALL
 
     def test_unknown_defaults_to_clusters(self) -> None:
         """UNKNOWN intent should default to clusters."""
-        assert get_leanrag_level_mode(QueryIntent.UNKNOWN) == LEANRAG_LEVEL_MODE_CLUSTERS
+        assert _get_leanrag_level_mode(QueryIntent.UNKNOWN) == LEANRAG_LEVEL_MODE_CLUSTERS
 
     def test_all_intents_have_mapping(self) -> None:
         """All QueryIntent values should have a defined level_mode mapping."""
         for intent in QueryIntent:
-            level_mode = get_leanrag_level_mode(intent)
+            level_mode = _get_leanrag_level_mode(intent)
             assert level_mode in (
                 LEANRAG_LEVEL_MODE_BASE,
                 LEANRAG_LEVEL_MODE_CLUSTERS,
@@ -734,7 +734,7 @@ class TestLevelModeIntegration:
 
         def mock_query_t3(query, code_path, limit=5, group_ids=None, intent=None):
             # Simulate what the real _query_t3 does: include level_mode in metadata
-            level_mode = get_leanrag_level_mode(intent or QueryIntent.UNKNOWN)
+            level_mode = _get_leanrag_level_mode(intent or QueryIntent.UNKNOWN)
             return [
                 TierEvidence(
                     tier=Tier.T3,

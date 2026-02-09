@@ -80,7 +80,7 @@ class TestTier1MemoryGraph:
 
     def test_parse_cross_tier_fixture(self, cross_tier_fixture_path: Path):
         """Validate fixture parses correctly."""
-        thread, entries, edges, hyperedges = parse_thread_to_nodes(cross_tier_fixture_path)
+        thread, entries, edges = parse_thread_to_nodes(cross_tier_fixture_path)
 
         # Validate thread metadata (thread_id derived from filename)
         assert thread.thread_id == "cross_tier_test"

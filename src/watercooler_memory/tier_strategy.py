@@ -81,7 +81,7 @@ LEANRAG_LEVEL_MODE_CLUSTERS = 1
 LEANRAG_LEVEL_MODE_ALL = 2
 
 
-def get_leanrag_level_mode(intent: QueryIntent) -> int:
+def _get_leanrag_level_mode(intent: QueryIntent) -> int:
     """Map query intent to optimal LeanRAG level_mode.
 
     LeanRAG's hierarchical graph has multiple levels:
@@ -107,11 +107,11 @@ def get_leanrag_level_mode(intent: QueryIntent) -> int:
         LeanRAG level_mode value (0, 1, or 2)
 
     Example:
-        >>> get_leanrag_level_mode(QueryIntent.LOOKUP)
+        >>> _get_leanrag_level_mode(QueryIntent.LOOKUP)
         0
-        >>> get_leanrag_level_mode(QueryIntent.SUMMARIZE)
+        >>> _get_leanrag_level_mode(QueryIntent.SUMMARIZE)
         1
-        >>> get_leanrag_level_mode(QueryIntent.RELATIONAL)
+        >>> _get_leanrag_level_mode(QueryIntent.RELATIONAL)
         2
     """
     if intent in (QueryIntent.LOOKUP, QueryIntent.ENTITY_SEARCH):
@@ -706,7 +706,7 @@ def _query_t3(
     # Determine level_mode based on intent
     if intent is None:
         intent = detect_intent(query)
-    level_mode = get_leanrag_level_mode(intent)
+    level_mode = _get_leanrag_level_mode(intent)
     logger.info(f"T3: Using level_mode={level_mode} for intent={intent.value}")
 
     evidence = []
@@ -1135,7 +1135,7 @@ __all__ = [
     "evaluate_sufficiency",
     "evaluate_dual_stream_sufficiency",
     "smart_query",
-    "get_leanrag_level_mode",
+
     # Orchestrator
     "TierOrchestrator",
     # Constants

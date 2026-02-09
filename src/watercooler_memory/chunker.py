@@ -589,6 +589,6 @@ def chunk_entries(
     return all_chunks, entry_to_chunks
 
 
-def is_tiktoken_available() -> bool:
+def _is_tiktoken_available() -> bool:
     """Check if tiktoken is available."""
     return TIKTOKEN_AVAILABLE
