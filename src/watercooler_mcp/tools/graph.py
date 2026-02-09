@@ -377,9 +377,26 @@ async def _search_graphiti_impl(
     if not backend:
         raise RuntimeError("Graphiti backend unavailable")
 
+    # Extract time filters from kwargs (passed through from route_search)
+    start_time = kwargs.get("start_time", "")
+    end_time = kwargs.get("end_time", "")
+    has_time_filters = bool(start_time or end_time)
+
+    # Over-fetch when time filters are active (post-filter reduces result count)
+    fetch_limit = min(limit * 3, 50) if has_time_filters else limit
+
     # Use Graphiti's search_memory_facts for entry-level search
     # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
-    results = await asyncio.to_thread(backend.search_facts, query=query, max_results=limit)
+    results = await asyncio.to_thread(
+        backend.search_facts,
+        query=query,
+        max_results=fetch_limit,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+    # Trim to requested limit after post-filtering
+    results = results[:limit]
 
     output: Dict[str, Any] = {
         "count": len(results),
@@ -398,6 +415,11 @@ async def _search_graphiti_impl(
             for r in results
         ],
     }
+    if has_time_filters:
+        output["filters_applied"] = {
+            "start_time": start_time or None,
+            "end_time": end_time or None,
+        }
 
     return json.dumps(output, indent=2)
 
@@ -462,8 +484,25 @@ async def _search_graphiti_episodes_impl(
     if not backend:
         raise RuntimeError("Graphiti backend unavailable")
 
+    # Extract time filters from kwargs (passed through from route_search)
+    start_time = kwargs.get("start_time", "")
+    end_time = kwargs.get("end_time", "")
+    has_time_filters = bool(start_time or end_time)
+
+    # Over-fetch when time filters are active (post-filter reduces result count)
+    fetch_limit = min(limit * 3, 50) if has_time_filters else limit
+
     # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
-    results = await asyncio.to_thread(backend.get_episodes, query=query, max_episodes=limit)
+    results = await asyncio.to_thread(
+        backend.get_episodes,
+        query=query,
+        max_episodes=fetch_limit,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+    # Trim to requested limit after post-filtering
+    results = results[:limit]
 
     output: Dict[str, Any] = {
         "count": len(results),
@@ -480,6 +519,11 @@ async def _search_graphiti_episodes_impl(
             for r in results
         ],
     }
+    if has_time_filters:
+        output["filters_applied"] = {
+            "start_time": start_time or None,
+            "end_time": end_time or None,
+        }
 
     return json.dumps(output, indent=2)
 
