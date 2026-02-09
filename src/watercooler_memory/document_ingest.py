@@ -12,29 +12,18 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .chunker import ChunkerConfig, chunk_text, count_tokens
-from .whitepaper_parser import detect_whitepaper, parse_whitepaper_structure
-
-
-def _utc_now_iso() -> str:
-    """Return current UTC time in ISO 8601 format."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+from ._utils import _generate_chunk_id, _utc_now_iso
+from .chunker import ChunkerConfig, chunk_text
+from .whitepaper_parser import parse_whitepaper_structure
 
 
 def _generate_doc_id(file_path: str, content: str) -> str:
     """Generate a stable document ID based on path and content hash."""
     data = f"{file_path}:{content}"
     return hashlib.sha256(data.encode()).hexdigest()[:16]
-
-
-def _generate_chunk_id(text: str, doc_id: str, index: int) -> str:
-    """Generate a stable chunk ID based on content hash."""
-    content = f"{doc_id}:{index}:{text}"
-    return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
 @dataclass
@@ -235,7 +224,7 @@ def ingest_directory(
             doc, chunks = ingest_document(file_path, config)
             all_docs.append(doc)
             all_chunks.extend(chunks)
-        except (ValueError, UnicodeDecodeError) as e:
+        except (ValueError, UnicodeDecodeError):
             # Skip non-markdown or unreadable files
             continue
 

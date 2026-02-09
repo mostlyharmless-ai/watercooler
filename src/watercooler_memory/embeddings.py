@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import time
-import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -291,23 +290,6 @@ def _embed_batch(
             time.sleep(2**attempt)
 
     raise last_error or EmbeddingError("Embedding failed with unknown error")
-
-
-def embed_single(
-    text: str,
-    config: Optional[EmbeddingConfig] = None,
-) -> list[float]:
-    """Generate embedding for a single text.
-
-    Args:
-        text: Text to embed.
-        config: Embedding configuration.
-
-    Returns:
-        Embedding vector.
-    """
-    result = embed_texts([text], config)
-    return result[0] if result else []
 
 
 def is_httpx_available() -> bool:

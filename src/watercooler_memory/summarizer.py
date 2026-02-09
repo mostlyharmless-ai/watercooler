@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -357,40 +356,6 @@ def summarize_thread(
     return summary
 
 
-def summarize_entries_batch(
-    entries: list[dict],
-    config: Optional[SummarizerConfig] = None,
-) -> list[str]:
-    """Summarize multiple entries.
-
-    Args:
-        entries: List of entry dicts with body, agent, role, entry_type, title.
-        config: Summarizer configuration.
-
-    Returns:
-        List of summaries (same order as input).
-    """
-    summaries: list[str] = []
-
-    for entry in entries:
-        try:
-            summary = summarize_entry(
-                body=entry.get("body", ""),
-                agent=entry.get("agent"),
-                role=entry.get("role"),
-                entry_type=entry.get("entry_type"),
-                title=entry.get("title"),
-                config=config,
-            )
-            summaries.append(summary)
-        except SummarizerError:
-            # Fall back to truncated body on error
-            body = entry.get("body", "")
-            summaries.append(body[:200] + "..." if len(body) > 200 else body)
-
-    return summaries
-
-
 def is_summarizer_available() -> bool:
     """Check if summarizer dependencies are available."""
     return HTTPX_AVAILABLE
@@ -518,83 +483,3 @@ async def summarize_entry_async(
     return summary
 
 
-async def summarize_entries_batch_async(
-    entries: list[dict],
-    config: Optional[SummarizerConfig] = None,
-    progress_callback=None,
-) -> list[str]:
-    """Async batch summarization with concurrent requests.
-
-    Uses a semaphore to limit concurrent API calls, significantly
-    speeding up summarization compared to sequential processing.
-
-    Args:
-        entries: List of entry dicts with body, agent, role, entry_type, title, entry_id.
-        config: Summarizer configuration (includes max_concurrent).
-        progress_callback: Optional callable(completed, total) for progress reporting.
-
-    Returns:
-        List of summaries (same order as input).
-    """
-    if config is None:
-        config = SummarizerConfig.from_env()
-
-    # Semaphore limits concurrent requests
-    semaphore = asyncio.Semaphore(config.max_concurrent)
-    completed = 0
-    total = len(entries)
-
-    async def summarize_one(entry: dict, index: int) -> tuple[int, str]:
-        nonlocal completed
-        async with semaphore:
-            try:
-                summary = await summarize_entry_async(
-                    body=entry.get("body", ""),
-                    agent=entry.get("agent"),
-                    role=entry.get("role"),
-                    entry_type=entry.get("entry_type"),
-                    title=entry.get("title"),
-                    config=config,
-                    entry_id=entry.get("entry_id"),
-                )
-            except SummarizerError:
-                # Fall back to truncated body on error
-                body = entry.get("body", "")
-                summary = body[:200] + "..." if len(body) > 200 else body
-
-            completed += 1
-            if progress_callback:
-                progress_callback(completed, total)
-
-            return index, summary
-
-    # Launch all tasks
-    tasks = [summarize_one(entry, i) for i, entry in enumerate(entries)]
-    results = await asyncio.gather(*tasks)
-
-    # Sort by index to maintain order
-    results.sort(key=lambda x: x[0])
-    return [summary for _, summary in results]
-
-
-def summarize_entries_concurrent(
-    entries: list[dict],
-    config: Optional[SummarizerConfig] = None,
-    progress_callback=None,
-) -> list[str]:
-    """Synchronous wrapper for async batch summarization.
-
-    Runs the async batch summarizer in an event loop. Use this from
-    synchronous code to get the benefits of concurrent summarization.
-
-    Args:
-        entries: List of entry dicts.
-        config: Summarizer configuration.
-        progress_callback: Optional callable(completed, total).
-
-    Returns:
-        List of summaries (same order as input).
-    """
-    return asyncio.run(
-        summarize_entries_batch_async(entries, config, progress_callback)
-    )

@@ -14,15 +14,11 @@ Design principles:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 import uuid
 
-
-def _utc_now_iso() -> str:
-    """Return current UTC time in ISO 8601 format."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+from ._utils import _utc_now_iso
 
 
 def _generate_id() -> str:

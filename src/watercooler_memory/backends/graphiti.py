@@ -8,6 +8,7 @@ import logging
 import re
 import subprocess
 import tempfile
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
@@ -449,10 +450,30 @@ class GraphitiConfig:
     auto_save_index: bool = True
 
     def __post_init__(self):
-        """Set default index path if not provided."""
+        """Set default index path if not provided and warn on deprecated fields."""
         if self.entry_episode_index_path is None and self.track_entry_episodes:
             self.entry_episode_index_path = (
                 Path.home() / ".watercooler" / "graphiti" / "entry_episode_index.json"
+            )
+
+        # Emit deprecation warnings for legacy OpenAI-specific fields
+        if self.openai_api_key is not None:
+            warnings.warn(
+                "GraphitiConfig.openai_api_key is deprecated, use llm_api_key",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if self.openai_api_base is not None:
+            warnings.warn(
+                "GraphitiConfig.openai_api_base is deprecated, use llm_api_base",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if self.openai_model is not None:
+            warnings.warn(
+                "GraphitiConfig.openai_model is deprecated, use llm_model",
+                DeprecationWarning,
+                stacklevel=2,
             )
 
     @classmethod
