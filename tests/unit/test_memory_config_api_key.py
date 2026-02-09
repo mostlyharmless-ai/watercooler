@@ -5,15 +5,17 @@ Validates that:
 - Remote endpoints still require API keys
 - Error messages reference credentials.toml (not config.toml)
 - _is_localhost_url helper works correctly
+- is_memory_queue_enabled respects env var and TOML fallback
 """
 
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
-from watercooler.memory_config import _is_localhost_url
+from watercooler.memory_config import _is_localhost_url, is_memory_queue_enabled
 from watercooler_mcp import memory
 
 # Note: isolated_config fixture is provided by conftest.py (from watercooler.testing)
@@ -187,3 +189,49 @@ class TestDiagnoseMemoryErrorMessage:
         # Should NOT reference old config.toml api_key path
         assert "[memory.llm].api_key" not in msg
         assert "[memory.embedding].api_key" not in msg
+
+
+class TestIsMemoryQueueEnabled:
+    """Tests for is_memory_queue_enabled() env var and TOML fallback."""
+
+    def test_env_var_enabled(self, monkeypatch, isolated_config):
+        """WATERCOOLER_MEMORY_QUEUE=1 → True."""
+        from watercooler.config_facade import config as cfg
+
+        monkeypatch.setenv("WATERCOOLER_MEMORY_QUEUE", "1")
+        cfg.reset()
+
+        assert is_memory_queue_enabled() is True
+
+    def test_env_var_disabled(self, monkeypatch, isolated_config):
+        """WATERCOOLER_MEMORY_QUEUE=0 → False."""
+        from watercooler.config_facade import config as cfg
+
+        monkeypatch.setenv("WATERCOOLER_MEMORY_QUEUE", "0")
+        cfg.reset()
+
+        assert is_memory_queue_enabled() is False
+
+    def test_toml_enabled_no_env(self, monkeypatch, isolated_config):
+        """No env var, TOML queue_enabled=True → True."""
+        from watercooler.config_facade import config as cfg
+
+        monkeypatch.delenv("WATERCOOLER_MEMORY_QUEUE", raising=False)
+        cfg.reset()
+
+        full = cfg.full()
+        full.memory.queue_enabled = True
+        with patch("watercooler.memory_config.config.full", return_value=full):
+            assert is_memory_queue_enabled() is True
+
+    def test_toml_default_no_env(self, monkeypatch, isolated_config):
+        """No env var, TOML default (False) → False."""
+        from watercooler.config_facade import config as cfg
+
+        monkeypatch.delenv("WATERCOOLER_MEMORY_QUEUE", raising=False)
+        cfg.reset()
+
+        full = cfg.full()
+        full.memory.queue_enabled = False
+        with patch("watercooler.memory_config.config.full", return_value=full):
+            assert is_memory_queue_enabled() is False

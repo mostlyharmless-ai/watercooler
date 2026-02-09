@@ -2940,12 +2940,12 @@ def sync_to_memory_backend(
 
     callback = _memory_sync_callbacks[backend]
 
+    from watercooler.memory_config import is_memory_queue_enabled
+
     # Try persistent memory queue when enabled (env var or TOML config).
     # The queue provides retry, persistence, and dead-letter semantics.
     # Falls back to the legacy ThreadPoolExecutor when not enabled or
     # when the memory_queue package is not installed (core-lib-only).
-    from watercooler.memory_config import is_memory_queue_enabled
-
     if is_memory_queue_enabled():
         try:
             from watercooler_mcp.memory_queue import enqueue_memory_task, get_worker
