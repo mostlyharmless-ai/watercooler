@@ -11,10 +11,11 @@ The parser produces:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
-from watercooler.thread_entries import ThreadEntry, parse_thread_entries, parse_thread_header
+from watercooler.thread_entries import parse_thread_entries, parse_thread_header
 
 from .schema import (
     ThreadNode,
@@ -22,6 +23,8 @@ from .schema import (
     Edge,
     Hyperedge,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def parse_thread_to_nodes(
@@ -187,7 +190,7 @@ def parse_threads_directory(
             if thread_path.exists():
                 thread_paths.append(thread_path)
             else:
-                print(f"Warning: Thread file not found: {thread_path}")
+                logger.warning("Thread file not found: %s", thread_path)
         thread_paths = sorted(thread_paths)
     else:
         # Process all *.md files in directory
@@ -208,6 +211,6 @@ def parse_threads_directory(
             all_hyperedges.extend(hyperedges)
         except Exception as e:
             # Log but continue with other threads
-            print(f"Warning: Failed to parse {thread_path}: {e}")
+            logger.warning("Failed to parse %s: %s", thread_path, e)
 
     return all_threads, all_entries, all_edges, all_hyperedges

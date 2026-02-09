@@ -11,10 +11,10 @@ Chunking strategy:
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from typing import Optional
 
+from ._utils import _generate_chunk_id
 from .schema import ChunkNode, EntryNode
 
 # Try to import tiktoken, fall back to estimation
@@ -122,12 +122,6 @@ def count_tokens(text: str, encoding_name: str = DEFAULT_ENCODING) -> int:
     if encoder:
         return len(encoder.encode(text))
     return _estimate_tokens(text)
-
-
-def _generate_chunk_id(text: str, entry_id: str, index: int) -> str:
-    """Generate a stable chunk ID based on content hash."""
-    content = f"{entry_id}:{index}:{text}"
-    return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
 def _split_into_sentences(text: str) -> list[str]:
