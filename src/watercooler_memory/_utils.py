@@ -59,7 +59,7 @@ def _resolve_embedding_field(attr: str, env_var: str, default):
         return getattr(resolve_embedding_config(), attr)
     except (ImportError, AttributeError):
         val = os.environ.get(env_var)
-        if val is None:
+        if not val:  # treat empty string same as unset
             return default
         target = type(default)
         if target in (int, float):
@@ -84,7 +84,7 @@ def _resolve_llm_field(attr: str, env_var: str, default):
         return getattr(resolve_llm_config(), attr)
     except (ImportError, AttributeError):
         val = os.environ.get(env_var)
-        if val is None:
+        if not val:  # treat empty string same as unset
             return default
         target = type(default)
         if target in (int, float):
@@ -137,6 +137,12 @@ def _http_post_with_retry(
             )
         except httpx.RequestError as e:
             last_error = error_cls(f"Request failed: {e}")
+        except ValueError as e:
+            # JSON decode failure — response body wasn't valid JSON
+            body_snippet = getattr(response, "text", "")[:200]
+            last_error = error_cls(
+                f"Invalid JSON in response: {e} — body: {body_snippet}"
+            )
         except Exception as e:
             last_error = error_cls(f"Unexpected error: {e}")
 
