@@ -18,7 +18,6 @@ from .schema import (
     DocumentNode,
     DocumentChunkNode,
     Edge,
-    Hyperedge,
     EdgeType,
 )
 from .parser import parse_thread_to_nodes, parse_threads_directory
@@ -63,7 +62,6 @@ class MemoryGraph:
         documents: Dict of doc_id → DocumentNode
         doc_chunks: Dict of chunk_id → DocumentChunkNode
         edges: List of all edges
-        hyperedges: List of all hyperedges
     """
 
     def __init__(self, config: Optional[GraphConfig] = None):
@@ -80,7 +78,6 @@ class MemoryGraph:
         self.documents: dict[str, DocumentNode] = {}
         self.doc_chunks: dict[str, DocumentChunkNode] = {}
         self.edges: list[Edge] = []
-        self.hyperedges: list[Hyperedge] = []
 
     def add_thread(
         self,
@@ -96,7 +93,7 @@ class MemoryGraph:
         Returns:
             The created ThreadNode.
         """
-        thread, entries, edges, hyperedges = parse_thread_to_nodes(
+        thread, entries, edges = parse_thread_to_nodes(
             thread_path, branch_context
         )
 
@@ -109,9 +106,8 @@ class MemoryGraph:
                 continue
             self.entries[entry.entry_id] = entry
 
-        # Store edges and hyperedges
+        # Store edges
         self.edges.extend(edges)
-        self.hyperedges.extend(hyperedges)
 
         return thread
 
@@ -131,7 +127,7 @@ class MemoryGraph:
         Returns:
             List of created ThreadNodes.
         """
-        threads, entries, edges, hyperedges = parse_threads_directory(
+        threads, entries, edges = parse_threads_directory(
             threads_dir, branch_context, thread_filter
         )
 
@@ -144,7 +140,6 @@ class MemoryGraph:
             self.entries[entry.entry_id] = entry
 
         self.edges.extend(edges)
-        self.hyperedges.extend(hyperedges)
 
         return threads
 
@@ -472,7 +467,6 @@ class MemoryGraph:
             "documents": len(self.documents),
             "doc_chunks": len(self.doc_chunks),
             "edges": len(self.edges),
-            "hyperedges": len(self.hyperedges),
             "entries_with_summaries": sum(
                 1 for e in self.entries.values() if e.summary
             ),
@@ -499,7 +493,6 @@ class MemoryGraph:
             "documents": {did: asdict(d) for did, d in self.documents.items()},
             "doc_chunks": {cid: asdict(c) for cid, c in self.doc_chunks.items()},
             "edges": [asdict(e) for e in self.edges],
-            "hyperedges": [asdict(h) for h in self.hyperedges],
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -577,16 +570,5 @@ class MemoryGraph:
                     f"Invalid edge type '{e.get('edge_type')}' at edge {i}: {err}"
                 ) from err
             graph.edges.append(Edge(**e))
-
-        for i, h in enumerate(data.get("hyperedges", [])):
-            from .schema import HyperedgeType
-
-            try:
-                h["hyperedge_type"] = HyperedgeType(h["hyperedge_type"])
-            except ValueError as err:
-                raise ValueError(
-                    f"Invalid hyperedge type '{h.get('hyperedge_type')}' at hyperedge {i}: {err}"
-                ) from err
-            graph.hyperedges.append(Hyperedge(**h))
 
         return graph

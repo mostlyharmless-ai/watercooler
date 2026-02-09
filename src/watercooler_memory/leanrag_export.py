@@ -12,7 +12,7 @@ from typing import Any
 
 from .graph import MemoryGraph
 from .schema import EntryNode, ChunkNode
-from .validation import validate_export, validate_pipeline_chunks
+from .validation import validate_export
 
 
 def entry_to_leanrag_document(
@@ -52,8 +52,6 @@ def entry_to_leanrag_document(
             "event_time": entry.event_time,
             "ingestion_time": entry.ingestion_time,
             "sequence_index": entry.sequence_index,
-            "preceding_entry_id": entry.preceding_entry_id,
-            "following_entry_id": entry.following_entry_id,
         },
         "embedding": entry.embedding,
     }
@@ -189,67 +187,3 @@ def export_to_leanrag(
     return manifest
 
 
-def export_for_leanrag_pipeline(
-    graph: MemoryGraph,
-    output_path: Path,
-    validate: bool = True,
-) -> None:
-    """Export in format directly consumable by LeanRAG build_graph pipeline.
-
-    Creates a single JSON file with all chunks ready for entity extraction
-    and graph building.
-
-    Args:
-        graph: The memory graph to export.
-        output_path: Path to output JSON file.
-        validate: Whether to validate chunks against schema (default True).
-
-    Raises:
-        ValidationError: If validate=True and chunks fail validation.
-    """
-    chunks_for_pipeline: list[dict] = []
-
-    for chunk_id, chunk in graph.chunks.items():
-        # Get parent entry for metadata
-        entry = graph.entries.get(chunk.entry_id)
-
-        chunk_doc = {
-            "hash_code": chunk.chunk_id,
-            "text": chunk.text,
-            "embedding": chunk.embedding,
-            "metadata": {
-                "source": "watercooler",
-                "thread_id": chunk.thread_id,
-                "entry_id": chunk.entry_id,
-                "chunk_index": chunk.index,
-                "event_time": chunk.event_time,
-            },
-        }
-
-        if entry:
-            chunk_doc["metadata"].update(
-                {
-                    "agent": entry.agent,
-                    "role": entry.role,
-                    "entry_type": entry.entry_type,
-                    "entry_title": entry.title,
-                }
-            )
-
-        chunks_for_pipeline.append(chunk_doc)
-
-    # Sort by thread and position
-    chunks_for_pipeline.sort(
-        key=lambda c: (
-            c["metadata"]["thread_id"],
-            c["metadata"]["entry_id"],
-            c["metadata"]["chunk_index"],
-        )
-    )
-
-    # Validate chunks before writing
-    if validate:
-        validate_pipeline_chunks(chunks_for_pipeline)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(chunks_for_pipeline, indent=2, default=str))

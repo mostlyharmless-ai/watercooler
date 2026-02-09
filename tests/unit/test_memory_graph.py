@@ -125,18 +125,17 @@ class TestParser:
 
     def test_parse_thread_to_nodes(self, sample_thread_file):
         """Test parsing a thread file into nodes."""
-        thread, entries, edges, hyperedges = parse_thread_to_nodes(sample_thread_file)
+        thread, entries, edges = parse_thread_to_nodes(sample_thread_file)
 
         assert thread.thread_id == "test-thread"
         assert thread.status == "OPEN"
         assert thread.ball == "Claude (user)"
         assert len(entries) == 2
         assert len(edges) >= 2  # CONTAINS edges
-        assert len(hyperedges) == 1  # Thread membership
 
     def test_parse_entries_have_correct_metadata(self, sample_thread_file):
         """Test that parsed entries have correct metadata."""
-        thread, entries, _, _ = parse_thread_to_nodes(sample_thread_file)
+        thread, entries, _ = parse_thread_to_nodes(sample_thread_file)
 
         first_entry = entries[0]
         assert first_entry.agent == "Claude (user)"
@@ -147,7 +146,6 @@ class TestParser:
         second_entry = entries[1]
         assert second_entry.agent == "Cursor (user)"
         assert second_entry.role == "implementer"
-        assert second_entry.preceding_entry_id is not None
 
 
 class TestChunker:
@@ -248,7 +246,7 @@ class TestMemoryGraph:
         assert "entries" in data
         assert "chunks" in data
         assert "edges" in data
-        assert "hyperedges" in data
+        assert "edges" in data  # hyperedges removed
 
     def test_save_and_load(self, sample_thread_file, tmp_path):
         """Test saving and loading graph."""
