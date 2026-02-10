@@ -592,13 +592,25 @@ When Claude uses Watercooler MCP tools:
 
 When invoking watercooler tools via `mcp-cli` in Bash, follow these rules:
 
-**Safe patterns:**
+**Safe input patterns:**
 - `jq` command substitution (PREFERRED): `mcp-cli call tool "$(jq -n --arg k 'v' '{key: $k}')"`
 - Pipe from file: `cat /tmp/payload.json | mcp-cli call tool -`
 - Inline JSON (small payloads): `mcp-cli call tool '{"key": "value"}'`
 
-**Broken pattern (NEVER USE):**
+**Broken input pattern (NEVER USE):**
 - File redirection: `mcp-cli call tool - < /tmp/payload.json` — causes `JSON Parse error: Unexpected EOF`
 
-This is a `mcp-cli` binary limitation. The `jq` command substitution pattern is the
-convention across all skills in this repository.
+**Output piping does NOT work:**
+- `mcp-cli call tool '{}' | jq .` → **0 bytes** (pipe receives nothing)
+- `mcp-cli call tool '{}' 2>&1 | head` → **0 bytes**
+- `mcp-cli call tool '{}' | python3 -c "..."` → **0 bytes**
+
+The `mcp-cli` binary writes output directly to the terminal, bypassing pipes.
+
+**Safe output patterns:**
+- File redirect then parse: `mcp-cli call tool '{}' > /tmp/out.json && jq . /tmp/out.json`
+- Command substitution: `result=$(mcp-cli call tool '{}'); echo "$result" | jq .`
+- Python subprocess: `subprocess.run([...], capture_output=True)` works correctly
+
+These are `mcp-cli` binary limitations (Claude Code built-in). The `jq` command
+substitution pattern is the convention across all skills in this repository.
