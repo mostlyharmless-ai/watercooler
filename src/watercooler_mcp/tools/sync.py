@@ -5,6 +5,8 @@ Tools:
 - watercooler_reindex: Generate thread index
 """
 
+import asyncio
+
 from fastmcp import Context
 
 from watercooler import commands
@@ -20,7 +22,7 @@ force_sync = None
 reindex = None
 
 
-def _force_sync_impl(
+async def _force_sync_impl(
     ctx: Context,
     code_path: str = "",
     action: str = "now",
@@ -87,7 +89,8 @@ def _force_sync_impl(
 
         if action_normalized in {"status", "inspect"}:
             log_debug("TOOL_STEP: calling sync.get_async_status()")
-            status = sync.get_async_status()
+            # Run in thread to avoid blocking event loop (#128)
+            status = await asyncio.to_thread(sync.get_async_status)
             log_debug(f"TOOL_STEP: get_async_status returned {len(status)} keys")
             result = _format_status(status)
             log_debug(f"TOOL_STEP: formatted status, length={len(result)}")
@@ -98,11 +101,12 @@ def _force_sync_impl(
             return f"Unknown action '{action}'. Use 'status' or 'now'."
 
         try:
-            sync.flush_async()
+            # Run in thread to avoid blocking event loop (#128)
+            await asyncio.to_thread(sync.flush_async)
         except PushError as exc:
             return f"Sync failed: {exc}"
 
-        status_after = sync.get_async_status()
+        status_after = await asyncio.to_thread(sync.get_async_status)
         remaining = status_after.get("pending", 0)
         prefix = "✅ Pending entries synced." if not remaining else f"⚠️ Sync completed with {remaining} entries still pending (retry scheduled)."
         return f"{prefix}\n\n{_format_status(status_after)}"

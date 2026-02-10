@@ -282,3 +282,26 @@ async def test_ok_outcome_includes_timeout_s():
         assert kwargs["timeout_s"] == _DEFAULT_TOOL_TIMEOUT
     finally:
         _mw.log_action = original_log_action
+
+
+@pytest.mark.anyio
+async def test_thread_offloaded_tool_timeout_fires(monkeypatch):
+    """Verify timeout fires for async tools using asyncio.to_thread().
+
+    Validates fix for #128: formerly-sync tools converted to async with
+    asyncio.to_thread() should have working timeouts, unlike sync tools
+    where the event loop is blocked and timeouts can't fire.
+    """
+    import time
+
+    async def run(self, arguments):
+        await asyncio.to_thread(time.sleep, 0.2)
+        return {"ok": True}
+
+    Tool = _make_tool_class(run)
+    _instrument(Tool)
+    tool = Tool("watercooler_health")
+
+    monkeypatch.setattr(_mw, "_DEFAULT_TOOL_TIMEOUT", 0.05)
+    with pytest.raises(TimeoutError, match=r"Tool 'watercooler_health' exceeded its"):
+        await Tool.run(tool, {})

@@ -856,7 +856,7 @@ def _find_similar_entries_impl(
         return f"Error finding similar entries: {str(e)}"
 
 
-def _graph_health_impl(
+async def _graph_health_impl(
     ctx: Context,
     code_path: str = "",
     verify_parity: bool = False,
@@ -903,8 +903,11 @@ def _graph_health_impl(
         # Check if graph exists at all
         graph_available = is_graph_available(threads_dir)
 
-        # Get health report (with optional parity verification)
-        health = check_graph_health(threads_dir, verify_parity=verify_parity)
+        # Get health report (with optional parity verification).
+        # Run in thread to avoid blocking event loop (#128).
+        health = await asyncio.to_thread(
+            check_graph_health, threads_dir, verify_parity=verify_parity
+        )
 
         output = {
             "graph_available": graph_available,
@@ -1027,7 +1030,7 @@ def _access_stats_impl(
 # =============================================================================
 
 
-def _graph_enrich_impl(
+async def _graph_enrich_impl(
     ctx: Context,
     code_path: str = "",
     summaries: bool = True,
@@ -1118,12 +1121,16 @@ def _graph_enrich_impl(
             )
             return result.to_dict()
 
-        # For dry_run, don't wrap in git sync
+        # Run in thread to avoid blocking event loop (#128).
+        # Note: asyncio.to_thread() worker threads continue after timeout —
+        # the operation completes in the background. This is acceptable since
+        # the server survives and the work completes.
         if dry_run:
-            output = _do_enrich()
+            output = await asyncio.to_thread(_do_enrich)
         else:
             # Run with full parity protocol (preflight + commit + push)
-            output = run_with_graph_sync(
+            output = await asyncio.to_thread(
+                run_with_graph_sync,
                 context,
                 _do_enrich,
                 f"graph: enrich mode={mode}",
@@ -1137,7 +1144,7 @@ def _graph_enrich_impl(
         return f"Error enriching graph: {str(e)}"
 
 
-def _graph_recover_impl(
+async def _graph_recover_impl(
     ctx: Context,
     code_path: str = "",
     mode: str = "stale",
@@ -1198,9 +1205,10 @@ def _graph_recover_impl(
         if topics:
             topic_list = [t.strip() for t in topics.split(",") if t.strip()]
 
-        # Resolve targets (fast, synchronous)
-        target_topics, resolve_errors = resolve_recovery_targets(
-            threads_dir, mode, topic_list
+        # Resolve targets — may call check_graph_health() in "stale" mode,
+        # so run in thread to avoid blocking event loop (#128).
+        target_topics, resolve_errors = await asyncio.to_thread(
+            resolve_recovery_targets, threads_dir, mode, topic_list
         )
         if resolve_errors:
             return json.dumps({"errors": resolve_errors}, indent=2)
@@ -1236,7 +1244,11 @@ def _graph_recover_impl(
                 generate_embeddings=generate_embeddings,
             )
 
-        # Fallback: synchronous recovery with git parity
+        # Fallback: synchronous recovery with git parity.
+        # Run in thread to avoid blocking event loop (#128).
+        # Note: asyncio.to_thread() worker threads continue after timeout —
+        # the operation completes in the background. This is acceptable since
+        # the server survives and the work completes.
         def _do_recover() -> dict:
             result = recover_graph(
                 threads_dir=threads_dir,
@@ -1248,7 +1260,8 @@ def _graph_recover_impl(
             )
             return result.to_dict()
 
-        output = run_with_graph_sync(
+        output = await asyncio.to_thread(
+            run_with_graph_sync,
             context,
             _do_recover,
             f"graph: recover mode={mode}",

@@ -310,8 +310,9 @@ class TestGraphRecoverImplQueuePath:
         ctx.code_root = threads_dir.parent
         return ctx
 
+    @pytest.mark.anyio
     @patch("watercooler_mcp.tools.graph.validation")
-    def test_dry_run_skips_queue(self, mock_validation, tmp_path):
+    async def test_dry_run_skips_queue(self, mock_validation, tmp_path):
         """dry_run=True should never enqueue, always return dry-run results."""
         from watercooler_mcp.tools.graph import _graph_recover_impl
 
@@ -336,7 +337,7 @@ class TestGraphRecoverImplQueuePath:
             }
             mock_recover.return_value = mock_result
 
-            result = _graph_recover_impl(
+            result = await _graph_recover_impl(
                 MagicMock(), code_path="/repo", mode="all", dry_run=True
             )
 
@@ -344,9 +345,10 @@ class TestGraphRecoverImplQueuePath:
         assert output["dry_run"] is True
         mock_recover.assert_called_once()
 
+    @pytest.mark.anyio
     @patch("watercooler_mcp.tools.graph._get_recover_queue")
     @patch("watercooler_mcp.tools.graph.validation")
-    def test_queue_available_enqueues_tasks(self, mock_validation, mock_get_queue, tmp_path):
+    async def test_queue_available_enqueues_tasks(self, mock_validation, mock_get_queue, tmp_path):
         """When queue is available, tasks should be enqueued per topic."""
         from watercooler_mcp.tools.graph import _graph_recover_impl
 
@@ -372,7 +374,7 @@ class TestGraphRecoverImplQueuePath:
             "watercooler.path_resolver.derive_group_id",
             return_value="test_repo",
         ):
-            result = _graph_recover_impl(
+            result = await _graph_recover_impl(
                 MagicMock(), code_path="/repo", mode="stale"
             )
 
@@ -384,10 +386,11 @@ class TestGraphRecoverImplQueuePath:
         assert "queue_status" in output
         mock_worker.wake.assert_called_once()
 
+    @pytest.mark.anyio
     @patch("watercooler_mcp.tools.graph._get_recover_queue")
     @patch("watercooler_mcp.tools.graph.run_with_graph_sync")
     @patch("watercooler_mcp.tools.graph.validation")
-    def test_no_queue_falls_back_to_sync(
+    async def test_no_queue_falls_back_to_sync(
         self, mock_validation, mock_run_sync, mock_get_queue, tmp_path
     ):
         """When queue unavailable, should fall back to synchronous recovery."""
@@ -410,7 +413,7 @@ class TestGraphRecoverImplQueuePath:
             "watercooler.baseline_graph.sync.resolve_recovery_targets",
             return_value=(["a", "b", "c"], []),
         ):
-            result = _graph_recover_impl(
+            result = await _graph_recover_impl(
                 MagicMock(), code_path="/repo", mode="all"
             )
 
@@ -418,9 +421,10 @@ class TestGraphRecoverImplQueuePath:
         assert output["threads_recovered"] == 3
         mock_run_sync.assert_called_once()
 
+    @pytest.mark.anyio
     @patch("watercooler_mcp.tools.graph._get_recover_queue")
     @patch("watercooler_mcp.tools.graph.validation")
-    def test_queue_reports_skipped_duplicates(self, mock_validation, mock_get_queue, tmp_path):
+    async def test_queue_reports_skipped_duplicates(self, mock_validation, mock_get_queue, tmp_path):
         """Duplicate and queue-full topics should appear in skipped list."""
         from watercooler_mcp.tools.graph import _graph_recover_impl
 
@@ -454,7 +458,7 @@ class TestGraphRecoverImplQueuePath:
             "watercooler.path_resolver.derive_group_id",
             return_value="test_repo",
         ):
-            result = _graph_recover_impl(
+            result = await _graph_recover_impl(
                 MagicMock(), code_path="/repo", mode="all"
             )
 
@@ -465,8 +469,9 @@ class TestGraphRecoverImplQueuePath:
         reasons = {s["reason"] for s in output["skipped"]}
         assert reasons == {"duplicate", "queue_full"}
 
+    @pytest.mark.anyio
     @patch("watercooler_mcp.tools.graph.validation")
-    def test_resolve_errors_returned_directly(self, mock_validation, tmp_path):
+    async def test_resolve_errors_returned_directly(self, mock_validation, tmp_path):
         """When resolve_recovery_targets returns errors, they're passed through."""
         from watercooler_mcp.tools.graph import _graph_recover_impl
 
@@ -480,7 +485,7 @@ class TestGraphRecoverImplQueuePath:
             "watercooler.baseline_graph.sync.resolve_recovery_targets",
             return_value=([], ["Invalid mode: bogus"]),
         ):
-            result = _graph_recover_impl(
+            result = await _graph_recover_impl(
                 MagicMock(), code_path="/repo", mode="bogus"
             )
 
@@ -488,8 +493,9 @@ class TestGraphRecoverImplQueuePath:
         assert "errors" in output
         assert "Invalid mode" in output["errors"][0]
 
+    @pytest.mark.anyio
     @patch("watercooler_mcp.tools.graph.validation")
-    def test_nothing_to_recover(self, mock_validation, tmp_path):
+    async def test_nothing_to_recover(self, mock_validation, tmp_path):
         """When no targets found, return informational message."""
         from watercooler_mcp.tools.graph import _graph_recover_impl
 
@@ -503,16 +509,17 @@ class TestGraphRecoverImplQueuePath:
             "watercooler.baseline_graph.sync.resolve_recovery_targets",
             return_value=([], []),
         ):
-            result = _graph_recover_impl(
+            result = await _graph_recover_impl(
                 MagicMock(), code_path="/repo", mode="stale"
             )
 
         output = json.loads(result)
         assert "Nothing to recover" in output["message"]
 
+    @pytest.mark.anyio
     @patch("watercooler_mcp.tools.graph._get_recover_queue")
     @patch("watercooler_mcp.tools.graph.validation")
-    def test_all_topics_skipped_as_duplicates(self, mock_validation, mock_get_queue, tmp_path):
+    async def test_all_topics_skipped_as_duplicates(self, mock_validation, mock_get_queue, tmp_path):
         """When every topic is a duplicate, mode should be 'all_skipped' with clear message."""
         from watercooler_mcp.tools.graph import _graph_recover_impl
 
@@ -534,7 +541,7 @@ class TestGraphRecoverImplQueuePath:
             "watercooler.path_resolver.derive_group_id",
             return_value="test_repo",
         ):
-            result = _graph_recover_impl(
+            result = await _graph_recover_impl(
                 MagicMock(), code_path="/repo", mode="stale"
             )
 
