@@ -600,17 +600,20 @@ When invoking watercooler tools via `mcp-cli` in Bash, follow these rules:
 **Broken input pattern (NEVER USE):**
 - File redirection: `mcp-cli call tool - < /tmp/payload.json` — causes `JSON Parse error: Unexpected EOF`
 
-**Output piping does NOT work:**
-- `mcp-cli call tool '{}' | jq .` → **0 bytes** (pipe receives nothing)
-- `mcp-cli call tool '{}' 2>&1 | head` → **0 bytes**
-- `mcp-cli call tool '{}' | python3 -c "..."` → **0 bytes**
+**Pipes don't work in Claude Code's Bash tool** (known bug, see
+[#774](https://github.com/anthropics/claude-code/issues/774),
+[#14595](https://github.com/anthropics/claude-code/issues/14595)):
+- `mcp-cli call tool '{}' | jq .` → **0 bytes**
+- `echo "$var" | python3 -c "..."` → **0 bytes**
+- ANY `cmd | cmd` pattern → **0 bytes**
 
-The `mcp-cli` binary writes output directly to the terminal, bypassing pipes.
+This affects ALL shell pipes, not just `mcp-cli`. The Claude Code Bash tool
+executes commands in a mode where pipe output is lost.
 
-**Safe output patterns:**
-- File redirect then parse: `mcp-cli call tool '{}' > /tmp/out.json && jq . /tmp/out.json`
-- Command substitution: `result=$(mcp-cli call tool '{}'); echo "$result" | jq .`
-- Python subprocess: `subprocess.run([...], capture_output=True)` works correctly
+**Safe output patterns (file redirect then parse):**
+```bash
+mcp-cli call tool '{}' > /tmp/out.json && python3 -c "import json; ..."
+```
 
-These are `mcp-cli` binary limitations (Claude Code built-in). The `jq` command
-substitution pattern is the convention across all skills in this repository.
+This is a Claude Code Bash tool limitation, not an `mcp-cli` issue. The `jq`
+command substitution pattern is the convention across all skills in this repository.
