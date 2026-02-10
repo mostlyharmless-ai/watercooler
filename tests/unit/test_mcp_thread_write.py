@@ -134,15 +134,15 @@ def patched_set_status_context(mock_context, monkeypatch):
     # Mock is_hosted_context to return False (local mode)
     monkeypatch.setattr("watercooler_mcp.tools.thread_write.is_hosted_context", lambda ctx: False)
 
-    # Mock set_status_graph_first to use non-graph set_status
+    # Mock commands_graph.set_status to use non-graph set_status
     from watercooler.commands import set_status as commands_set_status
 
-    def mock_set_status_graph_first(topic, *, threads_dir, status):
+    def mock_set_status(topic, *, threads_dir, status):
         return commands_set_status(topic, threads_dir=threads_dir, status=status)
 
     monkeypatch.setattr(
-        "watercooler_mcp.tools.thread_write.set_status_graph_first",
-        mock_set_status_graph_first
+        "watercooler.commands_graph.set_status",
+        mock_set_status
     )
 
     return mock_context
