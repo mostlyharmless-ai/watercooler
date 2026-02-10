@@ -12,7 +12,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Sequence
 
 logger = logging.getLogger(__name__)
@@ -520,6 +520,68 @@ class GraphitiConfig:
             reranker=get_graphiti_reranker(),
             track_entry_episodes=get_graphiti_track_entry_episodes(),
         )
+
+
+def _filter_by_time_range(
+    results: list[dict[str, Any]],
+    start_time: str,
+    end_time: str,
+    time_key: str = "created_at",
+) -> list[dict[str, Any]]:
+    """Post-filter results by timestamp range.
+
+    Compares each result's ``time_key`` field against the given ISO 8601
+    bounds.  Gracefully handles empty filter strings (no-op), missing or
+    unparseable timestamp values on individual results (excluded when
+    filters are active), and timezone-naive datetimes (treated as UTC).
+
+    Args:
+        results: List of result dicts from Graphiti search.
+        start_time: ISO 8601 lower bound (inclusive). Empty string = no lower bound.
+        end_time: ISO 8601 upper bound (inclusive). Empty string = no upper bound.
+        time_key: Dict key to read the timestamp from (default ``"created_at"``).
+
+    Returns:
+        Filtered list (may be shorter than input, never longer).
+    """
+    if not start_time and not end_time:
+        return results
+
+    def _parse_dt(value: str) -> datetime | None:
+        try:
+            # Normalize trailing Z → +00:00 (Python 3.10 fromisoformat doesn't accept Z)
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+            dt = datetime.fromisoformat(value)
+            # Ensure timezone-aware (assume UTC for naive datetimes)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, TypeError):
+            return None
+
+    lower = _parse_dt(start_time) if start_time else None
+    upper = _parse_dt(end_time) if end_time else None
+
+    # If both bounds failed to parse, skip filtering entirely
+    if lower is None and upper is None:
+        return results
+
+    filtered: list[dict[str, Any]] = []
+    for r in results:
+        raw = r.get(time_key)
+        if raw is None:
+            continue  # Exclude results with missing timestamp when filters are active
+        ts = _parse_dt(raw.isoformat() if isinstance(raw, datetime) else str(raw))
+        if ts is None:
+            continue  # Unparseable timestamp — exclude
+        if lower and ts < lower:
+            continue
+        if upper and ts > upper:
+            continue
+        filtered.append(r)
+
+    return filtered
 
 
 class GraphitiBackend(MemoryBackend):
@@ -1992,6 +2054,8 @@ class GraphitiBackend(MemoryBackend):
         group_ids: Sequence[str] | None = None,
         max_results: int = DEFAULT_MAX_FACTS,
         center_node_id: str | None = None,
+        start_time: str = "",
+        end_time: str = "",
     ) -> list[dict[str, Any]]:
         """Search for facts (edges) using semantic search.
 
@@ -2002,6 +2066,8 @@ class GraphitiBackend(MemoryBackend):
             group_ids: Optional list of group IDs to filter by
             max_results: Maximum facts to return (default: 10, max: 50)
             center_node_id: Optional node UUID to center search around
+            start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
+            end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
 
         Returns:
             List of fact dicts with edge data
@@ -2015,20 +2081,22 @@ class GraphitiBackend(MemoryBackend):
         if not query or not query.strip():
             from . import ConfigError
             raise ConfigError("query cannot be empty")
-        
+
         # Validate max_results to prevent resource exhaustion
         if max_results < self.MIN_SEARCH_RESULTS or max_results > self.MAX_SEARCH_RESULTS:
             from . import ConfigError
             raise ConfigError(
                 f"max_results must be between {self.MIN_SEARCH_RESULTS} and {self.MAX_SEARCH_RESULTS}, got {max_results}"
             )
-        
+
         # Get results from underlying method
         results = self.search_memory_facts(
             query=query,
             group_ids=group_ids,
             max_facts=max_results,
             center_node_uuid=center_node_id,
+            start_time=start_time,
+            end_time=end_time,
         )
         
         # Add CoreResult-compliant fields to each result
@@ -2048,6 +2116,8 @@ class GraphitiBackend(MemoryBackend):
         query: str,
         group_ids: Sequence[str] | None = None,
         max_results: int = DEFAULT_MAX_EPISODES,
+        start_time: str = "",
+        end_time: str = "",
     ) -> list[dict[str, Any]]:
         """Search for episodes (provenance-bearing content) using semantic search.
 
@@ -2057,6 +2127,8 @@ class GraphitiBackend(MemoryBackend):
             query: Search query string
             group_ids: Optional list of group IDs to filter by
             max_results: Maximum episodes to return (default: 10, max: 50)
+            start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
+            end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
 
         Returns:
             List of episode dicts with uuid, name, content, timestamps
@@ -2070,19 +2142,21 @@ class GraphitiBackend(MemoryBackend):
         if not query or not query.strip():
             from . import ConfigError
             raise ConfigError("query cannot be empty")
-        
+
         # Validate max_results to prevent resource exhaustion
         if max_results < self.MIN_SEARCH_RESULTS or max_results > self.MAX_SEARCH_RESULTS:
             from . import ConfigError
             raise ConfigError(
                 f"max_results must be between {self.MIN_SEARCH_RESULTS} and {self.MAX_SEARCH_RESULTS}, got {max_results}"
             )
-        
+
         # Get results from underlying method
         results = self.get_episodes(
             query=query,
             group_ids=group_ids,
             max_episodes=max_results,
+            start_time=start_time,
+            end_time=end_time,
         )
         
         # Add CoreResult-compliant fields to each result
@@ -2197,6 +2271,8 @@ class GraphitiBackend(MemoryBackend):
         group_ids: list[str] | None = None,
         max_facts: int = DEFAULT_MAX_FACTS,
         center_node_uuid: str | None = None,
+        start_time: str = "",
+        end_time: str = "",
     ) -> list[dict[str, Any]]:
         """Search for facts (edges) with optional center-node traversal.
 
@@ -2210,6 +2286,8 @@ class GraphitiBackend(MemoryBackend):
             group_ids: Optional list of group IDs to filter by
             max_facts: Maximum facts to return (default: 10, max: 50)
             center_node_uuid: Optional node UUID to center search around
+            start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
+            end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
 
         Returns:
             List of fact dicts with edge data
@@ -2267,7 +2345,8 @@ class GraphitiBackend(MemoryBackend):
                     "score": score,  # Hybrid search reranker score
                 })
 
-            return results
+            # Post-filter by time range (Graphiti search_ ignores time filters)
+            return _filter_by_time_range(results, start_time, end_time)
 
         try:
             return asyncio.run(search_facts_async())
@@ -2279,6 +2358,8 @@ class GraphitiBackend(MemoryBackend):
         query: str,
         group_ids: list[str] | None = None,
         max_episodes: int = DEFAULT_MAX_EPISODES,
+        start_time: str = "",
+        end_time: str = "",
     ) -> list[dict[str, Any]]:
         """Search for episodes from Graphiti memory using semantic search.
 
@@ -2294,6 +2375,8 @@ class GraphitiBackend(MemoryBackend):
             query: Search query string (required, must be non-empty)
             group_ids: Optional list of group IDs to filter by
             max_episodes: Maximum episodes to return (default: 10, max: 50)
+            start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
+            end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
 
         Returns:
             List of episode dicts with uuid, name, content, timestamps
@@ -2353,7 +2436,8 @@ class GraphitiBackend(MemoryBackend):
                     "score": score,  # Hybrid search reranker score
                 })
 
-            return results
+            # Post-filter by time range (Graphiti search_ ignores time filters)
+            return _filter_by_time_range(results, start_time, end_time)
 
         try:
             return asyncio.run(search_episodes_async())
