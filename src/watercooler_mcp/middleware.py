@@ -510,7 +510,9 @@ def run_with_graph_sync(
     Flow: preflight → operation → commit graph files → push with retry
 
     Unlike run_with_sync, this is simpler:
-    - No topic lock (graph operations are idempotent)
+    - No per-topic lock — the repo-pair parity lock (below) serializes all
+      graph write operations. If a worker thread continues after timeout,
+      a retry will block on this lock until the first operation completes.
     - No entry footers (graph files, not thread entries)
     - Commits only graph/baseline/* files
     """

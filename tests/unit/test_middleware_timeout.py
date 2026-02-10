@@ -305,3 +305,53 @@ async def test_thread_offloaded_tool_timeout_fires(monkeypatch):
     monkeypatch.setattr(_mw, "_DEFAULT_TOOL_TIMEOUT", 0.05)
     with pytest.raises(TimeoutError, match=r"Tool 'watercooler_health' exceeded its"):
         await Tool.run(tool, {})
+
+
+# ---------------------------------------------------------------------------
+# Integration-style test: real _graph_health_impl with blocking mock
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_graph_health_impl_timeout_fires():
+    """Real _graph_health_impl with blocking check_graph_health — timeout fires.
+
+    Unlike the generic mock tests above, this calls the actual tool implementation
+    function with a mocked blocking dependency. It proves that asyncio.to_thread()
+    in _graph_health_impl yields control to the event loop, allowing
+    asyncio.wait_for() to cancel it — exactly the middleware's mechanism.
+
+    Addresses PR #172 review feedback requesting an integration test that validates
+    the fix end-to-end rather than just in principle.
+    """
+    import time
+    from pathlib import Path
+    from unittest.mock import MagicMock, patch
+    from watercooler_mcp.tools.graph import _graph_health_impl
+
+    mock_threads_dir = MagicMock(spec=Path)
+    mock_threads_dir.exists.return_value = True
+
+    mock_context = MagicMock()
+    mock_context.threads_dir = mock_threads_dir
+    mock_context.code_root = Path("/tmp/fake-repo")
+
+    with (
+        patch(
+            "watercooler_mcp.tools.graph.validation._require_context",
+            return_value=(None, mock_context),
+        ),
+        patch(
+            "watercooler.baseline_graph.reader.is_graph_available",
+            return_value=True,
+        ),
+        patch(
+            "watercooler.baseline_graph.sync.check_graph_health",
+            side_effect=lambda *a, **kw: time.sleep(0.3),
+        ),
+    ):
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                _graph_health_impl(MagicMock(), code_path="/repo"),
+                timeout=0.05,
+            )
