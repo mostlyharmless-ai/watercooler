@@ -264,9 +264,12 @@ Standardize how Claude (this assistant) uses Watercooler tools so entries remain
 
 ### Thread Reading & Entry Access
 
-- Default to `watercooler_list_thread_entries` with `format="json"` and explicit `offset`/`limit` whenever you need to inspect or reason about entries programmatically. Follow up with `watercooler_get_thread_entry` / `get_thread_entry_range` using the returned `entry_id` or index.
-- Switch to `format="markdown"` when you intend to quote entries back to a human (e.g., preparing a response or summary). The markdown payload mirrors the thread file and avoids accidental reformatting.
-- Use `watercooler_read_thread(format="json")` only when you have a clear need for the entire thread structure (e.g., exporting or analytics). For routine reading, prefer paginated entry tools to stay under stdio size caps.
+- **Start with summaries**: Use `watercooler_read_thread(summary_only=true)` to scan a thread's narrative in ~500 tokens instead of ~5,000. This returns a condensed view with per-entry summaries — ideal for deciding which entries need full bodies.
+- **Browse entry headers**: Use `watercooler_list_thread_entries` with `format="json"` and explicit `offset`/`limit` to get a "TOC with abstracts" — each entry includes a `summary` field alongside metadata.
+- **Fetch specific entries**: Follow up with `watercooler_get_thread_entry` (by `entry_id` or index) for the full body when you need it.
+- **Scan a range**: Use `watercooler_get_thread_entry_range(summary_only=true)` to preview a span before fetching full bodies.
+- Switch to `format="markdown"` when you intend to quote entries back to a human. The markdown payload mirrors the thread file and avoids accidental reformatting.
+- Use `watercooler_read_thread(format="json")` (without `summary_only`) only when you need every entry body (e.g., exporting or analytics). For routine reading, prefer summary-first or paginated entry tools to stay under stdio size caps.
 - Large threads can exceed the MCP stdio ceiling; always chunk requests (batch size of ~5–10 entries works well) before relaying content.
 - Preserve provenance by capturing the `entry_id` from JSON responses when referencing a specific entry in follow-up messages or commits.
 

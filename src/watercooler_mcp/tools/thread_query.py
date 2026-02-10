@@ -36,16 +36,17 @@ from ..helpers import (
     _get_startup_warnings,
     _format_warnings_for_response,
     # Thread parsing
-    _extract_thread_metadata,  # DEPRECATED: for hosted mode only
-    _get_thread_metadata_graph_first,  # Preferred: graph-first with MD fallback
+    _extract_thread_metadata_from_md,  # MD-only: for hosted mode
+    _get_thread_metadata,  # Canonical: graph with MD fallback
     _resolve_format,
     # Entry loading
     _entry_header_payload,
     _entry_full_payload,
     # Graph helpers
     _track_access,
-    _load_thread_entries_graph_first,
-    _list_threads_graph_first,
+    _load_entries,
+    _list_threads,
+    _get_thread_summary,
 )
 from ..errors import (
     ContextError,
@@ -65,6 +66,14 @@ from ..sync import ensure_readable
 from ..observability import log_debug, log_error
 from .. import validation  # Import module for runtime access (enables test patching)
 from ..validation import is_hosted_context
+
+
+def _entry_to_markdown(entry: ThreadEntry) -> str:
+    """Render a ThreadEntry as markdown text (header + body)."""
+    body_content = entry.body.strip() if entry.body else ""
+    if body_content:
+        return entry.header + "\n\n" + body_content
+    return entry.header
 
 
 # Module-level references to registered tools (populated by register_thread_query_tools)
@@ -211,7 +220,7 @@ def _list_threads_impl(
 
         # Get thread list (canonical graph-first; markdown is legacy/backfill only)
         scan_start = time.time()
-        threads = _list_threads_graph_first(threads_dir, open_only=open_only, agent=agent)
+        threads = _list_threads(threads_dir, open_only=open_only, agent=agent)
         scan_elapsed = time.time() - scan_start
         log_debug(f"list_threads scanned {len(threads)} threads in {scan_elapsed:.2f}s")
 
@@ -257,17 +266,17 @@ def _list_threads_impl(
         waiting = []
         new_entries = []
 
-        for title, status, ball, updated, path, is_new in threads:
+        for title, status, ball, updated, path, is_new, summary in threads:
             topic = path.stem
             ball_lower = (ball or "").lower()
             has_ball = ball_lower == agent_lower
 
             if is_new:
-                new_entries.append((title, status, ball, updated, topic, has_ball))
+                new_entries.append((title, status, ball, updated, topic, has_ball, summary))
             elif has_ball:
-                your_turn.append((title, status, ball, updated, topic, has_ball))
+                your_turn.append((title, status, ball, updated, topic, has_ball, summary))
             else:
-                waiting.append((title, status, ball, updated, topic, has_ball))
+                waiting.append((title, status, ball, updated, topic, has_ball, summary))
         classify_elapsed = time.time() - classify_start
         log_debug(f"list_threads classified threads in {classify_elapsed:.2f}s (your_turn={len(your_turn)} waiting={len(waiting)} new={len(new_entries)})")
 
@@ -275,30 +284,36 @@ def _list_threads_impl(
         render_start = time.time()
         if your_turn:
             output.append(f"\n## 🎾 Your Turn ({len(your_turn)} threads)\n")
-            for title, status, ball, updated, topic, _ in your_turn:
+            for title, status, ball, updated, topic, _, summary in your_turn:
                 local_marker = " ⏳" if topic in pending_topics else ""
                 updated_label = updated + (" (local)" if topic in pending_topics else "")
                 output.append(f"- **{topic}**{local_marker} - {title}")
                 output.append(f"  Status: {status} | Ball: {ball} | Updated: {updated_label}")
+                if summary:
+                    output.append(f"  {summary}")
 
         # NEW entries section
         if new_entries:
             output.append(f"\n## 🆕 NEW Entries for You ({len(new_entries)} threads)\n")
-            for title, status, ball, updated, topic, has_ball in new_entries:
+            for title, status, ball, updated, topic, has_ball, summary in new_entries:
                 marker = "🎾 " if has_ball else ""
                 local_marker = " ⏳" if topic in pending_topics else ""
                 updated_label = updated + (" (local)" if topic in pending_topics else "")
                 output.append(f"- {marker}**{topic}**{local_marker} - {title}")
                 output.append(f"  Status: {status} | Ball: {ball} | Updated: {updated_label}")
+                if summary:
+                    output.append(f"  {summary}")
 
         # Waiting section
         if waiting:
             output.append(f"\n## ⏳ Waiting on Others ({len(waiting)} threads)\n")
-            for title, status, ball, updated, topic, _ in waiting:
+            for title, status, ball, updated, topic, _, summary in waiting:
                 local_marker = " ⏳" if topic in pending_topics else ""
                 updated_label = updated + (" (local)" if topic in pending_topics else "")
                 output.append(f"- **{topic}**{local_marker} - {title}")
                 output.append(f"  Status: {status} | Ball: {ball} | Updated: {updated_label}")
+                if summary:
+                    output.append(f"  {summary}")
 
         output.append(f"\n---\n*You are: {agent}*")
         output.append(f"*Threads dir: {threads_dir}*")
@@ -329,6 +344,7 @@ def _read_thread_impl(
     from_entry: int = 0,
     limit: int = 100,
     format: str = "markdown",
+    summary_only: bool = False,
     code_path: str = "",
 ) -> str:
     """Read the complete content of a watercooler thread.
@@ -337,20 +353,18 @@ def _read_thread_impl(
         topic: Thread topic identifier (e.g., "feature-auth")
         from_entry: Starting entry index for pagination (Phase 1A: ignored)
         limit: Maximum entries to include (Phase 1A: ignored, returns all)
-        format: Output format - "markdown" or "json" (Phase 1A: only "markdown" supported)
+        format: Output format - "markdown" or "json"
+        summary_only: When True, returns only entry summaries (no bodies).
+            Reduces token usage by ~90% — ideal for scanning threads.
         code_path: Path to the code repository directory containing the files most immediately
             under discussion. This establishes the code context for branch pairing.
             Should point to the root of your working repository.
 
     Returns:
-        Full thread content including:
+        Full thread content (or summary-only condensed view) including:
         - Thread metadata (status, ball owner, participants)
         - All entries with timestamps, authors, roles, and types
         - Current ball ownership status
-
-    Phase 1A notes:
-        - format must be "markdown" (JSON support in Phase 1B)
-        - from_entry and limit are ignored (pagination in Phase 1B)
     """
     try:
         fmt_error, resolved_format = _resolve_format(format, default="markdown")
@@ -388,8 +402,7 @@ def _read_thread_impl(
                 raise HostedModeError(load_error, operation="load_entries")
 
             # Extract metadata from content
-            header_block = content.split("---", 1)[0].strip() if "---" in content else ""
-            title, status, ball, last = _extract_thread_metadata(content, topic)
+            title, status, ball, last = _extract_thread_metadata_from_md(content, topic)
 
             payload = {
                 "topic": topic,
@@ -400,7 +413,7 @@ def _read_thread_impl(
                     "status": status,
                     "ball": ball,
                     "last_entry_at": last,
-                    "header": header_block,
+                    "summary": "",
                 },
                 "entries": [_entry_full_payload(entry) for entry in entries],
             }
@@ -441,18 +454,61 @@ def _read_thread_impl(
 
         # Read full thread content
         content = fs.read_body(thread_path)
-        if resolved_format == "markdown":
+        if resolved_format == "markdown" and not summary_only:
             return _format_warnings_for_response(content)
 
-        # For JSON format, use graph-first loading
-        load_error, entries = _load_thread_entries_graph_first(topic, context)
+        # Load entries from graph (canonical) with MD fallback
+        load_error, entries, summaries = _load_entries(topic, context)
         if load_error:
             return load_error
 
         # Extract metadata from graph (preferred) with MD fallback
-        header_block = content.split("---", 1)[0].strip() if "---" in content else ""
-        title, status, ball, last = _get_thread_metadata_graph_first(threads_dir, topic, content)
+        title, status, ball, last = _get_thread_metadata(threads_dir, topic, content)
+        thread_summary = _get_thread_summary(threads_dir, topic)
 
+        if summary_only:
+            if resolved_format == "markdown":
+                # Condensed "Cole's Notes" view
+                lines = [f"# {topic} — {title}"]
+                if thread_summary:
+                    lines.append(f"\n{thread_summary}")
+                lines.append(f"\nStatus: {status} | Ball: {ball} | Entries: {len(entries)}\n")
+                for entry in entries:
+                    ts = entry.timestamp or "unknown"
+                    t = entry.title or "(untitled)"
+                    s = summaries.get(entry.entry_id or "", "")
+                    lines.append(f"- [{entry.index}] {ts} — {t}")
+                    if s:
+                        lines.append(f"  {s}")
+                return _format_warnings_for_response("\n".join(lines))
+
+            # JSON summary_only mode
+            payload = {
+                "topic": topic,
+                "format": "json",
+                "summary_only": True,
+                "entry_count": len(entries),
+                "meta": {
+                    "title": title,
+                    "status": status,
+                    "ball": ball,
+                    "last_entry_at": last,
+                    "summary": thread_summary,
+                },
+                "entries": [
+                    _entry_header_payload(
+                        entry,
+                        summary=summaries.get(entry.entry_id or "", ""),
+                    )
+                    for entry in entries
+                ],
+            }
+            warnings = _get_startup_warnings()
+            if warnings:
+                payload["_warnings"] = warnings
+            return json.dumps(payload, indent=2)
+
+        # Full JSON mode (with summaries included)
         payload = {
             "topic": topic,
             "format": "json",
@@ -462,9 +518,15 @@ def _read_thread_impl(
                 "status": status,
                 "ball": ball,
                 "last_entry_at": last,
-                "header": header_block,
+                "summary": thread_summary,
             },
-            "entries": [_entry_full_payload(entry) for entry in entries],
+            "entries": [
+                _entry_full_payload(
+                    entry,
+                    summary=summaries.get(entry.entry_id or "", ""),
+                )
+                for entry in entries
+            ],
         }
         # For JSON, add warnings as a separate field if present
         warnings = _get_startup_warnings()
@@ -556,7 +618,7 @@ def _list_thread_entries_impl(
         log_debug(f"list_thread_entries read sync: {sync_actions}")
 
     validation._refresh_threads(context)
-    load_error, entries = _load_thread_entries_graph_first(topic, context)
+    load_error, entries, summaries = _load_entries(topic, context)
     if load_error:
         if "not found" in load_error.lower():
             raise ThreadNotFoundError(topic=topic)
@@ -572,7 +634,13 @@ def _list_thread_entries_impl(
         "entry_count": total,
         "offset": start,
         "limit": limit,
-        "entries": [_entry_header_payload(entry) for entry in slice_entries],
+        "entries": [
+            _entry_header_payload(
+                entry,
+                summary=summaries.get(entry.entry_id or "", ""),
+            )
+            for entry in slice_entries
+        ],
     }
 
     if resolved_format == "markdown":
@@ -582,9 +650,12 @@ def _list_thread_entries_impl(
                 timestamp = entry.timestamp or "unknown"
                 title = entry.title or "(untitled)"
                 entry_id = entry.entry_id or "(no Entry-ID)"
+                s = summaries.get(entry_id, "")
                 lines.append(
                     f"- [{entry.index}] {timestamp} — {title} ({entry.role or 'role?'} / {entry.entry_type or 'type?'}) id={entry_id}"
                 )
+                if s:
+                    lines.append(f"  {s}")
         else:
             lines.append("- (no entries in range)")
         text = "\n".join(lines)
@@ -652,8 +723,8 @@ def _get_thread_entry_impl(
         }
 
         if resolved_format == "markdown":
-            markdown = payload["entry"]["markdown"]  # type: ignore[index]
-            return ToolResult(content=[TextContent(type="text", text=markdown)])
+            text = _entry_to_markdown(selected)
+            return ToolResult(content=[TextContent(type="text", text=text)])
 
         return ToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))])
 
@@ -666,7 +737,7 @@ def _get_thread_entry_impl(
         log_debug(f"get_thread_entry read sync: {sync_actions}")
 
     validation._refresh_threads(context)
-    load_error, entries = _load_thread_entries_graph_first(topic, context)
+    load_error, entries, summaries = _load_entries(topic, context)
     if load_error:
         if "not found" in load_error.lower():
             raise ThreadNotFoundError(topic=topic)
@@ -697,16 +768,17 @@ def _get_thread_entry_impl(
     if selected.entry_id and context.threads_dir:
         _track_access(context.threads_dir, "entry", selected.entry_id)
 
+    entry_summary = summaries.get(selected.entry_id or "", "")
     payload = {
         "topic": topic,
         "entry_count": len(entries),
         "index": selected.index,
-        "entry": _entry_full_payload(selected),
+        "entry": _entry_full_payload(selected, summary=entry_summary),
     }
 
     if resolved_format == "markdown":
-        markdown = payload["entry"]["markdown"]  # type: ignore[index]
-        return ToolResult(content=[TextContent(type="text", text=markdown)])
+        text = _entry_to_markdown(selected)
+        return ToolResult(content=[TextContent(type="text", text=text)])
 
     return ToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))])
 
@@ -716,9 +788,20 @@ def _get_thread_entry_range_impl(
     start_index: int = 0,
     end_index: int | None = None,
     format: str = "json",
+    summary_only: bool = False,
     code_path: str = "",
 ) -> ToolResult:
-    """Return a contiguous range of entries (inclusive)."""
+    """Return a contiguous range of entries (inclusive).
+
+    Args:
+        topic: Thread topic identifier
+        start_index: First entry index (inclusive)
+        end_index: Last entry index (inclusive), or None for all remaining
+        format: Output format - "markdown" or "json"
+        summary_only: When True, returns only entry summaries (no bodies).
+            Reduces token usage by ~90% — ideal for scanning a range.
+        code_path: Code repository path for branch pairing context
+    """
 
     fmt_error, resolved_format = _resolve_format(format, default="json")
     if fmt_error:
@@ -790,7 +873,7 @@ def _get_thread_entry_range_impl(
         log_debug(f"get_thread_entry_range read sync: {sync_actions}")
 
     validation._refresh_threads(context)
-    load_error, entries = _load_thread_entries_graph_first(topic, context)
+    load_error, entries, summaries = _load_entries(topic, context)
     if load_error:
         if "not found" in load_error.lower():
             raise ThreadNotFoundError(topic=topic)
@@ -813,24 +896,57 @@ def _get_thread_entry_range_impl(
             if entry.entry_id:
                 _track_access(context.threads_dir, "entry", entry.entry_id)
 
-    payload = {
-        "topic": topic,
-        "entry_count": total,
-        "start_index": start_index,
-        "end_index": effective_end if selected_entries else None,
-        "entries": [_entry_full_payload(entry) for entry in selected_entries],
-    }
+    if summary_only:
+        payload = {
+            "topic": topic,
+            "entry_count": total,
+            "summary_only": True,
+            "start_index": start_index,
+            "end_index": effective_end if selected_entries else None,
+            "entries": [
+                _entry_header_payload(
+                    entry,
+                    summary=summaries.get(entry.entry_id or "", ""),
+                )
+                for entry in selected_entries
+            ],
+        }
+    else:
+        payload = {
+            "topic": topic,
+            "entry_count": total,
+            "start_index": start_index,
+            "end_index": effective_end if selected_entries else None,
+            "entries": [
+                _entry_full_payload(
+                    entry,
+                    summary=summaries.get(entry.entry_id or "", ""),
+                )
+                for entry in selected_entries
+            ],
+        }
 
     if resolved_format == "markdown":
         if not selected_entries:
             return ToolResult(content=[TextContent(type="text", text="(no entries in range)")])
-        markdown_blocks = []
-        for entry in selected_entries:
-            block = entry.header
-            if entry.body:
-                block += "\n\n" + entry.body
-            markdown_blocks.append(block)
-        text = "\n\n---\n\n".join(markdown_blocks)
+        if summary_only:
+            lines = []
+            for entry in selected_entries:
+                ts = entry.timestamp or "unknown"
+                t = entry.title or "(untitled)"
+                s = summaries.get(entry.entry_id or "", "")
+                lines.append(f"- [{entry.index}] {ts} — {t}")
+                if s:
+                    lines.append(f"  {s}")
+            text = "\n".join(lines)
+        else:
+            markdown_blocks = []
+            for entry in selected_entries:
+                block = entry.header
+                if entry.body:
+                    block += "\n\n" + entry.body
+                markdown_blocks.append(block)
+            text = "\n\n---\n\n".join(markdown_blocks)
         return ToolResult(content=[TextContent(type="text", text=text)])
 
     return ToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))])

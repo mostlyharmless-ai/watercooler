@@ -6,7 +6,7 @@ This module contains:
 - Branch validation and sync helpers
 - Thread parsing and metadata extraction
 - Entry loading and formatting
-- Graph-first read optimization helpers
+- Graph-canonical read helpers
 - Commit footer building
 
 These are extracted from server.py for modularity and testability.
@@ -441,12 +441,11 @@ def _normalize_status(s: str) -> str:
     return s.strip().lower()
 
 
-def _extract_thread_metadata(content: str, topic: str) -> tuple[str, str, str, str]:
-    """Extract thread metadata from content string without re-reading the file.
+def _extract_thread_metadata_from_md(content: str, topic: str) -> tuple[str, str, str, str]:
+    """Extract thread metadata from markdown content string.
 
-    DEPRECATED: For local mode, prefer _get_thread_metadata_graph_first() which
-    reads from the canonical graph. This MD-parsing version is still needed for
-    hosted mode where we only have GitHub API content.
+    This MD-parsing version is needed for hosted mode where we only have
+    GitHub API content, and as a fallback when graph data is unavailable.
 
     Args:
         content: Full thread markdown content
@@ -471,12 +470,12 @@ def _extract_thread_metadata(content: str, topic: str) -> tuple[str, str, str, s
     return title, status, ball, last
 
 
-def _get_thread_metadata_graph_first(
+def _get_thread_metadata(
     threads_dir: Path, topic: str, content: str | None = None
 ) -> tuple[str, str, str, str]:
-    """Get thread metadata from graph with MD fallback.
+    """Get thread metadata from canonical graph with MD fallback.
 
-    Graph-first: reads from canonical graph JSONL. Falls back to MD parsing
+    Reads from canonical graph JSONL. Falls back to MD parsing
     if graph data is not available.
 
     Args:
@@ -515,7 +514,7 @@ def _get_thread_metadata_graph_first(
         else:
             return topic, "open", "unknown", fs.utcnow_iso()
 
-    return _extract_thread_metadata(content, topic)
+    return _extract_thread_metadata_from_md(content, topic)
 
 
 def _resolve_format(
@@ -538,10 +537,10 @@ def _resolve_format(
 # ============================================================================
 
 
-def _load_thread_entries(
+def _load_entries_from_md(
     topic: str, context: ThreadContext
 ) -> tuple[str | None, list[ThreadEntry]]:
-    """Load and parse thread entries from disk.
+    """Load and parse thread entries from markdown on disk.
 
     Thread Safety Note:
         This function performs unlocked reads. This is safe because:
@@ -580,7 +579,7 @@ def _load_thread_entries(
     return (None, entries)
 
 
-def _entry_header_payload(entry: ThreadEntry) -> Dict[str, object]:
+def _entry_header_payload(entry: ThreadEntry, summary: str = "") -> Dict[str, object]:
     return {
         "index": entry.index,
         "entry_id": entry.entry_id,
@@ -589,43 +588,27 @@ def _entry_header_payload(entry: ThreadEntry) -> Dict[str, object]:
         "role": entry.role,
         "type": entry.entry_type,
         "title": entry.title,
-        "header": entry.header,
-        "start_line": entry.start_line,
-        "end_line": entry.end_line,
-        "start_offset": entry.start_offset,
-        "end_offset": entry.end_offset,
+        "summary": summary,
     }
 
 
-def _entry_full_payload(entry: ThreadEntry) -> Dict[str, object]:
+def _entry_full_payload(entry: ThreadEntry, summary: str = "") -> Dict[str, object]:
     """Convert ThreadEntry to full JSON payload including body content.
-
-    Note on whitespace handling:
-        - 'body' field preserves original whitespace from the thread file
-        - 'markdown' field uses stripped body to avoid trailing whitespace in output
-        This ensures markdown rendering is clean while preserving original content.
 
     Args:
         entry: ThreadEntry to convert
+        summary: LLM-generated summary (1-2 sentences) from graph
 
     Returns:
-        Dictionary with entry metadata, body, and markdown representation
+        Dictionary with entry metadata, summary, and body
     """
-    data = _entry_header_payload(entry)
-    # Handle whitespace-only bodies as empty
-    body_content = entry.body.strip() if entry.body else ""
-    data.update(
-        {
-            "body": entry.body,  # Preserve original whitespace
-            "markdown": entry.header
-            + ("\n\n" + body_content if body_content else ""),  # Clean output
-        }
-    )
+    data = _entry_header_payload(entry, summary=summary)
+    data["body"] = entry.body
     return data
 
 
 # ============================================================================
-# Graph-First Read Helpers
+# Graph-Canonical Read Helpers
 # ============================================================================
 
 
@@ -699,13 +682,17 @@ def _graph_entry_to_thread_entry(
         entry_type=graph_entry.entry_type,
         title=graph_entry.title,
         entry_id=graph_entry.entry_id,
+        start_line=0,
+        end_line=0,
+        start_offset=0,
+        end_offset=0,
     )
 
 
-def _load_thread_entries_graph_first(
+def _load_entries(
     topic: str,
     context: ThreadContext,
-) -> tuple[str | None, list[ThreadEntry]]:
+) -> tuple[str | None, list[ThreadEntry], dict[str, str]]:
     """Load thread entries from canonical graph JSONL, with legacy markdown backfill.
 
     Canonical source of truth is the baseline graph JSONL (`graph/baseline/*`) in the
@@ -721,7 +708,8 @@ def _load_thread_entries_graph_first(
         context: Thread context
 
     Returns:
-        Tuple of (error_message, entries). Error is None on success.
+        Tuple of (error_message, entries, summaries). Error is None on success.
+        summaries maps entry_id → LLM-generated summary string.
     """
     threads_dir = context.threads_dir
 
@@ -733,6 +721,14 @@ def _load_thread_entries_graph_first(
                 log_debug(f"[GRAPH] Topic '{topic}' not in graph, falling back to markdown")
             if result:
                 graph_thread, graph_entries = result
+
+                # Extract summaries from graph entries
+                summaries: dict[str, str] = {
+                    ge.entry_id: ge.summary
+                    for ge in graph_entries
+                    if ge.entry_id and ge.summary
+                }
+
                 # Graph entries may not have full body - need to get from markdown
                 # For now, use summaries from graph (bodies are optional in graph)
                 thread_path = fs.thread_path(topic, threads_dir)
@@ -770,17 +766,23 @@ def _load_thread_entries_graph_first(
                                 repaired = read_thread_from_graph(threads_dir, topic)
                                 if repaired:
                                     _, graph_entries = repaired
+                                    # Update summaries from repaired graph
+                                    summaries = {
+                                        ge.entry_id: ge.summary
+                                        for ge in graph_entries
+                                        if ge.entry_id and ge.summary
+                                    }
                             else:
                                 log_debug(
                                     "[GRAPH] Auto-repair failed, using markdown entries"
                                 )
-                                return (None, md_entries)
+                                return (None, md_entries, summaries)
                         except Exception as repair_err:
                             log_debug(
                                 f"[GRAPH] Auto-repair error: {repair_err}, "
                                 "using markdown"
                             )
-                            return (None, md_entries)
+                            return (None, md_entries, summaries)
 
                     # Merge: use graph metadata with markdown bodies
                     entries = []
@@ -798,7 +800,7 @@ def _load_thread_entries_graph_first(
                     log_debug(
                         f"[GRAPH] Loaded {len(entries)} entries from graph for {topic}"
                     )
-                    return (None, entries)
+                    return (None, entries, summaries)
                 else:
                     # No markdown, use graph entries directly
                     entries = [_graph_entry_to_thread_entry(ge) for ge in graph_entries]
@@ -806,22 +808,23 @@ def _load_thread_entries_graph_first(
                         f"[GRAPH] Loaded {len(entries)} entries from graph only "
                         f"for {topic}"
                     )
-                    return (None, entries)
+                    return (None, entries, summaries)
         except Exception as e:
             log_debug(
                 f"[GRAPH] Failed to load from graph, falling back to markdown: {e}"
             )
 
-    # Fallback to markdown parsing
+    # Fallback to markdown parsing (no summaries available)
     log_debug(f"[GRAPH] Using markdown fallback for '{topic}' entries")
-    return _load_thread_entries(topic, context)
+    err, entries = _load_entries_from_md(topic, context)
+    return (err, entries, {})
 
 
-def _list_threads_graph_first(
+def _list_threads(
     threads_dir: Path,
     open_only: bool | None = None,
     agent: str | None = None,
-) -> list[tuple[str, str, str, str, Path, bool]]:
+) -> list[tuple[str, str, str, str, Path, bool, str]]:
     """List threads from canonical graph JSONL, with legacy markdown backfill.
 
     Args:
@@ -831,7 +834,7 @@ def _list_threads_graph_first(
             flag based on whether the ball is held by someone else.
 
     Returns:
-        List of thread tuples (title, status, ball, updated, path, is_new)
+        List of thread tuples (title, status, ball, updated, path, is_new, summary)
     """
     # Try graph first if available
     if _use_graph_for_reads(threads_dir):
@@ -866,6 +869,7 @@ def _list_threads_graph_first(
                             gt.last_updated,
                             thread_path,
                             is_new,
+                            gt.summary or "",
                         )
                     )
                 log_debug(f"[GRAPH] Listed {len(result)} threads from graph")
@@ -875,9 +879,24 @@ def _list_threads_graph_first(
                 f"[GRAPH] Failed to list from graph, falling back to markdown: {e}"
             )
 
-    # Fallback to markdown
+    # Fallback to markdown (no summaries available)
     log_debug("[GRAPH] Using markdown fallback for list_threads")
-    return commands.list_threads(threads_dir=threads_dir, open_only=open_only)
+    md_threads = commands.list_threads(threads_dir=threads_dir, open_only=open_only)
+    # Extend 6-tuples to 7-tuples with empty summary
+    return [(t, s, b, u, p, n, "") for t, s, b, u, p, n in md_threads]
+
+
+def _get_thread_summary(threads_dir: Path, topic: str) -> str:
+    """Get thread summary from graph. Returns '' if unavailable."""
+    if _use_graph_for_reads(threads_dir):
+        try:
+            result = read_thread_from_graph(threads_dir, topic)
+            if result:
+                graph_thread, _ = result
+                return graph_thread.summary or ""
+        except Exception as e:
+            log_debug(f"[GRAPH] Failed to get thread summary: {e}")
+    return ""
 
 
 # ============================================================================

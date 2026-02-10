@@ -307,20 +307,26 @@ List all threads with ball ownership and NEW markers.
 - 🆕 NEW Entries - Threads with unread updates
 - ⏳ Waiting on Others - Threads where others have the ball
 
+Each thread includes an LLM-generated summary (when available from the baseline graph) below the status line, giving agents quick context without opening the thread.
+
 #### `watercooler_read_thread`
-Read complete thread content.
+Read complete thread content, or a condensed summary-only view.
 
 **Parameters:**
 - `topic` (str): Thread topic identifier (e.g., "feature-auth")
 - `from_entry` (int): Starting entry index (not yet implemented - returns from start)
 - `limit` (int): Max entries (not yet implemented - returns all)
 - `format` (str): Output format - `"markdown"` (default) or `"json"`
+- `summary_only` (bool): When `true`, returns only entry summaries (no bodies). Reduces token usage by ~90% — ideal for scanning threads. Default: `false`.
 
 **Returns:**
-- Markdown: original thread markdown
-- JSON: structured payload containing thread metadata plus an `entries[]` array (`header`, `body`, offsets)
+- Markdown (full): original thread markdown
+- Markdown (summary_only): condensed view with thread summary, status, and per-entry summaries
+- JSON (full): structured payload with `meta` (including thread `summary`) and `entries[]` array (each with `summary` and `body`)
+- JSON (summary_only): same structure but entries contain `summary` only (no `body`)
 
 **Usage Tips:**
+- Use `summary_only=true` to scan a thread's narrative in ~500 tokens instead of ~5,000 — then fetch specific entries with `get_thread_entry` for full bodies.
 - Prefer `format="json"` when a client needs to examine individual entries without reparsing markdown. Each element in `entries[]` mirrors the structures returned by the entry tools.
 - Remember that large JSON payloads can still exceed stdio limits; paginate with the entry tools when you only need a subset.
 - When preparing a human-facing summary, stick with the default markdown output so you can reuse the canonical thread text verbatim.
@@ -336,8 +342,10 @@ List entry headers (metadata only) for a thread so clients can select specific e
 - `code_path` (str): Code repository root (required to resolve the paired threads repo)
 
 **Returns:**
-- JSON: `entry_count`, effective `offset`, and an array of entry headers (`index`, `entry_id`, `agent`, etc.)
-- Markdown: bullet list summarising the selected entries
+- JSON: `entry_count`, effective `offset`, and an array of entry headers with summaries (`index`, `entry_id`, `agent`, `summary`, etc.)
+- Markdown: bullet list summarising the selected entries (with summaries shown when available)
+
+This tool acts as a **"TOC with abstracts"** — agents can scan entry summaries to decide which entries need full bodies.
 
 **Usage Tips:**
 - Use pagination (`offset`, `limit`) to stay well below stdio response limits in very long threads.
@@ -356,10 +364,11 @@ tool_result = list_thread_entries(
 payload = json.loads(tool_result.content[0].text)
 entries = payload["entries"]
 ```
+
+Each entry header contains:
 - `index`, `entry_id`
 - `agent`, `timestamp`, `role`, `type`, `title`
-- `header` (markdown header block)
-- `start_line`/`end_line` and `start_offset`/`end_offset` for editor integrations
+- `summary` — LLM-generated 1-2 sentence summary (empty string if unavailable)
 
 #### `watercooler_get_thread_entry`
 Retrieve a single entry (header + body) either by index or by `entry_id`.
@@ -372,12 +381,13 @@ Retrieve a single entry (header + body) either by index or by `entry_id`.
 - `code_path` (str): Code repository root (required)
 
 **Returns:**
-- JSON: entry metadata/body in a structured object (including a `markdown` convenience field)
+- JSON: entry metadata, `summary`, and `body` in a structured object
 - Markdown: raw entry header + body block
 
 **Usage Tips:**
 - Provide both `index` and `entry_id` when you want an extra guard that you are inspecting the expected entry; the tool will error if they disagree.
-- JSON output is ideal for downstream automation (e.g., extracting timestamps or authors), while markdown output is perfect for quoting the entry as-is in a response.
+- JSON output includes the `summary` alongside the full `body`, letting clients show a preview or use the summary for downstream reasoning.
+- Markdown output is perfect for quoting the entry as-is in a response.
 
 **Example (markdown slice):**
 ```python
@@ -400,13 +410,17 @@ Return a contiguous, inclusive range of entries for streaming scenarios.
 - `start_index` (int): Starting entry index (default: 0)
 - `end_index` (int | None): Inclusive end index (defaults to last entry)
 - `format` (str): `"json"` (default) or `"markdown"`
+- `summary_only` (bool): When `true`, returns only entry summaries (no bodies). Reduces token usage by ~90%. Default: `false`.
 - `code_path` (str): Code repository root (required)
 
 **Returns:**
-- JSON: `entries` array (header + body per entry) with `start_index`/`end_index`
-- Markdown: concatenated entry blocks separated by `---`
+- JSON (full): `entries` array (with `summary` and `body` per entry) and `start_index`/`end_index`
+- JSON (summary_only): same structure but entries contain `summary` only (no `body`)
+- Markdown (full): concatenated entry blocks separated by `---`
+- Markdown (summary_only): bullet list with entry timestamps, titles, and summaries
 
 **Usage Tips:**
+- Use `summary_only=true` to scan a range for relevant content before fetching full bodies.
 - Request smaller windows (e.g., batches of 5–10 entries) to reduce payload size and allow streaming consumption on the client side.
 - Markdown output mirrors the thread file layout, making it easy to forward directly to a user after light editing.
 - Combine `list_thread_entries` (for navigation) with `get_thread_entry_range` to fetch just the span you need.

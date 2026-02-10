@@ -144,7 +144,7 @@ def patched_context(mock_context, monkeypatch):
 
     # Mock graph functions to use markdown fallback
     monkeypatch.setattr(
-        "watercooler_mcp.tools.thread_query._list_threads_graph_first",
+        "watercooler_mcp.tools.thread_query._list_threads",
         _mock_list_threads_from_markdown
     )
 
@@ -168,7 +168,7 @@ def _mock_list_threads_from_markdown(threads_dir, open_only=None, agent=None):
         if open_only is False and status == "OPEN":
             continue
 
-        threads.append((title, status, ball, updated, md_file, False))
+        threads.append((title, status, ball, updated, md_file, False, ""))
 
     return threads
 
