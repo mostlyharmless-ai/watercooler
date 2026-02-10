@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -95,6 +96,46 @@ def _resolve_llm_field(attr: str, env_var: str, default):
         return val
 
 
+_MAX_ERROR_TEXT_LENGTH = 500
+
+# Patterns that indicate secrets in API response text
+_SECRET_PATTERNS = re.compile(
+    r"(?i)"
+    r"(?:Bearer\s+)\S+"  # Bearer tokens
+    r"|(?:Authorization:\s*)\S+(?:\s+\S+)?"  # Authorization headers (scheme + credentials)
+    r"|(?:sk-)\S+"  # OpenAI-style API keys
+    r"|(?:key-)\S+"  # Generic API keys
+    r"|(?:ghp_)\S+"  # GitHub personal access tokens
+    r"|(?:gho_)\S+"  # GitHub OAuth tokens
+    r"|(?:ghs_)\S+"  # GitHub app tokens
+)
+
+
+def _sanitize_response_text(text: object) -> str:
+    """Sanitize API response text for safe inclusion in error messages.
+
+    Truncates long responses and redacts common secret patterns to prevent
+    leaking sensitive data (tokens, internal paths, stack traces) into logs,
+    MCP tool responses, and CI output.
+
+    Args:
+        text: Response text (or None/non-string).
+
+    Returns:
+        Sanitized string, at most _MAX_ERROR_TEXT_LENGTH chars.
+    """
+    if text is None:
+        return ""
+    s = str(text)
+    if not s:
+        return ""
+    # Redact secrets first (before truncation so partial keys don't slip through)
+    s = _SECRET_PATTERNS.sub("[REDACTED]", s)
+    if len(s) > _MAX_ERROR_TEXT_LENGTH:
+        s = s[:_MAX_ERROR_TEXT_LENGTH] + "...[truncated]"
+    return s
+
+
 def _http_post_with_retry(
     *,
     url: str,
@@ -134,13 +175,13 @@ def _http_post_with_retry(
                 return response.json()
         except httpx.HTTPStatusError as e:
             last_error = error_cls(
-                f"HTTP {e.response.status_code}: {e.response.text}"
+                f"HTTP {e.response.status_code}: {_sanitize_response_text(e.response.text)}"
             )
         except httpx.RequestError as e:
             last_error = error_cls(f"Request failed: {e}")
         except ValueError as e:
             # JSON decode failure — response body wasn't valid JSON
-            body_snippet = response.text[:200] if response is not None else ""
+            body_snippet = _sanitize_response_text(response.text) if response is not None else ""
             last_error = error_cls(
                 f"Invalid JSON in response: {e} — body: {body_snippet}"
             )
