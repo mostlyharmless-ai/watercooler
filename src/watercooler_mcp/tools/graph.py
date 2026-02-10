@@ -22,9 +22,17 @@ from typing import Any, Dict, Optional
 
 from fastmcp import Context
 
+from ..memory_queue import (
+    DuplicateTaskError,
+    MemoryTask,
+    MemoryTaskQueue,
+    MemoryTaskWorker,
+    QueueFullError,
+)
 from ..sync import BranchPairingError
 from ..middleware import run_with_graph_sync
 from .. import validation  # Import module for runtime access (enables test patching)
+from watercooler.path_resolver import derive_group_id
 
 logger = logging.getLogger(__name__)
 
@@ -1149,6 +1157,10 @@ def _graph_recover_impl(
     In normal operation, the graph is the source of truth.
     This tool is the exception for recovery scenarios.
 
+    When the memory task queue is available, recovery tasks are enqueued
+    per-topic and processed asynchronously. Poll watercooler_memory_task_status
+    for progress. Falls back to synchronous recovery if queue unavailable.
+
     Modes:
     - "stale": Recover only stale/error threads (auto-detected)
     - "selective": Recover specific topics only
@@ -1166,7 +1178,10 @@ def _graph_recover_impl(
         JSON with recovery results: threads recovered, entries parsed, errors
     """
     try:
-        from watercooler.baseline_graph.sync import recover_graph
+        from watercooler.baseline_graph.sync import (
+            recover_graph,
+            resolve_recovery_targets,
+        )
 
         error, context = validation._require_context(code_path)
         if error:
@@ -1183,7 +1198,45 @@ def _graph_recover_impl(
         if topics:
             topic_list = [t.strip() for t in topics.split(",") if t.strip()]
 
-        # Define the recover operation
+        # Resolve targets (fast, synchronous)
+        target_topics, resolve_errors = resolve_recovery_targets(
+            threads_dir, mode, topic_list
+        )
+        if resolve_errors:
+            return json.dumps({"errors": resolve_errors}, indent=2)
+        if not target_topics:
+            return json.dumps(
+                {"action": "graph_recover", "mode": mode, "message": "Nothing to recover."},
+                indent=2,
+            )
+
+        # dry_run: delegate to recover_graph (no queue, no git sync)
+        if dry_run:
+            result = recover_graph(
+                threads_dir=threads_dir,
+                mode=mode,
+                topics=topic_list,
+                generate_summaries=generate_summaries,
+                generate_embeddings=generate_embeddings,
+                dry_run=True,
+            )
+            return json.dumps(result.to_dict(), indent=2)
+
+        # Try queue path: enqueue one MemoryTask per topic
+        queue, worker = _get_recover_queue()
+        if queue is not None:
+            return _enqueue_recovery_tasks(
+                queue=queue,
+                worker=worker,
+                target_topics=target_topics,
+                threads_dir=threads_dir,
+                code_root=context.code_root,
+                mode=mode,
+                generate_summaries=generate_summaries,
+                generate_embeddings=generate_embeddings,
+            )
+
+        # Fallback: synchronous recovery with git parity
         def _do_recover() -> dict:
             result = recover_graph(
                 threads_dir=threads_dir,
@@ -1191,27 +1244,119 @@ def _graph_recover_impl(
                 topics=topic_list,
                 generate_summaries=generate_summaries,
                 generate_embeddings=generate_embeddings,
-                dry_run=dry_run,
+                dry_run=False,
             )
             return result.to_dict()
 
-        # For dry_run, don't wrap in git sync
-        if dry_run:
-            output = _do_recover()
-        else:
-            # Run with full parity protocol (preflight + commit + push)
-            output = run_with_graph_sync(
-                context,
-                _do_recover,
-                f"graph: recover mode={mode}",
-            )
-
+        output = run_with_graph_sync(
+            context,
+            _do_recover,
+            f"graph: recover mode={mode}",
+        )
         return json.dumps(output, indent=2)
 
     except BranchPairingError as e:
         return f"Branch parity error: {str(e)}"
     except Exception as e:
         return f"Error recovering graph: {str(e)}"
+
+
+def _get_recover_queue() -> tuple[Optional[MemoryTaskQueue], Optional[MemoryTaskWorker]]:
+    """Return (queue, worker) if the memory task queue is available, else (None, None)."""
+    try:
+        from ..memory_queue import get_queue, get_worker
+
+        queue = get_queue()
+        worker = get_worker()
+        if queue is None:
+            return None, None
+        return queue, worker
+    except ImportError:
+        return None, None
+
+
+def _enqueue_recovery_tasks(
+    *,
+    queue: MemoryTaskQueue,
+    worker: Optional[MemoryTaskWorker],
+    target_topics: list[str],
+    threads_dir: Path,
+    code_root: Optional[Path],
+    mode: str,
+    generate_summaries: bool,
+    generate_embeddings: bool,
+) -> str:
+    """Enqueue one MemoryTask per topic for async graph recovery.
+
+    Returns JSON response with task_ids, skipped topics, and queue status.
+    """
+    group_id = derive_group_id(code_path=code_root) if code_root else derive_group_id(threads_dir=threads_dir)
+
+    content_payload = json.dumps({
+        "schema_version": 1,
+        "threads_dir": str(threads_dir),
+        "generate_summaries": generate_summaries,
+        "generate_embeddings": generate_embeddings,
+    })
+
+    task_ids: list[str] = []
+    enqueued_topics: list[str] = []
+    skipped: list[dict[str, str]] = []
+
+    for topic in target_topics:
+        task = MemoryTask(
+            backend="graph_recover",
+            # Composite key prevents dedup collisions across repos/groups
+            entry_id=f"{group_id}:{topic}",
+            topic=topic,
+            group_id=group_id,
+            content=content_payload,
+            title=f"graph_recover:{topic}",
+            source_description=f"{threads_dir}|graph_recover|{mode}",
+        )
+        try:
+            tid = queue.enqueue(task)
+            task_ids.append(tid)
+            enqueued_topics.append(topic)
+        except DuplicateTaskError:
+            skipped.append({"topic": topic, "reason": "duplicate"})
+        except QueueFullError:
+            skipped.append({"topic": topic, "reason": "queue_full"})
+
+    # Wake worker to start processing
+    if worker is not None and task_ids:
+        worker.wake()
+
+    if task_ids:
+        message = (
+            f"Recovery queued for {len(task_ids)} threads. "
+            "Poll watercooler_memory_task_status for progress."
+        )
+    else:
+        reasons = {s["reason"] for s in skipped}
+        if reasons == {"duplicate"}:
+            message = (
+                f"All {len(skipped)} topics already queued or recently processed. "
+                "Poll watercooler_memory_task_status for existing task progress."
+            )
+        else:
+            message = (
+                f"No tasks enqueued — {len(skipped)} topics skipped. "
+                "Check 'skipped' for details."
+            )
+
+    output = {
+        "action": "graph_recover",
+        "mode": "queued" if task_ids else "all_skipped",
+        "recovery_mode": mode,
+        "tasks_enqueued": len(task_ids),
+        "task_ids": task_ids,
+        "topics": enqueued_topics,
+        "skipped": skipped,
+        "queue_status": queue.status_summary(),
+        "message": message,
+    }
+    return json.dumps(output, indent=2)
 
 
 def _graph_project_impl(

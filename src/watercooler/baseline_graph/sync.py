@@ -2513,6 +2513,51 @@ def enrich_graph(
     return result
 
 
+def resolve_recovery_targets(
+    threads_dir: Path,
+    mode: str = "stale",
+    topics: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Resolve which topics need recovery without performing recovery.
+
+    Args:
+        threads_dir: Threads directory
+        mode: Recovery mode - "stale", "selective", or "all"
+        topics: Topics to recover (required for "selective" mode)
+
+    Returns:
+        Tuple of (target_topics, errors).
+    """
+    errors: list[str] = []
+
+    if mode not in ("stale", "selective", "all"):
+        errors.append(f"Invalid mode: {mode}. Use 'stale', 'selective', or 'all'")
+        return [], errors
+
+    if mode == "selective" and not topics:
+        errors.append("Mode 'selective' requires topics list")
+        return [], errors
+
+    thread_files = list(threads_dir.glob("*.md"))
+    available_topics = [f.stem for f in thread_files]
+
+    if mode == "stale":
+        health = check_graph_health(threads_dir)
+        target_topics = health.stale_threads + list(health.error_details.keys())
+        if not target_topics:
+            logger.info("No stale or error threads found, nothing to recover")
+            return [], errors
+    elif mode == "selective":
+        target_topics = [t for t in topics if t in available_topics]
+        if not target_topics:
+            errors.append("No matching topics found in markdown files")
+            return [], errors
+    else:  # mode == "all"
+        target_topics = available_topics
+
+    return target_topics, errors
+
+
 def recover_graph(
     threads_dir: Path,
     mode: str = "stale",  # "stale" | "selective" | "all"
@@ -2550,33 +2595,12 @@ def recover_graph(
     """
     result = RecoverResult(dry_run=dry_run)
 
-    # Validate mode
-    if mode not in ("stale", "selective", "all"):
-        result.errors.append(f"Invalid mode: {mode}. Use 'stale', 'selective', or 'all'")
+    target_topics, errors = resolve_recovery_targets(threads_dir, mode, topics)
+    if errors:
+        result.errors.extend(errors)
         return result
-
-    if mode == "selective" and not topics:
-        result.errors.append("Mode 'selective' requires topics list")
+    if not target_topics:
         return result
-
-    # Determine which topics to process
-    thread_files = list(threads_dir.glob("*.md"))
-    available_topics = [f.stem for f in thread_files]
-
-    if mode == "stale":
-        # Get stale/error topics from health check
-        health = check_graph_health(threads_dir)
-        target_topics = health.stale_threads + list(health.error_details.keys())
-        if not target_topics:
-            logger.info("No stale or error threads found, nothing to recover")
-            return result
-    elif mode == "selective":
-        target_topics = [t for t in topics if t in available_topics]
-        if not target_topics:
-            result.errors.append(f"No matching topics found in markdown files")
-            return result
-    else:  # mode == "all"
-        target_topics = available_topics
 
     # Count for dry run
     if dry_run:

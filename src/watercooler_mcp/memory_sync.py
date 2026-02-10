@@ -655,6 +655,58 @@ def init_memory_queue_executors() -> None:
     worker.register_executor("graphiti", graphiti_executor)
     logger.info("MEMORY: Registered graphiti executor with memory task queue")
 
+    worker.register_executor("graph_recover", _graph_recover_executor_fn)
+    logger.info("MEMORY: Registered graph_recover executor with memory task queue")
+
+
+async def _graph_recover_executor_fn(task: "MemoryTask") -> Dict[str, Any]:
+    """Execute a per-topic graph recovery from a queued task.
+
+    Parses ``task.content`` as JSON with ``schema_version`` validation,
+    then delegates to ``sync_thread_to_graph()`` for the single topic
+    stored in ``task.topic``.
+    """
+    from watercooler.baseline_graph.sync import sync_thread_to_graph
+
+    # Parse and validate content payload
+    try:
+        payload = json.loads(task.content)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(f"Invalid task content JSON: {exc}") from exc
+
+    schema_version = payload.get("schema_version")
+    if schema_version != 1:
+        raise RuntimeError(
+            f"Unsupported schema_version={schema_version!r}, expected 1"
+        )
+
+    threads_dir_str = payload.get("threads_dir", "")
+    if not threads_dir_str:
+        raise RuntimeError("Missing threads_dir in task content")
+
+    threads_dir = Path(threads_dir_str)
+    if not threads_dir.is_dir():
+        raise RuntimeError(f"threads_dir not found: {threads_dir}")
+
+    generate_summaries = payload.get("generate_summaries", False)
+    generate_embeddings = payload.get("generate_embeddings", True)
+
+    success = sync_thread_to_graph(
+        threads_dir=threads_dir,
+        topic=task.topic,
+        generate_summaries=generate_summaries,
+        generate_embeddings=generate_embeddings,
+    )
+
+    if not success:
+        raise RuntimeError(f"sync_thread_to_graph failed for topic={task.topic!r}")
+
+    return {
+        "topic": task.topic,
+        "threads_dir": str(threads_dir),
+        "recovered": True,
+    }
+
 
 def reset_callbacks() -> None:
     """Reset callback registration state (for testing).
