@@ -26,6 +26,7 @@ from watercooler.baseline_graph.reader import (
     is_graph_available,
     list_threads_from_graph,
     read_thread_from_graph,
+    get_entries_range_from_graph,
     increment_access_count,
     GraphEntry,
 )
@@ -824,7 +825,7 @@ def _list_threads(
     threads_dir: Path,
     open_only: bool | None = None,
     agent: str | None = None,
-) -> list[tuple[str, str, str, str, Path, bool, str]]:
+) -> list[tuple[str, str, str, str, Path, bool, str, int]]:
     """List threads from canonical graph JSONL, with legacy markdown backfill.
 
     Args:
@@ -834,7 +835,7 @@ def _list_threads(
             flag based on whether the ball is held by someone else.
 
     Returns:
-        List of thread tuples (title, status, ball, updated, path, is_new, summary)
+        List of thread tuples (title, status, ball, updated, path, is_new, summary, entry_count)
     """
     # Try graph first if available
     if _use_graph_for_reads(threads_dir):
@@ -870,6 +871,7 @@ def _list_threads(
                             thread_path,
                             is_new,
                             gt.summary or "",
+                            gt.entry_count,
                         )
                     )
                 log_debug(f"[GRAPH] Listed {len(result)} threads from graph")
@@ -879,11 +881,11 @@ def _list_threads(
                 f"[GRAPH] Failed to list from graph, falling back to markdown: {e}"
             )
 
-    # Fallback to markdown (no summaries available)
+    # Fallback to markdown (no summaries or entry counts available)
     log_debug("[GRAPH] Using markdown fallback for list_threads")
     md_threads = commands.list_threads(threads_dir=threads_dir, open_only=open_only)
-    # Extend 6-tuples to 7-tuples with empty summary
-    return [(t, s, b, u, p, n, "") for t, s, b, u, p, n in md_threads]
+    # Extend 6-tuples to 8-tuples with empty summary and 0 entry_count
+    return [(t, s, b, u, p, n, "", 0) for t, s, b, u, p, n in md_threads]
 
 
 def _get_thread_summary(threads_dir: Path, topic: str) -> str:
@@ -897,6 +899,28 @@ def _get_thread_summary(threads_dir: Path, topic: str) -> str:
         except Exception as e:
             log_debug(f"[GRAPH] Failed to get thread summary: {e}")
     return ""
+
+
+def _scan_thread_entries(
+    threads_dir: Path,
+    topics: list[str],
+) -> dict[str, list[GraphEntry]]:
+    """Load entry summaries for multiple threads in one pass (graph-only).
+
+    Returns dict mapping topic → list[GraphEntry]. Topics without graph data
+    are omitted (empty dict entry).
+    """
+    result: dict[str, list[GraphEntry]] = {}
+    if not _use_graph_for_reads(threads_dir):
+        return result
+    for topic in topics:
+        try:
+            entries = get_entries_range_from_graph(threads_dir, topic)
+            result[topic] = entries
+        except Exception as e:
+            log_debug(f"[GRAPH] Failed to scan entries for '{topic}': {e}")
+            result[topic] = []
+    return result
 
 
 # ============================================================================

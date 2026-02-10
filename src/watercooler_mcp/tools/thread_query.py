@@ -47,6 +47,7 @@ from ..helpers import (
     _load_entries,
     _list_threads,
     _get_thread_summary,
+    _scan_thread_entries,
 )
 from ..errors import (
     ContextError,
@@ -90,6 +91,7 @@ def _list_threads_impl(
     limit: int = 50,
     cursor: str | None = None,
     format: str = "markdown",
+    scan: bool = False,
     code_path: str = "",
 ) -> ToolResult:
     """List all watercooler threads.
@@ -101,7 +103,11 @@ def _list_threads_impl(
         open_only: Filter by open status (True=open only, False=closed only, None=all)
         limit: Maximum threads to return (Phase 1A: ignored, returns all)
         cursor: Pagination cursor (Phase 1A: ignored, no pagination)
-        format: Output format - "markdown" or "json" (Phase 1A: only "markdown" supported)
+        format: Output format - "markdown" or "json"
+        scan: When True, includes per-entry summaries for every thread in a single
+            call. Replaces N sequential read_thread(summary_only=true) calls with
+            one batch operation. Each entry summary links back to its thread (topic)
+            and entry (index, entry_id).
         code_path: Path to the code repository directory containing the files most immediately
             under discussion. This establishes the code context for branch pairing.
             Should point to the root of your working repository.
@@ -110,19 +116,14 @@ def _list_threads_impl(
         Formatted thread list with:
         - Threads where you have the ball (🎾 marker)
         - Threads with NEW entries for you to read
-        - Thread status and last update time
-
-    Phase 1A notes:
-        - format must be "markdown" (JSON support in Phase 1B)
-        - limit and cursor are ignored (pagination in Phase 1B)
+        - Thread status, entry count, and last update time
+        - When scan=True: per-entry summaries with index and entry_id
     """
     try:
         start_ts = time.time()
-        if format != "markdown":
-            raise ValidationError(
-                "Phase 1A only supports format='markdown'. JSON support coming in Phase 1B.",
-                field="format",
-            )
+        fmt_error, resolved_format = _resolve_format(format, default="markdown")
+        if fmt_error:
+            raise ValidationError(fmt_error, field="format")
 
         error, context = validation._require_context(code_path)
         if error:
@@ -132,7 +133,7 @@ def _list_threads_impl(
                 "Unable to resolve code context for the provided code_path.",
                 code_path=code_path,
             )
-        log_debug(f"list_threads start code_path={code_path!r} open_only={open_only}")
+        log_debug(f"list_threads start code_path={code_path!r} open_only={open_only} scan={scan}")
 
         # =====================================================================
         # Hosted Mode Path (GitHub API)
@@ -224,6 +225,16 @@ def _list_threads_impl(
         scan_elapsed = time.time() - scan_start
         log_debug(f"list_threads scanned {len(threads)} threads in {scan_elapsed:.2f}s")
 
+        # If scan mode, load all entry summaries in one batch
+        entry_scan: dict = {}
+        if scan:
+            topics = [path.stem for _, _, _, _, path, _, _, _ in threads]
+            scan_entries_start = time.time()
+            entry_scan = _scan_thread_entries(threads_dir, topics)
+            scan_entries_elapsed = time.time() - scan_entries_start
+            total_entries = sum(len(v) for v in entry_scan.values())
+            log_debug(f"list_threads scan loaded {total_entries} entries across {len(entry_scan)} threads in {scan_entries_elapsed:.2f}s")
+
         sync = get_git_sync_manager_from_context(context)
         pending_topics: set[str] = set()
         async_summary = ""
@@ -253,80 +264,133 @@ def _list_threads_impl(
             log_debug(f"list_threads no {status_filter or ''}threads found")
             return ToolResult(content=[TextContent(type="text", text=f"No {status_filter}threads found in: {threads_dir}")])
 
-        # Format output
+        # Classify threads by ball ownership
         agent_lower = agent.lower()
-        output = []
-        output.append(f"# Watercooler Threads ({len(threads)} total)\n")
-        if async_summary:
-            output.append(async_summary)
-
-        # Separate threads by ball ownership
         classify_start = time.time()
         your_turn = []
         waiting = []
         new_entries = []
 
-        for title, status, ball, updated, path, is_new, summary in threads:
+        for title, status, ball, updated, path, is_new, summary, entry_count in threads:
             topic = path.stem
             ball_lower = (ball or "").lower()
             has_ball = ball_lower == agent_lower
 
             if is_new:
-                new_entries.append((title, status, ball, updated, topic, has_ball, summary))
+                new_entries.append((title, status, ball, updated, topic, has_ball, summary, entry_count))
             elif has_ball:
-                your_turn.append((title, status, ball, updated, topic, has_ball, summary))
+                your_turn.append((title, status, ball, updated, topic, has_ball, summary, entry_count))
             else:
-                waiting.append((title, status, ball, updated, topic, has_ball, summary))
+                waiting.append((title, status, ball, updated, topic, has_ball, summary, entry_count))
         classify_elapsed = time.time() - classify_start
         log_debug(f"list_threads classified threads in {classify_elapsed:.2f}s (your_turn={len(your_turn)} waiting={len(waiting)} new={len(new_entries)})")
 
-        # Your turn section
+        # =====================================================================
+        # JSON output
+        # =====================================================================
+        if resolved_format == "json":
+            all_classified = [
+                ("your_turn", your_turn),
+                ("new_entries", new_entries),
+                ("waiting", waiting),
+            ]
+            json_threads = []
+            for _section, items in all_classified:
+                for title, status, ball, updated, topic, has_ball, summary, entry_count in items:
+                    t_obj: dict = {
+                        "topic": topic,
+                        "title": title,
+                        "status": status,
+                        "ball": ball,
+                        "updated": updated,
+                        "entry_count": entry_count,
+                        "summary": summary,
+                        "has_ball": has_ball,
+                    }
+                    if scan and topic in entry_scan:
+                        t_obj["entries"] = [
+                            {
+                                "index": ge.index,
+                                "entry_id": ge.entry_id,
+                                "title": ge.title,
+                                "timestamp": ge.timestamp,
+                                "role": ge.role,
+                                "type": ge.entry_type,
+                                "summary": ge.summary,
+                            }
+                            for ge in entry_scan[topic]
+                        ]
+                    json_threads.append(t_obj)
+
+            payload: dict = {
+                "total": len(threads),
+                "scan": scan,
+                "threads": json_threads,
+            }
+            warnings = _get_startup_warnings()
+            if warnings:
+                payload["_warnings"] = warnings
+            return ToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))])
+
+        # =====================================================================
+        # Markdown output
+        # =====================================================================
+        output: list[str] = []
+        scan_label = " — Scan" if scan else ""
+        output.append(f"# Watercooler Threads ({len(threads)} total){scan_label}\n")
+        if async_summary:
+            output.append(async_summary)
+
+        def _render_thread_md(
+            title: str, status: str, ball: str, updated: str,
+            topic: str, summary: str, entry_count: int,
+            marker: str = "",
+        ) -> None:
+            local_marker = " ⏳" if topic in pending_topics else ""
+            updated_label = updated + (" (local)" if topic in pending_topics else "")
+            ec = f" | Entries: {entry_count}" if entry_count else ""
+            output.append(f"- {marker}**{topic}**{local_marker} - {title}")
+            output.append(f"  Status: {status} | Ball: {ball}{ec} | Updated: {updated_label}")
+            if summary:
+                output.append(f"  {summary}")
+            # Scan mode: append per-entry summaries
+            if scan and topic in entry_scan:
+                for ge in entry_scan[topic]:
+                    eid_short = ge.entry_id[:12] + "…" if ge.entry_id and len(ge.entry_id) > 12 else ge.entry_id or ""
+                    t = ge.title or "(untitled)"
+                    output.append(f"    [{ge.index}] {ge.timestamp or '?'} — {t} ({eid_short})")
+                    if ge.summary:
+                        output.append(f"      {ge.summary}")
+
         render_start = time.time()
         if your_turn:
             output.append(f"\n## 🎾 Your Turn ({len(your_turn)} threads)\n")
-            for title, status, ball, updated, topic, _, summary in your_turn:
-                local_marker = " ⏳" if topic in pending_topics else ""
-                updated_label = updated + (" (local)" if topic in pending_topics else "")
-                output.append(f"- **{topic}**{local_marker} - {title}")
-                output.append(f"  Status: {status} | Ball: {ball} | Updated: {updated_label}")
-                if summary:
-                    output.append(f"  {summary}")
+            for title, status, ball, updated, topic, _, summary, entry_count in your_turn:
+                _render_thread_md(title, status, ball, updated, topic, summary, entry_count)
 
-        # NEW entries section
         if new_entries:
             output.append(f"\n## 🆕 NEW Entries for You ({len(new_entries)} threads)\n")
-            for title, status, ball, updated, topic, has_ball, summary in new_entries:
+            for title, status, ball, updated, topic, has_ball, summary, entry_count in new_entries:
                 marker = "🎾 " if has_ball else ""
-                local_marker = " ⏳" if topic in pending_topics else ""
-                updated_label = updated + (" (local)" if topic in pending_topics else "")
-                output.append(f"- {marker}**{topic}**{local_marker} - {title}")
-                output.append(f"  Status: {status} | Ball: {ball} | Updated: {updated_label}")
-                if summary:
-                    output.append(f"  {summary}")
+                _render_thread_md(title, status, ball, updated, topic, summary, entry_count, marker)
 
-        # Waiting section
         if waiting:
             output.append(f"\n## ⏳ Waiting on Others ({len(waiting)} threads)\n")
-            for title, status, ball, updated, topic, _, summary in waiting:
-                local_marker = " ⏳" if topic in pending_topics else ""
-                updated_label = updated + (" (local)" if topic in pending_topics else "")
-                output.append(f"- **{topic}**{local_marker} - {title}")
-                output.append(f"  Status: {status} | Ball: {ball} | Updated: {updated_label}")
-                if summary:
-                    output.append(f"  {summary}")
+            for title, status, ball, updated, topic, _, summary, entry_count in waiting:
+                _render_thread_md(title, status, ball, updated, topic, summary, entry_count)
 
         output.append(f"\n---\n*You are: {agent}*")
         output.append(f"*Threads dir: {threads_dir}*")
 
         response = "\n".join(output)
         render_elapsed = time.time() - render_start
-        log_debug(f"list_threads rendered markdown sections in {render_elapsed:.2f}s")
+        log_debug(f"list_threads rendered sections in {render_elapsed:.2f}s")
         duration = time.time() - start_ts
         log_debug(
             f"list_threads formatted response in "
             f"{duration:.2f}s (total={len(threads)} new={len(new_entries)} "
             f"your_turn={len(your_turn)} waiting={len(waiting)} "
-            f"chars={len(response)})"
+            f"scan={scan} chars={len(response)})"
         )
         log_debug("list_threads returning response")
         return ToolResult(content=[TextContent(type="text", text=_format_warnings_for_response(response))])
@@ -476,8 +540,10 @@ def _read_thread_impl(
                 for entry in entries:
                     ts = entry.timestamp or "unknown"
                     t = entry.title or "(untitled)"
-                    s = summaries.get(entry.entry_id or "", "")
-                    lines.append(f"- [{entry.index}] {ts} — {t}")
+                    eid = entry.entry_id or ""
+                    eid_short = eid[:12] + "…" if len(eid) > 12 else eid
+                    s = summaries.get(eid, "")
+                    lines.append(f"- [{entry.index}] {ts} — {t} ({eid_short})")
                     if s:
                         lines.append(f"  {s}")
                 return _format_warnings_for_response("\n".join(lines))
@@ -930,12 +996,14 @@ def _get_thread_entry_range_impl(
         if not selected_entries:
             return ToolResult(content=[TextContent(type="text", text="(no entries in range)")])
         if summary_only:
-            lines = []
+            lines = [f"Range for '{topic}':"]
             for entry in selected_entries:
                 ts = entry.timestamp or "unknown"
                 t = entry.title or "(untitled)"
-                s = summaries.get(entry.entry_id or "", "")
-                lines.append(f"- [{entry.index}] {ts} — {t}")
+                eid = entry.entry_id or ""
+                eid_short = eid[:12] + "…" if len(eid) > 12 else eid
+                s = summaries.get(eid, "")
+                lines.append(f"- [{entry.index}] {ts} — {t} ({eid_short})")
                 if s:
                     lines.append(f"  {s}")
             text = "\n".join(lines)
