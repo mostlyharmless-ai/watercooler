@@ -909,6 +909,12 @@ def _scan_thread_entries(
 
     Returns dict mapping topic → list[GraphEntry]. Topics without graph data
     are omitted (empty dict entry).
+
+    Note: Loads all entries for every topic into memory. For repos with many
+    threads and deep history, consider limiting the topics list via the
+    ``open_only`` / ``limit`` filters on ``list_threads`` before calling scan.
+    Each GraphEntry is lightweight (summary + metadata, no bodies), so typical
+    repos (< 100 threads, < 50 entries each) stay well under 10 MB.
     """
     result: dict[str, list[GraphEntry]] = {}
     if not _use_graph_for_reads(threads_dir):

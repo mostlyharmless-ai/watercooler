@@ -1841,7 +1841,7 @@ def _ensure_falkordb_restart_policy(docker_cmd: str) -> None:
                 capture_output=True,
                 timeout=10,
             )
-    except Exception as e:
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError, OSError) as e:
         log_debug(f"Could not check/update FalkorDB restart policy: {e}")
 
 
