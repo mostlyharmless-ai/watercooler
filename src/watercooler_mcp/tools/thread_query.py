@@ -64,7 +64,7 @@ from ..hosted_ops import (
     thread_exists_hosted,
 )
 from ..sync import ensure_readable
-from ..observability import log_debug, log_error
+from ..observability import log_debug, log_error, log_warning
 from .. import validation  # Import module for runtime access (enables test patching)
 from ..validation import is_hosted_context
 
@@ -232,6 +232,11 @@ def _list_threads_impl(
         entry_scan: dict = {}
         if scan:
             topics = [path.stem for _, _, _, _, path, _, _, _ in threads]
+            if len(topics) > 50:
+                log_warning(
+                    f"Scan mode loading entries for {len(topics)} threads — "
+                    "consider using open_only=True or limit to reduce memory usage"
+                )
             scan_entries_start = time.time()
             entry_scan = _scan_thread_entries(threads_dir, topics)
             scan_entries_elapsed = time.time() - scan_entries_start
