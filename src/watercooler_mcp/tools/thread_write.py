@@ -19,14 +19,7 @@ from ulid import ULID
 
 from watercooler import fs
 from watercooler.baseline_graph.writer import get_thread_from_graph
-from watercooler.commands_graph import (
-    say_graph_first,
-    ack_graph_first,
-    handoff_graph_first,
-    set_status_graph_first,
-    set_ball_graph_first,
-    append_entry_graph_first,
-)
+from watercooler import commands_graph
 
 from ..config import get_agent_name, is_slack_enabled, is_slack_bot_enabled
 from ..errors import (
@@ -187,9 +180,9 @@ def _say_impl(
     # Generate unique Entry-ID for idempotency
     entry_id = str(ULID())
 
-    # Define the append operation (graph-first)
+    # Define the append operation
     def append_operation():
-        say_graph_first(
+        commands_graph.say(
             topic,
             threads_dir=threads_dir,
             agent=agent,
@@ -353,9 +346,9 @@ def _ack_impl(
     # Generate Entry-ID
     entry_id = str(ULID())
 
-    # Define ack operation (graph-first)
+    # Define ack operation
     def ack_operation():
-        ack_graph_first(
+        commands_graph.ack(
             topic,
             threads_dir=threads_dir,
             agent=agent,
@@ -477,11 +470,11 @@ def _handoff_impl(
     entry_id = str(ULID())
 
     if target_agent:
-        # Define operation (graph-first)
+        # Define operation
         def op():
-            set_ball_graph_first(topic, threads_dir=threads_dir, ball=target_agent)
+            commands_graph.set_ball(topic, threads_dir=threads_dir, ball=target_agent)
             if note:
-                append_entry_graph_first(
+                commands_graph.append_entry(
                     topic,
                     threads_dir=threads_dir,
                     agent=agent,
@@ -533,9 +526,9 @@ def _handoff_impl(
             + (f"Note: {note}" if note else "")
         )
     else:
-        # Define operation (graph-first)
+        # Define operation
         def op():
-            handoff_graph_first(
+            commands_graph.handoff(
                 topic,
                 threads_dir=threads_dir,
                 agent=agent,
@@ -676,9 +669,9 @@ def _set_status_impl(
     except Exception:
         pass  # Thread may not exist yet
 
-    # Define operation (graph-first)
+    # Define operation
     def op():
-        set_status_graph_first(topic, threads_dir=threads_dir, status=status)
+        commands_graph.set_status(topic, threads_dir=threads_dir, status=status)
 
     priority_flush = status.strip().upper() == "CLOSED"
 

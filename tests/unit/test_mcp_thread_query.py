@@ -144,7 +144,7 @@ def patched_context(mock_context, monkeypatch):
 
     # Mock graph functions to use markdown fallback
     monkeypatch.setattr(
-        "watercooler_mcp.tools.thread_query._list_threads_graph_first",
+        "watercooler_mcp.tools.thread_query._list_threads",
         _mock_list_threads_from_markdown
     )
 
@@ -168,7 +168,7 @@ def _mock_list_threads_from_markdown(threads_dir, open_only=None, agent=None):
         if open_only is False and status == "OPEN":
             continue
 
-        threads.append((title, status, ball, updated, md_file, False))
+        threads.append((title, status, ball, updated, md_file, False, "", 0))
 
     return threads
 
@@ -273,16 +273,23 @@ class TestListThreads:
         assert "no" in text.lower() and "threads" in text.lower()
         assert "found" in text.lower()
 
-    def test_list_threads_markdown_format_required(self, patched_context, sample_threads, mcp_ctx):
-        """Test that list_threads requires markdown format in Phase 1A."""
-        with pytest.raises(ValidationError) as exc_info:
-            server.list_threads.fn(
-                mcp_ctx,
-                format="json",  # Not supported in Phase 1A
-                code_path=".",
-            )
-
-        assert "Phase 1A" in str(exc_info.value)
+    def test_list_threads_json_format(self, patched_context, sample_threads, mcp_ctx):
+        """Test that list_threads supports JSON format."""
+        result = server.list_threads.fn(
+            mcp_ctx,
+            format="json",
+            code_path=".",
+        )
+        import json
+        text = result.content[0].text
+        payload = json.loads(text)
+        assert "threads" in payload
+        assert "total" in payload
+        assert payload["total"] > 0
+        for t in payload["threads"]:
+            assert "topic" in t
+            assert "entry_count" in t
+            assert "summary" in t
 
 
 # ============================================================================

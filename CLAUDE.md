@@ -264,9 +264,12 @@ Standardize how Claude (this assistant) uses Watercooler tools so entries remain
 
 ### Thread Reading & Entry Access
 
-- Default to `watercooler_list_thread_entries` with `format="json"` and explicit `offset`/`limit` whenever you need to inspect or reason about entries programmatically. Follow up with `watercooler_get_thread_entry` / `get_thread_entry_range` using the returned `entry_id` or index.
-- Switch to `format="markdown"` when you intend to quote entries back to a human (e.g., preparing a response or summary). The markdown payload mirrors the thread file and avoids accidental reformatting.
-- Use `watercooler_read_thread(format="json")` only when you have a clear need for the entire thread structure (e.g., exporting or analytics). For routine reading, prefer paginated entry tools to stay under stdio size caps.
+- **Start with summaries**: Use `watercooler_read_thread(summary_only=true)` to scan a thread's narrative in ~500 tokens instead of ~5,000. This returns a condensed view with per-entry summaries — ideal for deciding which entries need full bodies.
+- **Browse entry headers**: Use `watercooler_list_thread_entries` with `format="json"` and explicit `offset`/`limit` to get a "TOC with abstracts" — each entry includes a `summary` field alongside metadata.
+- **Fetch specific entries**: Follow up with `watercooler_get_thread_entry` (by `entry_id` or index) for the full body when you need it.
+- **Scan a range**: Use `watercooler_get_thread_entry_range(summary_only=true)` to preview a span before fetching full bodies.
+- Switch to `format="markdown"` when you intend to quote entries back to a human. The markdown payload mirrors the thread file and avoids accidental reformatting.
+- Use `watercooler_read_thread(format="json")` (without `summary_only`) only when you need every entry body (e.g., exporting or analytics). For routine reading, prefer summary-first or paginated entry tools to stay under stdio size caps.
 - Large threads can exceed the MCP stdio ceiling; always chunk requests (batch size of ~5–10 entries works well) before relaying content.
 - Preserve provenance by capturing the `entry_id` from JSON responses when referencing a specific entry in follow-up messages or commits.
 
@@ -589,13 +592,28 @@ When Claude uses Watercooler MCP tools:
 
 When invoking watercooler tools via `mcp-cli` in Bash, follow these rules:
 
-**Safe patterns:**
+**Safe input patterns:**
 - `jq` command substitution (PREFERRED): `mcp-cli call tool "$(jq -n --arg k 'v' '{key: $k}')"`
 - Pipe from file: `cat /tmp/payload.json | mcp-cli call tool -`
 - Inline JSON (small payloads): `mcp-cli call tool '{"key": "value"}'`
 
-**Broken pattern (NEVER USE):**
+**Broken input pattern (NEVER USE):**
 - File redirection: `mcp-cli call tool - < /tmp/payload.json` — causes `JSON Parse error: Unexpected EOF`
 
-This is a `mcp-cli` binary limitation. The `jq` command substitution pattern is the
-convention across all skills in this repository.
+**Pipes don't work in Claude Code's Bash tool** (known bug, see
+[#774](https://github.com/anthropics/claude-code/issues/774),
+[#14595](https://github.com/anthropics/claude-code/issues/14595)):
+- `mcp-cli call tool '{}' | jq .` → **0 bytes**
+- `echo "$var" | python3 -c "..."` → **0 bytes**
+- ANY `cmd | cmd` pattern → **0 bytes**
+
+This affects ALL shell pipes, not just `mcp-cli`. The Claude Code Bash tool
+executes commands in a mode where pipe output is lost.
+
+**Safe output patterns (file redirect then parse):**
+```bash
+mcp-cli call tool '{}' > /tmp/out.json && python3 -c "import json; ..."
+```
+
+This is a Claude Code Bash tool limitation, not an `mcp-cli` issue. The `jq`
+command substitution pattern is the convention across all skills in this repository.

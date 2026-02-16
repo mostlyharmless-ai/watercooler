@@ -52,15 +52,15 @@ from .helpers import (
     _normalize_status,
     _resolve_format,
     # Entry loading
-    _load_thread_entries,
+    _load_entries_from_md,
     _entry_header_payload,
     _entry_full_payload,
     # Graph helpers
     _use_graph_for_reads,
     _track_access,
     _graph_entry_to_thread_entry,
-    _load_thread_entries_graph_first,
-    _list_threads_graph_first,
+    _load_entries,
+    _list_threads,
     # Commit helpers
     _build_commit_footers,
 )

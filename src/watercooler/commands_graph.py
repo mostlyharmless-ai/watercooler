@@ -1,20 +1,20 @@
-"""Graph-first command implementations.
+"""Graph-canonical command implementations.
 
-This module provides graph-first versions of thread commands where:
+This module provides the canonical thread commands where:
 1. Data is written to graph first (nodes.jsonl, edges.jsonl)
 2. Markdown is projected as a derived file
 
-These functions replace the MD-first implementations in commands.py
-for the graph-first architecture.
+These are the primary implementations; the MD-only fallbacks
+live in commands.py for graceful degradation.
 
 Usage:
     from watercooler.commands_graph import (
-        say_graph_first,
-        ack_graph_first,
-        handoff_graph_first,
-        set_status_graph_first,
-        set_ball_graph_first,
-        init_thread_graph_first,
+        say,
+        ack,
+        handoff,
+        set_status,
+        set_ball,
+        init_thread,
     )
 """
 
@@ -55,11 +55,11 @@ def _now_iso() -> str:
 
 
 # ============================================================================
-# Graph-First Thread Initialization
+# Graph-Canonical Thread Initialization
 # ============================================================================
 
 
-def init_thread_graph_first(
+def init_thread(
     topic: str,
     *,
     threads_dir: Path,
@@ -67,7 +67,7 @@ def init_thread_graph_first(
     status: str = "OPEN",
     ball: str = "codex",
 ) -> Path:
-    """Initialize a new thread using graph-first approach.
+    """Initialize a new thread using graph-canonical approach.
 
     Creates:
     1. Thread node in graph (nodes.jsonl)
@@ -116,16 +116,16 @@ def init_thread_graph_first(
             created=now,
         )
 
-        logger.debug(f"Graph-first init_thread complete: {topic}")
+        logger.debug(f"Graph-canonical init_thread complete: {topic}")
         return tp
 
 
 # ============================================================================
-# Graph-First Entry Commands
+# Graph-Canonical Entry Commands
 # ============================================================================
 
 
-def append_entry_graph_first(
+def append_entry(
     topic: str,
     *,
     threads_dir: Path,
@@ -140,7 +140,7 @@ def append_entry_graph_first(
     user_tag: str | None = None,
     entry_id: str | None = None,
 ) -> Path:
-    """Append a structured entry using graph-first approach.
+    """Append a structured entry using graph-canonical approach.
 
     Flow:
     1. Ensure thread exists in graph (create if needed)
@@ -160,13 +160,13 @@ def append_entry_graph_first(
         ball: Optional ball update (if None, uses counterpart logic in caller)
         registry: Optional agent registry
         user_tag: Optional user tag for agent identification
-        entry_id: Entry ID (required for graph-first)
+        entry_id: Entry ID (required for graph-canonical)
 
     Returns:
         Path to updated thread file
     """
     if not entry_id:
-        raise ValueError("entry_id is required for graph-first append")
+        raise ValueError("entry_id is required for graph-canonical append")
 
     # Ensure threads directory exists before acquiring lock
     threads_dir.mkdir(parents=True, exist_ok=True)
@@ -234,11 +234,11 @@ def append_entry_graph_first(
             # Fallback: full regeneration
             project_and_write_thread(threads_dir, topic)
 
-        logger.debug(f"Graph-first append_entry complete: {topic}/{entry_id}")
+        logger.debug(f"Graph-canonical append_entry complete: {topic}/{entry_id}")
         return tp
 
 
-def say_graph_first(
+def say(
     topic: str,
     *,
     threads_dir: Path,
@@ -253,7 +253,7 @@ def say_graph_first(
     user_tag: str | None = None,
     entry_id: str | None = None,
 ) -> Path:
-    """Quick team note with auto-ball-flip using graph-first approach.
+    """Quick team note with auto-ball-flip using graph-canonical approach.
 
     Args:
         topic: Thread topic
@@ -267,7 +267,7 @@ def say_graph_first(
         ball: Optional ball update (if not provided, auto-flips)
         registry: Optional agent registry
         user_tag: Optional user tag
-        entry_id: Entry ID (required for graph-first)
+        entry_id: Entry ID (required for graph-canonical)
 
     Returns:
         Path to updated thread file
@@ -283,7 +283,7 @@ def say_graph_first(
         canonical = _canonical_agent(final_agent, registry, user_tag=user_tag)
         final_ball = _counterpart_of(canonical, registry)
 
-    return append_entry_graph_first(
+    return append_entry(
         topic,
         threads_dir=threads_dir,
         agent=final_agent,
@@ -299,7 +299,7 @@ def say_graph_first(
     )
 
 
-def ack_graph_first(
+def ack(
     topic: str,
     *,
     threads_dir: Path,
@@ -314,7 +314,7 @@ def ack_graph_first(
     user_tag: str | None = None,
     entry_id: str | None = None,
 ) -> Path:
-    """Acknowledge without auto-flipping ball using graph-first approach.
+    """Acknowledge without auto-flipping ball using graph-canonical approach.
 
     Args:
         topic: Thread topic
@@ -328,7 +328,7 @@ def ack_graph_first(
         ball: Optional ball update (does NOT auto-flip)
         registry: Optional agent registry
         user_tag: Optional user tag
-        entry_id: Entry ID (required for graph-first)
+        entry_id: Entry ID (required for graph-canonical)
 
     Returns:
         Path to updated thread file
@@ -347,7 +347,7 @@ def ack_graph_first(
         if thread:
             final_ball = thread.get("ball", "codex")
 
-    return append_entry_graph_first(
+    return append_entry(
         topic,
         threads_dir=threads_dir,
         agent=final_agent,
@@ -363,7 +363,7 @@ def ack_graph_first(
     )
 
 
-def handoff_graph_first(
+def handoff(
     topic: str,
     *,
     threads_dir: Path,
@@ -374,7 +374,7 @@ def handoff_graph_first(
     user_tag: str | None = None,
     entry_id: str | None = None,
 ) -> Path:
-    """Flip the ball to the counterpart using graph-first approach.
+    """Flip the ball to the counterpart using graph-canonical approach.
 
     Args:
         topic: Thread topic
@@ -384,7 +384,7 @@ def handoff_graph_first(
         note: Optional custom handoff message
         registry: Optional agent registry
         user_tag: Optional user tag
-        entry_id: Entry ID (required for graph-first)
+        entry_id: Entry ID (required for graph-canonical)
 
     Returns:
         Path to updated thread file
@@ -392,7 +392,7 @@ def handoff_graph_first(
     # 1. Ensure thread exists
     thread = get_thread_from_graph(threads_dir, topic)
     if not thread:
-        init_thread_graph_first(topic, threads_dir=threads_dir)
+        init_thread(topic, threads_dir=threads_dir)
         thread = get_thread_from_graph(threads_dir, topic)
 
     # 2. Determine target based on current ball
@@ -407,7 +407,7 @@ def handoff_graph_first(
     text = note or f"handoff to {target}"
     handoff_title = f"Handoff to {target}"
 
-    return append_entry_graph_first(
+    return append_entry(
         topic,
         threads_dir=threads_dir,
         agent=final_agent,
@@ -423,17 +423,17 @@ def handoff_graph_first(
 
 
 # ============================================================================
-# Graph-First Metadata Commands
+# Graph-Canonical Metadata Commands
 # ============================================================================
 
 
-def set_status_graph_first(
+def set_status(
     topic: str,
     *,
     threads_dir: Path,
     status: str,
 ) -> Path:
-    """Update thread status using graph-first approach.
+    """Update thread status using graph-canonical approach.
 
     Flow:
     1. Update status in graph node
@@ -469,17 +469,17 @@ def set_status_graph_first(
         # 3. Update markdown header (efficient: just modify Status line)
         update_header_and_write(threads_dir, topic, status=status.upper())
 
-        logger.debug(f"Graph-first set_status complete: {topic} -> {status}")
+        logger.debug(f"Graph-canonical set_status complete: {topic} -> {status}")
         return tp
 
 
-def set_ball_graph_first(
+def set_ball(
     topic: str,
     *,
     threads_dir: Path,
     ball: str,
 ) -> Path:
-    """Update thread ball owner using graph-first approach.
+    """Update thread ball owner using graph-canonical approach.
 
     Flow:
     1. Update ball in graph node
@@ -501,7 +501,7 @@ def set_ball_graph_first(
         thread = get_thread_from_graph(threads_dir, topic)
         if not thread:
             # Create thread if missing
-            init_thread_graph_first(topic, threads_dir=threads_dir, ball=ball)
+            init_thread(topic, threads_dir=threads_dir, ball=ball)
             return tp
 
         # 2. Update ball in graph
@@ -517,12 +517,12 @@ def set_ball_graph_first(
         # 3. Update markdown header (efficient: just modify Ball line)
         update_header_and_write(threads_dir, topic, ball=ball)
 
-        logger.debug(f"Graph-first set_ball complete: {topic} -> {ball}")
+        logger.debug(f"Graph-canonical set_ball complete: {topic} -> {ball}")
         return tp
 
 
 # ============================================================================
-# NOTE: Graph-first mode is now ALWAYS enabled. The WATERCOOLER_GRAPH_FIRST env var
+# NOTE: Graph-canonical mode is now ALWAYS enabled. The WATERCOOLER_GRAPH_FIRST env var
 # and the enable/disable functions have been removed. All thread operations go through
-# the graph-first functions in this module. Enrichment (summaries/embeddings) is handled
+# the graph-canonical functions in this module. Enrichment (summaries/embeddings) is handled
 # by the middleware after the structural write completes.

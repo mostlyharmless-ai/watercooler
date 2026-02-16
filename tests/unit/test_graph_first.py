@@ -1,7 +1,7 @@
-"""Tests for graph-first command implementations.
+"""Tests for graph-canonical command implementations.
 
 Tests the writer.py, projector.py, and commands_graph.py modules
-that implement the graph-first architecture.
+that implement the graph-canonical architecture.
 """
 
 import json
@@ -30,12 +30,12 @@ from watercooler.baseline_graph.projector import (
     create_thread_file,
 )
 from watercooler.commands_graph import (
-    say_graph_first,
-    ack_graph_first,
-    handoff_graph_first,
-    set_status_graph_first,
-    set_ball_graph_first,
-    init_thread_graph_first,
+    say,
+    ack,
+    handoff,
+    set_status,
+    set_ball,
+    init_thread,
 )
 
 
@@ -269,14 +269,14 @@ class TestProjectorModule:
 
 
 class TestCommandsGraphModule:
-    """Tests for commands_graph.py graph-first commands."""
+    """Tests for commands_graph.py graph-canonical commands."""
 
-    def test_init_thread_graph_first(self, tmp_path):
+    def test_init_thread(self, tmp_path):
         """Test initializing thread graph-first."""
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
-        path = init_thread_graph_first(
+        path = init_thread(
             "test-thread",
             threads_dir=threads_dir,
             title="Test Thread",
@@ -294,13 +294,13 @@ class TestCommandsGraphModule:
         assert thread is not None
         assert thread["status"] == "OPEN"
 
-    def test_say_graph_first(self, tmp_path):
+    def test_say(self, tmp_path):
         """Test say command graph-first."""
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
         entry_id = str(ULID())
-        path = say_graph_first(
+        path = say(
             "test-thread",
             threads_dir=threads_dir,
             agent="Claude",
@@ -321,17 +321,17 @@ class TestCommandsGraphModule:
         assert entry is not None
         assert entry["title"] == "Test Entry"
 
-    def test_ack_graph_first(self, tmp_path):
+    def test_ack(self, tmp_path):
         """Test ack command graph-first."""
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
         # Initialize thread
-        init_thread_graph_first("test-thread", threads_dir=threads_dir, ball="User")
+        init_thread("test-thread", threads_dir=threads_dir, ball="User")
 
         # Ack
         entry_id = str(ULID())
-        path = ack_graph_first(
+        path = ack(
             "test-thread",
             threads_dir=threads_dir,
             agent="Claude",
@@ -346,16 +346,16 @@ class TestCommandsGraphModule:
         thread = get_thread_from_graph(threads_dir, "test-thread")
         assert thread["ball"] == "User"
 
-    def test_set_status_graph_first(self, tmp_path):
+    def test_set_status(self, tmp_path):
         """Test set_status command graph-first."""
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
         # Initialize thread
-        init_thread_graph_first("test-thread", threads_dir=threads_dir, status="OPEN")
+        init_thread("test-thread", threads_dir=threads_dir, status="OPEN")
 
         # Change status
-        set_status_graph_first("test-thread", threads_dir=threads_dir, status="CLOSED")
+        set_status("test-thread", threads_dir=threads_dir, status="CLOSED")
 
         # Verify graph updated
         thread = get_thread_from_graph(threads_dir, "test-thread")
@@ -365,16 +365,16 @@ class TestCommandsGraphModule:
         content = (threads_dir / "test-thread.md").read_text()
         assert "Status: CLOSED" in content
 
-    def test_set_ball_graph_first(self, tmp_path):
+    def test_set_ball(self, tmp_path):
         """Test set_ball command graph-first."""
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
         # Initialize thread
-        init_thread_graph_first("test-thread", threads_dir=threads_dir, ball="User")
+        init_thread("test-thread", threads_dir=threads_dir, ball="User")
 
         # Change ball
-        set_ball_graph_first("test-thread", threads_dir=threads_dir, ball="Claude")
+        set_ball("test-thread", threads_dir=threads_dir, ball="Claude")
 
         # Verify graph updated
         thread = get_thread_from_graph(threads_dir, "test-thread")
@@ -384,17 +384,17 @@ class TestCommandsGraphModule:
         content = (threads_dir / "test-thread.md").read_text()
         assert "Ball: Claude" in content
 
-    def test_handoff_graph_first(self, tmp_path):
+    def test_handoff(self, tmp_path):
         """Test handoff command graph-first."""
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
         # Initialize thread with ball=Claude
-        init_thread_graph_first("test-thread", threads_dir=threads_dir, ball="Claude")
+        init_thread("test-thread", threads_dir=threads_dir, ball="Claude")
 
         # Handoff (should flip to counterpart)
         entry_id = str(ULID())
-        handoff_graph_first(
+        handoff(
             "test-thread",
             threads_dir=threads_dir,
             agent="Claude",
@@ -414,7 +414,7 @@ class TestCommandsGraphModule:
 
 
 class TestEnrichGraphEntry:
-    """Tests for enrich_graph_entry() - graph-first enrichment."""
+    """Tests for enrich_graph_entry() - graph-canonical enrichment."""
 
     def test_enrich_graph_entry_returns_noop_when_disabled(self, tmp_path):
         """Test that enrich_graph_entry returns noop when enrichment disabled."""
@@ -425,7 +425,7 @@ class TestEnrichGraphEntry:
 
         # Create thread and entry via graph-first
         entry_id = str(ULID())
-        say_graph_first(
+        say(
             "test-thread",
             threads_dir=threads_dir,
             agent="Claude",
@@ -478,7 +478,7 @@ class TestEnrichGraphEntry:
 
         # Create entry
         entry_id = str(ULID())
-        say_graph_first(
+        say(
             "test-thread",
             threads_dir=threads_dir,
             agent="Claude",
@@ -522,7 +522,7 @@ class TestEnrichGraphEntry:
 
         # Create entry
         entry_id = str(ULID())
-        say_graph_first(
+        say(
             "test-thread",
             threads_dir=threads_dir,
             agent="Claude",
@@ -568,7 +568,7 @@ class TestEnrichGraphEntry:
         threads_dir.mkdir()
 
         entry_id = str(ULID())
-        say_graph_first(
+        say(
             "test-thread",
             threads_dir=threads_dir,
             agent="Claude",
@@ -605,7 +605,7 @@ class TestEnrichGraphEntry:
         threads_dir.mkdir()
 
         entry_id = str(ULID())
-        say_graph_first(
+        say(
             "test-thread",
             threads_dir=threads_dir,
             agent="Claude",
@@ -663,7 +663,7 @@ class TestEnrichGraphEntry:
         threads_dir.mkdir()
 
         entry_id = str(ULID())
-        say_graph_first(
+        say(
             "test-thread",
             threads_dir=threads_dir,
             agent="Claude",
@@ -710,7 +710,7 @@ class TestEnrichGraphEntry:
         threads_dir.mkdir()
 
         entry_id = str(ULID())
-        say_graph_first(
+        say(
             "test-thread",
             threads_dir=threads_dir,
             agent="Claude",

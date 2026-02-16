@@ -564,9 +564,9 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
 
         # Add backend service auto-start status
         try:
-            from watercooler_mcp.startup import get_service_status, ServiceState
+            from watercooler_mcp.startup import get_live_service_status, ServiceState
 
-            service_status = get_service_status()
+            service_status = get_live_service_status()
             status_lines.extend([
                 "",
                 "Backend Services (Auto-Start):",
