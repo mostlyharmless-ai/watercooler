@@ -31,12 +31,10 @@ class _FakeContext:
     """Minimal ThreadContext for testing."""
     code_root: Optional[Path]
     threads_dir: Path
-    threads_repo_url: Optional[str] = None
     code_repo: Optional[str] = None
     code_branch: Optional[str] = None
     code_commit: Optional[str] = None
     code_remote: Optional[str] = None
-    threads_slug: Optional[str] = None
     explicit_dir: bool = False
 
 

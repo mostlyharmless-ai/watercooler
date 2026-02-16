@@ -509,8 +509,8 @@ def _read_thread_impl(
                 code_path=code_path,
             )
 
-        # Auto-populate code_branch from context in orphan mode
-        if code_branch is None and context.orphan_mode:
+        # Auto-populate code_branch from context
+        if code_branch is None:
             code_branch = context.code_branch
 
         # Lightweight read sync: auto-pull if behind origin (never blocks)
@@ -653,8 +653,8 @@ def _list_thread_entries_impl(
     if error or context is None:
         raise ContextError(error or "Unknown context error", code_path=code_path)
 
-    # Auto-populate code_branch from context in orphan mode
-    if code_branch is None and context.orphan_mode:
+    # Auto-populate code_branch from context
+    if code_branch is None:
         code_branch = context.code_branch
 
     if offset < 0:
@@ -971,8 +971,8 @@ def _get_thread_entry_range_impl(
     # =========================================================================
     # Local Mode Path (Filesystem)
     # =========================================================================
-    # Auto-populate code_branch from context in orphan mode
-    if code_branch is None and context.orphan_mode:
+    # Auto-populate code_branch from context
+    if code_branch is None:
         code_branch = context.code_branch
 
     # Lightweight read sync: auto-pull if behind origin (never blocks)

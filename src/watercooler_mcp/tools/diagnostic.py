@@ -520,7 +520,7 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
             f"Agent: {agent}",
             f"Threads Dir: {threads_dir}",
             f"Threads Dir Exists: {threads_dir.exists()}",
-            f"Threads Repo URL: {context.threads_repo_url or 'local-only'}",
+            f"Threads Repo URL: {context.code_remote or 'local-only'}",
             f"Code Branch: {context.code_branch or 'n/a'}",
             f"Auto-Branch: {'enabled' if _should_auto_branch() else 'disabled'}",
             f"Python: {py_exec}",
@@ -612,7 +612,7 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
         # Add thread storage info
         if context.threads_dir:
             try:
-                orphan_label = "orphan worktree" if getattr(context, "orphan_mode", False) else "directory"
+                orphan_label = "orphan worktree"
                 status_lines.extend([
                     "",
                     "Thread Storage:",

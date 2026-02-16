@@ -50,12 +50,10 @@ def patched_context(tmp_path, monkeypatch):
     context = ThreadContext(
         code_root=tmp_path,
         threads_dir=threads_dir,
-        threads_repo_url=None,
         code_repo="mostlyharmless-ai/watercooler-cloud",
         code_branch="main",
         code_commit="abc1234",
         code_remote="origin",
-        threads_slug="watercooler-cloud",
         explicit_dir=True,
     )
 

@@ -186,12 +186,10 @@ def _require_context_hosted(
     context = ThreadContext(
         code_root=None,  # No local filesystem in hosted mode
         threads_dir=HOSTED_MODE_SENTINEL,  # Sentinel indicating hosted mode
-        threads_repo_url=f"https://github.com/{owner}/{threads_repo_name}",
         code_repo=repo,  # The CODE repo (from X-Repo header)
         code_branch=branch,
         code_commit=None,  # No local git commit info
         code_remote=f"https://github.com/{owner}/{repo_name}.git",
-        threads_slug=threads_repo_name,
         explicit_dir=True,  # We have explicit context from HTTP headers
     )
 
@@ -340,7 +338,7 @@ def _dynamic_context_missing(context: ThreadContext) -> bool:
             "WATERCOOLER_CODE_REPO",
         )
     )
-    return dynamic_env and not context.explicit_dir and context.threads_slug is None
+    return dynamic_env and not context.explicit_dir
 
 
 def _refresh_threads(context: ThreadContext, skip_validation: bool = False) -> None:
