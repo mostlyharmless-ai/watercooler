@@ -1092,25 +1092,8 @@ class TestMiddlewareMemorySync:
         mock_wc_config = MagicMock()
         mock_wc_config.mcp.graph = mock_graph_config
 
-        # We need a sync manager to trigger the graph sync path.
-        # When get_git_sync_manager_from_context returns None,
-        # run_with_sync just returns operation() without the graph sync wrapper.
-        mock_sync_manager = MagicMock()
-
-        def fake_with_sync(op, commit_msg, **kwargs):
-            return op()
-
-        mock_sync_manager.with_sync = fake_with_sync
-
-        mock_preflight_result = MagicMock()
-        mock_preflight_result.can_proceed = True
-        mock_preflight_result.auto_fixed = False
-
-        with patch("watercooler_mcp.middleware.get_git_sync_manager_from_context", return_value=mock_sync_manager), \
-             patch("watercooler_mcp.middleware.get_watercooler_config", return_value=mock_wc_config), \
+        with patch("watercooler_mcp.middleware.get_watercooler_config", return_value=mock_wc_config), \
              patch("watercooler_mcp.middleware._check_enrichment_services_available", return_value=(llm_available, embed_available)), \
-             patch("watercooler_mcp.middleware.run_preflight", return_value=mock_preflight_result), \
-             patch("watercooler_mcp.middleware.acquire_parity_lock") as mock_parity_lock, \
              patch("watercooler_mcp.middleware.acquire_topic_lock") as mock_topic_lock, \
              patch("watercooler.baseline_graph.sync.enrich_graph_entry", return_value=enrich_result) as mock_enrich, \
              patch("watercooler.baseline_graph.writer.get_entry_node_from_graph", return_value=entry_node) as mock_get_entry, \
@@ -1177,21 +1160,11 @@ class TestMiddlewareMemorySync:
         mock_wc_config = MagicMock()
         mock_wc_config.mcp.graph = mock_graph_config
 
-        mock_sync_manager = MagicMock()
-        mock_sync_manager.with_sync = lambda op, msg, **kw: op()
-
-        mock_preflight_result = MagicMock()
-        mock_preflight_result.can_proceed = True
-        mock_preflight_result.auto_fixed = False
-
         entry_node = {"body": "test", "title": "T", "timestamp": None,
                       "agent": "a", "role": "r", "entry_type": "Note"}
 
-        with patch("watercooler_mcp.middleware.get_git_sync_manager_from_context", return_value=mock_sync_manager), \
-             patch("watercooler_mcp.middleware.get_watercooler_config", return_value=mock_wc_config), \
+        with patch("watercooler_mcp.middleware.get_watercooler_config", return_value=mock_wc_config), \
              patch("watercooler_mcp.middleware._check_enrichment_services_available", return_value=(False, False)), \
-             patch("watercooler_mcp.middleware.run_preflight", return_value=mock_preflight_result), \
-             patch("watercooler_mcp.middleware.acquire_parity_lock"), \
              patch("watercooler_mcp.middleware.acquire_topic_lock"), \
              patch("watercooler.baseline_graph.writer.get_entry_node_from_graph", return_value=entry_node), \
              patch("watercooler.baseline_graph.sync.sync_to_memory_backend", side_effect=RuntimeError("sync boom")):
@@ -1214,7 +1187,7 @@ class TestMiddlewareMemorySync:
         context.threads_dir = tmp_path
         context.code_root = tmp_path
 
-        with patch("watercooler_mcp.middleware.get_git_sync_manager_from_context", return_value=None):
+        with patch("watercooler_mcp.middleware.acquire_topic_lock"):
             with patch("watercooler.baseline_graph.sync.sync_to_memory_backend") as mock_sync:
                 result = run_with_sync(
                     context=context,

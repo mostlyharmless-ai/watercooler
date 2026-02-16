@@ -65,6 +65,8 @@ def test_resolve_thread_context_git_pattern(tmp_path, monkeypatch):
     monkeypatch.setenv("WATERCOOLER_THREADS_BASE", str(threads_base))
     monkeypatch.delenv("WATERCOOLER_GIT_REPO", raising=False)
     monkeypatch.delenv("WATERCOOLER_CODE_REPO", raising=False)
+    # Force legacy separate-repo mode for this test
+    monkeypatch.setenv("WATERCOOLER_THREAD_MODE", "separate_repo")
 
     context = resolve_thread_context(repo_dir)
 
@@ -103,6 +105,8 @@ def test_resolve_thread_context_infers_repo_from_code_remote(tmp_path, monkeypat
     monkeypatch.delenv("WATERCOOLER_THREADS_PATTERN", raising=False)
     monkeypatch.delenv("WATERCOOLER_GIT_REPO", raising=False)
     monkeypatch.delenv("WATERCOOLER_CODE_REPO", raising=False)
+    # Force legacy separate-repo mode for this test
+    monkeypatch.setenv("WATERCOOLER_THREAD_MODE", "separate_repo")
 
     context = resolve_thread_context(repo_dir)
 
@@ -138,6 +142,8 @@ def test_ssh_url_uses_https_when_agent_unavailable(tmp_path, monkeypatch):
     monkeypatch.delenv("WATERCOOLER_GIT_REPO", raising=False)
     monkeypatch.delenv("WATERCOOLER_CODE_REPO", raising=False)
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    # Force legacy separate-repo mode for this test
+    monkeypatch.setenv("WATERCOOLER_THREAD_MODE", "separate_repo")
 
     context = resolve_thread_context(repo_dir)
 
@@ -173,6 +179,8 @@ def test_ssh_url_uses_ssh_when_agent_available(tmp_path, monkeypatch):
     # Explicitly set SSH pattern to test the fallback logic (not default config)
     monkeypatch.setenv("WATERCOOLER_THREADS_PATTERN", "git@github.com:{org}/{repo}-threads.git")
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/ssh-agent.sock")
+    # Force legacy separate-repo mode for this test
+    monkeypatch.setenv("WATERCOOLER_THREAD_MODE", "separate_repo")
 
     context = resolve_thread_context(repo_dir)
 

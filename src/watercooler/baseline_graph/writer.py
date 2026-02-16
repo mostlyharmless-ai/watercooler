@@ -60,6 +60,7 @@ class EntryData:
     timestamp: Optional[str] = None
     summary: str = ""
     embedding: Optional[List[float]] = None
+    code_branch: Optional[str] = None
 
 
 # ============================================================================
@@ -131,6 +132,8 @@ def _build_entry_node(
         "pr_refs": pr_refs or [],
         "commit_refs": commit_refs or [],
     }
+    if data.code_branch:
+        node["code_branch"] = data.code_branch
     # NOTE: Embeddings are NOT stored in entry nodes anymore.
     # They are stored in FalkorDB (with fallback to search-index.jsonl).
     # See sync.py:upsert_embedding() for embedding storage.

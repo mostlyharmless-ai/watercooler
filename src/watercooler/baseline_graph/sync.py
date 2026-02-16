@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
+from watercooler.fs import discover_thread_files
 from watercooler.baseline_graph import storage
 from watercooler.baseline_graph.export import (
     entry_to_node,
@@ -1897,7 +1898,7 @@ def check_graph_health(
     report = GraphHealthReport()
 
     # Count total threads
-    thread_files = list(threads_dir.glob("*.md"))
+    thread_files = discover_thread_files(threads_dir)
     report.total_threads = len(thread_files)
 
     # Load sync state
@@ -2538,7 +2539,7 @@ def resolve_recovery_targets(
         errors.append("Mode 'selective' requires topics list")
         return [], errors
 
-    thread_files = list(threads_dir.glob("*.md"))
+    thread_files = discover_thread_files(threads_dir)
     available_topics = [f.stem for f in thread_files]
 
     if mode == "stale":

@@ -112,7 +112,6 @@ from .config import (
     resolve_thread_context,
 )
 from .context import get_http_context, HttpRequestContext
-from .sync import BranchPairingError
 from .observability import log_debug
 
 
@@ -345,26 +344,15 @@ def _dynamic_context_missing(context: ThreadContext) -> bool:
 
 
 def _refresh_threads(context: ThreadContext, skip_validation: bool = False) -> None:
-    """Refresh threads repo by validating branch pairing and pulling latest changes.
+    """Refresh threads repo by pulling latest changes.
 
     This function ensures the threads repository is synchronized before any
-    read or write operation. It validates that code and threads branches match,
-    and pulls the latest changes from the remote.
+    read or write operation by pulling the latest changes from the remote.
 
     Args:
         context: Thread context with repo information
-        skip_validation: If True, skip branch validation (used for recovery operations)
-
-    Raises:
-        BranchPairingError: If branch validation fails and skip_validation=False
+        skip_validation: If True, skip validation (kept for API compatibility)
     """
-    # Import here to avoid circular import - _validate_and_sync_branches
-    # depends on other helpers.py functions
-    from .helpers import _validate_and_sync_branches
-
-    # Validate and sync branches (will raise if validation fails)
-    _validate_and_sync_branches(context, skip_validation=skip_validation)
-
     sync = get_git_sync_manager_from_context(context)
     if not sync:
         return

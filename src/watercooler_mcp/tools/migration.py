@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from fastmcp import Context
 
+from watercooler.fs import discover_thread_files
 from watercooler.thread_entries import parse_thread_entries, ThreadEntry
 from watercooler_memory.backends import TransientError, BackendError
 from watercooler_memory.backends.graphiti import _derive_database_name
@@ -529,7 +530,7 @@ async def _migration_preflight_impl(
         result["threads_dir_exists"] = True
 
         # Count threads and estimate entries
-        thread_files = list(threads_dir.glob("*.md"))
+        thread_files = discover_thread_files(threads_dir)
         result["thread_count"] = len(thread_files)
 
         total_entries = 0
@@ -641,7 +642,7 @@ async def _migrate_to_memory_backend_impl(
     result["unified_group_id"] = unified_group_id
 
     # Get thread files
-    thread_files = list(threads_dir.glob("*.md"))
+    thread_files = discover_thread_files(threads_dir)
 
     # Filter by topics if specified
     if topics:
@@ -916,6 +917,300 @@ async def _migrate_to_memory_backend_impl(
     return json.dumps(result, indent=2)
 
 
+def _run_git(args: list, cwd: Path) -> Optional[str]:
+    """Run a git command and return stdout, or None on failure."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def _parse_commit_footers(repo_path: Path) -> Dict[str, str]:
+    """Parse Code-Branch footers from all commits in the threads repo.
+
+    Builds a mapping of Watercooler-Entry-ID → Code-Branch by scanning
+    commit messages for footer lines.
+
+    Args:
+        repo_path: Path to the threads git repository
+
+    Returns:
+        Dict mapping entry_id to code_branch
+    """
+    entry_branch_map: Dict[str, str] = {}
+
+    # Use git log to get all commit messages with footers
+    log_output = _run_git(
+        ["log", "--all", "--format=%B%x00"],  # NUL-separated messages
+        repo_path,
+    )
+    if not log_output:
+        return entry_branch_map
+
+    for message in log_output.split("\x00"):
+        entry_id = None
+        code_branch = None
+        for line in message.split("\n"):
+            line = line.strip()
+            if line.startswith("Watercooler-Entry-ID:"):
+                entry_id = line.split(":", 1)[1].strip()
+            elif line.startswith("Code-Branch:"):
+                code_branch = line.split(":", 1)[1].strip()
+
+        if entry_id and code_branch:
+            entry_branch_map[entry_id] = code_branch
+
+    return entry_branch_map
+
+
+def _tag_graph_entries(graph_dir: Path, entry_branch_map: Dict[str, str]) -> int:
+    """Add code_branch to graph entry nodes that don't have one.
+
+    Modifies entries.jsonl files in-place, adding code_branch from
+    the commit footer mapping.
+
+    Args:
+        graph_dir: Path to graph/baseline/ directory
+        entry_branch_map: Mapping of entry_id → code_branch
+
+    Returns:
+        Number of entries tagged
+    """
+    tagged = 0
+    threads_dir = graph_dir / "threads"
+    if not threads_dir.exists():
+        return 0
+
+    for topic_dir in threads_dir.iterdir():
+        if not topic_dir.is_dir():
+            continue
+        entries_file = topic_dir / "entries.jsonl"
+        if not entries_file.exists():
+            continue
+
+        lines = entries_file.read_text().splitlines()
+        updated_lines = []
+        modified = False
+
+        for line in lines:
+            if not line.strip():
+                updated_lines.append(line)
+                continue
+            try:
+                node = json.loads(line)
+                if "code_branch" not in node:
+                    eid = node.get("entry_id", "")
+                    if eid in entry_branch_map:
+                        node["code_branch"] = entry_branch_map[eid]
+                        modified = True
+                        tagged += 1
+                updated_lines.append(json.dumps(node, ensure_ascii=False))
+            except json.JSONDecodeError:
+                updated_lines.append(line)
+
+        if modified:
+            entries_file.write_text("\n".join(updated_lines) + "\n")
+
+    return tagged
+
+
+def _migrate_to_orphan_impl(
+    code_path: str,
+    threads_repo_path: str,
+    dry_run: bool = True,
+) -> str:
+    """Migrate from separate threads repo to orphan branch mode.
+
+    Copies all thread files and graph data from the separate threads repo
+    to a watercooler/threads orphan branch on the code repo. Tags graph
+    entries with code_branch metadata parsed from commit footers.
+
+    Args:
+        code_path: Path to the code repository
+        threads_repo_path: Path to the existing separate threads repo clone
+        dry_run: If True, report what would happen without executing
+
+    Returns:
+        JSON with migration results
+    """
+    import shutil
+
+    result: Dict[str, Any] = {
+        "dry_run": dry_run,
+        "branches_found": 0,
+        "threads_copied": 0,
+        "graph_files_copied": 0,
+        "other_files_copied": 0,
+        "entries_tagged": 0,
+        "entry_branch_mappings": 0,
+        "errors": [],
+    }
+
+    # 1. Validate threads repo
+    threads_repo = Path(threads_repo_path).expanduser().resolve()
+    if not threads_repo.exists():
+        result["success"] = False
+        result["error"] = f"Threads repo path does not exist: {threads_repo}"
+        return json.dumps(result, indent=2)
+
+    if not (threads_repo / ".git").exists():
+        # Check if it's inside a worktree or bare repo
+        git_check = _run_git(["rev-parse", "--git-dir"], threads_repo)
+        if git_check is None:
+            result["success"] = False
+            result["error"] = f"Not a git repository: {threads_repo}"
+            return json.dumps(result, indent=2)
+
+    # 2. Validate code repo
+    code_root = Path(code_path).expanduser().resolve()
+    if not code_root.exists():
+        result["success"] = False
+        result["error"] = f"Code repo path does not exist: {code_root}"
+        return json.dumps(result, indent=2)
+
+    # 3. Count branches in threads repo
+    branch_output = _run_git(["branch", "-r", "--list", "origin/*"], threads_repo)
+    if branch_output:
+        branches = [
+            b.strip().replace("origin/", "")
+            for b in branch_output.split("\n")
+            if b.strip() and "HEAD" not in b
+        ]
+    else:
+        branches = []
+    result["branches_found"] = len(branches)
+
+    # 4. Parse commit footers for entry_id → code_branch mapping
+    entry_branch_map = _parse_commit_footers(threads_repo)
+    result["entry_branch_mappings"] = len(entry_branch_map)
+
+    # 5. Collect files from the current checkout of threads repo
+    # (User should have main/default branch checked out for fullest state)
+    skip_patterns = {".git"}
+    thread_files = []
+    graph_files = []
+    other_files = []
+
+    for item in threads_repo.rglob("*"):
+        if not item.is_file():
+            continue
+        rel = item.relative_to(threads_repo)
+        # Skip .git directory
+        if any(part in skip_patterns for part in rel.parts):
+            continue
+        # Skip migration checkpoints
+        if rel.name.startswith(".migration_checkpoint"):
+            continue
+
+        rel_str = str(rel)
+        if rel_str.startswith("graph/"):
+            graph_files.append(rel)
+        elif rel.suffix == ".md":
+            thread_files.append(rel)
+        else:
+            other_files.append(rel)
+
+    result["threads_found"] = len(thread_files)
+    result["graph_files_found"] = len(graph_files)
+    result["other_files_found"] = len(other_files)
+
+    if dry_run:
+        result["success"] = True
+        result["thread_files"] = [str(f) for f in thread_files[:50]]
+        if len(thread_files) > 50:
+            result["thread_files_truncated"] = True
+        if branches:
+            result["branches"] = branches[:20]
+        result["entry_branch_sample"] = dict(list(entry_branch_map.items())[:10])
+        return json.dumps(result, indent=2)
+
+    # 6. Create orphan branch worktree on code repo
+    from ..config import _ensure_worktree
+
+    wt_dir = _ensure_worktree(code_root)
+    if wt_dir is None:
+        result["success"] = False
+        result["error"] = "Failed to create orphan branch worktree on code repo"
+        return json.dumps(result, indent=2)
+    result["worktree_path"] = str(wt_dir)
+
+    # 7. Copy all files to worktree
+    for rel in thread_files:
+        src = threads_repo / rel
+        dst = wt_dir / rel
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            result["threads_copied"] += 1
+        except (OSError, IOError) as e:
+            result["errors"].append(f"Failed to copy {rel}: {e}")
+
+    for rel in graph_files:
+        src = threads_repo / rel
+        dst = wt_dir / rel
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            result["graph_files_copied"] += 1
+        except (OSError, IOError) as e:
+            result["errors"].append(f"Failed to copy graph/{rel}: {e}")
+
+    for rel in other_files:
+        src = threads_repo / rel
+        dst = wt_dir / rel
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            result["other_files_copied"] += 1
+        except (OSError, IOError) as e:
+            result["errors"].append(f"Failed to copy {rel}: {e}")
+
+    # 8. Tag graph entries with code_branch from commit footers
+    graph_baseline = wt_dir / "graph" / "baseline"
+    if graph_baseline.exists() and entry_branch_map:
+        tagged = _tag_graph_entries(graph_baseline, entry_branch_map)
+        result["entries_tagged"] = tagged
+
+    # 9. Commit and push
+    _run_git(["add", "-A"], wt_dir)
+
+    commit_msg = (
+        "Migrate threads from separate repo to orphan branch\n\n"
+        f"Threads: {result['threads_copied']}\n"
+        f"Graph files: {result['graph_files_copied']}\n"
+        f"Entries tagged with code_branch: {result['entries_tagged']}\n"
+        f"Source: {threads_repo}\n"
+    )
+    commit_result = _run_git(["commit", "-m", commit_msg], wt_dir)
+    if commit_result is None:
+        # Nothing to commit (empty or no changes)
+        result["commit"] = "nothing_to_commit"
+    else:
+        result["commit"] = "success"
+
+    from ..config import ORPHAN_BRANCH_NAME
+
+    push_result = _run_git(["push", "origin", ORPHAN_BRANCH_NAME], wt_dir)
+    result["push"] = "success" if push_result is not None else "failed"
+    if push_result is None:
+        result["errors"].append(
+            "Push failed. The orphan branch may need manual pushing, "
+            "or the remote may not be configured."
+        )
+
+    result["success"] = len(result["errors"]) == 0
+    return json.dumps(result, indent=2)
+
+
 def register_migration_tools(mcp):
     """Register migration tools with the MCP server.
 
@@ -1013,6 +1308,49 @@ def register_migration_tools(mcp):
             rechunk=rechunk,
         )
 
+    async def orphan_migrate_wrapper(
+        ctx: Context,
+        code_path: str = "",
+        threads_repo_path: str = "",
+        dry_run: bool = True,
+    ) -> str:
+        """Migrate from a separate threads repo to orphan branch mode.
+
+        Copies all thread files and graph data from an existing separate
+        threads repo (the old branch-mirroring architecture) to a single
+        watercooler/threads orphan branch on the code repo.
+
+        Graph entries are tagged with code_branch metadata parsed from
+        commit footers in the threads repo history.
+
+        Args:
+            code_path: Path to the code repository
+            threads_repo_path: Path to the existing separate threads repo clone.
+                The repo should have the default branch (main) checked out
+                for the most complete state.
+            dry_run: If True (default), show what would be migrated without executing
+
+        Returns:
+            JSON with migration results
+        """
+        if not code_path:
+            return json.dumps({
+                "success": False,
+                "error": "code_path is required — path to the code repository",
+            })
+        if not threads_repo_path:
+            return json.dumps({
+                "success": False,
+                "error": "threads_repo_path is required — path to existing threads repo clone",
+            })
+
+        return _migrate_to_orphan_impl(
+            code_path=code_path,
+            threads_repo_path=threads_repo_path,
+            dry_run=dry_run,
+        )
+
     # Register tools
     migration_preflight = mcp.tool(name="watercooler_migration_preflight")(preflight_wrapper)
     migrate_to_memory_backend = mcp.tool(name="watercooler_migrate_to_memory_backend")(migrate_wrapper)
+    mcp.tool(name="watercooler_migrate_to_orphan_branch")(orphan_migrate_wrapper)

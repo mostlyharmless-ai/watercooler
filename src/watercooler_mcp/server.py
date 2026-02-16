@@ -45,9 +45,6 @@ from .helpers import (
     _format_warnings_for_response,
     # Context helpers
     _should_auto_branch,
-    # Branch helpers
-    _attempt_auto_fix_divergence,
-    _validate_and_sync_branches,
     # Thread parsing
     _normalize_status,
     _resolve_format,
@@ -81,7 +78,6 @@ from .tools.thread_query import register_thread_query_tools
 from .tools.thread_write import register_thread_write_tools
 from .tools.sync import register_sync_tools
 from .tools.graph import register_graph_tools
-from .tools.branch_parity import register_branch_parity_tools
 from .tools.memory import register_memory_tools
 # Migration tools removed due to MCP SDK 60-second timeout limitation.
 # Use scripts/index_graphiti.py for thread migration instead.
@@ -92,7 +88,6 @@ from .tools import thread_query as _thread_query_tools
 from .tools import thread_write as _thread_write_tools
 from .tools import sync as _sync_tools
 from .tools import graph as _graph_tools
-from .tools import branch_parity as _branch_parity_tools
 from .tools import memory as _memory_tools
 
 
@@ -145,9 +140,9 @@ register_thread_query_tools(mcp)
 register_thread_write_tools(mcp)
 register_sync_tools(mcp)
 register_graph_tools(mcp)
-register_branch_parity_tools(mcp)
 register_memory_tools(mcp)
-# register_migration_tools removed - use scripts/index_graphiti.py instead
+from .tools.migration import register_migration_tools
+register_migration_tools(mcp)
 
 # Initialize memory sync callbacks (Issue #83 - callback registry pattern)
 from .memory_sync import init_memory_sync_callbacks
@@ -188,10 +183,6 @@ access_stats_tool = _graph_tools.access_stats_tool
 graph_enrich_tool = _graph_tools.graph_enrich_tool
 graph_recover_tool = _graph_tools.graph_recover_tool
 graph_project_tool = _graph_tools.graph_project_tool
-validate_branch_pairing_tool = _branch_parity_tools.validate_branch_pairing_tool
-sync_branch_state = _branch_parity_tools.sync_branch_state_tool
-audit_branch_pairing = _branch_parity_tools.audit_branch_pairing_tool
-recover_branch_state = _branch_parity_tools.recover_branch_state_tool
 # Memory tools (some tools removed - see replacement mappings in tools/memory.py)
 get_entity_edge = _memory_tools.get_entity_edge
 diagnose_memory = _memory_tools.diagnose_memory

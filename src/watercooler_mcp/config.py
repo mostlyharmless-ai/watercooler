@@ -50,6 +50,10 @@ __all__ = [
 ]
 
 
+ORPHAN_BRANCH_NAME = "watercooler/threads"
+WORKTREE_BASE = Path("~/.watercooler/worktrees").expanduser()
+
+
 @dataclass(frozen=True)
 class ThreadContext:
     """Resolved configuration for operating on watercooler threads."""
@@ -63,6 +67,7 @@ class ThreadContext:
     code_remote: Optional[str]
     threads_slug: Optional[str]
     explicit_dir: bool
+    orphan_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -205,6 +210,112 @@ def _infer_threads_repo_from_code(ctx: ThreadContext) -> Optional[str]:
     return None
 
 
+def _worktree_path_for(code_root: Path) -> Path:
+    """Compute the worktree path for a code repo."""
+    return WORKTREE_BASE / code_root.name
+
+
+def _orphan_branch_exists(code_root: Path) -> bool:
+    """Check if the orphan branch exists (local or remote)."""
+    result = _run_git(["branch", "-a", "--list", f"*{ORPHAN_BRANCH_NAME}*"], code_root)
+    return bool(result and ORPHAN_BRANCH_NAME in result)
+
+
+def _create_orphan_branch(code_root: Path) -> bool:
+    """Create the orphan branch with an empty initial commit.
+
+    Creates the branch without switching the code working tree.
+    """
+    log_debug(f"CONFIG: Creating orphan branch '{ORPHAN_BRANCH_NAME}' in {code_root}")
+
+    # Use git worktree to create the orphan branch without touching the main tree.
+    # Step 1: Create a temporary orphan branch via low-level commands
+    wt_path = _worktree_path_for(code_root)
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    # Create orphan branch and worktree in one step
+    result = _run_git(
+        ["worktree", "add", "--orphan", "-b", ORPHAN_BRANCH_NAME, str(wt_path)],
+        code_root,
+    )
+    if result is None:
+        # Fallback for older git: create orphan branch manually
+        log_debug("CONFIG: git worktree add --orphan failed, trying manual approach")
+
+        # Create a detached worktree first
+        _run_git(["worktree", "add", "--detach", str(wt_path)], code_root)
+
+        # Create orphan branch in the worktree
+        _run_git(["checkout", "--orphan", ORPHAN_BRANCH_NAME], wt_path)
+        _run_git(["rm", "-rf", "."], wt_path)
+
+    # Create initial empty commit in the worktree
+    _run_git(["commit", "--allow-empty", "-m", "Initialize watercooler threads"], wt_path)
+
+    # Push to origin if remote exists
+    _run_git(["push", "-u", "origin", ORPHAN_BRANCH_NAME], wt_path)
+
+    log_debug(f"CONFIG: Orphan branch '{ORPHAN_BRANCH_NAME}' created")
+    return True
+
+
+def _ensure_worktree(code_root: Path) -> Optional[Path]:
+    """Ensure the orphan branch worktree exists, creating it if needed.
+
+    Returns:
+        Path to the worktree directory, or None if creation failed.
+    """
+    wt_path = _worktree_path_for(code_root)
+
+    # Check if worktree already exists and is valid
+    if wt_path.exists() and (wt_path / ".git").exists():
+        # Verify it's on the right branch
+        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], wt_path)
+        if branch == ORPHAN_BRANCH_NAME:
+            return wt_path
+        # Worktree exists but wrong branch — remove and recreate
+        log_debug(f"CONFIG: Worktree at {wt_path} on wrong branch '{branch}', recreating")
+        _run_git(["worktree", "remove", "--force", str(wt_path)], code_root)
+
+    # Check if orphan branch exists
+    if not _orphan_branch_exists(code_root):
+        try:
+            _create_orphan_branch(code_root)
+        except Exception as e:
+            log_debug(f"CONFIG: Failed to create orphan branch: {e}")
+            return None
+    else:
+        # Branch exists but no worktree — create worktree
+        wt_path.mkdir(parents=True, exist_ok=True)
+        result = _run_git(
+            ["worktree", "add", str(wt_path), ORPHAN_BRANCH_NAME],
+            code_root,
+        )
+        if result is None:
+            log_debug(f"CONFIG: Failed to create worktree at {wt_path}")
+            return None
+
+    if wt_path.exists() and (wt_path / ".git").exists():
+        return wt_path
+
+    return None
+
+
+def _should_use_orphan_mode(code_root: Optional[Path]) -> bool:
+    """Determine if orphan branch mode should be used.
+
+    Orphan mode is used when:
+    1. WATERCOOLER_THREAD_MODE=orphan (explicit opt-in)
+    2. Or: the orphan branch already exists in the code repo
+    3. Or: no separate threads repo is configured/exists
+
+    For now, this is controlled by the WATERCOOLER_THREAD_MODE env var.
+    Default is "orphan" (the new architecture).
+    """
+    mode = os.getenv("WATERCOOLER_THREAD_MODE", "orphan").strip().lower()
+    return mode == "orphan"
+
+
 def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
     normalized_root = _normalize_code_root(code_root)
     git_details = _discover_git(normalized_root)
@@ -228,6 +339,36 @@ def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
             if parts:
                 code_repo = "/".join(parts)
 
+    effective_root = git_details.root or normalized_root
+
+    # =========================================================================
+    # Orphan Branch Mode (new default)
+    # =========================================================================
+    # In orphan mode, threads live on a separate orphan branch in the same
+    # code repo, accessed via git worktree. No separate threads repo needed.
+    use_orphan = _should_use_orphan_mode(effective_root) and not explicit_dir
+    if use_orphan and effective_root is not None:
+        wt_dir = _ensure_worktree(effective_root)
+        if wt_dir is not None:
+            log_debug(f"CONFIG: Orphan mode active, threads_dir={wt_dir}")
+            return ThreadContext(
+                code_root=effective_root,
+                threads_dir=wt_dir,
+                threads_repo_url=None,  # No separate repo
+                code_repo=code_repo,
+                code_branch=git_details.branch,
+                code_commit=git_details.commit,
+                code_remote=code_remote,
+                threads_slug=None,
+                explicit_dir=False,
+                orphan_mode=True,
+            )
+        else:
+            log_debug("CONFIG: Orphan mode requested but worktree creation failed, falling back")
+
+    # =========================================================================
+    # Legacy: Separate Threads Repo (fallback if orphan mode fails/disabled)
+    # =========================================================================
     threads_repo_env = os.getenv("WATERCOOLER_GIT_REPO")
     threads_repo_url = threads_repo_env or None
 
@@ -268,7 +409,7 @@ def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
 
     if threads_dir is None:
         env_base = os.getenv("WATERCOOLER_THREADS_BASE")
-        base = _default_threads_base(git_details.root or normalized_root)
+        base = _default_threads_base(effective_root)
 
         if env_base:
             if threads_slug:
@@ -288,7 +429,7 @@ def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
             threads_dir = _resolve_path(base / "_local")
 
     return ThreadContext(
-        code_root=git_details.root or normalized_root,
+        code_root=effective_root,
         threads_dir=threads_dir,
         threads_repo_url=threads_repo_url,
         code_repo=code_repo,
@@ -297,6 +438,7 @@ def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
         code_remote=code_remote,
         threads_slug=threads_slug,
         explicit_dir=explicit_dir,
+        orphan_mode=False,
     )
 
 

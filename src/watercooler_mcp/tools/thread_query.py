@@ -418,6 +418,7 @@ def _read_thread_impl(
     format: str = "markdown",
     summary_only: bool = False,
     code_path: str = "",
+    code_branch: str | None = None,
 ) -> str:
     """Read the complete content of a watercooler thread.
 
@@ -431,6 +432,8 @@ def _read_thread_impl(
         code_path: Path to the code repository directory containing the files most immediately
             under discussion. This establishes the code context for branch pairing.
             Should point to the root of your working repository.
+        code_branch: Filter entries by code branch. Auto-populated from current
+            branch in orphan mode. Pass "*" to see all branches.
 
     Returns:
         Full thread content (or summary-only condensed view) including:
@@ -506,6 +509,10 @@ def _read_thread_impl(
                 code_path=code_path,
             )
 
+        # Auto-populate code_branch from context in orphan mode
+        if code_branch is None and context.orphan_mode:
+            code_branch = context.code_branch
+
         # Lightweight read sync: auto-pull if behind origin (never blocks)
         sync_ok, sync_actions = ensure_readable(context.threads_dir, context.code_root)
         if sync_actions:
@@ -532,7 +539,7 @@ def _read_thread_impl(
             return _format_warnings_for_response(content)
 
         # Load entries from graph (canonical) with MD fallback
-        load_error, entries, summaries = _load_entries(topic, context)
+        load_error, entries, summaries = _load_entries(topic, context, code_branch=code_branch)
         if load_error:
             return load_error
 
@@ -624,8 +631,19 @@ def _list_thread_entries_impl(
     limit: int | None = None,
     format: str = "json",
     code_path: str = "",
+    code_branch: str | None = None,
 ) -> ToolResult:
-    """Return thread entry headers (metadata only) with optional pagination."""
+    """Return thread entry headers (metadata only) with optional pagination.
+
+    Args:
+        topic: Thread topic identifier
+        offset: Starting entry offset
+        limit: Maximum entries to return
+        format: Output format ("json" or "markdown")
+        code_path: Path to code repository
+        code_branch: Filter entries by code branch. Auto-populated from current
+            branch in orphan mode. Pass "*" to see all branches.
+    """
 
     fmt_error, resolved_format = _resolve_format(format, default="json")
     if fmt_error:
@@ -634,6 +652,10 @@ def _list_thread_entries_impl(
     error, context = validation._validate_thread_context(code_path)
     if error or context is None:
         raise ContextError(error or "Unknown context error", code_path=code_path)
+
+    # Auto-populate code_branch from context in orphan mode
+    if code_branch is None and context.orphan_mode:
+        code_branch = context.code_branch
 
     if offset < 0:
         raise ValidationError("offset must be non-negative", field="offset")
@@ -694,7 +716,7 @@ def _list_thread_entries_impl(
         log_debug(f"list_thread_entries read sync: {sync_actions}")
 
     validation._refresh_threads(context)
-    load_error, entries, summaries = _load_entries(topic, context)
+    load_error, entries, summaries = _load_entries(topic, context, code_branch=code_branch)
     if load_error:
         if "not found" in load_error.lower():
             raise ThreadNotFoundError(topic=topic)
@@ -710,6 +732,7 @@ def _list_thread_entries_impl(
         "entry_count": total,
         "offset": start,
         "limit": limit,
+        "code_branch": code_branch,
         "entries": [
             _entry_header_payload(
                 entry,
@@ -721,6 +744,8 @@ def _list_thread_entries_impl(
 
     if resolved_format == "markdown":
         lines = [f"Entries for '{topic}' ({total} total)"]
+        if code_branch and code_branch != "*":
+            lines[0] += f" [branch: {code_branch}]"
         if slice_entries:
             for entry in slice_entries:
                 timestamp = entry.timestamp or "unknown"
@@ -866,6 +891,7 @@ def _get_thread_entry_range_impl(
     format: str = "json",
     summary_only: bool = False,
     code_path: str = "",
+    code_branch: str | None = None,
 ) -> ToolResult:
     """Return a contiguous range of entries (inclusive).
 
@@ -877,6 +903,8 @@ def _get_thread_entry_range_impl(
         summary_only: When True, returns only entry summaries (no bodies).
             Reduces token usage by ~90% — ideal for scanning a range.
         code_path: Code repository path for branch pairing context
+        code_branch: Filter entries by code branch. Auto-populated from current
+            branch in orphan mode. Pass "*" to see all branches.
     """
 
     fmt_error, resolved_format = _resolve_format(format, default="json")
@@ -943,13 +971,17 @@ def _get_thread_entry_range_impl(
     # =========================================================================
     # Local Mode Path (Filesystem)
     # =========================================================================
+    # Auto-populate code_branch from context in orphan mode
+    if code_branch is None and context.orphan_mode:
+        code_branch = context.code_branch
+
     # Lightweight read sync: auto-pull if behind origin (never blocks)
     _sync_ok, sync_actions = ensure_readable(context.threads_dir, context.code_root)
     if sync_actions:
         log_debug(f"get_thread_entry_range read sync: {sync_actions}")
 
     validation._refresh_threads(context)
-    load_error, entries, summaries = _load_entries(topic, context)
+    load_error, entries, summaries = _load_entries(topic, context, code_branch=code_branch)
     if load_error:
         if "not found" in load_error.lower():
             raise ThreadNotFoundError(topic=topic)

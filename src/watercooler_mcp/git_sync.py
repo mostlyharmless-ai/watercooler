@@ -8,7 +8,6 @@
    - For primitives: ``from watercooler_mcp.sync import push_with_retry, pull_rebase``
    - For state: ``from watercooler_mcp.sync import StateManager, ParityState``
    - For local-remote sync: ``from watercooler_mcp.sync import LocalRemoteSyncManager``
-   - For branch parity: ``from watercooler_mcp.sync import BranchParityManager``
 
 This module is preserved as a facade for backward compatibility.
 New code should import from watercooler_mcp.sync directly.
@@ -76,23 +75,6 @@ except ImportError:  # pragma: no cover - executed when module is loaded stand-a
         provision_threads_repo = getattr(_module, "provision_threads_repo")  # type: ignore[assignment]
     else:  # pragma: no cover - defensive guard if spec resolution fails
         raise
-
-# Re-export types from sync/ for backward compatibility
-# New code should import directly from watercooler_mcp.sync
-from .sync import (
-    BranchPairingError,
-    BranchMismatch,
-    BranchSyncResult,
-    BranchDivergenceInfo,
-    BranchPairingResult,
-    validate_branch_pairing,
-    sync_branch_history,
-    _find_main_branch,
-    _detect_squash_merge,
-    _detect_behind_main_divergence,
-    _detect_branch_divergence,
-    _rebase_branch_onto,
-)
 
 T = TypeVar('T')
 
@@ -176,11 +158,6 @@ class GitPullError(GitSyncError):
 class GitPushError(GitSyncError):
     """Failed to push changes to remote."""
     pass
-
-
-# Note: BranchPairingError, BranchMismatch, BranchPairingResult are now imported
-# from .sync at the top of this module for backward compatibility.
-# The authoritative definitions live in sync/branch_parity.py and sync/errors.py.
 
 
 class GitSyncManager:
@@ -296,95 +273,6 @@ class GitSyncManager:
         self._setup()
         if self._async_enabled:
             self._init_async()
-
-    # ------------------------------------------------------------------
-    # Branch pairing auto-sync
-    # ------------------------------------------------------------------
-
-    def _quick_branch_check(self) -> tuple[str, str, bool]:
-        """Check if code and threads repos are on same branch.
-
-        Returns:
-            tuple of (code_branch, threads_branch, in_sync)
-
-        Performance: ~0.1-1ms (just file reads)
-        """
-        if not self.code_repo:
-            # No code repo configured, skip check
-            return ("", "", True)
-
-        try:
-            # Read .git/HEAD - very fast, O(1) file read
-            code_head_file = self.code_repo / ".git" / "HEAD"
-            threads_head_file = self.local_path / ".git" / "HEAD"
-
-            if not code_head_file.exists() or not threads_head_file.exists():
-                # One or both not git repos
-                return ("", "", True)
-
-            code_head = code_head_file.read_text().strip()
-            threads_head = threads_head_file.read_text().strip()
-
-            # Extract branch names from refs
-            code_branch = code_head.replace("ref: refs/heads/", "")
-            threads_branch = threads_head.replace("ref: refs/heads/", "")
-
-            # If HEAD is detached (SHA instead of ref), treat as in-sync
-            # since detached state is intentional and not a pairing issue
-            if not code_head.startswith("ref:") or not threads_head.startswith("ref:"):
-                return (code_branch, threads_branch, True)
-
-            in_sync = code_head == threads_head
-            return (code_branch, threads_branch, in_sync)
-
-        except Exception as e:
-            # If we can't read HEAD files, assume in sync to avoid blocking operations
-            self._log(f"Branch check failed: {e}")
-            return ("", "", True)
-
-    def _ensure_branch_sync(self) -> None:
-        """Ensure threads repo is on same branch as code repo.
-
-        Auto-syncs by checking out matching branch in threads repo if needed.
-        Called before write operations to maintain branch pairing invariant.
-
-        Raises:
-            GitSyncError: If auto-sync fails
-        """
-        code_branch, threads_branch, in_sync = self._quick_branch_check()
-
-        if in_sync:
-            return  # Already synced, nothing to do
-
-        if not code_branch or not threads_branch:
-            return  # Can't determine branches, skip
-
-        # Log the mismatch
-        self._log(f"Branch mismatch detected: code={code_branch}, threads={threads_branch}")
-        self._log(f"Auto-syncing threads repo to {code_branch}")
-
-        try:
-            # Check out matching branch in threads repo
-            repo = self._repo()
-
-            # Check if branch exists locally
-            try:
-                repo.git.checkout(code_branch)
-                self._log(f"Checked out existing branch: {code_branch}")
-            except GitCommandError:
-                # Branch doesn't exist locally, try to create from remote
-                try:
-                    repo.git.checkout("-b", code_branch, f"origin/{code_branch}")
-                    self._log(f"Created and checked out branch from remote: {code_branch}")
-                except GitCommandError:
-                    # Remote branch doesn't exist either, create new orphan branch
-                    repo.git.checkout("--orphan", code_branch)
-                    self._log(f"Created new orphan branch: {code_branch}")
-
-        except Exception as e:
-            error_msg = f"Failed to auto-sync branches: {e}"
-            self._log(error_msg)
-            raise GitSyncError(error_msg) from e
 
     # ------------------------------------------------------------------
     # Logging helpers
@@ -1439,77 +1327,6 @@ class GitSyncManager:
             return True
         return self.push_pending(max_retries=max_retries)
 
-    def ensure_branch(self, branch: str) -> bool:
-        """Ensure the local repo is on the given branch, creating it if needed (GitPython, no subprocess).
-
-        Also sets upstream to origin/<branch> on first creation.
-        Returns True on success, False on failure (non-fatal; caller can proceed).
-        """
-        try:
-            self._ensure_local_repo_ready()
-            repo = self._repo
-
-            # What branch are we on now?
-            current = repo.active_branch.name
-            if current == branch:
-                return True
-
-            # Does the branch exist locally?
-            exists = branch in [ref.name for ref in repo.heads]
-
-            remote_available = self._remote_allowed and self._ensure_remote_repo_exists()
-            remote_has_branch = False
-
-            if remote_available:
-                # Check if remote has the branch
-                with git.Git().custom_environment(**self._env):
-                    origin = repo.remote('origin')
-                    remote_has_branch = f"origin/{branch}" in [ref.name for ref in origin.refs]
-
-            if exists:
-                # Checkout existing local branch
-                log_debug(f"GIT_OP_START: checkout {branch}")
-                with git.Git().custom_environment(**self._env):
-                    repo.git.checkout(branch, env=self._env)
-                log_debug(f"GIT_OP_END: checkout {branch}")
-            else:
-                if remote_has_branch:
-                    # Fetch and checkout remote branch
-                    log_debug(f"GIT_OP_START: fetch {branch}")
-                    with git.Git().custom_environment(**self._env):
-                        origin = repo.remote('origin')
-                        origin.fetch(refspec=f"{branch}:refs/heads/{branch}", env=self._env)
-                    log_debug(f"GIT_OP_END: fetch {branch}")
-                    log_debug(f"GIT_OP_START: checkout {branch}")
-                    with git.Git().custom_environment(**self._env):
-                        repo.git.checkout(branch, env=self._env)
-                    log_debug(f"GIT_OP_END: checkout {branch}")
-                else:
-                    # Create new branch
-                    log_debug(f"GIT_OP_START: checkout -b {branch}")
-                    with git.Git().custom_environment(**self._env):
-                        repo.git.checkout('-b', branch, env=self._env)
-                    log_debug(f"GIT_OP_END: checkout -b {branch}")
-
-            # Ensure upstream is set when remote branch exists
-            try:
-                # Check if upstream is set (will raise if not)
-                repo.active_branch.tracking_branch()
-                has_upstream = True
-            except (AttributeError, TypeError):
-                has_upstream = False
-
-            if not has_upstream and remote_has_branch:
-                # Set upstream to origin/branch
-                with git.Git().custom_environment(**self._env):
-                    repo.git.branch('--set-upstream-to', f'origin/{branch}', branch, env=self._env)
-            elif not has_upstream and self._remote_allowed and not remote_has_branch:
-                # Remote unavailable or branch missing - leave as-is (local-only)
-                pass
-            return True
-        except Exception:
-            return False
-
     def with_sync(
         self,
         operation: Callable[[], T],
@@ -1527,9 +1344,6 @@ class GitSyncManager:
         a background worker pushes it to the remote (flushing immediately for
         priority operations such as ball hand-offs).
         """
-        # Auto-sync branches before any write operation
-        self._ensure_branch_sync()
-
         if self._async is None:
             return self._with_sync_sync(
                 operation,

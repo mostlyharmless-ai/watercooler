@@ -191,6 +191,7 @@ def _say_impl(
             entry_type=entry_type,
             body=body,
             entry_id=entry_id,
+            code_branch=context.code_branch,
         )
 
     run_with_sync(
@@ -355,6 +356,7 @@ def _ack_impl(
             title=title or None,
             body=body or None,
             entry_id=entry_id,
+            code_branch=context.code_branch,
         )
 
     run_with_sync(
@@ -484,6 +486,7 @@ def _handoff_impl(
                     body=note,
                     ball=target_agent,
                     entry_id=entry_id,
+                    code_branch=context.code_branch,
                 )
 
         run_with_sync(
@@ -534,6 +537,7 @@ def _handoff_impl(
                 agent=agent,
                 note=note or None,
                 entry_id=entry_id,
+                code_branch=context.code_branch,
             )
 
         run_with_sync(

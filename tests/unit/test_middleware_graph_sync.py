@@ -77,23 +77,13 @@ def _run_with_mocked_sync(
     Returns the mock for sync_entry_to_memory_backend so callers can assert
     on it.
     """
-    # Fake sync manager: with_sync(operation, ...) simply calls the operation
-    fake_sync = MagicMock()
-    fake_sync.with_sync.side_effect = lambda op, *a, **kw: op()
-
     mock_memory_sync = MagicMock()
 
     patches = {
-        "watercooler_mcp.middleware.get_git_sync_manager_from_context": MagicMock(return_value=fake_sync),
         "watercooler_mcp.middleware.get_watercooler_config": MagicMock(return_value=graph_config),
         "watercooler_mcp.middleware._check_enrichment_services_available": MagicMock(return_value=service_avail),
-        "watercooler_mcp.middleware.acquire_parity_lock": MagicMock(return_value=MagicMock()),
         "watercooler_mcp.middleware.acquire_topic_lock": MagicMock(return_value=MagicMock()),
-        "watercooler_mcp.middleware.run_preflight": MagicMock(return_value=MagicMock(can_proceed=True, auto_fixed=False)),
-        "watercooler_mcp.middleware.read_parity_state": MagicMock(return_value=MagicMock()),
-        "watercooler_mcp.middleware.write_parity_state": MagicMock(),
         "watercooler_mcp.middleware._build_commit_footers": MagicMock(return_value=[]),
-        "watercooler_mcp.middleware._should_auto_branch": MagicMock(return_value=False),
         # Patch at the source module so the lazy import inside the closure picks it up
         "watercooler.baseline_graph.sync.sync_to_memory_backend": mock_memory_sync,
         "watercooler.baseline_graph.writer.get_entry_node_from_graph": MagicMock(return_value={
