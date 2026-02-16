@@ -1,10 +1,10 @@
 """MCP Tools package for watercooler server.
 
 This package contains tool implementations organized by category:
-- diagnostic: health, whoami, reconcile_parity
+- diagnostic: health, whoami
 - thread_query: list_threads, read_thread, entry tools
 - thread_write: say, ack, handoff, set_status
-- sync: force_sync, reindex
+- sync: reindex
 - graph: baseline graph tools (stats, build, search, etc.)
 - memory: Graphiti memory tools
 - migration: memory backend migration, orphan branch migration

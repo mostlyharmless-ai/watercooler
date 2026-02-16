@@ -19,7 +19,7 @@ from .config import (
 )
 # Import from sync package
 from .sync import (
-    BranchPairingError,
+    SyncError,
     acquire_topic_lock,
 )
 from .observability import log_debug, log_action, log_warning
@@ -289,7 +289,7 @@ def run_with_sync(
                 log_action("parity.lock.acquire", scope="topic", topic=topic, outcome="ok")
             except TimeoutError as e:
                 log_action("parity.lock.acquire", scope="topic", topic=topic, outcome="timeout")
-                raise BranchPairingError(f"Failed to acquire lock for topic '{topic}': {e}")
+                raise SyncError(f"Failed to acquire lock for topic '{topic}': {e}")
 
         # Pull latest (if remote exists)
         log_debug("[SYNC] Simple sync flow")

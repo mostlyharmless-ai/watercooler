@@ -3,7 +3,6 @@
 Tools:
 - watercooler_health: Server health check
 - watercooler_whoami: Agent identity
-- watercooler_reconcile_parity: Branch parity reconciliation
 """
 
 import os
@@ -16,9 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp import Context
-from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent
-from git import Repo, InvalidGitRepositoryError
 
 from ..config import (
     get_agent_name,
@@ -27,7 +23,6 @@ from ..config import (
 )
 from ..helpers import (
     _should_auto_branch,
-    _require_context,
     _format_warnings_for_response,
 )
 from ..observability import log_debug
@@ -36,7 +31,6 @@ from ..observability import log_debug
 # Module-level references to registered tools (populated by register_diagnostic_tools)
 health = None
 whoami = None
-reconcile_parity = None
 
 # Rate limit warning threshold (10% remaining triggers warning)
 RATE_LIMIT_WARNING_THRESHOLD = 0.1
@@ -742,88 +736,14 @@ def _whoami_impl(ctx: Context) -> str:
         return f"Error determining identity: {str(e)}"
 
 
-def _reconcile_parity_impl(
-    ctx: Context,
-    code_path: str = "",
-) -> ToolResult:
-    """Reconcile thread storage with remote.
-
-    Pulls latest threads from origin and pushes any local commits.
-
-    Args:
-        code_path: Path to code repository directory (default: current directory)
-
-    Returns:
-        JSON with sync status and actions taken.
-    """
-    try:
-        error, context = _require_context(code_path)
-        if error:
-            return ToolResult(content=[TextContent(type="text", text=error)])
-        if context is None or not context.threads_dir:
-            return ToolResult(content=[TextContent(
-                type="text",
-                text="Error: Unable to resolve threads directory."
-            )])
-
-        from ..sync import ensure_readable, push_with_retry
-
-        actions_taken = []
-
-        # Pull latest
-        ok, msgs = ensure_readable(context.threads_dir)
-        if ok:
-            actions_taken.append("Pulled latest from origin")
-        else:
-            actions_taken.append(f"Pull issues: {'; '.join(msgs)}")
-
-        # Push any local commits
-        try:
-            threads_repo = Repo(context.threads_dir, search_parent_directories=True)
-            branch = threads_repo.active_branch.name
-            ahead = len(list(threads_repo.iter_commits(f"origin/{branch}..{branch}")))
-            if ahead > 0:
-                push_ok = push_with_retry(context.threads_dir, branch)
-                if push_ok:
-                    actions_taken.append(f"Pushed {ahead} commits to origin/{branch}")
-                else:
-                    actions_taken.append(f"Push failed for {ahead} commits")
-        except Exception as push_err:
-            actions_taken.append(f"Push check error: {push_err}")
-
-        output = {
-            "status": "ok",
-            "threads_dir": str(context.threads_dir),
-            "code_branch": context.code_branch or "unknown",
-            "actions_taken": actions_taken,
-        }
-
-        return ToolResult(content=[TextContent(
-            type="text",
-            text=json.dumps(output, indent=2)
-        )])
-
-    except InvalidGitRepositoryError as e:
-        return ToolResult(content=[TextContent(
-            type="text",
-            text=f"Error: Not a git repository: {str(e)}"
-        )])
-    except Exception as e:
-        return ToolResult(content=[TextContent(
-            type="text",
-            text=f"Error reconciling: {str(e)}"
-        )])
-
-
 def register_diagnostic_tools(mcp):
     """Register diagnostic tools with the MCP server.
 
     Args:
         mcp: The FastMCP server instance
     """
-    global health, whoami, reconcile_parity
+    global health, whoami
 
     # Register tools and store references for testing
     health = mcp.tool(name="watercooler_health")(_health_impl)
     whoami = mcp.tool(name="watercooler_whoami")(_whoami_impl)
-    reconcile_parity = mcp.tool(name="watercooler_reconcile_parity")(_reconcile_parity_impl)

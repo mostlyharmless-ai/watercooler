@@ -1,17 +1,10 @@
 """Sync package for watercooler-cloud git operations.
 
-This package provides a clean, modular architecture for git synchronization:
+This package provides git synchronization primitives and locking utilities:
 
-Layers:
-1. primitives - Pure git operations (no state, no side effects)
-2. state - Unified state management with live checks
-3. conflict - Conflict detection and resolution
-4. local_remote - Single-repo sync operations (L2R)
-5. async_coordinator - Background sync operations
-6. errors - Rich exception hierarchy
-
-The old git_sync.py and branch_parity.py modules are preserved as
-thin facades for backward compatibility.
+- primitives - Pure git operations (validate, fetch, pull, push, stash, checkout)
+- errors - Rich exception hierarchy
+- Locking utilities - Per-topic advisory locks for concurrent write serialization
 """
 
 import hashlib
@@ -25,7 +18,6 @@ from .errors import (
     PullError,
     PushError,
     ConflictError,
-    BranchPairingError,
     LockError,
     NetworkError,
     AuthenticationError,
@@ -59,73 +51,8 @@ from .primitives import (
     restore_stash,
 )
 
-from .state import (
-    # Constants
-    STATE_FILE_NAME,
-    STATE_FILE_VERSION,
-    STATE_DIR,
-    # Enums
-    ParityStatus,
-    # Data classes
-    ParityError,
-    ParityState,
-    # Classes
-    StateManager,
-    # Convenience functions
-    read_parity_state,
-    write_parity_state,
-    get_state_file_path,
-)
-
-from .conflict import (
-    # Enums
-    ConflictType,
-    ConflictScope,
-    # Data classes
-    ConflictInfo,
-    # Classes
-    ConflictResolver,
-    # Pure merge functions
-    merge_manifest_content,
-    merge_jsonl_content,
-    merge_sync_state_content,
-    merge_thread_content,
-    # Convenience functions
-    has_graph_conflicts_only,
-    has_thread_conflicts_only,
-    has_state_conflicts_only,
-)
-
-from .local_remote import (
-    # Data classes
-    PullResult,
-    CommitResult,
-    PushResult,
-    SyncResult,
-    SyncStatus,
-    # Classes
-    LocalRemoteSyncManager,
-)
-
-from .async_coordinator import (
-    # Constants
-    QUEUE_FILE_NAME,
-    DEFAULT_BATCH_WINDOW,
-    DEFAULT_MAX_DELAY,
-    DEFAULT_MAX_BATCH_SIZE,
-    DEFAULT_SYNC_INTERVAL,
-    # Data classes
-    PendingCommit,
-    AsyncConfig,
-    AsyncStatus,
-    # Classes
-    AsyncSyncCoordinator,
-    # Convenience functions
-    get_queue_file_path,
-)
-
 # ============================================================================
-# Standalone utilities (previously in branch_parity.py)
+# Standalone utilities (locking and topic sanitization)
 # ============================================================================
 
 # Locking constants
@@ -237,7 +164,6 @@ __all__ = [
     "PullError",
     "PushError",
     "ConflictError",
-    "BranchPairingError",
     "LockError",
     "NetworkError",
     "AuthenticationError",
@@ -266,59 +192,6 @@ __all__ = [
     "detect_stash",
     "stash_changes",
     "restore_stash",
-    # State - Constants
-    "STATE_FILE_NAME",
-    "STATE_FILE_VERSION",
-    "STATE_DIR",
-    # State - Enums
-    "ParityStatus",
-    # State - Data classes
-    "ParityError",
-    "ParityState",
-    # State - Classes
-    "StateManager",
-    # State - Convenience functions
-    "read_parity_state",
-    "write_parity_state",
-    "get_state_file_path",
-    # Conflict - Enums
-    "ConflictType",
-    "ConflictScope",
-    # Conflict - Data classes
-    "ConflictInfo",
-    # Conflict - Classes
-    "ConflictResolver",
-    # Conflict - Pure merge functions
-    "merge_manifest_content",
-    "merge_jsonl_content",
-    "merge_sync_state_content",
-    "merge_thread_content",
-    # Conflict - Convenience functions
-    "has_graph_conflicts_only",
-    "has_thread_conflicts_only",
-    "has_state_conflicts_only",
-    # Local-Remote - Data classes
-    "PullResult",
-    "CommitResult",
-    "PushResult",
-    "SyncResult",
-    "SyncStatus",
-    # Local-Remote - Classes
-    "LocalRemoteSyncManager",
-    # Async Coordinator - Constants
-    "QUEUE_FILE_NAME",
-    "DEFAULT_BATCH_WINDOW",
-    "DEFAULT_MAX_DELAY",
-    "DEFAULT_MAX_BATCH_SIZE",
-    "DEFAULT_SYNC_INTERVAL",
-    # Async Coordinator - Data classes
-    "PendingCommit",
-    "AsyncConfig",
-    "AsyncStatus",
-    # Async Coordinator - Classes
-    "AsyncSyncCoordinator",
-    # Async Coordinator - Convenience functions
-    "get_queue_file_path",
     # Standalone utilities
     "ensure_readable",
     "acquire_topic_lock",

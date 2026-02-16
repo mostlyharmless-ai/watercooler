@@ -172,7 +172,6 @@ say = _thread_write_tools.say
 ack = _thread_write_tools.ack
 handoff = _thread_write_tools.handoff
 set_status = _thread_write_tools.set_status
-force_sync = _sync_tools.force_sync
 reindex = _sync_tools.reindex
 baseline_graph_stats = _graph_tools.baseline_graph_stats
 search_graph_tool = _graph_tools.search_graph_tool
