@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import logging
@@ -766,6 +767,23 @@ class LeanRAGBackend(MemoryBackend):
         import time
 
         if not self.has_incremental_state():
+            # Guard against degenerate UMAP with very few chunks.
+            # UMAP requires n_neighbors > 0, which fails for N < ~5 samples.
+            # Skip the full build and return a descriptive result instead.
+            MIN_CHUNKS_FOR_INITIAL_BUILD = 5
+            if len(chunks.chunks) < MIN_CHUNKS_FOR_INITIAL_BUILD:
+                logger.info(
+                    "Too few chunks (%d) for initial build — skipping (need >= %d)",
+                    len(chunks.chunks), MIN_CHUNKS_FOR_INITIAL_BUILD,
+                )
+                return IndexResult(
+                    manifest_version=chunks.manifest_version,
+                    indexed_count=0,
+                    message=(
+                        f"Skipped: {len(chunks.chunks)} chunks insufficient for "
+                        f"initial build (need >= {MIN_CHUNKS_FOR_INITIAL_BUILD})"
+                    ),
+                )
             logger.info("No incremental state found — falling back to full index()")
             return self.index(chunks, progress_callback=progress_callback)
 
@@ -827,6 +845,7 @@ class LeanRAGBackend(MemoryBackend):
                     os.chdir(str(self.config.leanrag_path))
 
                     from leanrag.core.llm import embedding as embed_fn
+                    from leanrag.core.llm import generate_text
                     from leanrag.pipelines.incremental import incremental_update
 
                     # Load extracted entities
@@ -847,7 +866,7 @@ class LeanRAGBackend(MemoryBackend):
                             ent = _json.loads(line)
                             name = str(ent.get("entity_name", ""))
                             entities_meta.append({
-                                "entity_id": hash(name) % (2**31),
+                                "entity_id": int(hashlib.sha256(name.encode()).hexdigest(), 16) % (2**31),
                                 "entity_name": name,
                             })
                             entity_descriptions.append(
@@ -877,11 +896,15 @@ class LeanRAGBackend(MemoryBackend):
                     _report("incremental_update", "assigning", 1, 3)
                     state_dir = str(work_dir / ".cluster_state")
 
+                    # Wire up llm_func so dirty communities get re-summarized.
+                    # generate_text is the sync LLM wrapper used by the full
+                    # build pipeline (same signature: str -> str).
                     inc_result = incremental_update(
                         working_dir=str(work_dir),
                         new_entity_embeddings=embeddings,
                         new_entity_metadata=entities_meta,
                         state_dir=state_dir,
+                        llm_func=generate_text,
                     )
                 finally:
                     os.chdir(original_cwd)
@@ -894,7 +917,7 @@ class LeanRAGBackend(MemoryBackend):
                 message=(
                     f"Incremental index: {inc_result.entities_assigned} entities assigned, "
                     f"{inc_result.entities_orphaned} orphaned, "
-                    f"{inc_result.communities_resummmarized} communities re-summarized "
+                    f"{inc_result.communities_resummarized} communities re-summarized "
                     f"in {inc_result.duration_seconds:.1f}s"
                 ),
             )
