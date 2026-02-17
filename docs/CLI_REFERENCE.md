@@ -417,5 +417,4 @@ watercooler reindex
 
 - **[Installation Guide](INSTALLATION.md)** - Setup and configuration
 - **[Structured Entries](STRUCTURED_ENTRIES.md)** - Detailed entry format specification
-- **[Templates](archive/TEMPLATES.md)** - Template syntax and customization
 - **[MCP Server Guide](mcp-server.md)** - AI agent integration via MCP

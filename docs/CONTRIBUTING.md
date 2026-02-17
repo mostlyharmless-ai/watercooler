@@ -380,13 +380,11 @@ def temp_threads_dir(tmp_path: Path) -> Path:
 
 Update these files as needed:
 - `docs/QUICKSTART.md` - Getting started guide
-- `docs/archive/integration.md` - Integration patterns
 - `docs/mcp-server.md` - MCP tool reference
 - `docs/TROUBLESHOOTING.md` - Common issues
 
 #### 3. API Documentation
 
-- `docs/archive/integration.md#python-api-reference` - Python API reference
 - Keep examples current
 - Document all public APIs
 

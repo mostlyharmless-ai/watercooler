@@ -655,7 +655,7 @@ Server resolves threads inside the code repository instead of the sibling `<repo
    ```
 
 2. **Create agents.json if missing**
-   See [docs/archive/integration.md](./archive/integration.md) for configuration guide.
+   See [CONFIGURATION.md](./CONFIGURATION.md) for configuration guide.
 
 3. **Verify with read_thread**
    ```

@@ -485,8 +485,6 @@ asyncio.run(show_tools())
 ## See Also
 
 - [watercooler-cloud README](../README.md) - Main project documentation
-- [Python API Reference](./archive/integration.md#python-api-reference) - Watercooler library API
-- [Integration Guide](./archive/integration.md) - Using watercooler-cloud in projects
 
 ## Support
 

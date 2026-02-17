@@ -537,6 +537,4 @@ watercooler ack feature-auth \
 
 ## See Also
 
-- [TEMPLATES.md](archive/TEMPLATES.md) - Customizing entry templates
-- [AGENT_REGISTRY.md](archive/AGENT_REGISTRY.md) - Configuring agents and counterparts
 - [README.md](../README.md) - General usage guide
