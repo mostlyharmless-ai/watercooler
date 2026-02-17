@@ -1,13 +1,13 @@
 """MCP Tools package for watercooler server.
 
 This package contains tool implementations organized by category:
-- diagnostic: health, whoami, reconcile_parity
+- diagnostic: health, whoami
 - thread_query: list_threads, read_thread, entry tools
 - thread_write: say, ack, handoff, set_status
-- sync: force_sync, reindex
+- sync: reindex
 - graph: baseline graph tools (stats, build, search, etc.)
-- branch_parity: validate, sync, audit, recover branch
 - memory: Graphiti memory tools
+- migration: memory backend migration, orphan branch migration
 
 Each module provides a register_*_tools(mcp) function to register its tools.
 """
@@ -17,8 +17,8 @@ from .thread_query import register_thread_query_tools
 from .thread_write import register_thread_write_tools
 from .sync import register_sync_tools
 from .graph import register_graph_tools
-from .branch_parity import register_branch_parity_tools
 from .memory import register_memory_tools
+from .migration import register_migration_tools
 
 
 def register_all_tools(mcp):
@@ -32,8 +32,8 @@ def register_all_tools(mcp):
     register_thread_write_tools(mcp)
     register_sync_tools(mcp)
     register_graph_tools(mcp)
-    register_branch_parity_tools(mcp)
     register_memory_tools(mcp)
+    register_migration_tools(mcp)
 
 
 __all__ = [
@@ -43,6 +43,6 @@ __all__ = [
     "register_thread_write_tools",
     "register_sync_tools",
     "register_graph_tools",
-    "register_branch_parity_tools",
     "register_memory_tools",
+    "register_migration_tools",
 ]

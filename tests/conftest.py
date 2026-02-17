@@ -7,6 +7,27 @@ from typing import Generator
 
 import pytest
 
+# Re-export testing utilities from watercooler.testing
+# These are now available to all tests via conftest.py
+from watercooler.testing import (
+    clean_config,
+    isolated_config,
+    mock_env_vars,
+    mock_watercooler_env,
+    temp_config,
+    temp_threads_dir,
+)
+
+# Make pytest aware of these fixtures
+__all__ = [
+    "clean_config",
+    "isolated_config",
+    "mock_env_vars",
+    "mock_watercooler_env",
+    "temp_config",
+    "temp_threads_dir",
+]
+
 
 def pytest_sessionstart(session):  # type: ignore[override]
     root = Path(__file__).resolve().parents[1]
@@ -69,6 +90,19 @@ def stub_memory_api_keys(monkeypatch: pytest.MonkeyPatch) -> Generator[None, Non
 
 
 @pytest.fixture
+def clean_api_keys(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Clear all API keys for complete test isolation."""
+    api_keys = [
+        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
+        "GEMINI_API_KEY", "GROQ_API_KEY", "VOYAGE_API_KEY",
+        "LLM_API_KEY", "EMBEDDING_API_KEY", "DEEPSEEK_API_KEY",
+    ]
+    for key in api_keys:
+        monkeypatch.delenv(key, raising=False)
+    yield
+
+
+@pytest.fixture
 def stub_local_memory_servers(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Configure memory backends to use local server endpoints with stub keys.
 
@@ -98,6 +132,11 @@ def stub_local_memory_servers(monkeypatch: pytest.MonkeyPatch) -> Generator[None
     monkeypatch.setenv("DEEPSEEK_API_KEY", "not-needed-for-local")
     monkeypatch.setenv("DEEPSEEK_MODEL", "local")
 
+    # FalkorDB config (local instance, no auth for local dev)
+    monkeypatch.setenv("FALKORDB_HOST", "localhost")
+    monkeypatch.setenv("FALKORDB_PORT", "6379")
+    monkeypatch.setenv("FALKORDB_PASSWORD", "")
+
     yield
 
 
@@ -125,4 +164,3 @@ def memory_test_env(
     """
     monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
     yield
-

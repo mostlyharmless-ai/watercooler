@@ -17,6 +17,7 @@ Common issues and solutions for the watercooler MCP server.
   - [Permission Errors](#permission-errors)
   - [Client ID is None](#client-id-is-none)
   - [Tools Not Working](#tools-not-working)
+  - [JSON Parse Error: Unexpected EOF (mcp-cli)](#json-parse-error-unexpected-eof-mcp-cli)
   - [Git Not Found](#git-not-found)
   - [Git Authentication](#git-authentication)
   - [GitHub CLI Token Expiration](#github-cli-token-expiration)
@@ -57,6 +58,7 @@ graph TD
     Q3 -->|Git sync errors| GitSync[<b>Git Sync Issues</b><br/>Jump to section below]
     Q3 -->|"authentication failed"| GHAuth[<b>GitHub CLI Token Expiration</b><br/>Jump to section below]
     Q3 -->|"branch parity" or "preflight"| ParityError[<b>Branch Parity Errors</b><br/>Jump to section below]
+    Q3 -->|"JSON Parse error"| JsonEof[<b>JSON Parse Error: Unexpected EOF</b><br/>Jump to section below]
     Q3 -->|Other errors| ToolError[<b>Tools Not Working</b><br/>Jump to section below]
 
     Q4 -->|Wrong agent name| WrongAgent[<b>Wrong Agent Identity</b><br/>Jump to section below]
@@ -73,6 +75,7 @@ graph TD
     style GitSync fill:#ffcccc
     style GHAuth fill:#ffcccc
     style ParityError fill:#ffcccc
+    style JsonEof fill:#ffcccc
     style ToolError fill:#ffcccc
     style WrongAgent fill:#ffffcc
     style BallNotFlip fill:#ffffcc
@@ -291,6 +294,37 @@ Tool calls fail or return errors.
    ```
    Error adding entry to 'topic': [specific error]
    ```
+
+## JSON Parse Error: Unexpected EOF (mcp-cli)
+
+### Symptom
+```
+Error: Invalid JSON arguments
+SyntaxError: JSON Parse error: Unexpected EOF
+```
+When calling watercooler tools via `mcp-cli` in Claude Code.
+
+### Cause
+The `mcp-cli` binary does not support file redirection to stdin:
+```bash
+# BROKEN
+mcp-cli call watercooler-cloud/watercooler_say - < /tmp/payload.json
+```
+
+### Solution
+Use `jq` command substitution:
+```bash
+mcp-cli call watercooler-cloud/watercooler_say "$(jq -n \
+  --arg topic 'my-topic' \
+  --arg title 'My Title' \
+  --arg body 'Body content' \
+  '{topic: $topic, title: $title, body: $body}')"
+```
+
+Or pipe from a file:
+```bash
+cat /tmp/payload.json | mcp-cli call watercooler-cloud/watercooler_say -
+```
 
 ## Git Not Found
 

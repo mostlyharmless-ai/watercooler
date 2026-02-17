@@ -15,8 +15,9 @@ from .schema import (
     ThreadNode,
     EntryNode,
     ChunkNode,
+    DocumentNode,
+    DocumentChunkNode,
     Edge,
-    Hyperedge,
     EdgeType,
 )
 from .parser import parse_thread_to_nodes, parse_threads_directory
@@ -50,7 +51,7 @@ class GraphConfig:
 
 
 class MemoryGraph:
-    """In-memory graph of watercooler threads.
+    """In-memory graph of watercooler threads and documents.
 
     Provides methods to build, query, and export the graph.
 
@@ -58,8 +59,9 @@ class MemoryGraph:
         threads: Dict of thread_id → ThreadNode
         entries: Dict of entry_id → EntryNode
         chunks: Dict of chunk_id → ChunkNode
+        documents: Dict of doc_id → DocumentNode
+        doc_chunks: Dict of chunk_id → DocumentChunkNode
         edges: List of all edges
-        hyperedges: List of all hyperedges
     """
 
     def __init__(self, config: Optional[GraphConfig] = None):
@@ -73,8 +75,9 @@ class MemoryGraph:
         self.threads: dict[str, ThreadNode] = {}
         self.entries: dict[str, EntryNode] = {}
         self.chunks: dict[str, ChunkNode] = {}
+        self.documents: dict[str, DocumentNode] = {}
+        self.doc_chunks: dict[str, DocumentChunkNode] = {}
         self.edges: list[Edge] = []
-        self.hyperedges: list[Hyperedge] = []
 
     def add_thread(
         self,
@@ -90,7 +93,7 @@ class MemoryGraph:
         Returns:
             The created ThreadNode.
         """
-        thread, entries, edges, hyperedges = parse_thread_to_nodes(
+        thread, entries, edges = parse_thread_to_nodes(
             thread_path, branch_context
         )
 
@@ -103,9 +106,8 @@ class MemoryGraph:
                 continue
             self.entries[entry.entry_id] = entry
 
-        # Store edges and hyperedges
+        # Store edges
         self.edges.extend(edges)
-        self.hyperedges.extend(hyperedges)
 
         return thread
 
@@ -125,7 +127,7 @@ class MemoryGraph:
         Returns:
             List of created ThreadNodes.
         """
-        threads, entries, edges, hyperedges = parse_threads_directory(
+        threads, entries, edges = parse_threads_directory(
             threads_dir, branch_context, thread_filter
         )
 
@@ -138,7 +140,6 @@ class MemoryGraph:
             self.entries[entry.entry_id] = entry
 
         self.edges.extend(edges)
-        self.hyperedges.extend(hyperedges)
 
         return threads
 
@@ -368,14 +369,104 @@ class MemoryGraph:
             check_timeout()
             checkpoint("embeddings")
 
+    def add_document(
+        self,
+        doc: "DocumentNode",
+        chunks: list["DocumentChunkNode"],
+    ) -> None:
+        """Add a document and its chunks to the graph.
+
+        Args:
+            doc: The DocumentNode to add.
+            chunks: List of DocumentChunkNode objects for this document.
+        """
+        from .document_ingest import DocumentNode as IngestDocNode, DocumentChunk
+
+        # Convert from ingest types to schema types if needed
+        if isinstance(doc, IngestDocNode):
+            doc = DocumentNode(
+                doc_id=doc.doc_id,
+                file_path=doc.file_path,
+                title=doc.title,
+                doc_type=doc.doc_type,
+                metadata=doc.metadata,
+                chunk_ids=doc.chunk_ids,
+                summary=doc.summary or "",
+                embedding=doc.embedding,
+                ingestion_time=doc.ingestion_time,
+            )
+
+        self.documents[doc.doc_id] = doc
+
+        for chunk in chunks:
+            if isinstance(chunk, DocumentChunk):
+                schema_chunk = DocumentChunkNode(
+                    chunk_id=chunk.chunk_id,
+                    doc_id=chunk.doc_id,
+                    index=chunk.index,
+                    text=chunk.text,
+                    token_count=chunk.token_count,
+                    section_path=chunk.section_path,
+                    embedding=chunk.embedding,
+                    ingestion_time=chunk.ingestion_time,
+                )
+            else:
+                schema_chunk = chunk
+            self.doc_chunks[schema_chunk.chunk_id] = schema_chunk
+
+            # Add CONTAINS edge from document to chunk
+            self.edges.append(
+                Edge.contains(
+                    parent_id=f"document:{doc.doc_id}",
+                    child_id=f"doc_chunk:{schema_chunk.chunk_id}",
+                )
+            )
+
+    def ingest_documents(
+        self,
+        dir_path: Path,
+        pattern: str = "*.md",
+        config: Optional[ChunkerConfig] = None,
+    ) -> list["DocumentNode"]:
+        """Ingest documents from a directory.
+
+        Args:
+            dir_path: Path to directory containing documents.
+            pattern: Glob pattern for matching files (default: "*.md").
+            config: Chunking configuration. Defaults to whitepaper_preset.
+
+        Returns:
+            List of created DocumentNodes.
+        """
+        from .document_ingest import ingest_directory
+
+        if config is None:
+            config = ChunkerConfig.whitepaper_preset()
+
+        docs, chunks = ingest_directory(dir_path, pattern, config)
+
+        # Group chunks by document
+        doc_chunks: dict[str, list] = {}
+        for chunk in chunks:
+            if chunk.doc_id not in doc_chunks:
+                doc_chunks[chunk.doc_id] = []
+            doc_chunks[chunk.doc_id].append(chunk)
+
+        # Add each document with its chunks
+        for doc in docs:
+            self.add_document(doc, doc_chunks.get(doc.doc_id, []))
+
+        return [self.documents[d.doc_id] for d in docs]
+
     def stats(self) -> dict:
         """Return graph statistics."""
         return {
             "threads": len(self.threads),
             "entries": len(self.entries),
             "chunks": len(self.chunks),
+            "documents": len(self.documents),
+            "doc_chunks": len(self.doc_chunks),
             "edges": len(self.edges),
-            "hyperedges": len(self.hyperedges),
             "entries_with_summaries": sum(
                 1 for e in self.entries.values() if e.summary
             ),
@@ -385,6 +476,12 @@ class MemoryGraph:
             "chunks_with_embeddings": sum(
                 1 for c in self.chunks.values() if c.embedding
             ),
+            "documents_with_summaries": sum(
+                1 for d in self.documents.values() if d.summary
+            ),
+            "doc_chunks_with_embeddings": sum(
+                1 for c in self.doc_chunks.values() if c.embedding
+            ),
         }
 
     def to_dict(self) -> dict:
@@ -393,8 +490,9 @@ class MemoryGraph:
             "threads": {tid: asdict(t) for tid, t in self.threads.items()},
             "entries": {eid: asdict(e) for eid, e in self.entries.items()},
             "chunks": {cid: asdict(c) for cid, c in self.chunks.items()},
+            "documents": {did: asdict(d) for did, d in self.documents.items()},
+            "doc_chunks": {cid: asdict(c) for cid, c in self.doc_chunks.items()},
             "edges": [asdict(e) for e in self.edges],
-            "hyperedges": [asdict(h) for h in self.hyperedges],
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -458,6 +556,12 @@ class MemoryGraph:
         for cid, c in data.get("chunks", {}).items():
             graph.chunks[cid] = ChunkNode(**c)
 
+        for did, d in data.get("documents", {}).items():
+            graph.documents[did] = DocumentNode(**d)
+
+        for cid, c in data.get("doc_chunks", {}).items():
+            graph.doc_chunks[cid] = DocumentChunkNode(**c)
+
         for i, e in enumerate(data.get("edges", [])):
             try:
                 e["edge_type"] = EdgeType(e["edge_type"])
@@ -466,16 +570,5 @@ class MemoryGraph:
                     f"Invalid edge type '{e.get('edge_type')}' at edge {i}: {err}"
                 ) from err
             graph.edges.append(Edge(**e))
-
-        for i, h in enumerate(data.get("hyperedges", [])):
-            from .schema import HyperedgeType
-
-            try:
-                h["hyperedge_type"] = HyperedgeType(h["hyperedge_type"])
-            except ValueError as err:
-                raise ValueError(
-                    f"Invalid hyperedge type '{h.get('hyperedge_type')}' at hyperedge {i}: {err}"
-                ) from err
-            graph.hyperedges.append(Hyperedge(**h))
 
         return graph

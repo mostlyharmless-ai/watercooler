@@ -617,6 +617,51 @@ class TestChunkConfigHelpers:
         assert overlap == 64  # default
 
 
+class TestUseSummaryConfigHelper:
+    """Tests for get_graphiti_use_summary() config accessor."""
+
+    def test_default_is_false(self, monkeypatch):
+        """Test default use_summary value (False)."""
+        from watercooler.memory_config import get_graphiti_use_summary
+
+        monkeypatch.delenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", raising=False)
+        assert get_graphiti_use_summary() is False
+
+    def test_env_true(self, monkeypatch):
+        """Test use_summary enabled via env var."""
+        from watercooler.memory_config import get_graphiti_use_summary
+
+        for val in ("1", "true", "yes"):
+            monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", val)
+            assert get_graphiti_use_summary() is True
+
+    def test_env_false(self, monkeypatch):
+        """Test use_summary explicitly disabled via env var."""
+        from watercooler.memory_config import get_graphiti_use_summary
+
+        for val in ("0", "false", "no"):
+            monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", val)
+            assert get_graphiti_use_summary() is False
+
+    def test_env_case_insensitive(self, monkeypatch):
+        """Test that env var parsing is case-insensitive."""
+        from watercooler.memory_config import get_graphiti_use_summary
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", "TRUE")
+        assert get_graphiti_use_summary() is True
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", "False")
+        assert get_graphiti_use_summary() is False
+
+    def test_unrecognized_env_falls_back_to_config(self, monkeypatch):
+        """Test that unrecognized env values fall back to config default."""
+        from watercooler.memory_config import get_graphiti_use_summary
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", "maybe")
+        # Config default is False
+        assert get_graphiti_use_summary() is False
+
+
 class TestCallGraphitiAddEpisodeChunked:
     """Tests for _call_graphiti_add_episode_chunked function."""
 
@@ -791,3 +836,420 @@ class TestGraphitiSyncCallbackChunking:
 
                 # With chunking enabled, chunked should be called
                 mock_simple.assert_not_called()
+
+
+class TestGraphitiSyncCallbackSummary:
+    """Tests for summary resolution in _graphiti_sync_callback."""
+
+    def test_uses_raw_body_by_default(self, monkeypatch):
+        """Test that raw body is used when use_summary is disabled (default)."""
+        from watercooler_mcp.memory_sync import _graphiti_sync_callback
+
+        monkeypatch.delenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", raising=False)
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "false")
+
+        log = MagicMock()
+        captured_content = []
+
+        with patch(
+            "watercooler_mcp.memory_sync._call_graphiti_add_episode"
+        ) as mock_simple:
+            async def capture_call(*args, **kwargs):
+                captured_content.append(kwargs.get("content", args[0] if args else None))
+                return {"success": True, "episode_uuid": "test-uuid"}
+
+            mock_simple.side_effect = capture_call
+
+            try:
+                _graphiti_sync_callback(
+                    threads_dir=Path("/tmp/test-threads"),
+                    topic="test",
+                    entry_id="e1",
+                    entry_body="Raw body text",
+                    entry_title="Test",
+                    timestamp="2025-01-01T00:00:00Z",
+                    agent="claude",
+                    role="implementer",
+                    entry_type="Note",
+                    backend_config={"backend": "graphiti"},
+                    log=log,
+                    dry_run=False,
+                    entry_summary="Enriched summary text",
+                )
+            except Exception:
+                pass
+
+            # Verify _call_graphiti_add_episode was called with raw body
+            mock_simple.assert_called_once()
+            call_kwargs = mock_simple.call_args
+            assert call_kwargs.kwargs.get("content") == "Raw body text"
+
+    def test_uses_summary_when_configured(self, monkeypatch):
+        """Test that summary is used when use_summary is enabled."""
+        from watercooler_mcp.memory_sync import _graphiti_sync_callback
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", "true")
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "false")
+
+        log = MagicMock()
+
+        with patch(
+            "watercooler_mcp.memory_sync._call_graphiti_add_episode"
+        ) as mock_simple:
+            async def return_success(*args, **kwargs):
+                return {"success": True, "episode_uuid": "test-uuid"}
+
+            mock_simple.side_effect = return_success
+
+            try:
+                _graphiti_sync_callback(
+                    threads_dir=Path("/tmp/test-threads"),
+                    topic="test",
+                    entry_id="e1",
+                    entry_body="Raw body text",
+                    entry_title="Test",
+                    timestamp="2025-01-01T00:00:00Z",
+                    agent="claude",
+                    role="implementer",
+                    entry_type="Note",
+                    backend_config={"backend": "graphiti"},
+                    log=log,
+                    dry_run=False,
+                    entry_summary="Enriched summary text",
+                )
+            except Exception:
+                pass
+
+            mock_simple.assert_called_once()
+            call_kwargs = mock_simple.call_args
+            assert call_kwargs.kwargs.get("content") == "Enriched summary text"
+
+    def test_falls_back_to_body_when_summary_empty(self, monkeypatch):
+        """Test fallback to raw body when summary is empty string."""
+        from watercooler_mcp.memory_sync import _graphiti_sync_callback
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_USE_SUMMARY", "true")
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC", "false")
+
+        log = MagicMock()
+
+        with patch(
+            "watercooler_mcp.memory_sync._call_graphiti_add_episode"
+        ) as mock_simple:
+            async def return_success(*args, **kwargs):
+                return {"success": True, "episode_uuid": "test-uuid"}
+
+            mock_simple.side_effect = return_success
+
+            try:
+                _graphiti_sync_callback(
+                    threads_dir=Path("/tmp/test-threads"),
+                    topic="test",
+                    entry_id="e1",
+                    entry_body="Raw body text",
+                    entry_title="Test",
+                    timestamp="2025-01-01T00:00:00Z",
+                    agent="claude",
+                    role="implementer",
+                    entry_type="Note",
+                    backend_config={"backend": "graphiti"},
+                    log=log,
+                    dry_run=False,
+                    entry_summary="",  # Empty summary
+                )
+            except Exception:
+                pass
+
+            mock_simple.assert_called_once()
+            call_kwargs = mock_simple.call_args
+            assert call_kwargs.kwargs.get("content") == "Raw body text"
+
+
+class TestSyncEntryToMemoryBackend:
+    """Tests for the sync_entry_to_memory_backend helper function."""
+
+    def test_returns_true_when_entry_exists(self, tmp_path, monkeypatch):
+        """Test sync_entry_to_memory_backend returns True when entry is found."""
+        from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+        # Mock get_entry_node_from_graph to return a valid entry with summary
+        monkeypatch.setattr(
+            "watercooler.baseline_graph.sync.get_entry_node_from_graph",
+            lambda threads_dir, entry_id, topic: {
+                "body": "Test body",
+                "title": "Test title",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "agent": "claude",
+                "role": "implementer",
+                "entry_type": "Note",
+                "summary": "Enriched summary of test body",
+            },
+        )
+
+        sync_calls = []
+
+        def mock_sync(**kwargs):
+            sync_calls.append(kwargs)
+            return True
+
+        monkeypatch.setattr(
+            "watercooler.baseline_graph.sync.sync_to_memory_backend",
+            lambda **kwargs: mock_sync(**kwargs),
+        )
+
+        result = sync_entry_to_memory_backend(tmp_path, "test-topic", "entry-1")
+
+        assert result is True
+        assert len(sync_calls) == 1
+        assert sync_calls[0]["topic"] == "test-topic"
+        assert sync_calls[0]["entry_id"] == "entry-1"
+        assert sync_calls[0]["entry_body"] == "Test body"
+        assert sync_calls[0]["entry_title"] == "Test title"
+        assert sync_calls[0]["entry_summary"] == "Enriched summary of test body"
+
+    def test_returns_false_when_entry_not_found(self, tmp_path, monkeypatch):
+        """Test sync_entry_to_memory_backend returns False for missing entries."""
+        from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+        monkeypatch.setattr(
+            "watercooler.baseline_graph.sync.get_entry_node_from_graph",
+            lambda threads_dir, entry_id, topic: None,
+        )
+
+        result = sync_entry_to_memory_backend(tmp_path, "test-topic", "missing-entry")
+
+        assert result is False
+
+    def test_handles_exception_gracefully(self, tmp_path, monkeypatch):
+        """Test sync_entry_to_memory_backend catches exceptions."""
+        from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+        def raise_error(*args, **kwargs):
+            raise RuntimeError("graph explosion")
+
+        monkeypatch.setattr(
+            "watercooler.baseline_graph.sync.get_entry_node_from_graph",
+            raise_error,
+        )
+
+        result = sync_entry_to_memory_backend(tmp_path, "test-topic", "entry-1")
+
+        assert result is False
+
+
+class TestMiddlewareMemorySync:
+    """Tests for memory sync decoupled from enrichment in middleware.
+
+    Verifies that sync_to_memory_backend is called from
+    middleware.operation_with_graph_sync() independently of enrichment.
+    """
+
+    def _run_middleware(
+        self,
+        tmp_path,
+        topic="test-topic",
+        entry_id="entry-123",
+        wants_enrichment=True,
+        llm_available=False,
+        embed_available=False,
+        enrich_result=None,
+        entry_node=None,
+    ):
+        """Helper to run middleware with mocked dependencies.
+
+        Returns (result, mock_sync_to_memory, mock_enrich) for assertions.
+        """
+        from watercooler_mcp.middleware import run_with_sync
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir(exist_ok=True)
+
+        context = MagicMock()
+        context.threads_dir = threads_dir
+        context.code_root = tmp_path / "code"
+
+        # Default entry node
+        if entry_node is None:
+            entry_node = {
+                "body": "test body",
+                "title": "Test Title",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "agent": "claude",
+                "role": "implementer",
+                "entry_type": "Note",
+            }
+
+        # Default enrich result (noop)
+        if enrich_result is None:
+            from watercooler.baseline_graph.sync import EnrichmentResult
+            enrich_result = EnrichmentResult.noop()
+
+        # Mock graph config
+        mock_graph_config = MagicMock()
+        mock_graph_config.generate_summaries = wants_enrichment
+        mock_graph_config.generate_embeddings = False
+
+        mock_wc_config = MagicMock()
+        mock_wc_config.mcp.graph = mock_graph_config
+
+        with patch("watercooler_mcp.middleware.get_watercooler_config", return_value=mock_wc_config), \
+             patch("watercooler_mcp.middleware._check_enrichment_services_available", return_value=(llm_available, embed_available)), \
+             patch("watercooler_mcp.middleware.acquire_topic_lock") as mock_topic_lock, \
+             patch("watercooler.baseline_graph.sync.enrich_graph_entry", return_value=enrich_result) as mock_enrich, \
+             patch("watercooler.baseline_graph.writer.get_entry_node_from_graph", return_value=entry_node) as mock_get_entry, \
+             patch("watercooler.baseline_graph.sync.sync_to_memory_backend") as mock_sync:
+
+            result = run_with_sync(
+                context=context,
+                commit_title="test commit",
+                operation=lambda: "test-result",
+                topic=topic,
+                entry_id=entry_id,
+            )
+
+            return result, mock_sync, mock_enrich
+
+    def test_memory_sync_called_when_enrichment_not_configured(self, tmp_path):
+        """Memory sync should fire even when enrichment is disabled."""
+        result, mock_sync, _ = self._run_middleware(
+            tmp_path,
+            wants_enrichment=False,
+        )
+        assert result == "test-result"
+        mock_sync.assert_called_once()
+
+    def test_memory_sync_called_when_enrichment_services_unavailable(self, tmp_path):
+        """Memory sync should fire even when LLM/embedding services are down."""
+        result, mock_sync, _ = self._run_middleware(
+            tmp_path,
+            wants_enrichment=True,
+            llm_available=False,
+            embed_available=False,
+        )
+        assert result == "test-result"
+        mock_sync.assert_called_once()
+
+    def test_memory_sync_called_when_enrichment_noop(self, tmp_path):
+        """Memory sync should fire even when enrichment returns noop."""
+        from watercooler.baseline_graph.sync import EnrichmentResult
+
+        result, mock_sync, _ = self._run_middleware(
+            tmp_path,
+            wants_enrichment=True,
+            llm_available=True,
+            embed_available=False,
+            enrich_result=EnrichmentResult.noop(),
+        )
+        assert result == "test-result"
+        mock_sync.assert_called_once()
+
+    def test_memory_sync_failure_does_not_block_write(self, tmp_path):
+        """Memory sync failure should not prevent write from completing."""
+        from watercooler_mcp.middleware import run_with_sync
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir(exist_ok=True)
+
+        context = MagicMock()
+        context.threads_dir = threads_dir
+        context.code_root = tmp_path / "code"
+
+        mock_graph_config = MagicMock()
+        mock_graph_config.generate_summaries = False
+        mock_graph_config.generate_embeddings = False
+        mock_wc_config = MagicMock()
+        mock_wc_config.mcp.graph = mock_graph_config
+
+        entry_node = {"body": "test", "title": "T", "timestamp": None,
+                      "agent": "a", "role": "r", "entry_type": "Note"}
+
+        with patch("watercooler_mcp.middleware.get_watercooler_config", return_value=mock_wc_config), \
+             patch("watercooler_mcp.middleware._check_enrichment_services_available", return_value=(False, False)), \
+             patch("watercooler_mcp.middleware.acquire_topic_lock"), \
+             patch("watercooler.baseline_graph.writer.get_entry_node_from_graph", return_value=entry_node), \
+             patch("watercooler.baseline_graph.sync.sync_to_memory_backend", side_effect=RuntimeError("sync boom")):
+
+            result = run_with_sync(
+                context=context,
+                commit_title="test",
+                operation=lambda: "success",
+                topic="t",
+                entry_id="e1",
+            )
+
+        assert result == "success"
+
+    def test_memory_sync_not_called_without_entry_id(self, tmp_path):
+        """Memory sync should NOT be called when entry_id is None."""
+        from watercooler_mcp.middleware import run_with_sync
+
+        context = MagicMock()
+        context.threads_dir = tmp_path
+        context.code_root = tmp_path
+
+        with patch("watercooler_mcp.middleware.acquire_topic_lock"):
+            with patch("watercooler.baseline_graph.sync.sync_to_memory_backend") as mock_sync:
+                result = run_with_sync(
+                    context=context,
+                    commit_title="test",
+                    operation=lambda: "ok",
+                    topic="t",
+                    entry_id=None,
+                )
+
+        assert result == "ok"
+        mock_sync.assert_not_called()
+
+    def test_memory_sync_with_partial_entry_node(self, tmp_path):
+        """Memory sync should handle entry nodes with missing optional fields."""
+        partial_node = {
+            "body": "minimal body",
+            # title, timestamp, agent, role, entry_type, summary all missing
+        }
+        result, mock_sync, _ = self._run_middleware(
+            tmp_path,
+            wants_enrichment=False,
+            entry_node=partial_node,
+        )
+        assert result == "test-result"
+        mock_sync.assert_called_once()
+        call_kwargs = mock_sync.call_args[1]
+        assert call_kwargs["entry_body"] == "minimal body"
+        assert call_kwargs["entry_title"] is None
+        assert call_kwargs["entry_summary"] == ""
+        assert call_kwargs["timestamp"] is None
+        assert call_kwargs["agent"] is None
+        assert call_kwargs["role"] is None
+        assert call_kwargs["entry_type"] is None
+
+    def test_enrich_no_longer_calls_memory_sync(self, tmp_path):
+        """enrich_graph_entry should NOT call sync_to_memory_backend."""
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir(exist_ok=True)
+
+        # Create a mock entry node
+        entry_node = {
+            "body": "test body",
+            "title": "Test",
+            "entry_type": "Note",
+            "summary": "",
+        }
+
+        # Patch where the name is looked up (sync module imports it at top level)
+        with patch("watercooler.baseline_graph.sync.get_entry_node_from_graph", return_value=entry_node), \
+             patch("watercooler.baseline_graph.sync.sync_to_memory_backend") as mock_sync:
+
+            result = enrich_graph_entry(
+                threads_dir=threads_dir,
+                topic="test-topic",
+                entry_id="e1",
+                generate_summaries=False,
+                generate_embeddings=False,
+            )
+
+        # Should return noop since no enrichment requested
+        assert result.is_noop
+        # Memory sync should NOT be called from enrich_graph_entry anymore
+        mock_sync.assert_not_called()

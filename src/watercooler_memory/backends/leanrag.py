@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -10,9 +11,10 @@ import os
 import sys
 import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Generator, Literal, Sequence
 
 from . import (
     BackendError,
@@ -34,7 +36,51 @@ logger = logging.getLogger(__name__)
 # Thread-safe lock for os.chdir() operations
 # os.chdir() changes the process-wide current directory, which is not thread-safe.
 # This lock ensures that only one thread can change directories at a time.
-_chdir_lock = threading.Lock()
+_chdir_lock = threading.RLock()
+
+# Track LeanRAG paths that have been added to sys.path
+# NOTE: sys.path entries are intentionally NOT removed after use because:
+#   1. Python caches imported modules; removing the path would break reimports
+#   2. Duplicate entries are prevented by the `in sys.path` check
+#   3. In long-running processes, this is a bounded set (one path per LeanRAG location)
+_leanrag_paths_added: set[str] = set()
+
+
+@contextmanager
+def _leanrag_import_context(leanrag_path: Path) -> Generator[None, None, None]:
+    """Context manager for LeanRAG imports requiring chdir and sys.path setup.
+
+    Handles thread-safe directory changes and sys.path modifications needed
+    for importing LeanRAG modules (which load config.yaml at import time).
+
+    Note: sys.path entries are added once and persist for the process lifetime.
+    This is intentional - Python caches imported modules, so removing the path
+    after import would break module reloading. The check `if path not in sys.path`
+    prevents duplicate entries.
+
+    Args:
+        leanrag_path: Absolute path to LeanRAG installation directory.
+
+    Yields:
+        Control to the caller with proper context set up.
+    """
+    leanrag_path_str = str(leanrag_path)
+
+    with _chdir_lock:
+        # Add LeanRAG to sys.path if not already there (persists for process lifetime)
+        if leanrag_path_str not in sys.path:
+            sys.path.insert(0, leanrag_path_str)
+            _leanrag_paths_added.add(leanrag_path_str)
+            logger.debug(f"Added LeanRAG to sys.path: {leanrag_path_str}")
+
+        # Temporarily change to LeanRAG directory for imports
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(str(leanrag_path))
+            yield
+        finally:
+            os.chdir(original_cwd)
+
 
 # Resolve default submodule path from package location
 _PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -47,6 +93,9 @@ _LEANRAG_INSTALLED_AS_PACKAGE: bool | None = None
 def _is_leanrag_installed() -> bool:
     """Check if leanrag is installed as a Python package.
 
+    Uses importlib.util.find_spec to check without triggering module execution.
+    This avoids the FileNotFoundError from leanrag's import-time config loading.
+
     Returns:
         True if leanrag can be imported directly (installed via pip/uv),
         False if it needs to be loaded from submodule path.
@@ -55,15 +104,21 @@ def _is_leanrag_installed() -> bool:
     if _LEANRAG_INSTALLED_AS_PACKAGE is not None:
         return _LEANRAG_INSTALLED_AS_PACKAGE
 
-    try:
-        import leanrag  # noqa: F401
-        _LEANRAG_INSTALLED_AS_PACKAGE = True
-        logger.debug("leanrag found as installed package")
-        return True
-    except ImportError:
-        _LEANRAG_INSTALLED_AS_PACKAGE = False
-        logger.debug("leanrag not installed as package, will use submodule")
-        return False
+    # Use find_spec to check availability without executing module code.
+    # Direct import would trigger load_config() at module level, which fails
+    # if config.yaml isn't in the current working directory.
+    spec = importlib.util.find_spec("leanrag")
+    if spec is not None and spec.origin is not None:
+        # Verify it's a real installed package (not from our submodule path manipulation)
+        origin = Path(spec.origin)
+        if "site-packages" in str(origin) or "dist-packages" in str(origin):
+            _LEANRAG_INSTALLED_AS_PACKAGE = True
+            logger.debug("leanrag found as installed package at %s", origin)
+            return True
+
+    _LEANRAG_INSTALLED_AS_PACKAGE = False
+    logger.debug("leanrag not installed as package, will use submodule")
+    return False
 
 
 def _get_leanrag_path() -> Path | None:
@@ -92,7 +147,8 @@ def _ensure_leanrag_available() -> None:
         leanrag is already in site-packages, nothing to do.
 
     For development (git submodule):
-        Add the submodule path to sys.path so imports work.
+        Add the submodule path to sys.path and temporarily change to that
+        directory so leanrag's import-time config.yaml loading succeeds.
 
     Raises:
         ConfigError: If leanrag cannot be made available.
@@ -120,19 +176,36 @@ def _ensure_leanrag_available() -> None:
             "Ensure LeanRAG submodule is properly initialized."
         )
 
+    # Check for config.yaml in the submodule directory
+    config_yaml = leanrag_path / "config.yaml"
+    if not config_yaml.exists():
+        raise ConfigError(
+            f"LeanRAG config.yaml not found at {config_yaml}. "
+            "Ensure the LeanRAG submodule has a config.yaml file."
+        )
+
     # Add to sys.path if not already there
     leanrag_path_str = str(leanrag_path)
     if leanrag_path_str not in sys.path:
         sys.path.insert(0, leanrag_path_str)
         logger.debug(f"Added leanrag submodule to sys.path: {leanrag_path_str}")
 
-    # Verify import works now
-    try:
-        import leanrag  # noqa: F401
-    except ImportError as e:
-        raise ConfigError(
-            f"Failed to import leanrag after adding to path: {e}"
-        ) from e
+    # Import leanrag with CWD temporarily changed to the submodule directory.
+    # LeanRAG's llm.py loads config.yaml at import time from CWD, so we must
+    # be in the directory containing config.yaml during import.
+    original_cwd = os.getcwd()
+    with _chdir_lock:
+        try:
+            os.chdir(leanrag_path)
+            logger.debug(f"Changed to leanrag directory for import: {leanrag_path}")
+            import leanrag  # noqa: F401
+        except (ImportError, FileNotFoundError) as e:
+            raise ConfigError(
+                f"Failed to import leanrag after adding to path: {e}"
+            ) from e
+        finally:
+            os.chdir(original_cwd)
+            logger.debug(f"Restored original directory: {original_cwd}")
 
 
 @dataclass
@@ -148,13 +221,18 @@ class LeanRAGConfig:
     falkordb_host: str = "localhost"
     falkordb_port: int = 6379
 
-    # LLM configuration (optional)
+    # LLM configuration (maps to DEEPSEEK_* env vars)
+    llm_api_key: str | None = None
     llm_api_base: str | None = None
     llm_model: str | None = None
 
-    # Embedding configuration (optional)
+    # Embedding configuration (maps to GLM_* env vars)
+    # Note: LeanRAG's embedding endpoint uses raw HTTP without auth (no API key)
     embedding_api_base: str | None = None
     embedding_model: str | None = None
+
+    # Database password (maps to FALKORDB_PASSWORD)
+    falkordb_password: str | None = None
 
     # Working directory for exports
     work_dir: Path | None = None
@@ -194,12 +272,14 @@ class LeanRAGConfig:
         db = resolve_database_config()
 
         return cls(
+            llm_api_key=llm.api_key,
             llm_api_base=llm.api_base if llm.api_base != "https://api.openai.com/v1" else None,
             llm_model=llm.model,
             embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
             embedding_model=embedding.model,
             falkordb_host=db.host,
             falkordb_port=db.port,
+            falkordb_password=db.password if db.password else None,
             max_workers=get_leanrag_max_workers(),
         )
 
@@ -227,7 +307,60 @@ class LeanRAGBackend(MemoryBackend):
 
     def __init__(self, config: LeanRAGConfig | None = None) -> None:
         self.config = config or LeanRAGConfig()
+        self._apply_config_to_env()  # Bridge config to LeanRAG's expected env vars
         self._validate_config()
+
+    def _apply_config_to_env(self) -> None:
+        """Set environment variables from resolved config.
+
+        LeanRAG's config.yaml uses ${VAR} substitution to read environment variables.
+        This method bridges the unified watercooler config to LeanRAG's expected env vars.
+
+        Equivalence mapping (Watercooler standard → LeanRAG):
+            LLM_API_KEY      → DEEPSEEK_API_KEY
+            LLM_MODEL        → DEEPSEEK_MODEL
+            LLM_API_BASE     → DEEPSEEK_BASE_URL
+            EMBEDDING_MODEL  → GLM_MODEL
+            EMBEDDING_API_BASE → GLM_BASE_URL
+
+        Database vars use the same names in both systems:
+            FALKORDB_HOST, FALKORDB_PORT, FALKORDB_PASSWORD
+
+        Priority: If the LeanRAG var is already set, we don't override it.
+        If only the watercooler standard var is set, we bridge it to LeanRAG's name.
+        """
+        # Bridge standard watercooler env vars to LeanRAG equivalents
+        # This allows users to use either naming convention
+        standard_to_leanrag = [
+            ("LLM_API_KEY", "DEEPSEEK_API_KEY"),
+            ("LLM_MODEL", "DEEPSEEK_MODEL"),
+            ("LLM_API_BASE", "DEEPSEEK_BASE_URL"),
+            ("EMBEDDING_MODEL", "GLM_MODEL"),
+            ("EMBEDDING_API_BASE", "GLM_BASE_URL"),
+        ]
+        for standard_var, leanrag_var in standard_to_leanrag:
+            if leanrag_var not in os.environ and standard_var in os.environ:
+                os.environ[leanrag_var] = os.environ[standard_var]
+                logger.debug(f"Bridged {standard_var} → {leanrag_var}")
+
+        # Set from resolved config (only if not already set)
+        env_mappings = [
+            # LLM config (used by generate_text via OpenAI client)
+            ("DEEPSEEK_API_KEY", self.config.llm_api_key),
+            ("DEEPSEEK_MODEL", self.config.llm_model),
+            ("DEEPSEEK_BASE_URL", self.config.llm_api_base),
+            # Embedding config (used by embedding() via raw HTTP POST - no auth)
+            ("GLM_BASE_URL", self.config.embedding_api_base),
+            ("GLM_MODEL", self.config.embedding_model),
+            # Database config
+            ("FALKORDB_HOST", self.config.falkordb_host),
+            ("FALKORDB_PORT", str(self.config.falkordb_port) if self.config.falkordb_port else None),
+            ("FALKORDB_PASSWORD", self.config.falkordb_password),
+        ]
+        for env_name, value in env_mappings:
+            if value and env_name not in os.environ:
+                os.environ[env_name] = value
+                logger.debug(f"Set {env_name} from unified config")
 
     def _validate_config(self) -> None:
         """Validate configuration and LeanRAG availability."""
@@ -423,17 +556,32 @@ class LeanRAGBackend(MemoryBackend):
         chunk_file.write_text(json.dumps(serialized, indent=2))
         return chunk_file
 
-    def index(self, chunks: ChunkPayload) -> IndexResult:
+    def index(
+        self,
+        chunks: ChunkPayload,
+        progress_callback: Any | None = None,
+    ) -> IndexResult:
         """
         Run LeanRAG entity extraction and graph building.
 
         Executes LeanRAG pipeline:
         1. triple_extraction (bypasses LeanRAG chunking)
         2. build_hierarchical_graph() to construct hierarchical graph (native)
+
+        Args:
+            chunks: ChunkPayload containing chunks to index
+            progress_callback: Optional callback for progress updates.
+                Signature: (stage: str, step: str, current: int, total: int) -> None
         """
         import logging
+        import time
 
         logger = logging.getLogger(__name__)
+
+        def _report(stage: str, step: str, current: int = 0, total: int = 0) -> None:
+            """Report progress via callback if provided."""
+            if progress_callback:
+                progress_callback(stage, step, current, total)
 
         work_dir = self.config.work_dir or Path(tempfile.mkdtemp(prefix="leanrag-index-"))
 
@@ -453,6 +601,11 @@ class LeanRAGBackend(MemoryBackend):
                 corpus = json.load(fh)
             chunks_dict = {item["hash_code"]: item["text"] for item in corpus}
 
+            # Stage 1: Triple extraction (entity/relation extraction via LLM)
+            num_chunks = len(chunks_dict)
+            _report("triple_extraction", "starting", 0, num_chunks)
+            extraction_start = time.perf_counter()
+
             # Thread-safe directory change AND sys.path modification
             with _chdir_lock:
                 # Add LeanRAG to path inside lock to prevent race conditions
@@ -466,16 +619,45 @@ class LeanRAGBackend(MemoryBackend):
                     from leanrag.extraction.chunk import triple_extraction
                     from leanrag.core.llm import generate_text_async
 
+                    # Wrap LLM function to track progress
+                    # Each chunk requires ~4-6 LLM calls (entity, relation, gleaning)
+                    llm_call_count = [0]
+                    last_report_time = [time.perf_counter()]
+                    report_interval = 10.0  # Report every 10 seconds
+
+                    async def _tracked_llm(prompt: str, **kwargs) -> str:
+                        result = await generate_text_async(prompt, **kwargs)
+                        llm_call_count[0] += 1
+                        # Report progress periodically
+                        now = time.perf_counter()
+                        if now - last_report_time[0] >= report_interval:
+                            elapsed = now - extraction_start
+                            # Estimate: ~5 LLM calls per chunk
+                            estimated_chunks = llm_call_count[0] // 5
+                            _report("triple_extraction", "processing", estimated_chunks, num_chunks)
+                            last_report_time[0] = now
+                        return result
+
                     asyncio.run(
                         triple_extraction(
-                            chunks_dict, generate_text_async, str(work_dir), save_filtered=False
+                            chunks_dict, _tracked_llm, str(work_dir), save_filtered=False
                         )
                     )
                 finally:
                     os.chdir(original_cwd)
 
-            # Native graph building (replaces subprocess call to build.py)
+            extraction_elapsed = time.perf_counter() - extraction_start
+            _report("triple_extraction", "complete", num_chunks, num_chunks)
+            logger.info(f"Triple extraction complete: {num_chunks} chunks, {llm_call_count[0]} LLM calls in {extraction_elapsed:.1f}s")
+
+            # Stage 2: Hierarchical graph building
+            _report("graph_building", "starting", 0, 5)
+            build_start = time.perf_counter()
             logger.info(f"Running LeanRAG graph building (native) at {work_dir}")
+
+            # Progress callback wrapper for build_hierarchical_graph
+            def _build_progress(step_name: str, current: int, total: int) -> None:
+                _report("graph_building", step_name, current, total)
 
             # Import inside lock context to ensure sys.path is set
             with _chdir_lock:
@@ -490,11 +672,15 @@ class LeanRAGBackend(MemoryBackend):
 
                     build_result = build_hierarchical_graph(
                         working_dir=str(work_dir),
-                        max_workers=8,  # Default parallelism
+                        max_workers=self.config.max_workers,
                         fresh_start=False,  # Allow checkpoint resume
+                        progress_callback=_build_progress,
                     )
                 finally:
                     os.chdir(original_cwd)
+
+            build_elapsed = time.perf_counter() - build_start
+            _report("graph_building", "complete", 5, 5)
 
             if build_result.errors:
                 logger.warning(f"Graph building completed with errors: {build_result.errors}")
@@ -631,6 +817,7 @@ class LeanRAGBackend(MemoryBackend):
         group_ids: Sequence[str] | None = None,
         max_results: int = 10,
         entity_types: list[str] | None = None,
+        level_mode: Literal[0, 1, 2] = 2,
     ) -> list[dict[str, Any]]:
         """Search for entity nodes using vector similarity search.
 
@@ -639,6 +826,10 @@ class LeanRAGBackend(MemoryBackend):
             group_ids: Optional list of group IDs to filter by (ignored - LeanRAG uses separate databases)
             max_results: Maximum number of results to return
             entity_types: Optional list of entity types to filter by (not implemented in LeanRAG)
+            level_mode: LeanRAG hierarchy level mode (maps to search_vector_search):
+                - 0: Base entities only (precise, individual nodes)
+                - 1: Clusters only (hierarchical summaries)
+                - 2: All levels (base + clusters, default)
 
         Returns:
             List of normalized CoreResult dictionaries with node data
@@ -679,12 +870,13 @@ class LeanRAGBackend(MemoryBackend):
                     # Convert text query to embedding vector
                     query_embedding = embedding(query)
 
-                    # Execute vector search (level_mode=2 means all levels: base + clusters)
+                    # Execute vector search with specified level_mode
+                    logger.debug(f"LeanRAG search_nodes: level_mode={level_mode}")
                     results = search_vector_search(
                         str(work_dir),
                         query_embedding,
                         topk=max_results,
-                        level_mode=2
+                        level_mode=level_mode
                     )
 
                     # Normalize to CoreResult format

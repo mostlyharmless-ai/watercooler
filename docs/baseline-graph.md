@@ -72,9 +72,10 @@ print(f"Generated {manifest['nodes_written']} nodes, {manifest['edges_written']}
 from watercooler.baseline_graph import export_all_threads, SummarizerConfig
 
 # Configure for local llama-server instance
+# Model-aware prompting is automatic (e.g., /no_think for Qwen3)
 config = SummarizerConfig(
     api_base="http://localhost:8000/v1",
-    model="llama3.2:3b",
+    model="qwen3:1.7b",  # Recommended for summarization
     timeout=30.0,
 )
 
@@ -92,25 +93,42 @@ manifest = export_all_threads(
 | Option | Default | Description |
 |--------|---------|-------------|
 | `api_base` | `http://localhost:8000/v1` | OpenAI-compatible API endpoint |
-| `model` | `llama3.2:3b` | Model name for LLM summarization |
-| `api_key` | `local` | API key (local llama-server doesn't require one) |
+| `model` | `qwen3:1.7b` | Model name for LLM summarization (recommended) |
+| `api_key` | (resolved) | API key - resolved from env vars or credentials.toml |
 | `timeout` | `30.0` | Request timeout in seconds |
 | `max_tokens` | `256` | Maximum tokens for LLM response |
+| `system_prompt` | `""` (auto-detect) | System prompt for chat-style LLMs |
+| `prompt_prefix` | `""` (auto-detect) | Prefix for user prompt (e.g., `/no_think` for Qwen3) |
+| `summary_example_input` | OAuth2 example | Few-shot input example for format compliance |
+| `summary_example_output` | Summary with tags | Few-shot output example showing tag format |
 | `extractive_max_chars` | `200` | Max chars for extractive summaries |
 | `include_headers` | `True` | Include markdown headers in extractive summary |
 | `max_headers` | `3` | Max headers to include |
 | `max_thread_entries` | `10` | Max entries to include in thread summaries |
 | `prefer_extractive` | `False` | Force extractive mode (skip LLM) |
 
+### Model-Aware Prompting
+
+The summarizer automatically detects the model family and applies optimal prompting:
+
+| Model Family | Prompt Prefix | System Prompt |
+|--------------|---------------|---------------|
+| Qwen3 | `/no_think ` (disables thinking mode) | (none) |
+| Qwen2.5, Llama, others | (none) | Summarization instruction |
+
+This auto-detection is based on the model name. Set `system_prompt` or `prompt_prefix` explicitly to override.
+
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BASELINE_GRAPH_API_BASE` | `http://localhost:8000/v1` | LLM API endpoint |
-| `BASELINE_GRAPH_MODEL` | `llama3.2:3b` | LLM model name |
-| `BASELINE_GRAPH_API_KEY` | `local` | API key for LLM |
+| `BASELINE_GRAPH_MODEL` | `qwen3:1.7b` | LLM model name (recommended for summarization) |
+| `BASELINE_GRAPH_API_KEY` | (empty) | API key for LLM (or use `OPENAI_API_KEY`, or credentials.toml) |
 | `BASELINE_GRAPH_TIMEOUT` | `30.0` | Request timeout (seconds) |
 | `BASELINE_GRAPH_MAX_TOKENS` | `256` | Max response tokens |
+| `LLM_SYSTEM_PROMPT` | (auto-detect) | System prompt (empty = auto-detect by model family) |
+| `LLM_PROMPT_PREFIX` | (auto-detect) | User prompt prefix (empty = auto-detect by model family) |
 | `BASELINE_GRAPH_EXTRACTIVE_ONLY` | `false` | Force extractive mode (`1`, `true`, `yes`) |
 
 ### Config File (`config.toml`)
@@ -121,10 +139,14 @@ prefer_extractive = false
 
 [baseline_graph.llm]
 api_base = "http://localhost:8000/v1"
-model = "llama3.2:3b"
-api_key = "local"
+model = "qwen3:1.7b"  # Recommended for summarization
 timeout = 30.0
 max_tokens = 256
+# NOTE: API keys go in credentials.toml, not here
+
+# Prompt configuration (optional - auto-detected from model)
+# system_prompt = ""        # Empty = auto-detect by model family
+# prompt_prefix = ""        # Empty = auto-detect (e.g., /no_think for Qwen3)
 
 [baseline_graph.extractive]
 max_chars = 200
@@ -132,11 +154,25 @@ include_headers = true
 max_headers = 3
 ```
 
+### API Key Configuration
+
+API keys should be stored in `~/.watercooler/credentials.toml`:
+
+```toml
+# For OpenAI (when using api_base = "https://api.openai.com/v1")
+[openai]
+api_key = "sk-..."
+```
+
+Or use environment variables: `OPENAI_API_KEY`, `BASELINE_GRAPH_API_KEY`, or `LLM_API_KEY`.
+
 ### Configuration Precedence
 
 1. Environment variables (highest priority)
-2. `config.toml` `[baseline_graph]` section
-3. Built-in defaults (lowest priority)
+2. Provider-specific env vars (`OPENAI_API_KEY` based on api_base URL)
+3. `credentials.toml` provider sections (`[openai].api_key`, etc.)
+4. `config.toml` `[baseline_graph]` section (for non-secret settings)
+5. Built-in defaults (lowest priority)
 
 ## Output Format
 
@@ -314,8 +350,13 @@ llama-server auto-starts when configured for localhost endpoints. Models auto-do
 ```toml
 [baseline_graph.llm]
 api_base = "http://localhost:8000/v1"
-model = "llama3.2:3b"
+model = "qwen3:1.7b"  # Recommended for summarization
 ```
+
+**Recommended models for summarization:**
+- `qwen3:1.7b` - Fast, efficient (auto `/no_think` prefix applied)
+- `qwen2.5:3b` - Higher quality, slightly slower
+- `llama3.2:3b` - Balanced option
 
 To disable auto-provisioning:
 
@@ -328,10 +369,17 @@ models = false        # Don't auto-download GGUF models
 ### Any OpenAI-Compatible API
 
 ```toml
+# In config.toml (settings)
 [baseline_graph.llm]
 api_base = "https://your-api.example.com/v1"
 model = "your-model"
-api_key = "your-api-key"
+
+# In credentials.toml (secrets) - if using OpenAI endpoint:
+# [openai]
+# api_key = "your-api-key"
+#
+# Or use environment variable:
+# export OPENAI_API_KEY="your-api-key"
 ```
 
 ## Fallback Behavior
@@ -380,7 +428,7 @@ auto_detect_services = true
 
 # Service endpoints
 summarizer_api_base = "http://localhost:8000/v1"  # llama-server (LLM)
-summarizer_model = "llama3.2:3b"
+summarizer_model = "qwen3:1.7b"  # Recommended (auto /no_think)
 embedding_api_base = "http://localhost:8080/v1"   # llama-server (embeddings)
 embedding_model = "bge-m3"
 ```

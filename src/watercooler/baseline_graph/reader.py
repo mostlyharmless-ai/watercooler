@@ -62,6 +62,7 @@ class GraphEntry:
     pr_refs: List[str] = None
     commit_refs: List[str] = None
     access_count: int = 0
+    code_branch: Optional[str] = None
 
     def __post_init__(self):
         if self.file_refs is None:
@@ -148,6 +149,7 @@ def _node_to_entry(node: Dict[str, Any]) -> GraphEntry:
         pr_refs=node.get("pr_refs", []),
         commit_refs=node.get("commit_refs", []),
         access_count=node.get("access_count", 0),
+        code_branch=node.get("code_branch"),
     )
 
 
@@ -196,9 +198,28 @@ def list_threads_from_graph(
     return threads
 
 
+def _matches_code_branch(entry_branch: Optional[str], filter_branch: Optional[str]) -> bool:
+    """Check if an entry's code_branch matches the filter.
+
+    Args:
+        entry_branch: The code_branch tag on the entry (may be None)
+        filter_branch: The filter value. None or "*" means match all.
+
+    Returns:
+        True if the entry matches the filter
+    """
+    if not filter_branch or filter_branch == "*":
+        return True
+    if not entry_branch:
+        # Entries without a code_branch tag are visible from any branch
+        return True
+    return entry_branch == filter_branch
+
+
 def read_thread_from_graph(
     threads_dir: Path,
     topic: str,
+    code_branch: Optional[str] = None,
 ) -> Optional[Tuple[GraphThread, List[GraphEntry]]]:
     """Read thread with all entries from graph.
 
@@ -207,6 +228,7 @@ def read_thread_from_graph(
     Args:
         threads_dir: Threads directory
         topic: Thread topic
+        code_branch: Filter entries by code branch. None or "*" returns all.
 
     Returns:
         Tuple of (thread, entries) or None if not found
@@ -223,7 +245,9 @@ def read_thread_from_graph(
     # Load entries
     entries: List[GraphEntry] = []
     for node in storage.load_thread_entries(graph_dir, topic):
-        entries.append(_node_to_entry(node))
+        entry = _node_to_entry(node)
+        if _matches_code_branch(entry.code_branch, code_branch):
+            entries.append(entry)
 
     # Sort entries by index
     entries.sort(key=lambda e: e.index)
@@ -269,6 +293,7 @@ def get_entries_range_from_graph(
     topic: str,
     start_index: int = 0,
     end_index: Optional[int] = None,
+    code_branch: Optional[str] = None,
 ) -> List[GraphEntry]:
     """Get range of entries from graph.
 
@@ -279,6 +304,7 @@ def get_entries_range_from_graph(
         topic: Thread topic
         start_index: Starting index (inclusive)
         end_index: Ending index (inclusive), or None for all
+        code_branch: Filter entries by code branch. None or "*" returns all.
 
     Returns:
         List of GraphEntry objects in index order
@@ -293,7 +319,9 @@ def get_entries_range_from_graph(
         if end_index is not None and idx > end_index:
             continue
 
-        entries.append(_node_to_entry(node))
+        entry = _node_to_entry(node)
+        if _matches_code_branch(entry.code_branch, code_branch):
+            entries.append(entry)
 
     # Sort by index
     entries.sort(key=lambda e: e.index)
@@ -394,6 +422,7 @@ def format_entry_json(entry: GraphEntry) -> Dict[str, Any]:
         "pr_refs": entry.pr_refs,
         "commit_refs": entry.commit_refs,
         "access_count": entry.access_count,
+        "code_branch": entry.code_branch,
     }
 
 

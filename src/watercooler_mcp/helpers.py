@@ -3,10 +3,9 @@
 This module contains:
 - Startup warnings system
 - Context validation helpers
-- Branch validation and sync helpers
 - Thread parsing and metadata extraction
 - Entry loading and formatting
-- Graph-first read optimization helpers
+- Graph-canonical read helpers
 - Commit footer building
 
 These are extracted from server.py for modularity and testability.
@@ -16,8 +15,6 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from git import Repo
-
 # Local application imports
 from watercooler import commands, fs
 from watercooler.config_facade import config
@@ -26,22 +23,13 @@ from watercooler.baseline_graph.reader import (
     is_graph_available,
     list_threads_from_graph,
     read_thread_from_graph,
+    get_entries_range_from_graph,
     increment_access_count,
     GraphEntry,
 )
 from .config import (
     ThreadContext,
-    get_git_sync_manager_from_context,
     resolve_thread_context,
-)
-from .sync import (
-    BranchPairingError,
-    BranchMismatch,
-    BranchPairingResult,
-    validate_branch_pairing,
-    sync_branch_history,
-    auto_merge_to_main,
-    _find_main_branch,
 )
 from .observability import log_debug
 
@@ -132,301 +120,6 @@ from .validation import (
 )
 
 
-# ============================================================================
-# Branch Validation and Sync Helpers
-# ============================================================================
-
-
-def _attempt_auto_fix_divergence(
-    context: ThreadContext,
-    validation_result: BranchPairingResult,
-) -> Optional[BranchPairingResult]:
-    """Attempt to auto-fix branch history divergence via rebase or merge.
-
-    Args:
-        context: Thread context with code and threads repo info
-        validation_result: The failed validation result containing divergence info
-
-    Returns:
-        New BranchPairingResult on successful fix, None on failure.
-        On failure, raises BranchPairingError with details.
-
-    Raises:
-        BranchPairingError: If auto-fix fails and requires manual intervention
-    """
-    log_debug("Detected branch history divergence, attempting auto-fix")
-
-    # Check if this is a "merge to main" case (code PR merged, threads needs to follow)
-    merge_to_main_mismatch = None
-    for mismatch in validation_result.mismatches:
-        if mismatch.type == "branch_history_diverged" and mismatch.needs_merge_to_main:
-            merge_to_main_mismatch = mismatch
-            break
-
-    # Handle merge-to-main case: code branch merged to main, threads should follow
-    # Apply conservative evidence gating: only attempt auto-merge when the validation
-    # result explicitly requests merge-to-main (needs_merge_to_main=True) AND a main
-    # branch exists. Otherwise, surface the mismatch for explicit resolution.
-    if merge_to_main_mismatch:
-        try:
-            threads_repo = Repo(context.threads_dir, search_parent_directories=True)
-            main_branch = _find_main_branch(threads_repo)
-            if not main_branch:
-                raise BranchPairingError(
-                    "Cannot auto-merge: main branch not found in threads repo"
-                )
-
-            feature_branch = validation_result.threads_branch or context.code_branch
-
-            success, message = auto_merge_to_main(
-                threads_repo,
-                feature_branch,
-                main_branch,
-            )
-
-            if success:
-                log_debug(f"Auto-merged threads to main: {message}")
-                # Re-validate to confirm fix worked
-                revalidation = validate_branch_pairing(
-                    code_repo=context.code_root,
-                    threads_repo=context.threads_dir,
-                    strict=True,
-                    check_history=True,
-                )
-                if revalidation.valid:
-                    log_debug("Branch pairing now valid after auto-merge to main")
-                    return revalidation
-                else:
-                    log_debug(
-                        f"Auto-merge completed but validation still failing: "
-                        f"{revalidation.warnings}"
-                    )
-                    return revalidation
-            else:
-                # Surface for explicit resolution
-                raise BranchPairingError(
-                    f"Auto-merge to main failed: {message}\n"
-                    f"Manual recovery: cd <threads-repo> && git checkout main && "
-                    f"git merge {feature_branch} && git push origin main"
-                )
-        except BranchPairingError:
-            raise
-        except Exception as e:
-            raise BranchPairingError(f"Auto-merge to main failed: {e}")
-
-    # Check if this is a "behind-main" divergence (threads behind main but code not)
-    # vs a local-vs-origin divergence. They require different fix strategies.
-    behind_main_mismatch = None
-    for mismatch in validation_result.mismatches:
-        if mismatch.type == "branch_history_diverged" and "behind main" in mismatch.recovery.lower():
-            behind_main_mismatch = mismatch
-            break
-
-    # Determine the target for rebase
-    onto_branch: Optional[str] = None
-    if behind_main_mismatch:
-        # Need to rebase onto main, not origin/branch
-        try:
-            threads_repo = Repo(context.threads_dir, search_parent_directories=True)
-            onto_branch = _find_main_branch(threads_repo)
-            if onto_branch:
-                log_debug(
-                    f"Behind-main divergence detected, will rebase onto {onto_branch}"
-                )
-            else:
-                log_debug(
-                    "Behind-main divergence detected but couldn't find main branch"
-                )
-        except Exception as e:
-            log_debug(f"Error finding main branch: {e}")
-
-    try:
-        sync_result = sync_branch_history(
-            threads_repo_path=context.threads_dir,
-            branch=validation_result.threads_branch or context.code_branch,
-            strategy="rebase",
-            force=True,  # Uses --force-with-lease for safety
-            onto=onto_branch,  # None for origin/branch, "main" for behind-main fix
-        )
-
-        if not sync_result.success:
-            log_debug(f"Auto-fix failed: {sync_result.details}")
-            error_parts = [
-                "Branch history divergence detected and auto-fix failed:",
-                f"  Code branch: {validation_result.code_branch or '(detached/unknown)'}",
-                f"  Threads branch: {validation_result.threads_branch or '(detached/unknown)'}",
-                f"  Fix attempt: {sync_result.details}",
-            ]
-            if sync_result.needs_manual_resolution:
-                error_parts.append("  Manual resolution required.")
-            error_parts.append(
-                "\nManual recovery: watercooler_sync_branch_state with operation='recover'"
-            )
-            raise BranchPairingError("\n".join(error_parts))
-
-        log_debug(f"Auto-fixed branch divergence: {sync_result.details}")
-
-        # Re-validate to confirm fix worked
-        revalidation = validate_branch_pairing(
-            code_repo=context.code_root,
-            threads_repo=context.threads_dir,
-            strict=True,
-            check_history=True,
-        )
-
-        if revalidation.valid:
-            log_debug("Branch pairing now valid after auto-fix")
-            return revalidation
-        else:
-            log_debug(
-                f"Auto-fix completed but validation still failing: "
-                f"{revalidation.warnings}"
-            )
-            # Return the updated result so caller can report remaining issues
-            return revalidation
-
-    except BranchPairingError:
-        raise
-    except Exception as fix_error:
-        log_debug(f"Auto-fix exception: {fix_error}")
-        error_parts = [
-            "Branch history divergence detected, auto-fix failed:",
-            f"  Code branch: {validation_result.code_branch or '(detached/unknown)'}",
-            f"  Threads branch: {validation_result.threads_branch or '(detached/unknown)'}",
-            f"  Error: {fix_error}",
-            "\nManual recovery: watercooler_sync_branch_state with operation='recover'",
-        ]
-        raise BranchPairingError("\n".join(error_parts))
-
-
-def _validate_and_sync_branches(
-    context: ThreadContext,
-    skip_validation: bool = False,
-) -> None:
-    """Validate branch pairing and sync branches if needed.
-
-    This helper is used by both read and write operations to ensure
-    the threads repo is on the correct branch before any operation.
-
-    Includes automatic detection and repair of:
-    1. Branch name mismatch: Checks out threads repo to match code repo branch
-    2. Branch history divergence: Rebases threads branch after code repo rebase/force-push
-
-    When auto-fix is enabled (WATERCOOLER_AUTO_BRANCH=1, default), these issues
-    are resolved automatically. If auto-fix fails, raises BranchPairingError.
-
-    Side effects:
-        - May checkout threads repo to different branch
-        - May rebase threads branch to match code branch history
-        - May push to remote with --force-with-lease if divergence detected
-        - Blocks operation if conflicts occur during auto-fix
-
-    Args:
-        context: Thread context with code and threads repo info
-        skip_validation: If True, skip strict validation (used for recovery operations)
-
-    Raises:
-        BranchPairingError: If branch validation fails and auto-fix is not possible,
-                           or if auto-fix encounters conflicts requiring manual resolution
-    """
-    sync = get_git_sync_manager_from_context(context)
-    if not sync:
-        return
-
-    # Validate branch pairing before any operation
-    if not skip_validation and context.code_root and context.threads_dir:
-        try:
-            validation_result = validate_branch_pairing(
-                code_repo=context.code_root,
-                threads_repo=context.threads_dir,
-                strict=True,
-                check_history=True,  # Enable divergence detection
-            )
-            if not validation_result.valid:
-                # Check if this is a branch name mismatch we can auto-fix via checkout
-                branch_mismatch: Optional[BranchMismatch] = next(
-                    (
-                        m
-                        for m in validation_result.mismatches
-                        if m.type == "branch_name_mismatch"
-                    ),
-                    None,
-                )
-
-                if branch_mismatch and context.code_branch and _should_auto_branch():
-                    log_debug(
-                        f"Branch name mismatch detected, auto-fixing via checkout "
-                        f"to {context.code_branch}"
-                    )
-                    try:
-                        sync.ensure_branch(context.code_branch)
-                        # Re-validate after branch checkout
-                        validation_result = validate_branch_pairing(
-                            code_repo=context.code_root,
-                            threads_repo=context.threads_dir,
-                            strict=True,
-                            check_history=True,
-                        )
-                        if validation_result.valid:
-                            log_debug(
-                                f"Branch name mismatch auto-fixed: checked out to "
-                                f"{context.code_branch}"
-                            )
-                        else:
-                            log_debug(
-                                f"Branch checkout completed but validation still "
-                                f"failing: {validation_result.warnings}"
-                            )
-                    except Exception as e:
-                        log_debug(f"Auto-fix branch checkout failed: {e}")
-
-                # Check if this is a history divergence we can auto-fix
-                history_mismatch: Optional[BranchMismatch] = next(
-                    (
-                        m
-                        for m in validation_result.mismatches
-                        if m.type == "branch_history_diverged"
-                    ),
-                    None,
-                )
-
-                if history_mismatch:
-                    # Attempt auto-fix - may raise BranchPairingError on failure
-                    validation_result = _attempt_auto_fix_divergence(
-                        context, validation_result
-                    )
-
-                # Unified error reporting for any remaining validation failures
-                # (non-history issues, or edge case where auto-fix succeeded but
-                # other mismatches remain)
-                if not validation_result.valid:
-                    error_parts = [
-                        "Branch pairing validation failed:",
-                        f"  Code branch: {validation_result.code_branch or '(detached/unknown)'}",
-                        f"  Threads branch: {validation_result.threads_branch or '(detached/unknown)'}",
-                    ]
-                    if validation_result.mismatches:
-                        error_parts.append("\nMismatches:")
-                        for mismatch in validation_result.mismatches:
-                            error_parts.append(
-                                f"  - {mismatch.type}: {mismatch.recovery}"
-                            )
-                    if validation_result.warnings:
-                        error_parts.append("\nWarnings:")
-                        for warning in validation_result.warnings:
-                            error_parts.append(f"  - {warning}")
-                    error_parts.append(
-                        "\nRun: watercooler_sync_branch_state with "
-                        "operation='checkout' to sync branches"
-                    )
-                    raise BranchPairingError("\n".join(error_parts))
-        except BranchPairingError:
-            raise
-        except Exception as e:
-            # Log but don't block on validation errors (e.g., repo not initialized)
-            log_debug(f"Branch validation warning: {e}")
-
-
 # _refresh_threads is now in validation.py - re-export for backward compatibility
 from .validation import _refresh_threads  # noqa: F401 (re-export)
 
@@ -441,12 +134,11 @@ def _normalize_status(s: str) -> str:
     return s.strip().lower()
 
 
-def _extract_thread_metadata(content: str, topic: str) -> tuple[str, str, str, str]:
-    """Extract thread metadata from content string without re-reading the file.
+def _extract_thread_metadata_from_md(content: str, topic: str) -> tuple[str, str, str, str]:
+    """Extract thread metadata from markdown content string.
 
-    DEPRECATED: For local mode, prefer _get_thread_metadata_graph_first() which
-    reads from the canonical graph. This MD-parsing version is still needed for
-    hosted mode where we only have GitHub API content.
+    This MD-parsing version is needed for hosted mode where we only have
+    GitHub API content, and as a fallback when graph data is unavailable.
 
     Args:
         content: Full thread markdown content
@@ -471,12 +163,12 @@ def _extract_thread_metadata(content: str, topic: str) -> tuple[str, str, str, s
     return title, status, ball, last
 
 
-def _get_thread_metadata_graph_first(
+def _get_thread_metadata(
     threads_dir: Path, topic: str, content: str | None = None
 ) -> tuple[str, str, str, str]:
-    """Get thread metadata from graph with MD fallback.
+    """Get thread metadata from canonical graph with MD fallback.
 
-    Graph-first: reads from canonical graph JSONL. Falls back to MD parsing
+    Reads from canonical graph JSONL. Falls back to MD parsing
     if graph data is not available.
 
     Args:
@@ -515,7 +207,7 @@ def _get_thread_metadata_graph_first(
         else:
             return topic, "open", "unknown", fs.utcnow_iso()
 
-    return _extract_thread_metadata(content, topic)
+    return _extract_thread_metadata_from_md(content, topic)
 
 
 def _resolve_format(
@@ -538,10 +230,10 @@ def _resolve_format(
 # ============================================================================
 
 
-def _load_thread_entries(
+def _load_entries_from_md(
     topic: str, context: ThreadContext
 ) -> tuple[str | None, list[ThreadEntry]]:
-    """Load and parse thread entries from disk.
+    """Load and parse thread entries from markdown on disk.
 
     Thread Safety Note:
         This function performs unlocked reads. This is safe because:
@@ -559,7 +251,7 @@ def _load_thread_entries(
 
     if not thread_path.exists():
         if threads_dir.exists():
-            available_list = sorted(p.stem for p in threads_dir.glob("*.md"))
+            available_list = [p.stem for p in fs.discover_thread_files(threads_dir)]
             if len(available_list) > 10:
                 available = (
                     ", ".join(available_list[:10])
@@ -580,7 +272,7 @@ def _load_thread_entries(
     return (None, entries)
 
 
-def _entry_header_payload(entry: ThreadEntry) -> Dict[str, object]:
+def _entry_header_payload(entry: ThreadEntry, summary: str = "") -> Dict[str, object]:
     return {
         "index": entry.index,
         "entry_id": entry.entry_id,
@@ -589,43 +281,27 @@ def _entry_header_payload(entry: ThreadEntry) -> Dict[str, object]:
         "role": entry.role,
         "type": entry.entry_type,
         "title": entry.title,
-        "header": entry.header,
-        "start_line": entry.start_line,
-        "end_line": entry.end_line,
-        "start_offset": entry.start_offset,
-        "end_offset": entry.end_offset,
+        "summary": summary,
     }
 
 
-def _entry_full_payload(entry: ThreadEntry) -> Dict[str, object]:
+def _entry_full_payload(entry: ThreadEntry, summary: str = "") -> Dict[str, object]:
     """Convert ThreadEntry to full JSON payload including body content.
-
-    Note on whitespace handling:
-        - 'body' field preserves original whitespace from the thread file
-        - 'markdown' field uses stripped body to avoid trailing whitespace in output
-        This ensures markdown rendering is clean while preserving original content.
 
     Args:
         entry: ThreadEntry to convert
+        summary: LLM-generated summary (1-2 sentences) from graph
 
     Returns:
-        Dictionary with entry metadata, body, and markdown representation
+        Dictionary with entry metadata, summary, and body
     """
-    data = _entry_header_payload(entry)
-    # Handle whitespace-only bodies as empty
-    body_content = entry.body.strip() if entry.body else ""
-    data.update(
-        {
-            "body": entry.body,  # Preserve original whitespace
-            "markdown": entry.header
-            + ("\n\n" + body_content if body_content else ""),  # Clean output
-        }
-    )
+    data = _entry_header_payload(entry, summary=summary)
+    data["body"] = entry.body
     return data
 
 
 # ============================================================================
-# Graph-First Read Helpers
+# Graph-Canonical Read Helpers
 # ============================================================================
 
 
@@ -699,13 +375,18 @@ def _graph_entry_to_thread_entry(
         entry_type=graph_entry.entry_type,
         title=graph_entry.title,
         entry_id=graph_entry.entry_id,
+        start_line=0,
+        end_line=0,
+        start_offset=0,
+        end_offset=0,
     )
 
 
-def _load_thread_entries_graph_first(
+def _load_entries(
     topic: str,
     context: ThreadContext,
-) -> tuple[str | None, list[ThreadEntry]]:
+    code_branch: str | None = None,
+) -> tuple[str | None, list[ThreadEntry], dict[str, str]]:
     """Load thread entries from canonical graph JSONL, with legacy markdown backfill.
 
     Canonical source of truth is the baseline graph JSONL (`graph/baseline/*`) in the
@@ -721,18 +402,27 @@ def _load_thread_entries_graph_first(
         context: Thread context
 
     Returns:
-        Tuple of (error_message, entries). Error is None on success.
+        Tuple of (error_message, entries, summaries). Error is None on success.
+        summaries maps entry_id → LLM-generated summary string.
     """
     threads_dir = context.threads_dir
 
     # Try graph first if available
     if _use_graph_for_reads(threads_dir):
         try:
-            result = read_thread_from_graph(threads_dir, topic)
+            result = read_thread_from_graph(threads_dir, topic, code_branch=code_branch)
             if not result:
                 log_debug(f"[GRAPH] Topic '{topic}' not in graph, falling back to markdown")
             if result:
                 graph_thread, graph_entries = result
+
+                # Extract summaries from graph entries
+                summaries: dict[str, str] = {
+                    ge.entry_id: ge.summary
+                    for ge in graph_entries
+                    if ge.entry_id and ge.summary
+                }
+
                 # Graph entries may not have full body - need to get from markdown
                 # For now, use summaries from graph (bodies are optional in graph)
                 thread_path = fs.thread_path(topic, threads_dir)
@@ -770,17 +460,23 @@ def _load_thread_entries_graph_first(
                                 repaired = read_thread_from_graph(threads_dir, topic)
                                 if repaired:
                                     _, graph_entries = repaired
+                                    # Update summaries from repaired graph
+                                    summaries = {
+                                        ge.entry_id: ge.summary
+                                        for ge in graph_entries
+                                        if ge.entry_id and ge.summary
+                                    }
                             else:
                                 log_debug(
                                     "[GRAPH] Auto-repair failed, using markdown entries"
                                 )
-                                return (None, md_entries)
+                                return (None, md_entries, summaries)
                         except Exception as repair_err:
                             log_debug(
                                 f"[GRAPH] Auto-repair error: {repair_err}, "
                                 "using markdown"
                             )
-                            return (None, md_entries)
+                            return (None, md_entries, summaries)
 
                     # Merge: use graph metadata with markdown bodies
                     entries = []
@@ -798,7 +494,7 @@ def _load_thread_entries_graph_first(
                     log_debug(
                         f"[GRAPH] Loaded {len(entries)} entries from graph for {topic}"
                     )
-                    return (None, entries)
+                    return (None, entries, summaries)
                 else:
                     # No markdown, use graph entries directly
                     entries = [_graph_entry_to_thread_entry(ge) for ge in graph_entries]
@@ -806,22 +502,23 @@ def _load_thread_entries_graph_first(
                         f"[GRAPH] Loaded {len(entries)} entries from graph only "
                         f"for {topic}"
                     )
-                    return (None, entries)
+                    return (None, entries, summaries)
         except Exception as e:
             log_debug(
                 f"[GRAPH] Failed to load from graph, falling back to markdown: {e}"
             )
 
-    # Fallback to markdown parsing
+    # Fallback to markdown parsing (no summaries available)
     log_debug(f"[GRAPH] Using markdown fallback for '{topic}' entries")
-    return _load_thread_entries(topic, context)
+    err, entries = _load_entries_from_md(topic, context)
+    return (err, entries, {})
 
 
-def _list_threads_graph_first(
+def _list_threads(
     threads_dir: Path,
     open_only: bool | None = None,
     agent: str | None = None,
-) -> list[tuple[str, str, str, str, Path, bool]]:
+) -> list[tuple[str, str, str, str, Path, bool, str, int]]:
     """List threads from canonical graph JSONL, with legacy markdown backfill.
 
     Args:
@@ -831,7 +528,7 @@ def _list_threads_graph_first(
             flag based on whether the ball is held by someone else.
 
     Returns:
-        List of thread tuples (title, status, ball, updated, path, is_new)
+        List of thread tuples (title, status, ball, updated, path, is_new, summary, entry_count)
     """
     # Try graph first if available
     if _use_graph_for_reads(threads_dir):
@@ -866,6 +563,8 @@ def _list_threads_graph_first(
                             gt.last_updated,
                             thread_path,
                             is_new,
+                            gt.summary or "",
+                            gt.entry_count,
                         )
                     )
                 log_debug(f"[GRAPH] Listed {len(result)} threads from graph")
@@ -875,9 +574,52 @@ def _list_threads_graph_first(
                 f"[GRAPH] Failed to list from graph, falling back to markdown: {e}"
             )
 
-    # Fallback to markdown
+    # Fallback to markdown (no summaries or entry counts available)
     log_debug("[GRAPH] Using markdown fallback for list_threads")
-    return commands.list_threads(threads_dir=threads_dir, open_only=open_only)
+    md_threads = commands.list_threads(threads_dir=threads_dir, open_only=open_only)
+    # Extend 6-tuples to 8-tuples with empty summary and 0 entry_count
+    return [(t, s, b, u, p, n, "", 0) for t, s, b, u, p, n in md_threads]
+
+
+def _get_thread_summary(threads_dir: Path, topic: str) -> str:
+    """Get thread summary from graph. Returns '' if unavailable."""
+    if _use_graph_for_reads(threads_dir):
+        try:
+            result = read_thread_from_graph(threads_dir, topic)
+            if result:
+                graph_thread, _ = result
+                return graph_thread.summary or ""
+        except Exception as e:
+            log_debug(f"[GRAPH] Failed to get thread summary: {e}")
+    return ""
+
+
+def _scan_thread_entries(
+    threads_dir: Path,
+    topics: list[str],
+) -> dict[str, list[GraphEntry]]:
+    """Load entry summaries for multiple threads in one pass (graph-only).
+
+    Returns dict mapping topic → list[GraphEntry]. Topics without graph data
+    are omitted (empty dict entry).
+
+    Note: Loads all entries for every topic into memory. For repos with many
+    threads and deep history, consider limiting the topics list via the
+    ``open_only`` / ``limit`` filters on ``list_threads`` before calling scan.
+    Each GraphEntry is lightweight (summary + metadata, no bodies), so typical
+    repos (< 100 threads, < 50 entries each) stay well under 10 MB.
+    """
+    result: dict[str, list[GraphEntry]] = {}
+    if not _use_graph_for_reads(threads_dir):
+        return result
+    for topic in topics:
+        try:
+            entries = get_entries_range_from_graph(threads_dir, topic)
+            result[topic] = entries
+        except Exception as e:
+            log_debug(f"[GRAPH] Failed to scan entries for '{topic}': {e}")
+            result[topic] = []
+    return result
 
 
 # ============================================================================

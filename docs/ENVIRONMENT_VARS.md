@@ -24,7 +24,7 @@
 | [`WATERCOOLER_TEMPLATES`](#watercooler_templates) | No | Built-in | MCP & CLI | Custom templates directory |
 | [`WATERCOOLER_USER`](#watercooler_user) | No | OS username | Lock System | Override username in lock files |
 | [`BASELINE_GRAPH_API_BASE`](#baseline_graph_api_base) | No | `http://localhost:8000/v1` | Baseline Graph | LLM API endpoint |
-| [`BASELINE_GRAPH_MODEL`](#baseline_graph_model) | No | `llama3.2:3b` | Baseline Graph | LLM model name |
+| [`BASELINE_GRAPH_MODEL`](#baseline_graph_model) | No | `qwen3:1.7b` | Baseline Graph | LLM model name |
 | [`BASELINE_GRAPH_EXTRACTIVE_ONLY`](#baseline_graph_extractive_only) | No | `false` | Baseline Graph | Force extractive mode |
 | [`WATERCOOLER_GRAPHITI_ENABLED`](#watercooler_graphiti_enabled) | No | `"0"` | MCP Memory | Enable Graphiti memory queries |
 | [`WATERCOOLER_MEMORY_DISABLED`](#watercooler_memory_disabled) | No | Not set | All Memory | Disable all memory backends |
@@ -668,7 +668,7 @@ export BASELINE_GRAPH_API_BASE="https://api.openai.com/v1"
 
 **Required:** No
 
-**Default:** `"llama3.2:3b"`
+**Default:** `"qwen3:1.7b"` (recommended)
 
 **Format:** Model identifier string
 
@@ -676,13 +676,18 @@ export BASELINE_GRAPH_API_BASE="https://api.openai.com/v1"
 
 **Details:**
 
-Specifies which model to use for LLM-based summarization. Use a small, fast model for best results.
+Specifies which model to use for LLM-based summarization. The system auto-detects model family and applies optimal prompting (e.g., `/no_think` prefix for Qwen3 models).
+
+**Recommended models:**
+- `qwen3:1.7b` - Fast, efficient (auto `/no_think` applied)
+- `qwen2.5:3b` - Higher quality, slightly slower
+- `llama3.2:3b` - Balanced option
 
 **Configuration examples:**
 
 **Shell:**
 ```bash
-export BASELINE_GRAPH_MODEL="llama3.2:3b"
+export BASELINE_GRAPH_MODEL="qwen3:1.7b"
 ```
 
 ---
@@ -772,6 +777,64 @@ export BASELINE_GRAPH_EXTRACTIVE_ONLY="true"
 
 ---
 
+### LLM_SYSTEM_PROMPT
+
+**Purpose:** System prompt for chat-style LLMs in summarization.
+
+**Required:** No
+
+**Default:** Auto-detected based on model family
+
+**Format:** String
+
+**Used by:** Baseline Graph Module
+
+**Details:**
+
+When empty (default), the system auto-detects the appropriate system prompt based on model family:
+- Qwen3: No system prompt (uses `/no_think` prefix instead)
+- Qwen2.5, Llama, others: `"You summarize technical entries concisely with relevant tags."`
+
+Set explicitly to override auto-detection.
+
+**Configuration examples:**
+
+**Shell:**
+```bash
+export LLM_SYSTEM_PROMPT="You are a technical summarizer."
+```
+
+---
+
+### LLM_PROMPT_PREFIX
+
+**Purpose:** Prefix added to user prompt for LLM summarization.
+
+**Required:** No
+
+**Default:** Auto-detected based on model family
+
+**Format:** String
+
+**Used by:** Baseline Graph Module
+
+**Details:**
+
+When empty (default), the system auto-detects the appropriate prefix based on model family:
+- Qwen3: `/no_think ` (disables thinking mode for direct output)
+- Others: Empty (not needed)
+
+Set explicitly to override auto-detection.
+
+**Configuration examples:**
+
+**Shell:**
+```bash
+export LLM_PROMPT_PREFIX="/no_think "
+```
+
+---
+
 ## Graphiti Memory Variables
 
 Variables for querying thread history via Graphiti temporal graph memory. These enable the `watercooler_smart_query` and `watercooler_search` MCP tools.
@@ -795,7 +858,7 @@ Variables for querying thread history via Graphiti temporal graph memory. These 
 Enables the memory query tools (`watercooler_smart_query`, `watercooler_search`) for asking questions about thread history using Graphiti's temporal graph memory. When disabled, the tools return an error message directing users to enable it.
 
 **Prerequisites** (when enabled):
-- LLM API key configured (via `LLM_API_KEY` env var or `[memory.llm].api_key` in TOML)
+- LLM API key configured (via `LLM_API_KEY` env var, `OPENAI_API_KEY`, or `[openai].api_key` in credentials.toml)
 - FalkorDB running locally: `docker run -d -p 6379:6379 falkordb/falkordb:latest`
 - Memory extras installed: `pip install 'watercooler-cloud[memory]'`
 - Index built via CLI: `python -m watercooler_memory.pipeline run --backend graphiti --threads /path/to/threads`
@@ -808,9 +871,13 @@ enabled = true
 backend = "graphiti"
 
 [memory.llm]
-api_key = "local"  # or your API key
 api_base = "http://localhost:8000/v1"  # llama-server
 model = "qwen3:30b"
+
+# API keys go in credentials.toml (not config.toml):
+# ~/.watercooler/credentials.toml
+# [openai]
+# api_key = "sk-..."
 ```
 
 **Defaults:**
@@ -957,9 +1024,13 @@ Variables used by the Graphiti memory backend.
 | `EMBEDDING_MODEL` | No | `text-embedding-3-small` | Embedding model name |
 | `WATERCOOLER_GRAPHITI_RERANKER` | No | `rrf` | Reranker algorithm |
 
-*Required when Graphiti is enabled. For local servers, use a dummy value like `"not-needed-for-local"`.
+*Required when using cloud providers like OpenAI. For local servers (llama-server), API keys are not needed.
 
-**Note:** If `LLM_API_KEY` or `EMBEDDING_API_KEY` is not set, there is a temporary fallback to `OPENAI_API_KEY` with a deprecation warning. This fallback will be removed in a future release - please set `LLM_API_KEY` and `EMBEDDING_API_KEY` explicitly.
+**API Key Resolution Priority:**
+1. `LLM_API_KEY` / `EMBEDDING_API_KEY` (explicit env vars)
+2. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc. (auto-detected from api_base URL)
+3. `[openai].api_key`, etc. in `~/.watercooler/credentials.toml` (file-based)
+4. Empty string (local servers don't need keys)
 
 **Local server example:**
 ```bash

@@ -1,7 +1,6 @@
 """Sync tools for watercooler MCP server.
 
 Tools:
-- watercooler_sync: Force sync or get sync status
 - watercooler_reindex: Generate thread index
 """
 
@@ -9,106 +8,11 @@ from fastmcp import Context
 
 from watercooler import commands
 
-from ..config import get_agent_name, get_threads_dir, get_git_sync_manager_from_context
-from ..sync import PushError
-from ..observability import log_debug
-from .. import validation  # Import module for runtime access (enables test patching)
+from ..config import get_agent_name, get_threads_dir
 
 
 # Module-level references to registered tools (populated by register_sync_tools)
-force_sync = None
 reindex = None
-
-
-def _force_sync_impl(
-    ctx: Context,
-    code_path: str = "",
-    action: str = "now",
-) -> str:
-    """Inspect or flush the async git sync worker.
-
-    Args:
-        action: Action to perform - "status"/"inspect" to view sync state, or "now"/"flush" to force immediate sync (default: "now")
-        code_path: Path to the code repository directory. This establishes the code context for
-            determining which threads repository to sync. Should point to the root of your working repository.
-
-    Returns:
-        Status information or confirmation of sync operation
-    """
-    log_debug(f"TOOL_ENTRY: watercooler_sync(code_path={code_path!r}, action={action!r})")
-    try:
-        log_debug("TOOL_STEP: calling _require_context")
-        error, context = validation._require_context(code_path)
-        log_debug(f"TOOL_STEP: _require_context returned (error={error!r}, context={'present' if context else 'None'})")
-        if error:
-            return error
-        if context is None:
-            return "Error: Unable to resolve code context for the provided code_path."
-
-        log_debug("TOOL_STEP: calling get_git_sync_manager_from_context")
-        sync = get_git_sync_manager_from_context(context)
-        log_debug(f"TOOL_STEP: get_git_sync_manager returned {'present' if sync else 'None'}")
-        if not sync:
-            return "Async sync unavailable: no git-enabled threads repository for this context."
-
-        action_normalized = (action or "now").strip().lower()
-        log_debug(f"TOOL_STEP: action_normalized={action_normalized!r}")
-
-        def _format_status(info: dict) -> str:
-            if info.get("mode") != "async":
-                return "Async sync disabled; repository uses synchronous git writes."
-            lines = ["Async sync status:"]
-            lines.append(f"- Pending entries: {info.get('pending', 0)}")
-            topics = info.get("pending_topics") or []
-            if topics:
-                lines.append(f"- Pending topics: {', '.join(topics)}")
-            last_pull = info.get("last_pull")
-            if last_pull:
-                age = info.get("last_pull_age_seconds")
-                age_fragment = f"{age:.1f}s ago" if age is not None else "recently"
-                stale = " (stale)" if info.get("stale") else ""
-                lines.append(f"- Last pull: {last_pull} ({age_fragment}){stale}")
-            else:
-                lines.append("- Last pull: never")
-            next_eta = info.get("next_pull_eta_seconds")
-            if next_eta is not None:
-                lines.append(f"- Next background pull in: {next_eta:.1f}s")
-            if info.get("is_syncing"):
-                lines.append("- Sync in progress")
-            if info.get("priority"):
-                lines.append("- Priority flush requested")
-            if info.get("retry_at"):
-                retry_in = info.get("retry_in_seconds")
-                extra = f" (in {retry_in:.1f}s)" if retry_in is not None else ""
-                lines.append(f"- Next retry at: {info['retry_at']}{extra}")
-            if info.get("last_error"):
-                lines.append(f"- Last error: {info['last_error']}")
-            return "\n".join(lines)
-
-        if action_normalized in {"status", "inspect"}:
-            log_debug("TOOL_STEP: calling sync.get_async_status()")
-            status = sync.get_async_status()
-            log_debug(f"TOOL_STEP: get_async_status returned {len(status)} keys")
-            result = _format_status(status)
-            log_debug(f"TOOL_STEP: formatted status, length={len(result)}")
-            log_debug("TOOL_EXIT: returning status result")
-            return result
-
-        if action_normalized not in {"now", "flush"}:
-            return f"Unknown action '{action}'. Use 'status' or 'now'."
-
-        try:
-            sync.flush_async()
-        except PushError as exc:
-            return f"Sync failed: {exc}"
-
-        status_after = sync.get_async_status()
-        remaining = status_after.get("pending", 0)
-        prefix = "✅ Pending entries synced." if not remaining else f"⚠️ Sync completed with {remaining} entries still pending (retry scheduled)."
-        return f"{prefix}\n\n{_format_status(status_after)}"
-
-    except Exception as exc:  # pragma: no cover - defensive guard
-        return f"Error running sync: {exc}"
 
 
 def _reindex_impl(ctx: Context) -> str:
@@ -211,8 +115,7 @@ def register_sync_tools(mcp):
     Args:
         mcp: The FastMCP server instance
     """
-    global force_sync, reindex
+    global reindex
 
     # Register tools and store references for testing
-    force_sync = mcp.tool(name="watercooler_sync")(_force_sync_impl)
     reindex = mcp.tool(name="watercooler_reindex")(_reindex_impl)

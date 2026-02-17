@@ -7,6 +7,8 @@ Tools:
 - watercooler_leanrag_run_pipeline: Run LeanRAG clustering pipeline
 - watercooler_clear_graph_group: Clear episodes for a group
 - watercooler_smart_query: Multi-tier intelligent query with auto-escalation
+- watercooler_memory_task_status: Check queue health, poll task status, recover
+- watercooler_bulk_index: Queue bulk thread indexing into memory backend
 
 Removed (use replacements):
 - watercooler_query_memory → watercooler_smart_query
@@ -17,11 +19,14 @@ Removed (use replacements):
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Optional, List
 
 from fastmcp import Context
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
+
+from watercooler.fs import discover_thread_files
 
 from ..observability import log_action, log_error, log_warning
 from .. import validation  # Import module for runtime access (enables test patching)
@@ -40,6 +45,10 @@ clear_graph_group = None
 
 # Multi-tier orchestration
 smart_query = None
+
+# Memory task queue tools
+memory_task_status = None
+bulk_index = None
 
 
 async def _get_entity_edge_impl(
@@ -259,7 +268,8 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
             diagnostics["config_issue"] = (
                 "Graphiti not enabled. Either set WATERCOOLER_GRAPHITI_ENABLED=1, "
                 "or configure [memory] backend = 'graphiti' in config.toml. "
-                "Also ensure [memory.llm].api_key and [memory.embedding].api_key are set."
+                "Also ensure API keys are configured via LLM_API_KEY / EMBEDDING_API_KEY "
+                "env vars or ~/.watercooler/credentials.toml (see credentials.example.toml)."
             )
 
         # Check backend initialization
@@ -413,50 +423,51 @@ async def _graphiti_add_episode_impl(
         episode_title = title if title else content[:50] + ("..." if len(content) > 50 else "")
         source_desc = source_description if source_description else "Direct episode via MCP tool"
 
-        # Add episode via backend
-        try:
-            result = await backend.add_episode_direct(
-                name=episode_title,
-                episode_body=content,
-                source_description=source_desc,
-                reference_time=ref_time,
-                group_id=group_id,
-                previous_episode_uuids=previous_episode_uuids,
-            )
+        # Fire-and-forget: spawn background task for the slow LLM+graph work.
+        # The graphiti pipeline (DeepSeek LLM calls + FalkorDB writes) takes
+        # 60-120s, which exceeds the middleware's default 50s tool timeout.
+        # Cancellation mid-flight corrupts FalkorDB connections and causes
+        # socket disconnects. By returning immediately, we avoid the timeout
+        # while matching the fire-and-forget pattern used by middleware memory
+        # sync (sync_to_memory_backend via ThreadPoolExecutor).
+        async def _do_add_episode():
+            try:
+                result = await backend.add_episode_direct(
+                    name=episode_title,
+                    episode_body=content,
+                    source_description=source_desc,
+                    reference_time=ref_time,
+                    group_id=group_id,
+                    previous_episode_uuids=previous_episode_uuids,
+                )
 
-            episode_uuid = result.get("episode_uuid", "unknown")
-            entities = result.get("entities_extracted", [])
-            facts_count = result.get("facts_extracted", 0)
+                episode_uuid = result.get("episode_uuid", "unknown")
 
-            # Track entry-episode mapping if entry_id provided
-            if entry_id and episode_uuid != "unknown":
-                backend.index_entry_as_episode(entry_id, episode_uuid, group_id)
+                # Track entry-episode mapping if entry_id provided
+                if entry_id and episode_uuid != "unknown":
+                    backend.index_entry_as_episode(entry_id, episode_uuid, group_id)
 
-            log_action(f"MEMORY: Added episode {episode_uuid} to group {group_id}")
+                log_action(
+                    f"MEMORY: Background episode added {episode_uuid} "
+                    f"to group {group_id} "
+                    f"(entities={len(result.get('entities_extracted', []))}, "
+                    f"facts={result.get('facts_extracted', 0)})"
+                )
+            except Exception as e:
+                log_error(f"MEMORY: Background add_episode failed: {e}")
 
-            return ToolResult(content=[TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": True,
-                    "episode_uuid": episode_uuid,
-                    "group_id": group_id,
-                    "entities_extracted": entities,
-                    "facts_extracted": facts_count,
-                    "entry_id": entry_id if entry_id else None,
-                    "message": f"Episode added to {group_id}",
-                }, indent=2)
-            )])
+        asyncio.create_task(_do_add_episode())
 
-        except Exception as e:
-            log_error(f"MEMORY: Failed to add episode: {e}")
-            return ToolResult(content=[TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": False,
-                    "error": f"Failed to add episode: {e}",
-                    "episode_uuid": None,
-                }, indent=2)
-            )])
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps({
+                "success": True,
+                "status": "submitted",
+                "group_id": group_id,
+                "entry_id": entry_id if entry_id else None,
+                "message": "Episode submitted for background processing",
+            }, indent=2)
+        )])
 
     except Exception as e:
         log_error(f"MEMORY: Unexpected error in graphiti_add_episode: {e}")
@@ -1081,6 +1092,231 @@ async def _smart_query_impl(
         )])
 
 
+# ============================================================================
+# Memory Task Queue Tools
+# ============================================================================
+
+
+async def _memory_task_status_impl(
+    ctx: Context,
+    task_id: str = "",
+    recover: bool = False,
+    retry_dead_letters: bool = False,
+) -> ToolResult:
+    """Check memory queue health, poll task status, or trigger recovery.
+
+    Args:
+        ctx: MCP context
+        task_id: Optional task ID to check. Empty = queue summary.
+        recover: If True, reset stale "running" tasks to "pending".
+        retry_dead_letters: If True, move dead-letter tasks back to queue.
+
+    Returns:
+        JSON with queue status or specific task details.
+    """
+    try:
+        from ..memory_queue import get_queue
+
+        queue = get_queue()
+        if queue is None:
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Memory queue not initialised",
+                    "hint": "Queue starts automatically with MCP server",
+                }),
+            )])
+
+        # Recovery actions
+        if recover:
+            count = queue.recover_stale()
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "action": "recover_stale",
+                    "recovered": count,
+                }),
+            )])
+
+        if retry_dead_letters:
+            count = queue.retry_dead_letters()
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "action": "retry_dead_letters",
+                    "re_enqueued": count,
+                }),
+            )])
+
+        # Specific task lookup
+        if task_id:
+            task = queue.get_task(task_id)
+            if task is None:
+                return ToolResult([TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": f"Task {task_id} not found in active queue",
+                        "hint": "Completed tasks are removed from the active queue",
+                    }),
+                )])
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps(task.to_dict(), indent=2),
+            )])
+
+        # Queue summary
+        summary = queue.status_summary()
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps(summary, indent=2),
+        )])
+
+    except Exception as e:
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({"error": str(e)}),
+        )])
+
+
+async def _bulk_index_impl(
+    ctx: Context,
+    code_path: str = "",
+    backend: str = "graphiti",
+    threads: str = "",
+    max_entries: int = 0,
+) -> ToolResult:
+    """Queue bulk indexing of threads into memory backend (paid tier onboarding).
+
+    Discovers threads, builds a manifest of entries, and enqueues them
+    as individual tasks for persistent background processing with retry.
+
+    Args:
+        ctx: MCP context
+        code_path: Repository root path (for group_id derivation).
+        backend: Target backend ("graphiti" or "leanrag").
+        threads: Comma-separated thread topics to index (empty = all).
+        max_entries: Max entries to queue (0 = unlimited, for testing).
+
+    Returns:
+        JSON with task count and monitoring info.
+    """
+    try:
+        from ..memory_queue import get_queue, MemoryTask, enqueue_memory_task, VALID_BACKENDS
+
+        if backend not in VALID_BACKENDS:
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Invalid backend {backend!r}",
+                    "valid_backends": sorted(VALID_BACKENDS),
+                }),
+            )])
+
+        queue = get_queue()
+        if queue is None:
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Memory queue not initialised",
+                }),
+            )])
+
+        # Discover entries via watercooler library
+        from watercooler.commands import list_entries
+        from watercooler.path_resolver import resolve_threads_dir
+
+        threads_dir = resolve_threads_dir(code_root=Path(code_path)) if code_path else None
+        if threads_dir is None:
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Could not resolve threads directory",
+                    "hint": "Provide code_path to the repository root",
+                }),
+            )])
+
+        # Get list of thread topics
+        all_topics = [p.stem for p in discover_thread_files(threads_dir)]
+
+        if threads:
+            selected = [t.strip() for t in threads.split(",")]
+            all_topics = [t for t in all_topics if t in selected]
+
+        # Derive group_id from code_path
+        threads_dir_str = str(threads_dir)
+        group_id = (
+            threads_dir_str.removesuffix("-threads")
+            if threads_dir_str.endswith("-threads")
+            else threads_dir_str
+        )
+
+        queued = 0
+        skipped = 0
+        errors = []
+
+        for topic in all_topics:
+            try:
+                entries = list_entries(topic, threads_dir)
+            except Exception as e:
+                errors.append(f"{topic}: {e}")
+                continue
+
+            for entry in entries:
+                if max_entries and queued >= max_entries:
+                    break
+
+                entry_id = entry.get("entry_id", "")
+                content = entry.get("body", "")
+                if not content:
+                    skipped += 1
+                    continue
+
+                task_id = enqueue_memory_task(
+                    entry_id=entry_id,
+                    topic=topic,
+                    group_id=group_id,
+                    content=content,
+                    backend=backend,
+                    title=entry.get("title", ""),
+                    timestamp=entry.get("timestamp", ""),
+                    source_description=f"{group_id} | thread:{topic} | bulk_index",
+                )
+                if task_id:
+                    queued += 1
+                else:
+                    skipped += 1
+
+            if max_entries and queued >= max_entries:
+                break
+
+        summary = queue.status_summary()
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({
+                "action": "bulk_index",
+                "topics_scanned": len(all_topics),
+                "entries_queued": queued,
+                "entries_skipped": skipped,
+                "errors": errors[:10],
+                "queue": summary,
+            }, indent=2),
+        )])
+
+    except ImportError as e:
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({
+                "error": f"Missing dependency: {e}",
+                "hint": "Bulk index requires the full watercooler package",
+            }),
+        )])
+    except Exception as e:
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({"error": str(e)}),
+        )])
+
+
 def register_memory_tools(mcp):
     """Register memory tools with the MCP server.
 
@@ -1097,6 +1333,7 @@ def register_memory_tools(mcp):
     global get_entity_edge, diagnose_memory
     global graphiti_add_episode, leanrag_run_pipeline, clear_graph_group
     global smart_query
+    global memory_task_status, bulk_index
 
     # Register tools and store references for testing
     get_entity_edge = mcp.tool(name="watercooler_get_entity_edge")(_get_entity_edge_impl)
@@ -1111,3 +1348,7 @@ def register_memory_tools(mcp):
 
     # Multi-tier orchestration
     smart_query = mcp.tool(name="watercooler_smart_query")(_smart_query_impl)
+
+    # Memory task queue tools
+    memory_task_status = mcp.tool(name="watercooler_memory_task_status")(_memory_task_status_impl)
+    bulk_index = mcp.tool(name="watercooler_bulk_index")(_bulk_index_impl)

@@ -73,14 +73,12 @@ class TestFalkorDBEntryStoreInit:
         assert store.database == "custom_db"
         assert store.group_id == "watercooler_cloud"
 
-    def test_from_config(self, monkeypatch, tmp_path):
+    def test_from_config(self, monkeypatch, isolated_config):
         """Test from_config factory method."""
-        # Set up isolated config
         from watercooler.config_facade import config
 
-        config_dir = tmp_path / ".watercooler"
-        config_dir.mkdir()
-        (config_dir / "config.toml").write_text("""
+        # Write test config to isolated config dir
+        (isolated_config["config_dir"] / "config.toml").write_text("""
 [memory.database]
 host = "config-host"
 port = 6380
@@ -88,44 +86,39 @@ port = 6380
 [memory.embedding]
 dim = 768
         """)
-        monkeypatch.setenv("HOME", str(tmp_path))
         # Clear env vars
         monkeypatch.delenv("FALKORDB_HOST", raising=False)
         monkeypatch.delenv("FALKORDB_PORT", raising=False)
         monkeypatch.delenv("EMBEDDING_DIM", raising=False)
-        config.reset()
 
-        try:
+        # Prevent project config from overriding user config during test
+        with patch("watercooler.config_loader._get_project_config_dir", return_value=None):
+            config.reset()
             store = FalkorDBEntryStore.from_config("my_group")
             assert store.group_id == "my_group"
             assert store.host == "config-host"
             assert store.port == 6380
             assert store.embedding_dim == 768
-        finally:
-            config.reset()
 
-    def test_from_config_env_vars_override(self, monkeypatch, tmp_path):
+    def test_from_config_env_vars_override(self, monkeypatch, isolated_config):
         """Test that environment variables override config file."""
         from watercooler.config_facade import config
 
-        config_dir = tmp_path / ".watercooler"
-        config_dir.mkdir()
-        (config_dir / "config.toml").write_text("""
+        # Write test config to isolated config dir
+        (isolated_config["config_dir"] / "config.toml").write_text("""
 [memory.database]
 host = "config-host"
 port = 6380
         """)
-        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("FALKORDB_HOST", "env-host")
         monkeypatch.setenv("FALKORDB_PORT", "7379")
-        config.reset()
 
-        try:
+        # Prevent project config from overriding user config during test
+        with patch("watercooler.config_loader._get_project_config_dir", return_value=None):
+            config.reset()
             store = FalkorDBEntryStore.from_config("test")
             assert store.host == "env-host"
             assert store.port == 7379
-        finally:
-            config.reset()
 
 
 class TestFalkorDBEntryStoreConnectionState:

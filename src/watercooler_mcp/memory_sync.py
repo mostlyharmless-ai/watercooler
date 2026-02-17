@@ -303,6 +303,7 @@ def _graphiti_sync_callback(
     backend_config: Dict[str, Any],
     log: logging.Logger,
     dry_run: bool = False,
+    entry_summary: str = "",
 ) -> bool:
     """Sync entry to Graphiti backend.
 
@@ -325,6 +326,9 @@ def _graphiti_sync_callback(
         backend_config: Backend configuration dict
         log: Logger instance
         dry_run: If True, simulate without actual sync
+        entry_summary: Enriched summary from graph enrichment. Used as
+            episode content instead of entry_body when use_summary is
+            configured and summary is non-empty.
 
     Returns:
         True on success, False on failure
@@ -334,11 +338,21 @@ def _graphiti_sync_callback(
         return True
 
     try:
-        # Import chunking config helpers
+        # Import config helpers
         from watercooler.memory_config import (
             get_graphiti_chunk_config,
             get_graphiti_chunk_on_sync,
+            get_graphiti_use_summary,
         )
+
+        # Resolve content: use enriched summary if configured and available
+        content = entry_body
+        if get_graphiti_use_summary() and entry_summary:
+            content = entry_summary
+            log.debug(
+                f"MEMORY: Using enriched summary for {topic}/{entry_id} "
+                f"({len(entry_summary)} chars vs {len(entry_body)} raw)"
+            )
 
         # Derive code_path from threads_dir
         # threads_dir: /path/to/project-threads -> code_path: /path/to/project
@@ -362,7 +376,7 @@ def _graphiti_sync_callback(
             max_tokens, overlap = get_graphiti_chunk_config()
             result = asyncio.run(
                 _call_graphiti_add_episode_chunked(
-                    content=entry_body,
+                    content=content,
                     topic=topic,
                     entry_id=entry_id,
                     timestamp=timestamp,
@@ -375,7 +389,7 @@ def _graphiti_sync_callback(
         else:
             result = asyncio.run(
                 _call_graphiti_add_episode(
-                    content=entry_body,
+                    content=content,
                     topic=topic,
                     entry_id=entry_id,
                     timestamp=timestamp,
@@ -425,6 +439,7 @@ def _leanrag_sync_callback(
     backend_config: Dict[str, Any],
     log: logging.Logger,
     dry_run: bool = False,
+    entry_summary: str = "",
 ) -> bool:
     """Sync entry to LeanRAG backend.
 
@@ -449,6 +464,7 @@ def _leanrag_sync_callback(
         backend_config: Backend configuration dict
         log: Logger instance
         dry_run: If True, simulate without actual sync
+        entry_summary: Enriched summary (unused by LeanRAG, protocol compliance)
 
     Returns:
         True on success, False on failure
@@ -598,6 +614,98 @@ def init_memory_sync_callbacks() -> None:
         logger.warning(f"MEMORY: Could not register sync callbacks: {e}")
     except Exception as e:
         logger.exception(f"MEMORY: Error registering sync callbacks: {e}")
+
+
+def init_memory_queue_executors() -> None:
+    """Register backend executors with the memory task queue worker.
+
+    Called after both init_memory_sync_callbacks() and init_memory_queue()
+    have completed. The executor adapts the existing _call_graphiti_add_episode
+    async function to the MemoryTask interface expected by the queue worker.
+    """
+    try:
+        from .memory_queue import get_worker, MemoryTask
+    except ImportError:
+        logger.debug("MEMORY: memory_queue package not available, skipping executor registration")
+        return
+
+    worker = get_worker()
+    if worker is None:
+        logger.debug("MEMORY: queue worker not initialised, skipping executor registration")
+        return
+
+    async def graphiti_executor(task: MemoryTask) -> Dict[str, Any]:
+        """Execute a Graphiti episode ingestion from a queued task."""
+        result = await _call_graphiti_add_episode(
+            content=task.content,
+            topic=task.topic,
+            entry_id=task.entry_id,
+            timestamp=task.timestamp,
+            title=task.title,
+            code_path=task.source_description.split("|")[0].strip() if "|" in task.source_description else "",
+        )
+        if not result.get("success", False):
+            raise RuntimeError(result.get("error", "Graphiti sync failed"))
+        return {
+            "episode_uuid": result.get("episode_uuid", ""),
+            "entities_extracted": result.get("entities_extracted", []),
+            "facts_extracted": result.get("facts_extracted", 0),
+        }
+
+    worker.register_executor("graphiti", graphiti_executor)
+    logger.info("MEMORY: Registered graphiti executor with memory task queue")
+
+    worker.register_executor("graph_recover", _graph_recover_executor_fn)
+    logger.info("MEMORY: Registered graph_recover executor with memory task queue")
+
+
+async def _graph_recover_executor_fn(task: "MemoryTask") -> Dict[str, Any]:
+    """Execute a per-topic graph recovery from a queued task.
+
+    Parses ``task.content`` as JSON with ``schema_version`` validation,
+    then delegates to ``sync_thread_to_graph()`` for the single topic
+    stored in ``task.topic``.
+    """
+    from watercooler.baseline_graph.sync import sync_thread_to_graph
+
+    # Parse and validate content payload
+    try:
+        payload = json.loads(task.content)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(f"Invalid task content JSON: {exc}") from exc
+
+    schema_version = payload.get("schema_version")
+    if schema_version != 1:
+        raise RuntimeError(
+            f"Unsupported schema_version={schema_version!r}, expected 1"
+        )
+
+    threads_dir_str = payload.get("threads_dir", "")
+    if not threads_dir_str:
+        raise RuntimeError("Missing threads_dir in task content")
+
+    threads_dir = Path(threads_dir_str)
+    if not threads_dir.is_dir():
+        raise RuntimeError(f"threads_dir not found: {threads_dir}")
+
+    generate_summaries = payload.get("generate_summaries", False)
+    generate_embeddings = payload.get("generate_embeddings", True)
+
+    success = sync_thread_to_graph(
+        threads_dir=threads_dir,
+        topic=task.topic,
+        generate_summaries=generate_summaries,
+        generate_embeddings=generate_embeddings,
+    )
+
+    if not success:
+        raise RuntimeError(f"sync_thread_to_graph failed for topic={task.topic!r}")
+
+    return {
+        "topic": task.topic,
+        "threads_dir": str(threads_dir),
+        "recovered": True,
+    }
 
 
 def reset_callbacks() -> None:

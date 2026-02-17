@@ -1,6 +1,5 @@
 """Pipeline stage implementations."""
 
-import asyncio
 import json
 import os
 import re
@@ -8,12 +7,14 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
+
+from watercooler.fs import discover_thread_files
 
 from ..graph import MemoryGraph, GraphConfig
 from ..leanrag_export import export_to_leanrag
 from .config import PipelineConfig
-from .state import Stage, StageState, PipelineState
+from .state import Stage, PipelineState
 from .logging import PipelineLogger
 
 
@@ -116,6 +117,31 @@ def _run_subprocess_with_timeout(
         )
 
 
+def _build_leanrag_env(config: PipelineConfig) -> dict[str, str]:
+    """Build environment dict with LeanRAG API credentials from pipeline config.
+
+    Sets LLM and embedding environment variables required by LeanRAG's
+    config_loader at import time.
+
+    Args:
+        config: Pipeline configuration with LLM and embedding settings.
+
+    Returns:
+        Copy of os.environ with LeanRAG variables set.
+    """
+    env = os.environ.copy()
+    env["DEEPSEEK_API_KEY"] = config.llm.api_key
+    env["DEEPSEEK_BASE_URL"] = config.llm.base_url
+    env["LLM_API_BASE"] = config.llm.base_url
+    env["DEEPSEEK_MODEL"] = config.llm.model
+    env["GLM_MODEL"] = config.embedding.model
+    env["GLM_EMBEDDING_MODEL"] = config.embedding.model
+    env["GLM_BASE_URL"] = config.embedding.base_url
+    env["EMBEDDING_API_BASE"] = config.embedding.base_url
+    env["EMBEDDING_BATCH_SIZE"] = str(config.embedding.batch_size)
+    return env
+
+
 class StageRunner:
     """Base class for stage runners."""
 
@@ -150,7 +176,7 @@ class ExportStageRunner(StageRunner):
 
         if not threads_dir.exists():
             errors.append(f"Threads directory not found: {threads_dir}")
-        elif not any(threads_dir.glob("*.md")):
+        elif not discover_thread_files(threads_dir):
             errors.append(f"No .md files found in {threads_dir}")
 
         return errors
@@ -343,18 +369,7 @@ class ExtractStageRunner(StageRunner):
 
         self.logger.info(f"Running LeanRAG pipeline: {' '.join(cmd)}")
 
-        # Build environment with API credentials from config
-        env = os.environ.copy()
-        env["DEEPSEEK_API_KEY"] = self.config.llm.api_key
-        env["DEEPSEEK_BASE_URL"] = self.config.llm.base_url
-        env["LLM_API_BASE"] = self.config.llm.base_url
-        env["DEEPSEEK_MODEL"] = self.config.llm.model
-        # LeanRAG also needs embedding config during extraction
-        env["GLM_MODEL"] = self.config.embedding.model
-        env["GLM_EMBEDDING_MODEL"] = self.config.embedding.model
-        env["GLM_BASE_URL"] = self.config.embedding.base_url
-        env["EMBEDDING_API_BASE"] = self.config.embedding.base_url
-        env["EMBEDDING_BATCH_SIZE"] = str(self.config.embedding.batch_size)
+        env = _build_leanrag_env(self.config)
 
         with self.logger.timed("llm_call", operation="leanrag_extraction"):
             result = _run_subprocess_with_timeout(
@@ -453,19 +468,7 @@ class DedupeStageRunner(StageRunner):
 
         self.logger.info(f"Running entity deduplication: {' '.join(cmd)}")
 
-        # Build environment with API credentials
-        # LeanRAG's config_loader requires GLM_MODEL even for dedupe stage
-        env = os.environ.copy()
-        env["DEEPSEEK_API_KEY"] = self.config.llm.api_key
-        env["LLM_API_BASE"] = self.config.llm.base_url
-        env["DEEPSEEK_BASE_URL"] = self.config.llm.base_url
-        env["DEEPSEEK_MODEL"] = self.config.llm.model
-        # Embedding config required by LeanRAG config_loader at import time
-        env["GLM_MODEL"] = self.config.embedding.model
-        env["GLM_EMBEDDING_MODEL"] = self.config.embedding.model
-        env["GLM_BASE_URL"] = self.config.embedding.base_url
-        env["EMBEDDING_API_BASE"] = self.config.embedding.base_url
-        env["EMBEDDING_BATCH_SIZE"] = str(self.config.embedding.batch_size)
+        env = _build_leanrag_env(self.config)
 
         with self.logger.timed("llm_call", operation="entity_deduplication"):
             result = _run_subprocess_with_timeout(
@@ -563,21 +566,9 @@ class BuildStageRunner(StageRunner):
 
         self.logger.info(f"Running graph build: {' '.join(cmd)}")
 
-        # Build environment with embedding credentials
-        # LeanRAG's config_loader requires GLM_EMBEDDING_MODEL at import time
-        env = os.environ.copy()
-        env["EMBEDDING_API_BASE"] = self.config.embedding.base_url
-        env["GLM_BASE_URL"] = self.config.embedding.base_url
-        env["GLM_MODEL"] = self.config.embedding.model
-        env["GLM_EMBEDDING_MODEL"] = self.config.embedding.model
-        env["EMBEDDING_BATCH_SIZE"] = str(self.config.embedding.batch_size)
+        env = _build_leanrag_env(self.config)
         # Force sequential embedding to work with llama-cpp server (can't handle concurrent requests)
         env["EMBEDDING_MAX_WORKERS"] = "1"
-        # LLM config also needed by LeanRAG config_loader at import time
-        env["DEEPSEEK_API_KEY"] = self.config.llm.api_key
-        env["DEEPSEEK_BASE_URL"] = self.config.llm.base_url
-        env["DEEPSEEK_MODEL"] = self.config.llm.model
-        env["LLM_API_BASE"] = self.config.llm.base_url
 
         with self.logger.timed("embedding_call", operation="graph_build_embeddings"):
             result = _run_subprocess_with_timeout(

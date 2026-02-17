@@ -370,12 +370,17 @@ class TestLeanRAGSmoke:
     """Smoke tests for LeanRAG backend with real FalkorDB."""
 
     @pytest.fixture
-    def leanrag_backend(self, tmp_path: Path) -> Generator[LeanRAGBackend, None, None]:
+    def leanrag_backend(
+        self, tmp_path: Path, stub_local_memory_servers
+    ) -> Generator[LeanRAGBackend, None, None]:
         """LeanRAG backend with unique working directory per test for isolation.
 
         Uses pytest's tmp_path fixture to create a unique directory per test.
         This avoids Milvus-lite file lock issues that occur when multiple tests
         share the same work directory.
+
+        Uses stub_local_memory_servers to set required env vars (GLM_MODEL, etc.)
+        that LeanRAG's config.yaml substitution requires.
 
         Why unique directories per test:
         - Milvus-lite uses SQLite under the hood with file locks
@@ -410,7 +415,13 @@ class TestLeanRAGSmoke:
             print(f"FalkorDB cleanup skipped: {e}")
 
         config = LeanRAGConfig(work_dir=work_dir, test_mode=True)
-        backend = LeanRAGBackend(config)
+        try:
+            backend = LeanRAGBackend(config)
+        except ValueError as e:
+            # LeanRAG's config.yaml has many required env vars without defaults
+            if "Environment variable" in str(e) and "is not set" in str(e):
+                pytest.skip(f"LeanRAG environment not fully configured: {e}")
+            raise
 
         print(f"\n*** LeanRAG working directory: {work_dir.absolute()} ***\n")
 
@@ -568,6 +579,7 @@ class TestGraphitiSmoke:
         from watercooler_memory.backends.graphiti import (
             GraphitiBackend,
             GraphitiConfig,
+            ConfigError,
         )
 
         # Ensure OpenAI API key is set (required for Graphiti)
@@ -575,7 +587,13 @@ class TestGraphitiSmoke:
             pytest.skip("OPENAI_API_KEY not set - required for Graphiti")
 
         config = GraphitiConfig(work_dir=tmp_path / "pytest__graphiti_work", test_mode=True)
-        backend = GraphitiBackend(config)
+        try:
+            backend = GraphitiBackend(config)
+        except ConfigError as e:
+            # Graphiti requires neo4j module and other dependencies
+            if "No module named" in str(e):
+                pytest.skip(f"Graphiti dependencies not installed: {e}")
+            raise
         yield backend
 
     def test_healthcheck(self, graphiti_backend):
@@ -923,7 +941,8 @@ class TestMultiBackendComparison:
         reason="Backend comparison requires both backends fully implemented",
     )
     def test_same_query_both_backends(
-        self, minimal_corpus, minimal_chunks, sample_queries, tmp_path
+        self, minimal_corpus, minimal_chunks, sample_queries, tmp_path,
+        stub_local_memory_servers
     ):
         """Same query should return results from both backends."""
         import os
@@ -932,17 +951,26 @@ class TestMultiBackendComparison:
             GraphitiBackend,
             GraphitiConfig,
         )
+        from watercooler_memory.backends import ConfigError
 
         if "OPENAI_API_KEY" not in os.environ:
             pytest.skip("OPENAI_API_KEY required")
 
         # Setup both backends with test_mode enabled
-        leanrag = LeanRAGBackend(
-            LeanRAGConfig(work_dir=tmp_path / "leanrag", test_mode=True)
-        )
-        graphiti = GraphitiBackend(
-            GraphitiConfig(work_dir=tmp_path / "graphiti", test_mode=True)
-        )
+        try:
+            leanrag = LeanRAGBackend(
+                LeanRAGConfig(work_dir=tmp_path / "leanrag", test_mode=True)
+            )
+        except (ConfigError, FileNotFoundError, ValueError) as e:
+            # ValueError from LeanRAG config.yaml env var substitution
+            pytest.skip(f"LeanRAG backend not available: {e}")
+
+        try:
+            graphiti = GraphitiBackend(
+                GraphitiConfig(work_dir=tmp_path / "graphiti", test_mode=True)
+            )
+        except ConfigError as e:
+            pytest.skip(f"Graphiti backend not available: {e}")
 
         # Prepare both
         leanrag.prepare(minimal_corpus)
@@ -963,3 +991,65 @@ class TestMultiBackendComparison:
         # Results may differ (different retrieval strategies) but both valid
         print(f"LeanRAG returned {len(leanrag_results.results)} results")
         print(f"Graphiti returned {len(graphiti_results.results)} results")
+
+
+@pytest.mark.integration_falkor
+class TestMemorySyncCallPath:
+    """Verify sync_to_memory_backend accepts the parameter shape
+    used by the middleware call site.
+
+    This is a call-shape conformance test. Middleware-level integration
+    (operation_with_graph_sync invoking memory sync) and callback dispatch
+    are covered by unit tests in test_memory_sync.py.
+    """
+
+    @pytest.mark.skipif(
+        "os.environ.get('SKIP_GRAPHITI_INDEX') == '1'",
+        reason="Graphiti indexing requires OPENAI_API_KEY and FalkorDB",
+    )
+    def test_sync_to_memory_backend_dispatches(self, tmp_path):
+        """sync_to_memory_backend dispatches correctly with middleware call shape."""
+        from unittest.mock import patch, MagicMock
+        import watercooler.baseline_graph.sync as sync_mod
+
+        if "OPENAI_API_KEY" not in os.environ:
+            pytest.skip("OPENAI_API_KEY not set")
+
+        # Setup: create minimal graph-first thread structure
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        sync_called = []
+        original_sync = sync_mod.sync_to_memory_backend
+
+        def tracking_sync(*args, **kwargs):
+            sync_called.append(kwargs)
+            return original_sync(*args, **kwargs)
+
+        # Use the same parameter shape as middleware.operation_with_graph_sync
+        entry_node = {
+            "body": "Integration test: verifying memory backend dispatch after decoupling",
+            "title": "Memory Sync Dispatch Test",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "agent": "pytest",
+            "role": "tester",
+            "entry_type": "Note",
+        }
+
+        with patch.object(sync_mod, "sync_to_memory_backend", side_effect=tracking_sync):
+            sync_mod.sync_to_memory_backend(
+                threads_dir=threads_dir,
+                topic="integration-test",
+                entry_id="test-entry-1",
+                entry_body=entry_node["body"],
+                entry_title=entry_node["title"],
+                entry_summary=entry_node.get("summary", ""),
+                timestamp=entry_node["timestamp"],
+                agent=entry_node["agent"],
+                role=entry_node["role"],
+                entry_type=entry_node["entry_type"],
+            )
+
+        assert len(sync_called) == 1
+        assert sync_called[0]["topic"] == "integration-test"
+        assert sync_called[0]["entry_id"] == "test-entry-1"

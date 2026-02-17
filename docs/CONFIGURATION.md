@@ -224,16 +224,26 @@ prefer_extractive = false    # Force extractive mode (skip LLM)
 
 [baseline_graph.llm]
 api_base = "http://localhost:8000/v1"   # llama-server default
-model = "llama3.2:3b"                   # Small local model
+model = "qwen3:1.7b"                    # Recommended for summarization
 api_key = "local"                       # Local server doesn't require key
 timeout = 30.0                          # Request timeout (seconds)
 max_tokens = 256                        # Max response tokens
+
+# Prompt configuration (auto-detected from model if empty)
+# system_prompt = ""          # Empty = auto-detect by model family
+# prompt_prefix = ""          # Empty = auto-detect (e.g., /no_think for Qwen3)
+
+# Few-shot example for format compliance (optional)
+# summary_example_input = "Implemented OAuth2 authentication..."
+# summary_example_output = "OAuth2 authentication implemented...\ntags: #auth #OAuth2"
 
 [baseline_graph.extractive]
 max_chars = 200              # Max chars for extractive summary
 include_headers = true       # Include markdown headers
 max_headers = 3              # Max headers to include
 ```
+
+**Recommended models:** `qwen3:1.7b` (fast, auto `/no_think`), `qwen2.5:3b` (quality), `llama3.2:3b` (balanced).
 
 See [Baseline Graph Documentation](baseline-graph.md) for full usage guide.
 
@@ -271,7 +281,7 @@ export WATERCOOLER_GRAPHITI_ENABLED=1
 # LLM via llama-server
 export LLM_API_KEY="local"  # Local server doesn't require a real key
 export LLM_API_BASE="http://localhost:8000/v1"
-export LLM_MODEL="llama3.2:3b"
+export LLM_MODEL="qwen3:1.7b"
 
 # Embeddings via llama-server
 export EMBEDDING_API_KEY="local"  # Local server doesn't require a real key
@@ -393,9 +403,25 @@ level = "DEBUG"
 
 **Note:** Environment variables still work and override config file values.
 
-## Credentials
+## Credentials vs Configuration
 
-Credentials (GitHub tokens, SSH keys) are stored separately in `credentials.toml`:
+Watercooler separates **credentials** (secrets) from **configuration** (settings):
+
+| File | Purpose | Permissions | Git |
+|------|---------|-------------|-----|
+| `~/.watercooler/config.toml` | Settings (api_base, model, etc.) | Normal | Can commit |
+| `~/.watercooler/credentials.toml` | Secrets (API keys, tokens) | 0600 | **Never commit** |
+
+### Why Separate Files?
+
+1. **Security**: Different access patterns - credentials need 0600 permissions
+2. **Version control**: Config can be shared in repos; credentials cannot
+3. **Environment parity**: Same config across dev/prod, different credentials
+4. **Intuitive**: "I have an OpenAI key" vs "I have an LLM key"
+
+### API Key Storage
+
+Store API keys in `credentials.toml` by **provider name**:
 
 ```toml
 # ~/.watercooler/credentials.toml
@@ -404,8 +430,62 @@ Credentials (GitHub tokens, SSH keys) are stored separately in `credentials.toml
 token = "ghp_xxxxxxxxxxxx"
 ssh_key = "~/.ssh/id_ed25519"
 
+[openai]
+api_key = "sk-proj-..."
+
+[anthropic]
+api_key = "sk-ant-..."
+
+[groq]
+api_key = "gsk_..."
+
+[voyage]
+api_key = "vg-..."
+
+[google]
+api_key = "AIza..."
+
 [dashboard]
 session_secret = "your-secret-key"
+```
+
+The system auto-detects which provider to use based on `api_base` in config.toml.
+
+### API Key Resolution Priority
+
+When resolving API keys for LLM or embedding services:
+
+```
+1. Env var (highest):     LLM_API_KEY / EMBEDDING_API_KEY
+2. Provider-specific env: OPENAI_API_KEY (auto-detected from api_base)
+3. Provider credentials:  [openai].api_key in credentials.toml
+4. Empty string (lowest): Local servers often don't need keys
+```
+
+### Migration from config.toml
+
+If you have API keys in config.toml, move them to credentials.toml:
+
+**Before** (deprecated):
+```toml
+# ~/.watercooler/config.toml
+[memory.llm]
+api_key = "sk-proj-..."  # ❌ Secrets don't belong here
+api_base = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+```
+
+**After** (correct):
+```toml
+# ~/.watercooler/config.toml
+[memory.llm]
+api_base = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+# No api_key here - it's in credentials.toml
+
+# ~/.watercooler/credentials.toml
+[openai]
+api_key = "sk-proj-..."
 ```
 
 **Security:** Credentials files are automatically set to mode 0600 (owner read/write only).

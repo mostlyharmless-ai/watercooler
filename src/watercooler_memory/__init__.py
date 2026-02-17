@@ -7,7 +7,7 @@ entity extraction.
 The graph uses a hierarchical structure:
   Thread -> Entry -> Chunk
 
-With hyperedges for membership and temporal edges for sequencing.
+With temporal FOLLOWS edges for sequencing.
 
 Usage:
     from watercooler_memory import MemoryGraph, GraphConfig
@@ -79,16 +79,34 @@ if MEMORY_AVAILABLE:
         ThreadNode,
         EntryNode,
         ChunkNode,
-        EntityNode,
+        DocumentNode,
+        DocumentChunkNode,
         Edge,
-        Hyperedge,
         EdgeType,
-        HyperedgeType,
     )
     from watercooler_memory.graph import MemoryGraph, GraphConfig
     from watercooler_memory.parser import parse_thread_to_nodes, parse_threads_directory
-    from watercooler_memory.chunker import chunk_text, chunk_entry, ChunkerConfig
+    from watercooler_memory.chunker import (
+        chunk_text,
+        chunk_entry,
+        chunk_whitepaper,
+        ChunkerConfig,
+    )
     from watercooler_memory.leanrag_export import export_to_leanrag
+    from watercooler_memory.whitepaper_parser import (
+        detect_whitepaper,
+        parse_whitepaper_structure,
+        get_section_breadcrumb,
+        DocumentMetadata,
+        Section,
+        AtomicBlock,
+        DocumentStructure,
+    )
+    from watercooler_memory.document_ingest import (
+        ingest_document,
+        ingest_directory,
+        DocumentChunk,
+    )
 else:
     # Stub classes that raise helpful errors when instantiated
     class _StubClass:
@@ -101,11 +119,10 @@ else:
     ThreadNode = _StubClass  # type: ignore
     EntryNode = _StubClass  # type: ignore
     ChunkNode = _StubClass  # type: ignore
-    EntityNode = _StubClass  # type: ignore
+    DocumentNode = _StubClass  # type: ignore
+    DocumentChunkNode = _StubClass  # type: ignore
     Edge = _StubClass  # type: ignore
-    Hyperedge = _StubClass  # type: ignore
     EdgeType = _StubClass  # type: ignore
-    HyperedgeType = _StubClass  # type: ignore
 
     # Graph stubs
     MemoryGraph = _StubClass  # type: ignore
@@ -125,11 +142,38 @@ else:
     def chunk_entry(*args, **kwargs):
         _raise_missing_deps()
 
+    def chunk_whitepaper(*args, **kwargs):
+        _raise_missing_deps()
+
     ChunkerConfig = _StubClass  # type: ignore
 
     # Export stubs
     def export_to_leanrag(*args, **kwargs):
         _raise_missing_deps()
+
+    # Whitepaper parser stubs
+    def detect_whitepaper(*args, **kwargs):
+        _raise_missing_deps()
+
+    def parse_whitepaper_structure(*args, **kwargs):
+        _raise_missing_deps()
+
+    def get_section_breadcrumb(*args, **kwargs):
+        _raise_missing_deps()
+
+    DocumentMetadata = _StubClass  # type: ignore
+    Section = _StubClass  # type: ignore
+    AtomicBlock = _StubClass  # type: ignore
+    DocumentStructure = _StubClass  # type: ignore
+
+    # Document ingest stubs
+    def ingest_document(*args, **kwargs):
+        _raise_missing_deps()
+
+    def ingest_directory(*args, **kwargs):
+        _raise_missing_deps()
+
+    DocumentChunk = _StubClass  # type: ignore
 
 
 __all__ = [
@@ -139,11 +183,10 @@ __all__ = [
     "ThreadNode",
     "EntryNode",
     "ChunkNode",
-    "EntityNode",
+    "DocumentNode",
+    "DocumentChunkNode",
     "Edge",
-    "Hyperedge",
     "EdgeType",
-    "HyperedgeType",
     # Graph
     "MemoryGraph",
     "GraphConfig",
@@ -153,9 +196,22 @@ __all__ = [
     # Chunker
     "chunk_text",
     "chunk_entry",
+    "chunk_whitepaper",
     "ChunkerConfig",
     # Export
     "export_to_leanrag",
+    # Whitepaper parser
+    "detect_whitepaper",
+    "parse_whitepaper_structure",
+    "get_section_breadcrumb",
+    "DocumentMetadata",
+    "Section",
+    "AtomicBlock",
+    "DocumentStructure",
+    # Document ingest
+    "ingest_document",
+    "ingest_directory",
+    "DocumentChunk",
     # Validation (always available - no external deps)
     "ValidationError",
     "validate_chunk",

@@ -257,6 +257,132 @@ class TestSearchRouting:
             mock_episodes.assert_called_once()
 
 
+class TestTimeFilterRouting:
+    """Tests for time filter passthrough in search routing (issue #148)."""
+
+    @pytest.fixture
+    def mock_context(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_threads_dir(self, tmp_path):
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+        graph_dir = threads_dir / "graph" / "baseline"
+        graph_dir.mkdir(parents=True)
+        (graph_dir / "nodes.jsonl").write_text("")
+        (graph_dir / "edges.jsonl").write_text("")
+        return threads_dir
+
+    async def test_episodes_time_filters_passed_through(self, mock_context, mock_threads_dir):
+        """Time filters should be passed through to episodes impl."""
+        from watercooler_mcp.tools.graph import route_search
+
+        with patch(
+            "watercooler_mcp.tools.graph._search_graphiti_episodes_impl",
+            new_callable=AsyncMock,
+        ) as mock_episodes:
+            mock_episodes.return_value = json.dumps({"results": [], "count": 0})
+
+            await route_search(
+                ctx=mock_context,
+                threads_dir=mock_threads_dir,
+                query="test query",
+                backend="graphiti",
+                mode="episodes",
+                start_time="2026-02-01",
+                end_time="2026-02-09",
+            )
+
+            mock_episodes.assert_called_once()
+            assert mock_episodes.call_args.kwargs.get("start_time") == "2026-02-01"
+
+    async def test_episodes_no_time_filters_unchanged(self, mock_context, mock_threads_dir):
+        """Episodes without time filters should work as before."""
+        from watercooler_mcp.tools.graph import route_search
+
+        with patch(
+            "watercooler_mcp.tools.graph._search_graphiti_episodes_impl",
+            new_callable=AsyncMock,
+        ) as mock_episodes:
+            mock_episodes.return_value = json.dumps({"results": [], "count": 0})
+
+            await route_search(
+                ctx=mock_context,
+                threads_dir=mock_threads_dir,
+                query="test query",
+                backend="graphiti",
+                mode="episodes",
+            )
+
+            mock_episodes.assert_called_once()
+
+    async def test_episodes_start_time_only(self, mock_context, mock_threads_dir):
+        """Only start_time should be passed through (end_time empty)."""
+        from watercooler_mcp.tools.graph import route_search
+
+        with patch(
+            "watercooler_mcp.tools.graph._search_graphiti_episodes_impl",
+            new_callable=AsyncMock,
+        ) as mock_episodes:
+            mock_episodes.return_value = json.dumps({"results": [], "count": 0})
+
+            await route_search(
+                ctx=mock_context,
+                threads_dir=mock_threads_dir,
+                query="test query",
+                backend="graphiti",
+                mode="episodes",
+                start_time="2026-02-01",
+            )
+
+            mock_episodes.assert_called_once()
+
+    async def test_episodes_end_time_only(self, mock_context, mock_threads_dir):
+        """Only end_time should be passed through (start_time empty)."""
+        from watercooler_mcp.tools.graph import route_search
+
+        with patch(
+            "watercooler_mcp.tools.graph._search_graphiti_episodes_impl",
+            new_callable=AsyncMock,
+        ) as mock_episodes:
+            mock_episodes.return_value = json.dumps({"results": [], "count": 0})
+
+            await route_search(
+                ctx=mock_context,
+                threads_dir=mock_threads_dir,
+                query="test query",
+                backend="graphiti",
+                mode="episodes",
+                end_time="2026-02-09",
+            )
+
+            mock_episodes.assert_called_once()
+
+    async def test_facts_time_filters_passed_through(self, mock_context, mock_threads_dir):
+        """Time filters should be passed through to facts/entries impl."""
+        from watercooler_mcp.tools.graph import route_search
+
+        with patch(
+            "watercooler_mcp.tools.graph._search_graphiti_impl",
+            new_callable=AsyncMock,
+        ) as mock_graphiti:
+            mock_graphiti.return_value = json.dumps({"results": [], "count": 0})
+
+            await route_search(
+                ctx=mock_context,
+                threads_dir=mock_threads_dir,
+                query="test query",
+                backend="graphiti",
+                mode="entries",
+                start_time="2026-02-01",
+                end_time="2026-02-09",
+            )
+
+            mock_graphiti.assert_called_once()
+            assert mock_graphiti.call_args.kwargs.get("start_time") == "2026-02-01"
+
+
 class TestSearchToolParameters:
     """Tests for extended watercooler_search tool parameters."""
 

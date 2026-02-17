@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
-import subprocess
+import sys
 import tempfile
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Sequence
 
 logger = logging.getLogger(__name__)
@@ -31,7 +33,26 @@ from . import (
 )
 from ..entry_episode_index import EntryEpisodeIndex, IndexConfig
 
-import os
+from watercooler.memory_config import is_anthropic_url
+from watercooler.path_resolver import derive_group_id
+
+# Providers whose OpenAI-compatible APIs do NOT support json_schema
+# structured outputs (response_format type). These need json_object fallback.
+_NO_STRUCTURED_OUTPUTS_DOMAINS = ("deepseek.com",)
+# DeepSeek max output tokens is 8192; graphiti_core defaults to 16384
+_DEEPSEEK_MAX_TOKENS = 8192
+
+
+def _needs_json_object_only(api_base: str | None) -> bool:
+    """Check if provider requires json_object mode (no structured outputs)."""
+    if not api_base:
+        return False
+    try:
+        from urllib.parse import urlparse
+        hostname = (urlparse(api_base).hostname or "").lower()
+        return any(hostname.endswith(d) for d in _NO_STRUCTURED_OUTPUTS_DOMAINS)
+    except Exception:
+        return False
 
 # Resolve package root from this file's location
 # graphiti.py is at: src/watercooler_memory/backends/graphiti.py
@@ -148,10 +169,16 @@ def _ensure_graphiti_available() -> None:
 def _derive_database_name(code_path: Path | str | None) -> str:
     """Derive database name from project directory.
 
+    Uses unified derive_group_id() from path_resolver for consistent
+    sanitization across all backends.
+
     Converts project directory name to a valid FalkorDB database name:
     - Replaces hyphens with underscores (FalkorDB doesn't like hyphens)
     - Converts to lowercase
     - Falls back to 'watercooler' if no code_path provided
+
+    Note: Does NOT remove dots or other special chars to preserve
+    compatibility with existing migrated FalkorDB data.
 
     Args:
         code_path: Path to the project directory
@@ -159,16 +186,209 @@ def _derive_database_name(code_path: Path | str | None) -> str:
     Returns:
         Sanitized database name (e.g., 'watercooler_cloud')
     """
-    if code_path is None:
-        return "watercooler"
+    return derive_group_id(code_path=Path(code_path) if code_path else None)
 
-    path = Path(code_path) if isinstance(code_path, str) else code_path
-    name = path.resolve().name  # Get directory name
-    # Sanitize: replace hyphens with underscores, lowercase
-    sanitized = name.replace("-", "_").lower()
-    # Remove any non-alphanumeric except underscores
-    sanitized = "".join(c if c.isalnum() or c == "_" else "_" for c in sanitized)
-    return sanitized or "watercooler"
+
+def _best_extra_match(missing_field: str, extras: set[str]) -> str | None:
+    """Pick the extra field most likely to correspond to *missing_field*.
+
+    When DeepSeek (and similar providers) use ``json_object`` mode instead of
+    ``json_schema``, the LLM is free to choose its own field names.  Commonly
+    it prefixes every field with the parent concept (``entity_name`` instead of
+    ``name``, ``entity_nodes`` instead of ``extracted_entities``).
+
+    The heuristic ranks candidates in decreasing confidence:
+
+    1. **Suffix match** – ``entity_name`` ends with ``_name`` → strong signal
+       that the semantic meaning is "name".
+    2. **Substring match** – the target name appears *somewhere* inside the
+       candidate (weaker, but still useful for ``xnamex``-style variants).
+    3. **Alphabetical fallback** – deterministic tie-breaker when no textual
+       similarity exists.  This keeps behaviour stable across runs but is
+       essentially a guess; in practice the first two tiers catch real cases.
+    """
+    suffix: list[str] = []
+    contains: list[str] = []
+    for e in sorted(extras):
+        if e.endswith(f"_{missing_field}") or e == missing_field:
+            suffix.append(e)
+        elif missing_field in e:
+            contains.append(e)
+    if suffix:
+        return suffix[0]
+    if contains:
+        return contains[0]
+    return sorted(extras)[0] if extras else None
+
+
+# Maximum recursion depth for _normalize_json_response.
+# Graphiti responses are 2-3 levels deep; this is a defensive ceiling.
+MAX_NORMALIZE_DEPTH = 10
+
+
+def _normalize_json_response(
+    data: dict[str, Any], response_model: type,
+    *, _depth: int = 0,
+) -> dict[str, Any]:
+    """Remap response field names to match a Pydantic model schema.
+
+    Without ``json_schema`` enforcement, LLMs may use synonymous field
+    names (e.g. ``entity_nodes`` instead of ``extracted_entities``,
+    ``entity_name`` instead of ``name`` inside nested objects).
+    This detects required fields missing from *data* and remaps extra
+    keys that aren't in the model schema, recursing into nested
+    Pydantic models within list fields.
+
+    The recursion is depth-limited to :data:`MAX_NORMALIZE_DEPTH` as a
+    defensive guard against pathological payloads; real Graphiti
+    responses never exceed 3 levels.
+    """
+    if _depth >= MAX_NORMALIZE_DEPTH:
+        logger.warning(
+            "json_object normalize: hit depth limit (%d) for %s, returning as-is",
+            MAX_NORMALIZE_DEPTH, getattr(response_model, "__name__", response_model),
+        )
+        return data
+    from pydantic import BaseModel
+
+    if not (isinstance(response_model, type) and issubclass(response_model, BaseModel)):
+        return data
+
+    # --- top-level field remap ---
+    required = {
+        name for name, info in response_model.model_fields.items()
+        if info.is_required()
+    }
+    present = set(data.keys())
+    missing = required - present
+    extra = present - set(response_model.model_fields.keys())
+
+    remapped = dict(data)
+
+    if missing and extra:
+        extra_remaining = set(extra)
+        for m_field in sorted(missing):
+            if not extra_remaining:
+                break
+            e_field = _best_extra_match(m_field, extra_remaining)
+            if e_field is None:
+                break
+            extra_remaining.discard(e_field)
+            logger.info(
+                "json_object field remap: '%s' -> '%s' for %s",
+                e_field, m_field, response_model.__name__,
+            )
+            remapped[m_field] = remapped.pop(e_field)
+
+    # --- recurse into nested Pydantic models ---
+    for field_name, field_info in response_model.model_fields.items():
+        value = remapped.get(field_name)
+        if value is None:
+            continue
+        inner_model = _get_list_item_model(field_info.annotation)
+        if inner_model is not None and isinstance(value, list):
+            remapped[field_name] = [
+                _normalize_json_response(item, inner_model, _depth=_depth + 1)
+                if isinstance(item, dict) else item
+                for item in value
+            ]
+        elif inner_model is not None and isinstance(value, dict):
+            # DeepSeek sometimes returns a single dict where list is expected.
+            # Validate the dict looks plausible before wrapping: it must have
+            # at least one key that either matches a model field directly OR
+            # could be remapped to one (e.g. entity_name → name).
+            model_fields = set(inner_model.model_fields.keys())
+            value_keys = set(value.keys())
+            has_direct = bool(value_keys & model_fields)
+            # Only count as remappable if there's a suffix or substring
+            # match — the alphabetical fallback in _best_extra_match is
+            # too loose for deciding whether to coerce dict→list.
+            has_remappable = False
+            if not has_direct:
+                for mf in model_fields:
+                    if mf in value_keys:
+                        continue
+                    for vk in value_keys:
+                        if vk.endswith(f"_{mf}") or vk == mf or mf in vk:
+                            has_remappable = True
+                            break
+                    if has_remappable:
+                        break
+            if not (has_direct or has_remappable) or not value:
+                logger.warning(
+                    "json_object list coercion: dict has no keys matching %s "
+                    "fields (%s), skipping coercion for '%s' in %s",
+                    inner_model.__name__, model_fields, field_name,
+                    response_model.__name__,
+                )
+            else:
+                logger.info(
+                    "json_object list coercion: wrapping single dict in list "
+                    "for field '%s' in %s",
+                    field_name, response_model.__name__,
+                )
+                remapped[field_name] = [
+                    _normalize_json_response(value, inner_model, _depth=_depth + 1),
+                ]
+        elif (
+            isinstance(value, dict)
+            and isinstance(field_info.annotation, type)
+            and issubclass(field_info.annotation, BaseModel)
+        ):
+            remapped[field_name] = _normalize_json_response(
+                value, field_info.annotation, _depth=_depth + 1,
+            )
+
+    return remapped
+
+
+def _get_list_item_model(annotation: Any) -> type | None:
+    """Extract the Pydantic model from a ``list[Model]`` annotation."""
+    from pydantic import BaseModel
+
+    origin = getattr(annotation, "__origin__", None)
+    if origin is not list:
+        return None
+    args = getattr(annotation, "__args__", ())
+    if args and isinstance(args[0], type) and issubclass(args[0], BaseModel):
+        return args[0]
+    return None
+
+
+class _JsonObjectOnlyClient:
+    """OpenAI-compatible LLM client that forces json_object response format.
+
+    Some providers (DeepSeek, etc.) reject OpenAI's json_schema structured
+    outputs with HTTP 400.  This thin wrapper delegates to
+    ``OpenAIGenericClient`` but clears ``response_model`` so the parent
+    always uses ``{"type": "json_object"}`` instead of ``json_schema``.
+
+    Graphiti prompts already include JSON format instructions, so the
+    model output is correct even without strict schema enforcement.
+    The response is then normalised via :func:`_normalize_json_response`
+    to remap any variant field names back to the expected Pydantic schema.
+    """
+
+    def __new__(cls, **kwargs: Any) -> Any:  # type: ignore[override]
+        from graphiti_core.llm_client.openai_generic_client import (
+            OpenAIGenericClient,
+        )
+
+        class _Inner(OpenAIGenericClient):
+            async def _generate_response(
+                self, messages: Any, response_model: Any = None, **kw: Any,
+            ) -> dict[str, Any]:
+                # Force json_object by dropping response_model
+                raw = await super()._generate_response(
+                    messages, response_model=None, **kw,
+                )
+                # Without json_schema enforcement, LLMs may use variant
+                # field names.  Remap to match the expected Pydantic model.
+                if response_model is not None:
+                    raw = _normalize_json_response(raw, response_model)
+                return raw
+
+        return _Inner(**kwargs)
 
 
 @dataclass
@@ -228,10 +448,30 @@ class GraphitiConfig:
     auto_save_index: bool = True
 
     def __post_init__(self):
-        """Set default index path if not provided."""
+        """Set default index path if not provided and warn on deprecated fields."""
         if self.entry_episode_index_path is None and self.track_entry_episodes:
             self.entry_episode_index_path = (
                 Path.home() / ".watercooler" / "graphiti" / "entry_episode_index.json"
+            )
+
+        # Emit deprecation warnings for legacy OpenAI-specific fields
+        if self.openai_api_key is not None:
+            warnings.warn(
+                "GraphitiConfig.openai_api_key is deprecated, use llm_api_key",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if self.openai_api_base is not None:
+            warnings.warn(
+                "GraphitiConfig.openai_api_base is deprecated, use llm_api_base",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if self.openai_model is not None:
+            warnings.warn(
+                "GraphitiConfig.openai_model is deprecated, use llm_model",
+                DeprecationWarning,
+                stacklevel=2,
             )
 
     @classmethod
@@ -265,10 +505,12 @@ class GraphitiConfig:
 
         return cls(
             llm_api_key=llm.api_key,
-            llm_api_base=llm.api_base if llm.api_base != "https://api.openai.com/v1" else None,
+            # Pass through any resolved URL; converts empty string to None so
+            # the graphiti_core client applies its own default (api.openai.com).
+            llm_api_base=llm.api_base or None,
             llm_model=llm.model,
             embedding_api_key=embedding.api_key,
-            embedding_api_base=embedding.api_base if embedding.api_base != "https://api.openai.com/v1" else None,
+            embedding_api_base=embedding.api_base or None,
             embedding_model=embedding.model,
             embedding_dim=embedding.dim,
             falkordb_host=db.host,
@@ -278,6 +520,68 @@ class GraphitiConfig:
             reranker=get_graphiti_reranker(),
             track_entry_episodes=get_graphiti_track_entry_episodes(),
         )
+
+
+def _filter_by_time_range(
+    results: list[dict[str, Any]],
+    start_time: str,
+    end_time: str,
+    time_key: str = "created_at",
+) -> list[dict[str, Any]]:
+    """Post-filter results by timestamp range.
+
+    Compares each result's ``time_key`` field against the given ISO 8601
+    bounds.  Gracefully handles empty filter strings (no-op), missing or
+    unparseable timestamp values on individual results (excluded when
+    filters are active), and timezone-naive datetimes (treated as UTC).
+
+    Args:
+        results: List of result dicts from Graphiti search.
+        start_time: ISO 8601 lower bound (inclusive). Empty string = no lower bound.
+        end_time: ISO 8601 upper bound (inclusive). Empty string = no upper bound.
+        time_key: Dict key to read the timestamp from (default ``"created_at"``).
+
+    Returns:
+        Filtered list (may be shorter than input, never longer).
+    """
+    if not start_time and not end_time:
+        return results
+
+    def _parse_dt(value: str) -> datetime | None:
+        try:
+            # Normalize trailing Z → +00:00 (Python 3.10 fromisoformat doesn't accept Z)
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+            dt = datetime.fromisoformat(value)
+            # Ensure timezone-aware (assume UTC for naive datetimes)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, TypeError):
+            return None
+
+    lower = _parse_dt(start_time) if start_time else None
+    upper = _parse_dt(end_time) if end_time else None
+
+    # If both bounds failed to parse, skip filtering entirely
+    if lower is None and upper is None:
+        return results
+
+    filtered: list[dict[str, Any]] = []
+    for r in results:
+        raw = r.get(time_key)
+        if raw is None:
+            continue  # Exclude results with missing timestamp when filters are active
+        ts = _parse_dt(raw.isoformat() if isinstance(raw, datetime) else str(raw))
+        if ts is None:
+            continue  # Unparseable timestamp — exclude
+        if lower and ts < lower:
+            continue
+        if upper and ts > upper:
+            continue
+        filtered.append(r)
+
+    return filtered
 
 
 class GraphitiBackend(MemoryBackend):
@@ -817,13 +1121,38 @@ class GraphitiBackend(MemoryBackend):
         finally:
             asyncio.get_running_loop = original_get_running_loop
 
-        # Configure LLM client (supports OpenAI, local servers, DeepSeek, etc.)
-        llm_config = LLMConfig(
-            api_key=self.config.llm_api_key,
-            model=self.config.llm_model,
-            base_url=self.config.llm_api_base,
-        )
-        llm_client = OpenAIGenericClient(config=llm_config)
+        # Configure LLM client (supports OpenAI, Anthropic, local servers, DeepSeek, etc.)
+        llm_api_base = self.config.llm_api_base or ""
+        is_anthropic = is_anthropic_url(llm_api_base)
+
+        if is_anthropic:
+            # Use native Anthropic client for Anthropic API
+            from graphiti_core.llm_client.anthropic_client import AnthropicClient
+            llm_client = AnthropicClient(
+                api_key=self.config.llm_api_key,
+                model=self.config.llm_model,
+            )
+        else:
+            # Use OpenAI-compatible client for OpenAI, DeepSeek, Groq, local servers
+            llm_config = LLMConfig(
+                api_key=self.config.llm_api_key,
+                model=self.config.llm_model,
+                base_url=self.config.llm_api_base,
+            )
+            if _needs_json_object_only(llm_api_base):
+                # DeepSeek (and similar) don't support json_schema structured
+                # outputs. Use a thin wrapper that forces json_object mode.
+                # Also cap max_tokens to 8192 (DeepSeek's output limit).
+                llm_client = _JsonObjectOnlyClient(
+                    config=llm_config, max_tokens=_DEEPSEEK_MAX_TOKENS,
+                )
+                logger.warning(
+                    "Using json_object-only LLM client for %s "
+                    "(provider does not support json_schema structured outputs)",
+                    llm_api_base,
+                )
+            else:
+                llm_client = OpenAIGenericClient(config=llm_config)
 
         # Configure embedder (supports OpenAI, local llama.cpp, etc.)
         # Check if embedding service needs auto-start
@@ -1725,6 +2054,8 @@ class GraphitiBackend(MemoryBackend):
         group_ids: Sequence[str] | None = None,
         max_results: int = DEFAULT_MAX_FACTS,
         center_node_id: str | None = None,
+        start_time: str = "",
+        end_time: str = "",
     ) -> list[dict[str, Any]]:
         """Search for facts (edges) using semantic search.
 
@@ -1735,6 +2066,8 @@ class GraphitiBackend(MemoryBackend):
             group_ids: Optional list of group IDs to filter by
             max_results: Maximum facts to return (default: 10, max: 50)
             center_node_id: Optional node UUID to center search around
+            start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
+            end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
 
         Returns:
             List of fact dicts with edge data
@@ -1748,27 +2081,30 @@ class GraphitiBackend(MemoryBackend):
         if not query or not query.strip():
             from . import ConfigError
             raise ConfigError("query cannot be empty")
-        
+
         # Validate max_results to prevent resource exhaustion
         if max_results < self.MIN_SEARCH_RESULTS or max_results > self.MAX_SEARCH_RESULTS:
             from . import ConfigError
             raise ConfigError(
                 f"max_results must be between {self.MIN_SEARCH_RESULTS} and {self.MAX_SEARCH_RESULTS}, got {max_results}"
             )
-        
+
         # Get results from underlying method
         results = self.search_memory_facts(
             query=query,
             group_ids=group_ids,
             max_facts=max_results,
             center_node_uuid=center_node_id,
+            start_time=start_time,
+            end_time=end_time,
         )
         
         # Add CoreResult-compliant fields to each result
         for result in results:
             result.setdefault("id", result.get("uuid"))  # Required by CoreResult
             result.setdefault("backend", "graphiti")  # Required by CoreResult
-            result.setdefault("content", None)  # Facts don't have content
+            result.setdefault("content", result.get("fact"))  # Map fact text to content
+            result.setdefault("name", result.get("fact", "")[:100] if result.get("fact") else None)
             result.setdefault("source", None)  # Source tracking not applicable to edges
             result.setdefault("metadata", {})  # Additional metadata
             result.setdefault("extra", {})  # Backend-specific fields
@@ -1780,6 +2116,8 @@ class GraphitiBackend(MemoryBackend):
         query: str,
         group_ids: Sequence[str] | None = None,
         max_results: int = DEFAULT_MAX_EPISODES,
+        start_time: str = "",
+        end_time: str = "",
     ) -> list[dict[str, Any]]:
         """Search for episodes (provenance-bearing content) using semantic search.
 
@@ -1789,6 +2127,8 @@ class GraphitiBackend(MemoryBackend):
             query: Search query string
             group_ids: Optional list of group IDs to filter by
             max_results: Maximum episodes to return (default: 10, max: 50)
+            start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
+            end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
 
         Returns:
             List of episode dicts with uuid, name, content, timestamps
@@ -1802,19 +2142,21 @@ class GraphitiBackend(MemoryBackend):
         if not query or not query.strip():
             from . import ConfigError
             raise ConfigError("query cannot be empty")
-        
+
         # Validate max_results to prevent resource exhaustion
         if max_results < self.MIN_SEARCH_RESULTS or max_results > self.MAX_SEARCH_RESULTS:
             from . import ConfigError
             raise ConfigError(
                 f"max_results must be between {self.MIN_SEARCH_RESULTS} and {self.MAX_SEARCH_RESULTS}, got {max_results}"
             )
-        
+
         # Get results from underlying method
         results = self.get_episodes(
             query=query,
             group_ids=group_ids,
             max_episodes=max_results,
+            start_time=start_time,
+            end_time=end_time,
         )
         
         # Add CoreResult-compliant fields to each result
@@ -1929,6 +2271,8 @@ class GraphitiBackend(MemoryBackend):
         group_ids: list[str] | None = None,
         max_facts: int = DEFAULT_MAX_FACTS,
         center_node_uuid: str | None = None,
+        start_time: str = "",
+        end_time: str = "",
     ) -> list[dict[str, Any]]:
         """Search for facts (edges) with optional center-node traversal.
 
@@ -1942,6 +2286,8 @@ class GraphitiBackend(MemoryBackend):
             group_ids: Optional list of group IDs to filter by
             max_facts: Maximum facts to return (default: 10, max: 50)
             center_node_uuid: Optional node UUID to center search around
+            start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
+            end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
 
         Returns:
             List of fact dicts with edge data
@@ -1987,7 +2333,9 @@ class GraphitiBackend(MemoryBackend):
                 
                 results.append({
                     "uuid": edge.uuid,
+                    "name": edge.name,  # Relation name (e.g. "IMPLEMENTS")
                     "fact": edge.fact,
+                    "content": edge.fact,  # CoreResult-compliant: map fact text to content
                     "source_node_uuid": edge.source_node_uuid,
                     "target_node_uuid": edge.target_node_uuid,
                     "valid_at": edge.valid_at.isoformat() if edge.valid_at else None,
@@ -1997,7 +2345,8 @@ class GraphitiBackend(MemoryBackend):
                     "score": score,  # Hybrid search reranker score
                 })
 
-            return results
+            # Post-filter by time range (Graphiti search_ ignores time filters)
+            return _filter_by_time_range(results, start_time, end_time)
 
         try:
             return asyncio.run(search_facts_async())
@@ -2009,6 +2358,8 @@ class GraphitiBackend(MemoryBackend):
         query: str,
         group_ids: list[str] | None = None,
         max_episodes: int = DEFAULT_MAX_EPISODES,
+        start_time: str = "",
+        end_time: str = "",
     ) -> list[dict[str, Any]]:
         """Search for episodes from Graphiti memory using semantic search.
 
@@ -2024,6 +2375,8 @@ class GraphitiBackend(MemoryBackend):
             query: Search query string (required, must be non-empty)
             group_ids: Optional list of group IDs to filter by
             max_episodes: Maximum episodes to return (default: 10, max: 50)
+            start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
+            end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
 
         Returns:
             List of episode dicts with uuid, name, content, timestamps
@@ -2083,7 +2436,8 @@ class GraphitiBackend(MemoryBackend):
                     "score": score,  # Hybrid search reranker score
                 })
 
-            return results
+            # Post-filter by time range (Graphiti search_ ignores time filters)
+            return _filter_by_time_range(results, start_time, end_time)
 
         try:
             return asyncio.run(search_episodes_async())

@@ -1,16 +1,12 @@
 """Pipeline state management for resumable processing."""
 
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Any
 import json
 
-
-def _utc_iso_timestamp() -> str:
-    """Return current UTC time as ISO 8601 string with Z suffix."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+from .._utils import _utc_now_iso as _utc_iso_timestamp
 
 
 class StageStatus(str, Enum):

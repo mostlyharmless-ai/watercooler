@@ -50,12 +50,10 @@ def patched_context(tmp_path, monkeypatch):
     context = ThreadContext(
         code_root=tmp_path,
         threads_dir=threads_dir,
-        threads_repo_url=None,
         code_repo="mostlyharmless-ai/watercooler-cloud",
         code_branch="main",
         code_commit="abc1234",
         code_remote="origin",
-        threads_slug="watercooler-cloud",
         explicit_dir=True,
     )
 
@@ -90,7 +88,13 @@ def test_list_thread_entries_returns_headers(patched_context):
     first = payload["entries"][0]
     assert first["index"] == 0
     assert first["entry_id"] == "01KA0PK97G9Q6AB0B17896Y1EB"
-    assert first["header"].startswith("Entry: Codex")
+    assert "summary" in first
+    # Vestigial MD fields must not appear
+    assert "header" not in first
+    assert "start_line" not in first
+    assert "end_line" not in first
+    assert "start_offset" not in first
+    assert "end_offset" not in first
     assert "body" not in first
 
 
@@ -102,7 +106,11 @@ def test_get_thread_entry_by_index(patched_context):
     entry = payload["entry"]
     assert entry["entry_id"] == "01KA0PYSR7X43QQ61H1BCR3S2S"
     assert "Another body line" in entry["body"]
-    assert entry["markdown"].startswith("Entry: Codex (caleb)")
+    assert "summary" in entry
+    # Vestigial fields must not appear
+    assert "markdown" not in entry
+    assert "header" not in entry
+    assert "start_line" not in entry
 
 
 def test_get_thread_entry_by_id(patched_context):

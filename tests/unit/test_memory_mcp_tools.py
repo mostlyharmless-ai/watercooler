@@ -51,7 +51,7 @@ class TestGraphitiAddEpisodeTool:
         return MagicMock()
 
     async def test_add_episode_success(self, mock_graphiti_backend, mock_context):
-        """Test successful episode addition."""
+        """Test successful episode submission (fire-and-forget)."""
         from watercooler_mcp.tools.memory import _graphiti_add_episode_impl
 
         with patch(
@@ -71,12 +71,20 @@ class TestGraphitiAddEpisodeTool:
             result_text = result.content[0].text
             result_data = json.loads(result_text)
 
+            # Fire-and-forget: returns immediately with "submitted" status
             assert result_data["success"] is True
-            assert result_data["episode_uuid"] == "ep-uuid-12345"
-            assert "entities_extracted" in result_data
+            assert result_data["status"] == "submitted"
+            assert result_data["group_id"] == "auth-feature"
+            assert "background" in result_data["message"].lower()
+
+            # Let the background task run
+            await asyncio.sleep(0.05)
+
+            # Verify the backend was called in the background
+            mock_graphiti_backend.add_episode_direct.assert_called_once()
 
     async def test_add_episode_with_timestamp(self, mock_graphiti_backend, mock_context):
-        """Test episode addition with custom timestamp."""
+        """Test episode submission with custom timestamp."""
         from watercooler_mcp.tools.memory import _graphiti_add_episode_impl
 
         timestamp = "2025-01-15T10:00:00Z"
@@ -97,13 +105,17 @@ class TestGraphitiAddEpisodeTool:
 
             result_data = json.loads(result.content[0].text)
             assert result_data["success"] is True
+            assert result_data["status"] == "submitted"
 
-            # Verify timestamp was passed to backend
+            # Let the background task run
+            await asyncio.sleep(0.05)
+
+            # Verify timestamp was passed to backend in the background task
             call_args = mock_graphiti_backend.add_episode_direct.call_args
             assert call_args is not None
 
     async def test_add_episode_with_entry_id(self, mock_graphiti_backend, mock_context):
-        """Test episode addition with entry_id for provenance tracking."""
+        """Test episode submission with entry_id for provenance tracking."""
         from watercooler_mcp.tools.memory import _graphiti_add_episode_impl
 
         with patch(
@@ -122,8 +134,13 @@ class TestGraphitiAddEpisodeTool:
 
             result_data = json.loads(result.content[0].text)
             assert result_data["success"] is True
+            assert result_data["status"] == "submitted"
+            assert result_data["entry_id"] == "01ABC123"
 
-            # Verify entry-episode mapping was created
+            # Let the background task run
+            await asyncio.sleep(0.05)
+
+            # Verify entry-episode mapping was created in background
             mock_graphiti_backend.index_entry_as_episode.assert_called_once()
 
     async def test_add_episode_graphiti_disabled(self, mock_context):
@@ -345,3 +362,85 @@ class TestToolRegistration:
             __import__("watercooler_mcp.tools.memory", fromlist=["leanrag_run_pipeline"]),
             "leanrag_run_pipeline",
         )
+
+
+class TestBulkIndexImpl:
+    """Tests for _bulk_index_impl thread directory resolution."""
+
+    @pytest.fixture
+    def mock_context(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def threads_dir(self, tmp_path):
+        """Create a fake threads directory with .md files."""
+        td = tmp_path / "repo-threads"
+        td.mkdir()
+        (td / "topic-a.md").write_text("# topic-a\n\nentry content A")
+        (td / "topic-b.md").write_text("# topic-b\n\nentry content B")
+        return td
+
+    @pytest.fixture
+    def mock_queue(self):
+        queue = MagicMock()
+        queue.status_summary.return_value = {
+            "queue_depth": 0,
+            "by_status": {},
+            "oldest_task_age_s": None,
+            "stats": {"total_enqueued": 0, "total_completed": 0,
+                      "total_dead_lettered": 0, "total_retries": 0},
+        }
+        return queue
+
+    async def test_resolve_threads_dir_uses_code_root(
+        self, mock_context, threads_dir, mock_queue
+    ):
+        """Verify resolve_threads_dir is called with code_root kwarg, not cli_value."""
+        from watercooler_mcp.tools.memory import _bulk_index_impl
+
+        code_path = "/some/repo"
+
+        with patch("watercooler_mcp.memory_queue.get_queue", return_value=mock_queue), \
+             patch("watercooler.commands.list_entries", return_value=[]), \
+             patch(
+                 "watercooler.path_resolver.resolve_threads_dir",
+                 return_value=threads_dir,
+             ) as mock_resolve:
+            result = await _bulk_index_impl(
+                ctx=mock_context, code_path=code_path, backend="graphiti",
+            )
+
+        # Key assertion: code_root keyword arg, NOT positional cli_value
+        mock_resolve.assert_called_once_with(code_root=Path(code_path))
+
+    async def test_bulk_index_discovers_topics(
+        self, mock_context, threads_dir, mock_queue
+    ):
+        """Verify bulk_index discovers .md files as topics."""
+        from watercooler_mcp.tools.memory import _bulk_index_impl
+
+        with patch("watercooler_mcp.memory_queue.get_queue", return_value=mock_queue), \
+             patch("watercooler.commands.list_entries", return_value=[]), \
+             patch(
+                 "watercooler.path_resolver.resolve_threads_dir",
+                 return_value=threads_dir,
+             ), \
+             patch("watercooler_mcp.memory_queue.enqueue_memory_task", return_value="t1"):
+            result = await _bulk_index_impl(
+                ctx=mock_context, code_path="/repo", backend="graphiti",
+            )
+
+        data = json.loads(result.content[0].text)
+        assert data["topics_scanned"] == 2
+
+    async def test_bulk_index_code_path_none_returns_error(self, mock_context, mock_queue):
+        """Verify graceful error when code_path is empty."""
+        from watercooler_mcp.tools.memory import _bulk_index_impl
+
+        with patch("watercooler_mcp.memory_queue.get_queue", return_value=mock_queue):
+            result = await _bulk_index_impl(
+                ctx=mock_context, code_path="", backend="graphiti",
+            )
+
+        data = json.loads(result.content[0].text)
+        assert "error" in data

@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
-from .fs import write, thread_path, lock_path_for_topic, utcnow_iso, read_body, is_closed
+from .fs import write, thread_path, lock_path_for_topic, utcnow_iso, read_body, is_closed, discover_thread_files
 from .lock import AdvisoryLock
 from .baseline_graph.writer import get_thread_from_graph, get_entries_for_thread
-from .thread_entries import parse_thread_header
+from .thread_entries import parse_thread_header, parse_thread_entries
 from .agents import _counterpart_of, _canonical_agent, _default_agent_and_role
 from .path_resolver import load_template, resolve_templates_dir
 from .templates import _fill_template
@@ -271,10 +271,13 @@ def set_status(topic: str, *, threads_dir: Path, status: str) -> Path:
 
 def set_ball(topic: str, *, threads_dir: Path, ball: str) -> Path:
     tp = thread_path(topic, threads_dir)
+
+    # Initialize thread if it doesn't exist (before acquiring lock to avoid deadlock)
+    if not tp.exists():
+        init_thread(topic, threads_dir=threads_dir)
+
     lp = lock_path_for_topic(topic, threads_dir)
     with AdvisoryLock(lp, timeout=2, ttl=10, force_break=False):
-        if not tp.exists():
-            init_thread(topic, threads_dir=threads_dir)
         s = tp.read_text(encoding="utf-8")
         s = _bump_header(s, ball=ball)
         write(tp, s)
@@ -286,7 +289,7 @@ def list_threads(*, threads_dir: Path, open_only: bool | None = None) -> list[tu
     out: list[tuple[str, str, str, str, Path, bool]] = []
     if not threads_dir.exists():
         return out
-    for p in sorted(threads_dir.glob("*.md")):
+    for p in discover_thread_files(threads_dir):
         topic = p.stem
         title, status, ball, updated = _thread_meta_from_graph(threads_dir, topic)
         if open_only is True and is_closed(status):
@@ -493,11 +496,35 @@ def reindex(*, threads_dir: Path, out_file: Path | None = None, open_only: bool 
     return out_path
 
 
+def list_entries(topic: str, threads_dir: Path) -> list[dict[str, str]]:
+    """List parsed entries for a thread topic.
+
+    Args:
+        topic: Thread topic identifier.
+        threads_dir: Path to threads directory.
+
+    Returns:
+        List of dicts with keys: entry_id, title, body, timestamp.
+    """
+    tp = thread_path(topic, threads_dir)
+    text = tp.read_text(encoding="utf-8")
+    entries = parse_thread_entries(text)
+    return [
+        {
+            "entry_id": e.entry_id or "",
+            "title": e.title or "",
+            "body": e.body or "",
+            "timestamp": e.timestamp or "",
+        }
+        for e in entries
+    ]
+
+
 def search(*, threads_dir: Path, query: str) -> list[tuple[Path, int, str]]:
     """Naive case-insensitive search; returns (path, line_no, line)."""
     q = query.lower()
     hits: list[tuple[Path, int, str]] = []
-    for p in sorted(threads_dir.glob("*.md")):
+    for p in discover_thread_files(threads_dir):
         try:
             for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), start=1):
                 if q in line.lower():
@@ -613,7 +640,6 @@ def check_branches(*, code_root: Path | None = None, include_merged: bool = Fals
 
     try:
         from watercooler_mcp.config import resolve_thread_context
-        from watercooler_mcp.sync import validate_branch_pairing
 
         code_path = code_root or Path.cwd()
         context = resolve_thread_context(code_path)
@@ -710,28 +736,6 @@ def check_branches(*, code_root: Path | None = None, include_merged: bool = Fals
         lines.append("=" * 60)
         lines.append(f"Summary: {len(synced)} synced, {len(code_only)} code-only, {len(threads_only)} threads-only")
 
-        # Add parity health status for current branch
-        try:
-            from watercooler_mcp.sync import get_branch_health
-            health = get_branch_health(context.code_root, context.threads_dir)
-            lines.append("")
-            lines.append("📊 Current Branch Parity Status:")
-            lines.append(f"  Code branch:    {health.get('code_branch', 'unknown')}")
-            lines.append(f"  Threads branch: {health.get('threads_branch', 'unknown')}")
-            lines.append(f"  Status:         {health.get('status', 'unknown')}")
-            lines.append(f"  Code ahead/behind origin:    {health.get('code_ahead_origin', 0)}/{health.get('code_behind_origin', 0)}")
-            lines.append(f"  Threads ahead/behind origin: {health.get('threads_ahead_origin', 0)}/{health.get('threads_behind_origin', 0)}")
-            if health.get('pending_push'):
-                lines.append(f"  ⚠️  Pending push: True")
-            if health.get('lock_holder'):
-                lines.append(f"  Lock holder:    PID {health.get('lock_holder')}")
-            if health.get('actions_taken'):
-                lines.append(f"  Actions taken:  {', '.join(health.get('actions_taken', []))}")
-            if health.get('last_error'):
-                lines.append(f"  ⚠️  Last error: {health.get('last_error')}")
-        except Exception as health_err:
-            lines.append(f"\n📊 Current Branch Parity Status: Error - {health_err}")
-
         return "\n".join(lines)
 
     except InvalidGitRepositoryError as e:
@@ -750,57 +754,7 @@ def check_branch(branch: str, *, code_root: Path | None = None) -> str:
     Returns:
         Human-readable validation report
     """
-    if Repo is None:
-        return "Error: GitPython not available. Install with: pip install GitPython"
-
-    try:
-        from watercooler_mcp.config import resolve_thread_context
-        from watercooler_mcp.sync import validate_branch_pairing
-
-        code_path = code_root or Path.cwd()
-        context = resolve_thread_context(code_path)
-
-        if not context.code_root or not context.threads_dir:
-            return "Error: Unable to resolve code and threads repo paths."
-
-        result = validate_branch_pairing(
-            code_repo=context.code_root,
-            threads_repo=context.threads_dir,
-            strict=False,
-        )
-
-        lines = []
-        lines.append(f"Branch Pairing Check: {branch}")
-        lines.append("=" * 60)
-        lines.append("")
-
-        if result.valid:
-            lines.append("✅ Branch pairing is valid")
-            lines.append(f"  Code branch: {result.code_branch or '(detached/unknown)'}")
-            lines.append(f"  Threads branch: {result.threads_branch or '(detached/unknown)'}")
-        else:
-            lines.append("❌ Branch pairing validation failed")
-            lines.append(f"  Code branch: {result.code_branch or '(detached/unknown)'}")
-            lines.append(f"  Threads branch: {result.threads_branch or '(detached/unknown)'}")
-            lines.append("")
-
-            if result.mismatches:
-                lines.append("Mismatches:")
-                for mismatch in result.mismatches:
-                    lines.append(f"  - {mismatch.type}: {mismatch.recovery}")
-
-        if result.warnings:
-            lines.append("")
-            lines.append("Warnings:")
-            for warning in result.warnings:
-                lines.append(f"  - {warning}")
-
-        return "\n".join(lines)
-
-    except InvalidGitRepositoryError as e:
-        return f"Error: Not a git repository: {str(e)}"
-    except Exception as e:
-        return f"Error checking branch: {str(e)}"
+    return f"Branch parity validation has been removed. Branch: {branch}"
 
 
 def merge_branch(branch: str, *, code_root: Path | None = None, force: bool = False) -> str:
@@ -838,7 +792,7 @@ def merge_branch(branch: str, *, code_root: Path | None = None, force: bool = Fa
         if not force:
             threads_repo.git.checkout(branch)
             open_threads = []
-            for thread_file in context.threads_dir.glob("*.md"):
+            for thread_file in discover_thread_files(context.threads_dir):
                 try:
                     topic = thread_file.stem
                     title, status, ball, updated = _thread_meta_from_graph(context.threads_dir, topic)
@@ -861,23 +815,8 @@ def merge_branch(branch: str, *, code_root: Path | None = None, force: bool = Fa
                 lines.append("Proceed? [y/N]")
                 return "\n".join(lines)
 
-        # Detect squash merge in code repo
-        warnings = []
-        if context.code_root:
-            try:
-                from watercooler_mcp.sync import _detect_squash_merge
-                code_repo_obj = Repo(context.code_root, search_parent_directories=True)
-                is_squash, squash_sha = _detect_squash_merge(code_repo_obj, branch)
-                if is_squash:
-                    squash_info = f"Detected squash merge in code repo"
-                    if squash_sha:
-                        squash_info += f" (squash commit: {squash_sha})"
-                    warnings.append(squash_info)
-                    warnings.append("Note: Original commits preserved in threads branch history")
-            except Exception:
-                pass  # Ignore squash detection errors
-
         # Perform merge
+        warnings = []
         threads_repo.git.checkout("main")
         try:
             from git import Actor
@@ -962,7 +901,7 @@ def archive_branch(branch: str, *, code_root: Path | None = None, abandon: bool 
         # Checkout branch and find OPEN threads
         threads_repo.git.checkout(branch)
         open_threads = []
-        for thread_file in context.threads_dir.glob("*.md"):
+        for thread_file in discover_thread_files(context.threads_dir):
             try:
                 topic = thread_file.stem
                 title, status, ball, updated = _thread_meta_from_graph(context.threads_dir, topic)

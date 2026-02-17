@@ -1,26 +1,23 @@
 """Sync package for watercooler-cloud git operations.
 
-This package provides a clean, modular architecture for git synchronization:
+This package provides git synchronization primitives and locking utilities:
 
-Layers:
-1. primitives - Pure git operations (no state, no side effects)
-2. state - Unified state management with live checks
-3. conflict - Conflict detection and resolution
-4. local_remote - Single-repo sync operations (L2R)
-5. branch_parity - Cross-repo coordination (T2C)
-6. async_coordinator - Background sync operations
-7. errors - Rich exception hierarchy
-
-The old git_sync.py and branch_parity.py modules are preserved as
-thin facades for backward compatibility.
+- primitives - Pure git operations (validate, fetch, pull, push, stash, checkout)
+- errors - Rich exception hierarchy
+- Locking utilities - Per-topic advisory locks for concurrent write serialization
 """
+
+import hashlib
+import re
+import time
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 from .errors import (
     SyncError,
     PullError,
     PushError,
     ConflictError,
-    BranchPairingError,
     LockError,
     NetworkError,
     AuthenticationError,
@@ -54,112 +51,112 @@ from .primitives import (
     restore_stash,
 )
 
-from .state import (
-    # Constants
-    STATE_FILE_NAME,
-    STATE_FILE_VERSION,
-    STATE_DIR,
-    # Enums
-    ParityStatus,
-    # Data classes
-    ParityError,
-    ParityState,
-    # Classes
-    StateManager,
-    # Convenience functions
-    read_parity_state,
-    write_parity_state,
-    get_state_file_path,
-)
+# ============================================================================
+# Standalone utilities (locking and topic sanitization)
+# ============================================================================
 
-from .conflict import (
-    # Enums
-    ConflictType,
-    ConflictScope,
-    # Data classes
-    ConflictInfo,
-    # Classes
-    ConflictResolver,
-    # Pure merge functions
-    merge_manifest_content,
-    merge_jsonl_content,
-    merge_sync_state_content,
-    merge_thread_content,
-    # Convenience functions
-    has_graph_conflicts_only,
-    has_thread_conflicts_only,
-    has_state_conflicts_only,
-)
+# Locking constants
+LOCK_TIMEOUT_SECONDS = 30
+LOCK_TTL_SECONDS = 120
+LOCK_QUICK_RETRIES = 3
+LOCK_QUICK_RETRY_DELAY = 0.1
+LOCKS_DIR_NAME = ".watercooler"
 
-from .local_remote import (
-    # Data classes
-    PullResult,
-    CommitResult,
-    PushResult,
-    SyncResult,
-    SyncStatus,
-    # Classes
-    LocalRemoteSyncManager,
-)
+# Topic validation constants
+MAX_TOPIC_LENGTH = 200
+UNSAFE_TOPIC_CHARS_PATTERN = re.compile(r'[<>:"/\\|?*]')
 
-from .async_coordinator import (
-    # Constants
-    QUEUE_FILE_NAME,
-    DEFAULT_BATCH_WINDOW,
-    DEFAULT_MAX_DELAY,
-    DEFAULT_MAX_BATCH_SIZE,
-    DEFAULT_SYNC_INTERVAL,
-    # Data classes
-    PendingCommit,
-    AsyncConfig,
-    AsyncStatus,
-    # Classes
-    AsyncSyncCoordinator,
-    # Convenience functions
-    get_queue_file_path,
-)
 
-from .branch_parity import (
-    # Enums
-    StateClass,
-    # Data classes
-    BranchMismatch,
-    BranchSyncResult,
-    BranchDivergenceInfo,
-    PreflightResult,
-    BranchPairingResult,
-    # Classes
-    BranchParityManager,
-    # Standalone functions
-    validate_branch_pairing,
-    sync_branch_history,
-    run_preflight,
-    ensure_readable,
-    get_branch_health,
-    push_after_commit,
-    acquire_topic_lock,
-    acquire_parity_lock,
-    auto_merge_to_main,
-    _detect_squash_merge,
-    _now_iso,
-    # Helper functions (re-exported for backward compat)
-    _find_main_branch,
-    _sanitize_topic_for_filename,
-    _lock_dir,
-    _topic_lock_path,
-    _detect_behind_main_divergence,
-    _detect_branch_divergence,
-    _rebase_branch_onto,
-    # Locking constants
-    LOCK_TIMEOUT_SECONDS,
-    LOCK_TTL_SECONDS,
-    LOCK_QUICK_RETRIES,
-    LOCK_QUICK_RETRY_DELAY,
-    LOCKS_DIR_NAME,
-    # Topic validation constants
-    MAX_TOPIC_LENGTH,
-    UNSAFE_TOPIC_CHARS_PATTERN,
-)
+def _sanitize_topic_for_filename(topic: str) -> str:
+    """Sanitize topic name for use as filename."""
+    safe = re.sub(r'\.\.', '_', topic)
+    safe = re.sub(r'[<>:"/\\|?*]', '_', safe)
+    safe = re.sub(r'_+', '_', safe)
+    safe = safe.strip('_').lstrip('.')
+    if not safe:
+        return '_empty_'
+    if len(safe) > MAX_TOPIC_LENGTH:
+        hash_suffix = hashlib.sha256(topic.encode()).hexdigest()[:8]
+        truncate_at = MAX_TOPIC_LENGTH - len(hash_suffix) - 1
+        safe = f"{safe[:truncate_at]}_{hash_suffix}"
+    return safe
+
+
+def _lock_dir(threads_dir: Path) -> Path:
+    """Get the directory for lock files."""
+    return threads_dir / LOCKS_DIR_NAME / "locks"
+
+
+def _topic_lock_path(threads_dir: Path, topic: str) -> Path:
+    """Get path to per-topic lock file."""
+    lock_dir = _lock_dir(threads_dir)
+    safe_topic = _sanitize_topic_for_filename(topic)
+    return lock_dir / f"{safe_topic}.lock"
+
+
+def acquire_topic_lock(
+    threads_dir: Path, topic: str, timeout: int = LOCK_TIMEOUT_SECONDS
+) -> "AdvisoryLock":
+    """Acquire lock for a specific topic. Returns lock (caller must release)."""
+    from watercooler.lock import AdvisoryLock
+
+    lock_path = _topic_lock_path(threads_dir, topic)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    for attempt in range(LOCK_QUICK_RETRIES):
+        lock = AdvisoryLock(lock_path, ttl=LOCK_TTL_SECONDS, timeout=0)
+        if lock.acquire():
+            return lock
+        time.sleep(LOCK_QUICK_RETRY_DELAY)
+
+    lock = AdvisoryLock(lock_path, ttl=LOCK_TTL_SECONDS, timeout=timeout)
+    if not lock.acquire():
+        raise TimeoutError(
+            f"Failed to acquire topic lock for '{topic}' within {timeout}s"
+        )
+    return lock
+
+
+def ensure_readable(
+    threads_repo_path: Path, code_repo_path: Optional[Path] = None
+) -> Tuple[bool, List[str]]:
+    """Ensure threads dir is readable by doing a fast-forward pull if needed.
+
+    Returns:
+        Tuple of (success, list of actions taken)
+    """
+    actions: List[str] = []
+    try:
+        if not threads_repo_path.exists():
+            return (True, actions)
+        git_dir = threads_repo_path / ".git"
+        if not git_dir.exists() and not (threads_repo_path / "HEAD").exists():
+            # Not a git repo (could be worktree with linked .git file)
+            git_file = threads_repo_path / ".git"
+            if not git_file.exists():
+                return (True, actions)
+
+        from git import Repo
+        repo = Repo(threads_repo_path)
+
+        # Fetch with timeout
+        try:
+            fetch_with_timeout(repo, timeout=15)
+            actions.append("fetched")
+        except Exception:
+            pass
+
+        # Fast-forward if behind
+        try:
+            pull_ff_only(repo)
+            actions.append("pulled")
+        except Exception:
+            pass
+
+        return (True, actions)
+    except Exception as e:
+        return (False, [f"error: {e}"])
+
 
 __all__ = [
     # Errors
@@ -167,7 +164,6 @@ __all__ = [
     "PullError",
     "PushError",
     "ConflictError",
-    "BranchPairingError",
     "LockError",
     "NetworkError",
     "AuthenticationError",
@@ -196,96 +192,10 @@ __all__ = [
     "detect_stash",
     "stash_changes",
     "restore_stash",
-    # State - Constants
-    "STATE_FILE_NAME",
-    "STATE_FILE_VERSION",
-    "STATE_DIR",
-    # State - Enums
-    "ParityStatus",
-    # State - Data classes
-    "ParityError",
-    "ParityState",
-    # State - Classes
-    "StateManager",
-    # State - Convenience functions
-    "read_parity_state",
-    "write_parity_state",
-    "get_state_file_path",
-    # Conflict - Enums
-    "ConflictType",
-    "ConflictScope",
-    # Conflict - Data classes
-    "ConflictInfo",
-    # Conflict - Classes
-    "ConflictResolver",
-    # Conflict - Pure merge functions
-    "merge_manifest_content",
-    "merge_jsonl_content",
-    "merge_sync_state_content",
-    "merge_thread_content",
-    # Conflict - Convenience functions
-    "has_graph_conflicts_only",
-    "has_thread_conflicts_only",
-    "has_state_conflicts_only",
-    # Local-Remote - Data classes
-    "PullResult",
-    "CommitResult",
-    "PushResult",
-    "SyncResult",
-    "SyncStatus",
-    # Local-Remote - Classes
-    "LocalRemoteSyncManager",
-    # Async Coordinator - Constants
-    "QUEUE_FILE_NAME",
-    "DEFAULT_BATCH_WINDOW",
-    "DEFAULT_MAX_DELAY",
-    "DEFAULT_MAX_BATCH_SIZE",
-    "DEFAULT_SYNC_INTERVAL",
-    # Async Coordinator - Data classes
-    "PendingCommit",
-    "AsyncConfig",
-    "AsyncStatus",
-    # Async Coordinator - Classes
-    "AsyncSyncCoordinator",
-    # Async Coordinator - Convenience functions
-    "get_queue_file_path",
-    # Branch Parity - Enums
-    "StateClass",
-    # Branch Parity - Data classes
-    "BranchMismatch",
-    "BranchSyncResult",
-    "BranchDivergenceInfo",
-    "PreflightResult",
-    "BranchPairingResult",
-    # Branch Parity - Classes
-    "BranchParityManager",
-    # Branch Parity - Standalone functions
-    "validate_branch_pairing",
-    "sync_branch_history",
-    "run_preflight",
+    # Standalone utilities
     "ensure_readable",
-    "get_branch_health",
-    "push_after_commit",
     "acquire_topic_lock",
-    "acquire_parity_lock",
-    "auto_merge_to_main",
-    "_detect_squash_merge",
-    "_now_iso",
-    # Branch Parity - Helper functions
-    "_find_main_branch",
-    "_sanitize_topic_for_filename",
-    "_lock_dir",
-    "_topic_lock_path",
-    "_detect_behind_main_divergence",
-    "_detect_branch_divergence",
-    "_rebase_branch_onto",
-    # Branch Parity - Locking constants
     "LOCK_TIMEOUT_SECONDS",
     "LOCK_TTL_SECONDS",
-    "LOCK_QUICK_RETRIES",
-    "LOCK_QUICK_RETRY_DELAY",
-    "LOCKS_DIR_NAME",
-    # Branch Parity - Topic validation constants
     "MAX_TOPIC_LENGTH",
-    "UNSAFE_TOPIC_CHARS_PATTERN",
 ]

@@ -72,6 +72,62 @@ class QueryIntent(str, Enum):
     UNKNOWN = "unknown"        # Default -> T1
 
 
+# LeanRAG level_mode values:
+#   0 = Base entities only (precise, individual nodes)
+#   1 = Clusters only (hierarchical summaries)
+#   2 = All levels (base + clusters combined)
+LEANRAG_LEVEL_MODE_BASE = 0
+LEANRAG_LEVEL_MODE_CLUSTERS = 1
+LEANRAG_LEVEL_MODE_ALL = 2
+
+
+def _get_leanrag_level_mode(intent: QueryIntent) -> int:
+    """Map query intent to optimal LeanRAG level_mode.
+
+    LeanRAG's hierarchical graph has multiple levels:
+    - Level 0 (base entities): Individual extracted entities with descriptions
+    - Level 1+ (clusters): Hierarchical summaries via GMM clustering
+
+    This function selects the optimal level_mode based on query intent:
+    - LOOKUP/ENTITY_SEARCH: Use base entities (level_mode=0) for precision
+      (maps to issue #119's "entity_context" concept)
+    - SUMMARIZE/MULTI_HOP: Use clusters (level_mode=1) for synthesis
+      (maps to issue #119's "community_summary" concept)
+    - TEMPORAL/RELATIONAL: Use all levels (level_mode=2) for completeness
+      (maps to issue #119's "hybrid" concept)
+    - UNKNOWN: Default to clusters (level_mode=1)
+
+    Note: LeanRAG's API uses integer level_modes (0, 1, 2), not the string
+    identifiers described in issue #119.
+
+    Args:
+        intent: The detected query intent
+
+    Returns:
+        LeanRAG level_mode value (0, 1, or 2)
+
+    Example:
+        >>> _get_leanrag_level_mode(QueryIntent.LOOKUP)
+        0
+        >>> _get_leanrag_level_mode(QueryIntent.SUMMARIZE)
+        1
+        >>> _get_leanrag_level_mode(QueryIntent.RELATIONAL)
+        2
+    """
+    if intent in (QueryIntent.LOOKUP, QueryIntent.ENTITY_SEARCH):
+        # Precision queries: use base entities for exact matches
+        return LEANRAG_LEVEL_MODE_BASE
+    elif intent in (QueryIntent.SUMMARIZE, QueryIntent.MULTI_HOP):
+        # Synthesis queries: use cluster summaries for broader context
+        return LEANRAG_LEVEL_MODE_CLUSTERS
+    elif intent in (QueryIntent.TEMPORAL, QueryIntent.RELATIONAL):
+        # Relationship/temporal queries: use all levels for completeness
+        return LEANRAG_LEVEL_MODE_ALL
+    else:
+        # Default: clusters provide good balance
+        return LEANRAG_LEVEL_MODE_CLUSTERS
+
+
 # Tier cost ordering (lower is cheaper)
 TIER_COSTS = {
     Tier.T1: 1,   # Just embeddings, JSONL scan
@@ -124,19 +180,32 @@ def load_tier_config(
     threads_dir: Optional[Path] = None,
     code_path: Optional[Path] = None,
 ) -> TierConfig:
-    """Load tier configuration from environment and TOML config.
+    """Load tier configuration from unified config system.
 
-    Priority (highest first):
-        1. Environment variables (WATERCOOLER_TIER_T*_ENABLED)
-        2. TOML config (memory.backend = "graphiti" enables T2)
+    Uses the unified config system with proper priority chain:
+        1. Environment variables (WATERCOOLER_TIER_T*_ENABLED, etc.)
+        2. TOML config (memory.tiers.*)
         3. Built-in defaults
 
     Environment Variables:
         WATERCOOLER_TIER_T1_ENABLED: "1" to enable T1 (default: "1")
-        WATERCOOLER_TIER_T2_ENABLED: "1" to enable T2 (requires Graphiti)
+        WATERCOOLER_TIER_T2_ENABLED: "1" to enable T2 (auto-enables with graphiti backend)
         WATERCOOLER_TIER_T3_ENABLED: "1" to enable T3 (expensive, opt-in)
         WATERCOOLER_TIER_MAX_TIERS: Maximum tiers to query (default: "2")
         WATERCOOLER_TIER_MIN_RESULTS: Min results for sufficiency (default: "3")
+        WATERCOOLER_TIER_MIN_CONFIDENCE: Min confidence score (default: "0.5")
+
+    TOML Config (config.toml):
+        [memory.tiers]
+        t1_enabled = true
+        t2_enabled = true
+        t3_enabled = false
+        max_tiers = 2
+        min_results = 3
+        min_confidence = 0.5
+        t1_limit = 10
+        t2_limit = 10
+        t3_limit = 5
 
     Args:
         threads_dir: Path to threads directory
@@ -145,29 +214,35 @@ def load_tier_config(
     Returns:
         TierConfig instance
     """
-    # Check if Graphiti is enabled via env var
-    graphiti_env = os.getenv("WATERCOOLER_GRAPHITI_ENABLED", "0") == "1"
-
-    # Also check TOML config: memory.backend = "graphiti"
-    graphiti_toml = False
     try:
-        from watercooler.memory_config import get_memory_backend
-        graphiti_toml = get_memory_backend() == "graphiti"
+        from watercooler.memory_config import resolve_tier_config
+        resolved = resolve_tier_config()
+        return TierConfig(
+            t1_enabled=resolved.t1_enabled,
+            t2_enabled=resolved.t2_enabled,
+            t3_enabled=resolved.t3_enabled,
+            max_tiers=resolved.max_tiers,
+            min_results=resolved.min_results,
+            min_confidence=resolved.min_confidence,
+            t1_limit=resolved.t1_limit,
+            t2_limit=resolved.t2_limit,
+            t3_limit=resolved.t3_limit,
+            threads_dir=threads_dir,
+            code_path=code_path,
+        )
     except ImportError:
-        pass
-
-    # T2 is enabled if either env var or TOML config enables Graphiti
-    graphiti_enabled = graphiti_env or graphiti_toml
-
-    return TierConfig(
-        t1_enabled=os.getenv("WATERCOOLER_TIER_T1_ENABLED", "1") == "1",
-        t2_enabled=os.getenv("WATERCOOLER_TIER_T2_ENABLED", "1" if graphiti_enabled else "0") == "1",
-        t3_enabled=os.getenv("WATERCOOLER_TIER_T3_ENABLED", "0") == "1",
-        max_tiers=_get_int_env("WATERCOOLER_TIER_MAX_TIERS", DEFAULT_MAX_TIERS),
-        min_results=_get_int_env("WATERCOOLER_TIER_MIN_RESULTS", DEFAULT_MIN_RESULTS),
-        threads_dir=threads_dir,
-        code_path=code_path,
-    )
+        logger.warning("watercooler.memory_config not available, using env vars only")
+        # Fallback to env vars only
+        graphiti_env = os.getenv("WATERCOOLER_GRAPHITI_ENABLED", "0") == "1"
+        return TierConfig(
+            t1_enabled=os.getenv("WATERCOOLER_TIER_T1_ENABLED", "1") == "1",
+            t2_enabled=os.getenv("WATERCOOLER_TIER_T2_ENABLED", "1" if graphiti_env else "0") == "1",
+            t3_enabled=os.getenv("WATERCOOLER_TIER_T3_ENABLED", "0") == "1",
+            max_tiers=_get_int_env("WATERCOOLER_TIER_MAX_TIERS", DEFAULT_MAX_TIERS),
+            min_results=_get_int_env("WATERCOOLER_TIER_MIN_RESULTS", DEFAULT_MIN_RESULTS),
+            threads_dir=threads_dir,
+            code_path=code_path,
+        )
 
 
 # ============================================================================
@@ -369,6 +444,55 @@ def evaluate_sufficiency(
     return True, "Sufficient results"
 
 
+def evaluate_dual_stream_sufficiency(
+    evidence: list[TierEvidence],
+    min_results: int = DEFAULT_MIN_RESULTS,
+    min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    total_results: Optional[int] = None,
+) -> tuple[bool, str]:
+    """Evaluate sufficiency for dual-stream tiers (T2/T3).
+
+    Dual-stream tiers run separate searches for entities and facts.
+    Checks each stream independently — either meeting min_results with
+    min_confidence is sufficient. Falls back to combined evaluation.
+
+    Uses endswith() matching for node_type to handle both T2 ('entity'/'fact')
+    and T3 ('hierarchical_entity'/'hierarchical_fact') metadata values.
+
+    Args:
+        evidence: List of evidence items to evaluate
+        min_results: Minimum number of results required
+        min_confidence: Minimum average confidence score
+        total_results: Optional total result count for the quantity check
+
+    Returns:
+        Tuple of (is_sufficient, reason)
+    """
+    if not evidence:
+        return False, "No results found"
+
+    entities = [e for e in evidence if e.metadata.get("node_type", "").endswith("entity")]
+    facts = [e for e in evidence if e.metadata.get("node_type", "").endswith("fact")]
+
+    for stream_name, stream in [("Entity", entities), ("Fact", facts)]:
+        if len(stream) >= min_results:
+            avg = sum(e.score for e in stream) / len(stream)
+            if avg >= min_confidence:
+                return True, f"{stream_name} stream sufficient ({len(stream)} results, avg {avg:.2f})"
+
+    # Neither stream alone sufficient — check combined as fallback
+    combined_count = total_results if total_results is not None else len(evidence)
+    if combined_count >= min_results and evidence:
+        avg = sum(e.score for e in evidence) / len(evidence)
+        if avg >= min_confidence:
+            return True, f"Combined streams sufficient ({combined_count} results, avg {avg:.2f})"
+
+    entity_info = f"entities: {len(entities)}"
+    fact_info = f"facts: {len(facts)}"
+    avg_info = f"combined avg: {sum(e.score for e in evidence) / max(len(evidence), 1):.2f}" if evidence else "no evidence"
+    return False, f"Insufficient ({entity_info}, {fact_info}, {avg_info})"
+
+
 # ============================================================================
 # Tier Adapters
 # ============================================================================
@@ -517,7 +641,7 @@ def _query_t2(
             evidence.append(TierEvidence(
                 tier=Tier.T2,
                 id=fact.get("id", ""),
-                content=fact.get("content") or fact.get("summary", ""),
+                content=fact.get("content") or fact.get("fact") or fact.get("summary", ""),
                 score=fact.get("score", 0.0) or 0.0,
                 name=fact.get("name"),
                 provenance={
@@ -541,6 +665,7 @@ def _query_t3(
     code_path: Path,
     limit: int = 5,
     group_ids: Optional[Sequence[str]] = None,
+    intent: Optional[QueryIntent] = None,
 ) -> list[TierEvidence]:
     """Query T3 (LeanRAG backend).
 
@@ -549,37 +674,51 @@ def _query_t3(
         code_path: Path to code repository
         limit: Maximum results
         group_ids: Optional group IDs to filter
+        intent: Query intent for level_mode selection (auto-detected if None)
 
     Returns:
         List of TierEvidence from T3
     """
     try:
-        from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
+        from watercooler_memory.backends.leanrag import LeanRAGBackend
     except ImportError:
         logger.warning("T3: LeanRAG backend not available")
         return []
 
-    # LeanRAG requires specific configuration
-    leanrag_path = os.getenv("LEANRAG_PATH")
-    if not leanrag_path:
-        logger.debug("T3: LEANRAG_PATH not set")
+    # Use unified config loader (parallel to T2's load_graphiti_config)
+    try:
+        from watercooler_mcp.memory import load_leanrag_config
+    except ImportError:
+        logger.warning("T3: watercooler_mcp.memory not available")
+        return []
+
+    config = load_leanrag_config(code_path=code_path)
+    if config is None:
+        logger.debug("T3: LeanRAG not configured")
         return []
 
     try:
-        config = LeanRAGConfig(
-            leanrag_path=Path(leanrag_path),
-            work_dir=code_path,
-        )
         backend = LeanRAGBackend(config)
     except Exception as e:
         logger.warning(f"T3: Backend initialization failed: {e}")
         return []
 
+    # Determine level_mode based on intent
+    if intent is None:
+        intent = detect_intent(query)
+    level_mode = _get_leanrag_level_mode(intent)
+    logger.info(f"T3: Using level_mode={level_mode} for intent={intent.value}")
+
     evidence = []
 
     # Search nodes (hierarchical)
     try:
-        nodes = backend.search_nodes(query, group_ids=group_ids, max_results=limit)
+        nodes = backend.search_nodes(
+            query,
+            group_ids=group_ids,
+            max_results=limit,
+            level_mode=level_mode,
+        )
         for node in nodes:
             evidence.append(TierEvidence(
                 tier=Tier.T3,
@@ -594,6 +733,7 @@ def _query_t3(
                 metadata={
                     "node_type": "hierarchical_entity",
                     "backend": "leanrag",
+                    "level_mode": level_mode,
                     **node.get("extra", {}),
                 },
             ))
@@ -607,7 +747,7 @@ def _query_t3(
             evidence.append(TierEvidence(
                 tier=Tier.T3,
                 id=fact.get("id", ""),
-                content=fact.get("content") or fact.get("summary", ""),
+                content=fact.get("content") or fact.get("fact") or fact.get("summary", ""),
                 score=fact.get("score", 0.0) or 0.0,
                 name=fact.get("name"),
                 provenance={
@@ -682,11 +822,15 @@ class TierOrchestrator:
                 logger.debug("T2 disabled: watercooler_mcp.memory not available")
 
         if self.config.t3_enabled:
-            # T3 needs LeanRAG path
-            if os.getenv("LEANRAG_PATH"):
-                self._available_tiers.append(Tier.T3)
-            else:
-                logger.debug("T3 disabled: LEANRAG_PATH not set")
+            # T3 needs LeanRAG configuration (parallel to T2's Graphiti check)
+            try:
+                from watercooler_mcp.memory import load_leanrag_config
+                if load_leanrag_config(self.config.code_path) is not None:
+                    self._available_tiers.append(Tier.T3)
+                else:
+                    logger.debug("T3 disabled: LeanRAG not configured")
+            except ImportError:
+                logger.debug("T3 disabled: watercooler_mcp.memory not available")
 
     @property
     def available_tiers(self) -> list[Tier]:
@@ -770,15 +914,24 @@ class TierOrchestrator:
         tiers_to_try = [current_tier]
         tiers_tried = 0
 
+        # Track queried tiers to prevent duplicates (O(1) lookup)
+        queried_tiers: set[Tier] = set()
+
         while tiers_tried < self.config.max_tiers and tiers_to_try:
             tier = tiers_to_try.pop(0)
+
+            # Skip if already queried (defensive guard)
+            if tier in queried_tiers:
+                continue
+
+            queried_tiers.add(tier)
             tiers_tried += 1
             result.tiers_queried.append(tier)
             result.total_cost += TIER_COSTS[tier]
 
             # Query the tier
             before_count = result.result_count
-            tier_evidence = self._query_tier(tier, query, group_ids)
+            tier_evidence = self._query_tier(tier, query, group_ids, intent)
             result.evidence.extend(tier_evidence)
             new_count = result.result_count - before_count
 
@@ -786,13 +939,21 @@ class TierOrchestrator:
             # all evidence if current tier returned nothing (for cross-tier queries)
             evidence_for_eval = tier_evidence if tier_evidence else result.evidence
 
-            # Check sufficiency
-            is_sufficient, reason = evaluate_sufficiency(
-                evidence_for_eval,
-                min_results=self.config.min_results,
-                min_confidence=self.config.min_confidence,
-                total_results=result.result_count,
-            )
+            # Check sufficiency — use dual-stream for T2/T3 (entities + facts)
+            if tier in (Tier.T2, Tier.T3):
+                is_sufficient, reason = evaluate_dual_stream_sufficiency(
+                    evidence_for_eval,
+                    min_results=self.config.min_results,
+                    min_confidence=self.config.min_confidence,
+                    total_results=result.result_count,
+                )
+            else:
+                is_sufficient, reason = evaluate_sufficiency(
+                    evidence_for_eval,
+                    min_results=self.config.min_results,
+                    min_confidence=self.config.min_confidence,
+                    total_results=result.result_count,
+                )
 
             if is_sufficient:
                 result.sufficient = True
@@ -807,7 +968,7 @@ class TierOrchestrator:
                 # Prefer cheaper fallback if the current tier produced nothing
                 if new_count == 0:
                     for lower_tier in self._get_lower_tiers(tier):
-                        if lower_tier not in result.tiers_queried and lower_tier not in tiers_to_try:
+                        if lower_tier not in queried_tiers and lower_tier not in tiers_to_try:
                             next_tier = lower_tier
                             break
 
@@ -815,7 +976,7 @@ class TierOrchestrator:
                 if next_tier is None:
                     next_tier = self._get_next_tier(tier)
 
-                if next_tier and next_tier not in result.tiers_queried and next_tier not in tiers_to_try:
+                if next_tier and next_tier not in queried_tiers and next_tier not in tiers_to_try:
                     result.escalation_reason = reason
                     tiers_to_try.append(next_tier)
                     logger.info(f"Escalating from {tier.value} to {next_tier.value}: {reason}")
@@ -838,6 +999,7 @@ class TierOrchestrator:
         tier: Tier,
         query: str,
         group_ids: Optional[Sequence[str]] = None,
+        intent: Optional[QueryIntent] = None,
     ) -> list[TierEvidence]:
         """Query a specific tier.
 
@@ -845,6 +1007,7 @@ class TierOrchestrator:
             tier: Which tier to query
             query: Search query
             group_ids: Optional group IDs to filter
+            intent: Query intent (used by T3 for level_mode selection)
 
         Returns:
             List of TierEvidence from the tier
@@ -878,6 +1041,7 @@ class TierOrchestrator:
                 self.config.code_path,
                 limit=self.config.t3_limit,
                 group_ids=group_ids,
+                intent=intent,
             )
 
         return []
@@ -969,7 +1133,9 @@ __all__ = [
     # Functions
     "detect_intent",
     "evaluate_sufficiency",
+    "evaluate_dual_stream_sufficiency",
     "smart_query",
+
     # Orchestrator
     "TierOrchestrator",
     # Constants
@@ -977,4 +1143,7 @@ __all__ = [
     "DEFAULT_MIN_RESULTS",
     "DEFAULT_MIN_CONFIDENCE",
     "DEFAULT_MAX_TIERS",
+    "LEANRAG_LEVEL_MODE_BASE",
+    "LEANRAG_LEVEL_MODE_CLUSTERS",
+    "LEANRAG_LEVEL_MODE_ALL",
 ]

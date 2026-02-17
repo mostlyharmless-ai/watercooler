@@ -109,22 +109,6 @@ class ConflictError(SyncError):
 
 
 @dataclass
-class BranchPairingError(SyncError):
-    """Error in branch parity between code and threads repos.
-
-    Common causes:
-    - Branch name mismatch
-    - Orphan branch (threads exists, code deleted)
-    - Main protection violation
-    - Detached HEAD state
-    """
-
-    code_branch: Optional[str] = None
-    threads_branch: Optional[str] = None
-    is_retryable: bool = False  # Usually requires user action
-
-
-@dataclass
 class LockError(SyncError):
     """Error acquiring or releasing advisory lock.
 

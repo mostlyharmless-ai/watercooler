@@ -11,10 +11,10 @@ Chunking strategy:
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from typing import Optional
 
+from ._utils import _generate_chunk_id
 from .schema import ChunkNode, EntryNode
 
 # Try to import tiktoken, fall back to estimation
@@ -42,7 +42,10 @@ class ChunkerConfig:
     overlap: int = DEFAULT_OVERLAP
     encoding_name: str = DEFAULT_ENCODING
     include_header: bool = False
-    mode: str = "default"
+    mode: str = "default"  # "default", "watercooler", "whitepaper", "semantic"
+    include_section_context: bool = True
+    section_context_format: str = "prefix"  # "[Section] content"
+    preserve_abstract: bool = True
 
     @classmethod
     def watercooler_preset(
@@ -58,6 +61,32 @@ class ChunkerConfig:
             encoding_name=encoding_name,
             include_header=True,
             mode="watercooler",
+        )
+
+    @classmethod
+    def whitepaper_preset(
+        cls,
+        max_tokens: int = 768,
+        overlap: int = 64,
+        encoding_name: str = DEFAULT_ENCODING,
+    ) -> "ChunkerConfig":
+        """Preset tuned for white papers and academic documents.
+
+        Uses semantic-aware chunking that:
+        - Respects section boundaries
+        - Preserves atomic blocks (math, tables, code)
+        - Includes section context as prefixes
+        - Keeps abstracts as single chunks when possible
+        """
+        return cls(
+            max_tokens=max_tokens,
+            overlap=overlap,
+            encoding_name=encoding_name,
+            include_header=False,
+            mode="whitepaper",
+            include_section_context=True,
+            section_context_format="prefix",
+            preserve_abstract=True,
         )
 
 
@@ -95,12 +124,6 @@ def count_tokens(text: str, encoding_name: str = DEFAULT_ENCODING) -> int:
     return _estimate_tokens(text)
 
 
-def _generate_chunk_id(text: str, entry_id: str, index: int) -> str:
-    """Generate a stable chunk ID based on content hash."""
-    content = f"{entry_id}:{index}:{text}"
-    return hashlib.sha256(content.encode()).hexdigest()[:16]
-
-
 def _split_into_sentences(text: str) -> list[str]:
     """Split text into sentences (basic implementation)."""
     import re
@@ -116,27 +139,222 @@ def _split_into_paragraphs(text: str) -> list[str]:
     return [p.strip() for p in paragraphs if p.strip()]
 
 
-def chunk_text(
+def _apply_section_prefix(content: str, section_prefix: str, config: ChunkerConfig) -> str:
+    """Prepend section prefix to content when section context is enabled."""
+    if section_prefix and config.include_section_context:
+        return f"{section_prefix}\n\n{content}"
+    return content
+
+
+def _chunk_section_content(
+    content: str,
+    section_prefix: str,
+    config: ChunkerConfig,
+    atomic_line_ranges: list[tuple[int, int]],
+) -> list[tuple[str, int]]:
+    """Chunk section content respecting atomic blocks.
+
+    Args:
+        content: Section body content.
+        section_prefix: Section context prefix to add.
+        config: Chunking configuration.
+        atomic_line_ranges: List of (start, end) line ranges for atomic blocks.
+
+    Returns:
+        List of (chunk_text, token_count) tuples.
+    """
+    if not content.strip():
+        return []
+
+    # Calculate available tokens for content after prefix
+    prefix_tokens = count_tokens(section_prefix, config.encoding_name) if section_prefix else 0
+    available_tokens = config.max_tokens - prefix_tokens - 2  # -2 for newlines
+
+    chunks: list[tuple[str, int]] = []
+    paragraphs = _split_into_paragraphs(content)
+
+    current_chunk: list[str] = []
+    current_tokens = 0
+
+    for para in paragraphs:
+        para_tokens = count_tokens(para, config.encoding_name)
+
+        # Check if this paragraph contains an atomic block
+        # For simplicity, treat long paragraphs with special markers as atomic
+        is_atomic = (
+            para.startswith("$$")
+            or para.startswith("|")
+            or para.startswith("```")
+        )
+
+        if is_atomic:
+            # Flush current chunk first
+            if current_chunk:
+                chunk_text_str = _apply_section_prefix("\n\n".join(current_chunk), section_prefix, config)
+                chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
+                current_chunk = []
+                current_tokens = 0
+
+            # Add atomic block as its own chunk (may exceed max if necessary)
+            chunk_text_str = _apply_section_prefix(para, section_prefix, config)
+            chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
+            continue
+
+        if para_tokens > available_tokens:
+            # Flush current chunk
+            if current_chunk:
+                chunk_text_str = _apply_section_prefix("\n\n".join(current_chunk), section_prefix, config)
+                chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
+                current_chunk = []
+                current_tokens = 0
+
+            # Split large paragraph by sentences
+            sentences = _split_into_sentences(para)
+            sentence_chunk: list[str] = []
+            sentence_tokens = 0
+
+            for sentence in sentences:
+                sent_tokens = count_tokens(sentence, config.encoding_name)
+
+                if sentence_tokens + sent_tokens > available_tokens:
+                    if sentence_chunk:
+                        chunk_text_str = _apply_section_prefix(" ".join(sentence_chunk), section_prefix, config)
+                        chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
+                        # Overlap
+                        overlap_tokens = 0
+                        overlap_sentences = []
+                        for s in reversed(sentence_chunk):
+                            s_tokens = count_tokens(s, config.encoding_name)
+                            if overlap_tokens + s_tokens <= config.overlap:
+                                overlap_sentences.insert(0, s)
+                                overlap_tokens += s_tokens
+                            else:
+                                break
+                        sentence_chunk = overlap_sentences
+                        sentence_tokens = overlap_tokens
+
+                sentence_chunk.append(sentence)
+                sentence_tokens += sent_tokens
+
+            if sentence_chunk:
+                chunk_text_str = _apply_section_prefix(" ".join(sentence_chunk), section_prefix, config)
+                chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
+
+        elif current_tokens + para_tokens > available_tokens:
+            # Flush and start new chunk
+            if current_chunk:
+                chunk_text_str = _apply_section_prefix("\n\n".join(current_chunk), section_prefix, config)
+                chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
+
+            current_chunk = [para]
+            current_tokens = para_tokens
+        else:
+            current_chunk.append(para)
+            current_tokens += para_tokens
+
+    # Flush remaining
+    if current_chunk:
+        chunk_text_str = _apply_section_prefix("\n\n".join(current_chunk), section_prefix, config)
+        chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
+
+    return chunks
+
+
+def chunk_whitepaper(
     text: str,
     config: Optional[ChunkerConfig] = None,
 ) -> list[tuple[str, int]]:
-    """Split text into chunks with token counts.
+    """Chunk whitepaper/academic document with semantic awareness.
+
+    Respects section boundaries, preserves atomic blocks (math, tables, code),
+    and includes section context as prefixes for better retrieval.
 
     Args:
-        text: Text to chunk.
+        text: Markdown text to chunk.
         config: Chunking configuration.
 
     Returns:
         List of (chunk_text, token_count) tuples.
     """
+    from .whitepaper_parser import (
+        parse_whitepaper_structure,
+        get_section_breadcrumb,
+        get_all_sections,
+    )
+
     if config is None:
-        config = ChunkerConfig()
+        config = ChunkerConfig.whitepaper_preset()
 
     if not text.strip():
         return []
 
-    encoder = _get_encoder(config.encoding_name)
+    # Parse document structure
+    structure = parse_whitepaper_structure(text)
 
+    # If not detected as whitepaper and we're in explicit whitepaper mode,
+    # still try to process it as sections
+    if not structure.sections:
+        # Fall back to default chunking
+        return _chunk_text_default(text, config)
+
+    chunks: list[tuple[str, int]] = []
+
+    # Build atomic block line ranges for quick lookup
+    atomic_ranges = [
+        (block.start_line, block.end_line)
+        for block in structure.atomic_blocks
+    ]
+
+    # Process each section
+    all_sections = get_all_sections(structure)
+
+    for section in all_sections:
+        # Skip sections with no content (only have children)
+        if not section.content.strip():
+            continue
+
+        # Build section prefix for context
+        if config.include_section_context:
+            breadcrumb = get_section_breadcrumb(section)
+            section_prefix = f"[{breadcrumb}]"
+        else:
+            section_prefix = ""
+
+        # Check if this is an abstract that should be preserved whole
+        is_abstract = section.title.lower() == "abstract"
+        if is_abstract and config.preserve_abstract:
+            content_tokens = count_tokens(section.content, config.encoding_name)
+            # Keep abstract as single chunk if under 1.5x max tokens
+            if content_tokens <= config.max_tokens * 1.5:
+                chunk_text_str = _apply_section_prefix(section.content, section_prefix, config)
+                chunks.append((chunk_text_str, count_tokens(chunk_text_str, config.encoding_name)))
+                continue
+
+        # Chunk section content
+        section_chunks = _chunk_section_content(
+            section.content,
+            section_prefix,
+            config,
+            atomic_ranges,
+        )
+        chunks.extend(section_chunks)
+
+    # If no chunks were generated (e.g., all content in front matter),
+    # fall back to default chunking
+    if not chunks:
+        return _chunk_text_default(text, config)
+
+    return chunks
+
+
+def _chunk_text_default(
+    text: str,
+    config: ChunkerConfig,
+) -> list[tuple[str, int]]:
+    """Default paragraph-based chunking (internal implementation).
+
+    This is the original chunking logic, extracted for reuse.
+    """
     # If text fits in one chunk, return as-is
     total_tokens = count_tokens(text, config.encoding_name)
     if total_tokens <= config.max_tokens:
@@ -224,6 +442,45 @@ def chunk_text(
     return chunks
 
 
+def chunk_text(
+    text: str,
+    config: Optional[ChunkerConfig] = None,
+) -> list[tuple[str, int]]:
+    """Split text into chunks with token counts.
+
+    Supports multiple modes:
+    - "default": Standard paragraph-based chunking
+    - "watercooler": Watercooler thread optimized chunking
+    - "whitepaper": Semantic-aware chunking for academic papers
+    - "semantic": Auto-detect document structure and use appropriate chunking
+
+    Args:
+        text: Text to chunk.
+        config: Chunking configuration.
+
+    Returns:
+        List of (chunk_text, token_count) tuples.
+    """
+    if config is None:
+        config = ChunkerConfig()
+
+    if not text.strip():
+        return []
+
+    # Dispatch based on mode
+    if config.mode == "whitepaper":
+        return chunk_whitepaper(text, config)
+    elif config.mode == "semantic":
+        # Auto-detect whitepaper structure
+        from .whitepaper_parser import detect_whitepaper
+
+        if detect_whitepaper(text):
+            return chunk_whitepaper(text, config)
+        # Fall through to default chunking
+
+    return _chunk_text_default(text, config)
+
+
 def chunk_entry(
     entry: EntryNode,
     config: Optional[ChunkerConfig] = None,
@@ -309,6 +566,6 @@ def chunk_entries(
     return all_chunks, entry_to_chunks
 
 
-def is_tiktoken_available() -> bool:
+def _is_tiktoken_available() -> bool:
     """Check if tiktoken is available."""
     return TIKTOKEN_AVAILABLE

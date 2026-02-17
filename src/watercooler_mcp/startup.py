@@ -180,6 +180,51 @@ def get_service_status() -> dict[str, dict]:
         return {name: status.to_dict() for name, status in _service_status.items()}
 
 
+def get_live_service_status() -> dict[str, dict]:
+    """Get service status with live health probes.
+
+    Unlike get_service_status() which returns cached state,
+    this function actively pings each service that was previously
+    reported as running. If a service is down, updates the cached
+    state to reflect reality.
+
+    Returns:
+        Dictionary mapping service name to status dict with live state.
+    """
+    cached = get_service_status()
+
+    for name, status in cached.items():
+        if status["state"] not in ("running", "starting"):
+            continue
+
+        endpoint = status.get("endpoint", "")
+        if not endpoint:
+            continue
+
+        alive = False
+        if name == "falkordb":
+            # Parse host:port from endpoint
+            parts = endpoint.split(":")
+            if len(parts) == 2:
+                try:
+                    alive = _check_falkordb_health(parts[0], int(parts[1]))
+                except (ValueError, TypeError):
+                    pass
+        elif name in ("llm", "embedding"):
+            # HTTP health check against the API endpoint
+            check_fn = _check_llm_health if name == "llm" else _check_embedding_health
+            alive = check_fn(endpoint)
+
+        if not alive:
+            _update_service_status(
+                name, ServiceState.FAILED,
+                message="Not responding (was running)"
+            )
+            cached[name] = {**status, "state": "failed", "message": "Not responding (was running)"}
+
+    return cached
+
+
 def _update_service_status(
     name: str,
     state: ServiceState,
@@ -633,9 +678,19 @@ def ensure_llm_running() -> None:
         # Start in background thread
         log_debug(f"LLM service not available at {api_base}, starting in background...")
 
-        # Get context size from model spec or use default
+        # Get context size: config.toml > model registry > default
+        # Config takes priority (user explicitly set it), then model spec, then default
         from watercooler.models import get_llm_context_size
-        context_size = get_llm_context_size(model_name, default=DEFAULT_CONTEXT_SIZE)
+        config_context_size = llm_config.context_size
+        model_context_size = get_llm_context_size(model_name, default=DEFAULT_CONTEXT_SIZE)
+
+        # Use config if explicitly set (not default), otherwise use model spec
+        if config_context_size != DEFAULT_CONTEXT_SIZE:
+            context_size = config_context_size
+            log_debug(f"Using context_size={context_size} from config.toml (overrides default {DEFAULT_CONTEXT_SIZE})")
+        else:
+            context_size = model_context_size
+            log_debug(f"Using context_size={context_size} from model registry (config used default {DEFAULT_CONTEXT_SIZE})")
 
         thread = threading.Thread(
             target=_llm_startup_worker,
@@ -1764,6 +1819,34 @@ def _wait_for_falkordb_ready(
     return False
 
 
+def _ensure_falkordb_restart_policy(docker_cmd: str) -> None:
+    """Ensure the FalkorDB container has restart=unless-stopped policy.
+
+    Existing containers created before the restart policy was added will
+    have restart=no. This updates them so Docker auto-restarts FalkorDB
+    after daemon restarts or SIGTERM events.
+    """
+    try:
+        result = subprocess.run(
+            [docker_cmd, "inspect", "falkordb", "--format", "{{.HostConfig.RestartPolicy.Name}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        current_policy = result.stdout.strip()
+        if current_policy and current_policy not in ("unless-stopped", "always"):
+            log_debug(f"Updating FalkorDB restart policy from '{current_policy}' to 'unless-stopped'")
+            subprocess.run(
+                [docker_cmd, "update", "--restart", "unless-stopped", "falkordb"],
+                capture_output=True,
+                timeout=10,
+            )
+    except subprocess.TimeoutExpired:
+        log_debug("Docker command timed out checking FalkorDB restart policy")
+    except (subprocess.SubprocessError, FileNotFoundError) as e:
+        log_debug(f"Could not check/update FalkorDB restart policy: {e}")
+
+
 def _falkordb_startup_worker(host: str, port: int) -> None:
     """Background worker to start FalkorDB and wait for it to be ready."""
     import traceback
@@ -1804,6 +1887,9 @@ def _falkordb_startup_worker(host: str, port: int) -> None:
             container_status = result.stdout.strip()
 
             if container_status:
+                # Container exists - ensure restart policy is set
+                _ensure_falkordb_restart_policy(docker_cmd)
+
                 # Container exists - try to start it
                 if "Exited" in container_status or "Created" in container_status:
                     log_debug("Starting existing FalkorDB container...")
@@ -1838,6 +1924,7 @@ def _falkordb_startup_worker(host: str, port: int) -> None:
                 result = subprocess.run(
                     [
                         docker_cmd, "run", "-d",
+                        "--restart", "unless-stopped",
                         "-p", f"{port}:6379",
                         "-p", "3000:3000",
                         "--name", "falkordb",

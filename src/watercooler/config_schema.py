@@ -25,7 +25,8 @@ class CommonConfig(BaseModel):
     )
     threads_suffix: str = Field(
         default="-threads",
-        description="Suffix appended to code repo name for threads repo",
+        description="Suffix appended to code repo name for threads repo. "
+                    "Override with WATERCOOLER_THREADS_SUFFIX env var.",
     )
     templates_dir: str = Field(
         default="",
@@ -313,6 +314,20 @@ class GraphConfig(BaseModel):
     auto_start_services: bool = Field(
         default=False,
         description="Auto-start LLM/embedding services if unavailable (requires ServerManager)",
+    )
+
+    # Arc change detection for thread summaries
+    embedding_divergence_threshold: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Cosine similarity threshold for thread summary regeneration. "
+                    "When a new entry's embedding similarity to the previous entry "
+                    "falls below this threshold, it indicates a significant topic "
+                    "shift ('arc change') and triggers automatic thread summary "
+                    "regeneration. Lower values (0.4-0.5) reduce summary churn, "
+                    "higher values (0.7-0.8) trigger more responsive updates. "
+                    "Override with WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD env var.",
     )
 
 
@@ -604,20 +619,20 @@ class ValidationConfig(BaseModel):
 class LLMServiceConfig(BaseModel):
     """LLM service configuration for memory backends.
 
-    Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT, LLM_MAX_TOKENS
+    Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT, LLM_MAX_TOKENS,
+                   LLM_CONTEXT_SIZE
+
+    Note: API keys should be stored in credentials.toml, not config.toml.
+    Use [openai].api_key, [anthropic].api_key, etc. in ~/.watercooler/credentials.toml
     """
 
-    api_key: str = Field(
-        default="",
-        description="LLM API key (set via env for security)",
-    )
     api_base: str = Field(
-        default="https://api.openai.com/v1",
-        description="LLM API base URL",
+        default="",
+        description="LLM API base URL. Empty means use context-specific default (localhost for baseline graph).",
     )
     model: str = Field(
-        default="gpt-4o-mini",
-        description="LLM model name",
+        default="",
+        description="LLM model name. Empty means use context-specific default.",
     )
     timeout: float = Field(
         default=60.0,
@@ -629,6 +644,20 @@ class LLMServiceConfig(BaseModel):
         ge=1,
         description="Maximum tokens for LLM response",
     )
+    context_size: int = Field(
+        default=8192,
+        ge=512,
+        description="Context window size for local llama-server auto-start (ignored for external APIs). Env: LLM_CONTEXT_SIZE",
+    )
+    # Prompt configuration for summarization
+    system_prompt: str = Field(
+        default="",
+        description="System prompt for chat-style LLMs. Empty means auto-detect based on model.",
+    )
+    prompt_prefix: str = Field(
+        default="",
+        description="Prefix added to user prompt (e.g., '/no_think' for Qwen3). Empty means auto-detect.",
+    )
     summary_prompt: str = Field(
         default="Summarize this thread entry in 1-2 sentences. Be concise and factual.",
         description="Prompt template for entry summarization. Use {context} and {content} placeholders.",
@@ -637,6 +666,15 @@ class LLMServiceConfig(BaseModel):
         default="Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any.",
         description="Prompt template for thread summarization. Use {title} and {entries} placeholders.",
     )
+    # Few-shot example for summarization (improves format compliance)
+    summary_example_input: str = Field(
+        default="Implemented OAuth2 authentication with JWT tokens. Added refresh token rotation and secure cookie storage.",
+        description="Example input for few-shot summarization prompt.",
+    )
+    summary_example_output: str = Field(
+        default="OAuth2 authentication implemented with JWT tokens, refresh rotation, and secure cookie storage.\ntags: #authentication #OAuth2 #JWT #security",
+        description="Example output for few-shot summarization prompt.",
+    )
 
 
 class EmbeddingServiceConfig(BaseModel):
@@ -644,12 +682,11 @@ class EmbeddingServiceConfig(BaseModel):
 
     Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM,
                    EMBEDDING_TIMEOUT, EMBEDDING_BATCH_SIZE, EMBEDDING_CONTEXT_SIZE
+
+    Note: API keys should be stored in credentials.toml, not config.toml.
+    Use [openai].api_key, [voyage].api_key, etc. in ~/.watercooler/credentials.toml
     """
 
-    api_key: str = Field(
-        default="",
-        description="Embedding API key (often not needed for local servers)",
-    )
     api_base: str = Field(
         default="http://localhost:8080/v1",
         description="Embedding API base URL (llama.cpp default)",
@@ -710,13 +747,12 @@ class GraphitiBackendConfig(BaseModel):
     """Graphiti-specific configuration overrides.
 
     These override shared [memory.llm] and [memory.embedding] settings.
+
+    Note: API keys should be stored in credentials.toml, not config.toml.
+    Use [openai].api_key, etc. in ~/.watercooler/credentials.toml
     """
 
     # LLM overrides (empty = use shared)
-    llm_api_key: str = Field(
-        default="",
-        description="Override LLM API key for Graphiti (e.g., OpenAI key when shared uses local)",
-    )
     llm_model: str = Field(
         default="",
         description="Override LLM model for Graphiti",
@@ -727,10 +763,6 @@ class GraphitiBackendConfig(BaseModel):
     )
 
     # Embedding overrides (empty = use shared)
-    embedding_api_key: str = Field(
-        default="",
-        description="Override embedding API key for Graphiti",
-    )
     embedding_model: str = Field(
         default="",
         description="Override embedding model for Graphiti",
@@ -767,19 +799,32 @@ class GraphitiBackendConfig(BaseModel):
         le=256,
         description="Token overlap between chunks for context continuity",
     )
+    use_summary: bool = Field(
+        default=False,
+        description=(
+            "Send enriched summary to Graphiti instead of raw body. "
+            "Requires enrichment with generate_summaries=true. "
+            "Falls back to raw body when summary is empty."
+        ),
+    )
 
 
 class LeanRAGBackendConfig(BaseModel):
     """LeanRAG-specific configuration overrides.
 
     These override shared [memory.llm] and [memory.embedding] settings.
+
+    Note: API keys should be stored in credentials.toml, not config.toml.
+    Use [openai].api_key, etc. in ~/.watercooler/credentials.toml
     """
 
-    # LLM overrides (empty = use shared)
-    llm_api_key: str = Field(
+    # Path to LeanRAG installation
+    path: str = Field(
         default="",
-        description="Override LLM API key for LeanRAG (e.g., OpenAI key when shared uses local)",
+        description="Path to LeanRAG installation directory. Env override: LEANRAG_PATH",
     )
+
+    # LLM overrides (empty = use shared)
     llm_model: str = Field(
         default="",
         description="Override LLM model for LeanRAG",
@@ -790,10 +835,6 @@ class LeanRAGBackendConfig(BaseModel):
     )
 
     # Embedding overrides (empty = use shared)
-    embedding_api_key: str = Field(
-        default="",
-        description="Override embedding API key for LeanRAG",
-    )
     embedding_model: str = Field(
         default="",
         description="Override embedding model for LeanRAG",
@@ -808,6 +849,64 @@ class LeanRAGBackendConfig(BaseModel):
         default=8,
         ge=1,
         description="Max parallel workers for graph building",
+    )
+
+
+class TierOrchestrationConfig(BaseModel):
+    """Multi-tier memory query orchestration configuration.
+
+    Controls which memory tiers are enabled and escalation behavior.
+    Environment variables override TOML settings.
+
+    Env overrides:
+        WATERCOOLER_TIER_T1_ENABLED, WATERCOOLER_TIER_T2_ENABLED,
+        WATERCOOLER_TIER_T3_ENABLED, WATERCOOLER_TIER_MAX_TIERS,
+        WATERCOOLER_TIER_MIN_RESULTS
+    """
+
+    t1_enabled: bool = Field(
+        default=True,
+        description="Enable T1 (Baseline) tier - JSONL graph with keyword/semantic search",
+    )
+    t2_enabled: bool = Field(
+        default=True,
+        description="Enable T2 (Graphiti) tier - FalkorDB temporal graph. Auto-enabled when memory.backend='graphiti'",
+    )
+    t3_enabled: bool = Field(
+        default=False,
+        description="Enable T3 (LeanRAG) tier - Hierarchical clustering with multi-hop reasoning. Expensive, opt-in.",
+    )
+    max_tiers: int = Field(
+        default=2,
+        ge=1,
+        le=3,
+        description="Maximum number of tiers to query before stopping (budget control)",
+    )
+    min_results: int = Field(
+        default=3,
+        ge=1,
+        description="Minimum results required before considering a tier sufficient",
+    )
+    min_confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Minimum average confidence score for sufficiency",
+    )
+    t1_limit: int = Field(
+        default=10,
+        ge=1,
+        description="Maximum results to fetch from T1",
+    )
+    t2_limit: int = Field(
+        default=10,
+        ge=1,
+        description="Maximum results to fetch from T2",
+    )
+    t3_limit: int = Field(
+        default=5,
+        ge=1,
+        description="Maximum results to fetch from T3",
     )
 
 
@@ -827,11 +926,18 @@ class MemoryConfig(BaseModel):
         default="graphiti",
         description="Default memory backend",
     )
+    queue_enabled: bool = Field(
+        default=False,
+        description="Enable persistent memory task queue with retry and dead-letter semantics",
+    )
 
     # Shared service configs
     llm: LLMServiceConfig = Field(default_factory=LLMServiceConfig)
     embedding: EmbeddingServiceConfig = Field(default_factory=EmbeddingServiceConfig)
     database: MemoryDatabaseConfig = Field(default_factory=MemoryDatabaseConfig)
+
+    # Tier orchestration
+    tiers: TierOrchestrationConfig = Field(default_factory=TierOrchestrationConfig)
 
     # Backend-specific overrides
     graphiti: GraphitiBackendConfig = Field(default_factory=GraphitiBackendConfig)

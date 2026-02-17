@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import storage
+from watercooler.path_resolver import derive_group_id
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ class EntryData:
     timestamp: Optional[str] = None
     summary: str = ""
     embedding: Optional[List[float]] = None
+    code_branch: Optional[str] = None
 
 
 # ============================================================================
@@ -130,6 +132,8 @@ def _build_entry_node(
         "pr_refs": pr_refs or [],
         "commit_refs": commit_refs or [],
     }
+    if data.code_branch:
+        node["code_branch"] = data.code_branch
     # NOTE: Embeddings are NOT stored in entry nodes anymore.
     # They are stored in FalkorDB (with fallback to search-index.jsonl).
     # See sync.py:upsert_embedding() for embedding storage.
@@ -283,19 +287,6 @@ def upsert_entry_node(
         # Write all per-thread files atomically
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-        # Dual-write: Also append to monolithic format for backward compatibility
-        # Failures here should not fail the primary write (per-thread is canonical)
-        try:
-            monolithic_nodes = [meta, entries[entry_id]]
-            monolithic_edges = list(edges.values())
-            storage.append_to_monolithic_nodes(graph_dir, monolithic_nodes)
-            storage.append_to_monolithic_edges(graph_dir, monolithic_edges)
-        except Exception as dual_write_err:
-            logger.warning(
-                f"Dual-write to monolithic format failed for {topic}/{data.entry_id}: "
-                f"{dual_write_err}. Per-thread format is canonical; continuing."
-            )
-
         # NOTE: Embeddings are handled separately by sync.py enrichment.
         # They are stored in FalkorDB (with fallback to search-index.jsonl).
         # See sync.py:upsert_embedding() for embedding storage.
@@ -423,13 +414,8 @@ def delete_entry_node(
         try:
             from .falkordb_entries import get_falkordb_entry_store
 
-            # Derive group_id from threads_dir (handles paired repos like foo-threads)
-            dir_name = threads_dir.name
-            if dir_name.endswith("-threads"):
-                group_id = dir_name[:-8].replace("-", "_").lower()
-            else:
-                group_id = threads_dir.parent.name.replace("-", "_").lower()
-            group_id = group_id or "watercooler"
+            # Use unified group_id derivation from path_resolver
+            group_id = derive_group_id(threads_dir=threads_dir)
 
             store = get_falkordb_entry_store(group_id)
             if store:

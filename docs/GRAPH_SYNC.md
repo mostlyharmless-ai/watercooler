@@ -319,7 +319,7 @@ def resolve_jsonl_merge_conflict(path: Path) -> bool:
 
    [memory.llm]
    api_base = "http://localhost:8000/v1"
-   model = "llama3.2:3b"
+   model = "qwen3:1.7b"
 
    [memory.embedding]
    api_base = "http://localhost:8080/v1"

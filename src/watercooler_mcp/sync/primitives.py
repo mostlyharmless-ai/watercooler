@@ -290,7 +290,7 @@ def pull_rebase(repo: Repo, branch: Optional[str] = None) -> bool:
 
 def push_with_retry(
     repo: Repo,
-    branch: str,
+    branch: Optional[str] = None,
     max_retries: int = MAX_PUSH_RETRIES,
     set_upstream: bool = False,
 ) -> bool:
@@ -300,13 +300,16 @@ def push_with_retry(
 
     Args:
         repo: Git repository
-        branch: Branch name to push (validated for safety)
+        branch: Branch name to push (validated for safety).
+                If None, uses the active branch.
         max_retries: Maximum retry attempts
         set_upstream: If True, use -u flag to set upstream tracking
 
     Returns:
         True on success, False on failure
     """
+    if branch is None:
+        branch = repo.active_branch.name
     try:
         validate_branch_name(branch)
     except ValueError as e:

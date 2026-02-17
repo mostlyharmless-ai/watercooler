@@ -789,47 +789,31 @@ def test_should_auto_start_services_disabled_by_default(monkeypatch):
     assert not _should_auto_start_services()
 
 
-def test_should_auto_start_services_enabled_via_env(monkeypatch, tmp_path):
+def test_should_auto_start_services_enabled_via_env(monkeypatch, isolated_config):
     """Test _should_auto_start_services returns True when env var set."""
     from watercooler.baseline_graph.sync import _should_auto_start_services
     from watercooler.config_facade import config
 
-    # Isolate from user config
-    config_dir = tmp_path / ".watercooler"
-    config_dir.mkdir()
-    (config_dir / "config.toml").write_text("")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    config.reset()
-
-    try:
-        for value in ["1", "true", "True", "TRUE", "yes", "YES"]:
-            monkeypatch.setenv("WATERCOOLER_AUTO_START_SERVICES", value)
-            assert _should_auto_start_services(), f"Expected True for {value}"
-    finally:
-        config.reset()
+    # isolated_config provides HOME redirect and config.reset()
+    for value in ["1", "true", "True", "TRUE", "yes", "YES"]:
+        monkeypatch.setenv("WATERCOOLER_AUTO_START_SERVICES", value)
+        config.reset()  # Reload config with new env var
+        assert _should_auto_start_services(), f"Expected True for {value}"
 
 
-def test_should_auto_start_services_disabled_for_other_values(monkeypatch, tmp_path):
+def test_should_auto_start_services_disabled_for_other_values(monkeypatch, isolated_config):
     """Test _should_auto_start_services returns False for non-truthy values."""
     from watercooler.baseline_graph.sync import _should_auto_start_services
     from watercooler.config_facade import config
 
-    # Isolate from user config
-    config_dir = tmp_path / ".watercooler"
-    config_dir.mkdir()
-    (config_dir / "config.toml").write_text("")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    config.reset()
-
-    try:
-        for value in ["0", "false", "no", "maybe"]:
-            monkeypatch.setenv("WATERCOOLER_AUTO_START_SERVICES", value)
-            assert not _should_auto_start_services(), f"Expected False for {value}"
-    finally:
-        config.reset()
+    # isolated_config provides HOME redirect and config.reset()
+    for value in ["0", "false", "no", "maybe"]:
+        monkeypatch.setenv("WATERCOOLER_AUTO_START_SERVICES", value)
+        config.reset()  # Reload config with new env var
+        assert not _should_auto_start_services(), f"Expected False for {value}"
 
 
-def test_should_auto_start_services_enabled_via_toml_config(monkeypatch, tmp_path):
+def test_should_auto_start_services_enabled_via_toml_config(monkeypatch, isolated_config):
     """Test _should_auto_start_services reads from TOML config when env var not set."""
     from watercooler.baseline_graph.sync import _should_auto_start_services
     from watercooler.config_facade import config
@@ -838,43 +822,29 @@ def test_should_auto_start_services_enabled_via_toml_config(monkeypatch, tmp_pat
     monkeypatch.delenv("WATERCOOLER_AUTO_START_SERVICES", raising=False)
 
     # Create a test config file with auto_start_services = true
-    config_dir = tmp_path / ".watercooler"
-    config_dir.mkdir()
-    config_file = config_dir / "config.toml"
+    config_file = isolated_config["config_dir"] / "config.toml"
     config_file.write_text("""
 [mcp.graph]
 auto_start_services = true
 """)
 
-    # Override HOME to use our temp config
-    monkeypatch.setenv("HOME", str(tmp_path))
-
     # Reset config cache to pick up new config
     config.reset()
 
-    try:
-        assert _should_auto_start_services(), "Expected True from TOML config"
-    finally:
-        # Reset again to restore normal state
-        config.reset()
+    assert _should_auto_start_services(), "Expected True from TOML config"
 
 
-def test_should_auto_start_services_env_overrides_toml(monkeypatch, tmp_path):
+def test_should_auto_start_services_env_overrides_toml(monkeypatch, isolated_config):
     """Test env var takes priority over TOML config."""
     from watercooler.baseline_graph.sync import _should_auto_start_services
     from watercooler.config_facade import config
 
     # Create a test config file with auto_start_services = true
-    config_dir = tmp_path / ".watercooler"
-    config_dir.mkdir()
-    config_file = config_dir / "config.toml"
+    config_file = isolated_config["config_dir"] / "config.toml"
     config_file.write_text("""
 [mcp.graph]
 auto_start_services = true
 """)
-
-    # Override HOME to use our temp config
-    monkeypatch.setenv("HOME", str(tmp_path))
 
     # Set env var to false - should override TOML
     monkeypatch.setenv("WATERCOOLER_AUTO_START_SERVICES", "false")
@@ -882,11 +852,7 @@ auto_start_services = true
     # Reset config cache to pick up new config
     config.reset()
 
-    try:
-        assert not _should_auto_start_services(), "Expected env var to override TOML"
-    finally:
-        # Reset again to restore normal state
-        config.reset()
+    assert not _should_auto_start_services(), "Expected env var to override TOML"
 
 
 def test_try_auto_start_service_disabled_returns_false(monkeypatch):
@@ -1473,3 +1439,431 @@ def test_parity_mismatch_dataclass():
     assert mismatch.graph_value == 5
     assert mismatch.actual_value == 10
     assert mismatch.difference == 5
+
+
+# ============================================================================
+# Tests for Arc Change Detection Functions
+# ============================================================================
+
+
+def test_normalize_entry_id_with_prefix():
+    """Test _normalize_entry_id removes entry: prefix."""
+    from watercooler.baseline_graph.sync import _normalize_entry_id
+
+    assert _normalize_entry_id("entry:abc123") == "abc123"
+    assert _normalize_entry_id("entry:") == ""
+
+
+def test_normalize_entry_id_without_prefix():
+    """Test _normalize_entry_id passes through IDs without prefix."""
+    from watercooler.baseline_graph.sync import _normalize_entry_id
+
+    assert _normalize_entry_id("abc123") == "abc123"
+    assert _normalize_entry_id("") == ""
+
+
+def test_normalize_entry_id_only_removes_first_prefix():
+    """Test _normalize_entry_id only removes one prefix."""
+    from watercooler.baseline_graph.sync import _normalize_entry_id
+
+    # Edge case: entry ID that contains "entry:" in the middle
+    assert _normalize_entry_id("entry:entry:abc") == "entry:abc"
+
+
+def test_entries_for_summarization_sorts_by_index():
+    """Test _entries_for_summarization sorts entries by index."""
+    from watercooler.baseline_graph.sync import _entries_for_summarization
+
+    entries = {
+        "entry:c": {"index": 2, "title": "Third", "body": "Body 3", "entry_type": "Note", "agent": "Agent"},
+        "entry:a": {"index": 0, "title": "First", "body": "Body 1", "entry_type": "Plan", "agent": "Agent"},
+        "entry:b": {"index": 1, "title": "Second", "body": "Body 2", "entry_type": "Note", "agent": "Agent"},
+    }
+
+    result = _entries_for_summarization(entries)
+
+    assert len(result) == 3
+    assert result[0]["title"] == "First"
+    assert result[1]["title"] == "Second"
+    assert result[2]["title"] == "Third"
+
+
+def test_entries_for_summarization_prefers_summary_over_body():
+    """Test _entries_for_summarization uses summary when available."""
+    from watercooler.baseline_graph.sync import _entries_for_summarization
+
+    entries = {
+        "entry:a": {
+            "index": 0,
+            "title": "Entry",
+            "body": "Full body text",
+            "summary": "Short summary",
+            "entry_type": "Note",
+            "agent": "Agent",
+        },
+    }
+
+    result = _entries_for_summarization(entries)
+
+    assert result[0]["body"] == "Short summary"
+
+
+def test_entries_for_summarization_falls_back_to_body():
+    """Test _entries_for_summarization uses body when no summary."""
+    from watercooler.baseline_graph.sync import _entries_for_summarization
+
+    entries = {
+        "entry:a": {
+            "index": 0,
+            "title": "Entry",
+            "body": "Full body text",
+            "entry_type": "Note",
+            "agent": "Agent",
+        },
+    }
+
+    result = _entries_for_summarization(entries)
+
+    assert result[0]["body"] == "Full body text"
+
+
+def test_get_embedding_divergence_threshold_default(monkeypatch, isolated_config):
+    """Test _get_embedding_divergence_threshold returns default 0.6."""
+    from watercooler.baseline_graph.sync import _get_embedding_divergence_threshold
+
+    monkeypatch.delenv("WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD", raising=False)
+
+    result = _get_embedding_divergence_threshold()
+
+    assert result == 0.6
+
+
+def test_get_embedding_divergence_threshold_from_env(monkeypatch, isolated_config):
+    """Test _get_embedding_divergence_threshold reads from env var."""
+    from watercooler.baseline_graph.sync import _get_embedding_divergence_threshold
+
+    monkeypatch.setenv("WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD", "0.75")
+
+    result = _get_embedding_divergence_threshold()
+
+    assert result == 0.75
+
+
+def test_get_embedding_divergence_threshold_invalid_env_uses_default(monkeypatch, isolated_config):
+    """Test _get_embedding_divergence_threshold handles invalid env var.
+
+    When given a non-numeric value, should log warning and return default 0.6.
+    """
+    from watercooler.baseline_graph.sync import _get_embedding_divergence_threshold
+
+    monkeypatch.setenv("WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD", "not-a-number")
+
+    result = _get_embedding_divergence_threshold()
+
+    # Invalid value is rejected, falls back to default
+    assert result == 0.6
+
+
+def test_get_embedding_divergence_threshold_out_of_range_uses_default(monkeypatch, isolated_config):
+    """Test _get_embedding_divergence_threshold rejects out-of-range values.
+
+    When given a value outside 0.0-1.0 range, should log warning and return default 0.6.
+    """
+    from watercooler.baseline_graph.sync import _get_embedding_divergence_threshold
+
+    monkeypatch.setenv("WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD", "1.5")
+
+    result = _get_embedding_divergence_threshold()
+
+    # Out-of-range value is rejected, falls back to default
+    assert result == 0.6
+
+
+def test_get_embedding_divergence_threshold_negative_uses_default(monkeypatch, isolated_config):
+    """Test _get_embedding_divergence_threshold rejects negative values."""
+    from watercooler.baseline_graph.sync import _get_embedding_divergence_threshold
+
+    monkeypatch.setenv("WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD", "-0.5")
+
+    result = _get_embedding_divergence_threshold()
+
+    # Negative value is rejected, falls back to default
+    assert result == 0.6
+
+
+def test_should_update_thread_summary_embedding_divergence_triggers():
+    """Test should_update_thread_summary triggers on embedding divergence."""
+    from watercooler.baseline_graph.sync import should_update_thread_summary
+    from watercooler.baseline_graph.parser import ParsedThread, ParsedEntry
+
+    # Create a thread with enough entries to not trigger other criteria
+    entries = [
+        ParsedEntry(
+            entry_id=f"entry{i}",
+            index=i,
+            agent="Agent",
+            role="implementer",
+            entry_type="Note",
+            title=f"Entry {i}",
+            timestamp="2024-01-01T00:00:00Z",
+            body=f"Body {i}",
+            summary=f"Summary {i}",
+        )
+        for i in range(5)
+    ]
+    parsed = ParsedThread(
+        topic="test",
+        title="Test Thread",
+        status="OPEN",
+        ball=None,
+        entries=entries,
+        summary="Existing summary",
+        last_updated="2024-01-01T00:00:00Z",
+    )
+    new_entry = entries[-1]
+
+    # Similar embeddings - should NOT trigger
+    similar_embedding = [0.1, 0.2, 0.3, 0.4, 0.5]
+    result = should_update_thread_summary(
+        parsed,
+        new_entry,
+        previous_entry_count=4,
+        new_entry_embedding=similar_embedding,
+        previous_entry_embedding=similar_embedding,
+        embedding_divergence_threshold=0.6,
+    )
+    assert result is False
+
+    # Divergent embeddings - should trigger
+    divergent_embedding_1 = [1.0, 0.0, 0.0, 0.0, 0.0]
+    divergent_embedding_2 = [0.0, 0.0, 0.0, 0.0, 1.0]
+    result = should_update_thread_summary(
+        parsed,
+        new_entry,
+        previous_entry_count=4,
+        new_entry_embedding=divergent_embedding_1,
+        previous_entry_embedding=divergent_embedding_2,
+        embedding_divergence_threshold=0.6,
+    )
+    assert result is True
+
+
+def test_should_update_thread_summary_no_embeddings_doesnt_trigger():
+    """Test should_update_thread_summary doesn't trigger on missing embeddings."""
+    from watercooler.baseline_graph.sync import should_update_thread_summary
+    from watercooler.baseline_graph.parser import ParsedThread, ParsedEntry
+
+    entries = [
+        ParsedEntry(
+            entry_id=f"entry{i}",
+            index=i,
+            agent="Agent",
+            role="implementer",
+            entry_type="Note",
+            title=f"Entry {i}",
+            timestamp="2024-01-01T00:00:00Z",
+            body=f"Body {i}",
+            summary=f"Summary {i}",
+        )
+        for i in range(5)
+    ]
+    parsed = ParsedThread(
+        topic="test",
+        title="Test Thread",
+        status="OPEN",
+        ball=None,
+        entries=entries,
+        summary="Existing summary",
+        last_updated="2024-01-01T00:00:00Z",
+    )
+    new_entry = entries[-1]
+
+    # No embeddings provided - should not trigger embedding divergence
+    result = should_update_thread_summary(
+        parsed,
+        new_entry,
+        previous_entry_count=4,
+        new_entry_embedding=None,
+        previous_entry_embedding=None,
+    )
+    assert result is False
+
+
+# ============================================================================
+# Decoupled Memory Sync Tests (sync_entry_to_memory_backend)
+# ============================================================================
+
+
+def test_sync_entry_to_memory_backend_calls_sync(threads_dir: Path, sample_thread: Path, monkeypatch):
+    """Test sync_entry_to_memory_backend reads entry from graph and calls sync_to_memory_backend."""
+    from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+    # First, write the thread to graph so entry nodes exist
+    sync_thread_to_graph(threads_dir, "test-topic")
+
+    memory_calls = []
+
+    def mock_sync_to_memory(**kwargs):
+        memory_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.sync_to_memory_backend",
+        lambda **kwargs: mock_sync_to_memory(**kwargs),
+    )
+
+    result = sync_entry_to_memory_backend(
+        threads_dir, "test-topic", "01TEST00000000000000000001"
+    )
+
+    assert result is True
+    assert len(memory_calls) == 1
+    assert memory_calls[0]["topic"] == "test-topic"
+    assert memory_calls[0]["entry_id"] == "01TEST00000000000000000001"
+    assert "entry_body" in memory_calls[0]
+
+
+def test_sync_entry_to_memory_backend_missing_entry(threads_dir: Path, monkeypatch):
+    """Test sync_entry_to_memory_backend returns False for missing entry."""
+    from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+    result = sync_entry_to_memory_backend(
+        threads_dir, "nonexistent-topic", "nonexistent-entry"
+    )
+
+    assert result is False
+
+
+def test_sync_entry_to_memory_backend_handles_exception(threads_dir: Path, monkeypatch):
+    """Test sync_entry_to_memory_backend handles exceptions gracefully."""
+    from watercooler.baseline_graph.sync import sync_entry_to_memory_backend
+
+    def raise_error(*args, **kwargs):
+        raise RuntimeError("graph read error")
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.get_entry_node_from_graph",
+        raise_error,
+    )
+
+    result = sync_entry_to_memory_backend(threads_dir, "test-topic", "entry-1")
+
+    assert result is False
+
+
+def test_enrich_graph_entry_does_not_call_sync_to_memory(threads_dir: Path, sample_thread: Path, monkeypatch):
+    """Test enrich_graph_entry no longer calls sync_to_memory_backend directly.
+
+    Memory sync is now handled independently by the middleware via
+    sync_entry_to_memory_backend().
+    """
+    from watercooler.baseline_graph.sync import enrich_graph_entry
+
+    # Write the thread to graph first
+    sync_thread_to_graph(threads_dir, "test-topic")
+
+    memory_calls = []
+
+    def mock_sync_to_memory(*args, **kwargs):
+        memory_calls.append(True)
+        return True
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.sync_to_memory_backend",
+        mock_sync_to_memory,
+    )
+    # Mock services as unavailable so enrichment generates nothing
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.is_llm_service_available",
+        lambda config=None: False,
+    )
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.is_embedding_available",
+        lambda config=None: False,
+    )
+
+    result = enrich_graph_entry(
+        threads_dir=threads_dir,
+        topic="test-topic",
+        entry_id="01TEST00000000000000000001",
+        generate_summaries=True,
+        generate_embeddings=True,
+    )
+
+    # Enrichment returns noop (services unavailable)
+    assert result.is_noop
+    # sync_to_memory_backend should NOT have been called
+    assert len(memory_calls) == 0
+
+
+def test_enrich_graph_entry_with_services_does_not_call_sync_to_memory(
+    threads_dir: Path, sample_thread: Path, monkeypatch
+):
+    """Test enrich_graph_entry doesn't call sync_to_memory even when enrichment succeeds."""
+    from watercooler.baseline_graph.sync import enrich_graph_entry
+
+    # Write the thread to graph first
+    sync_thread_to_graph(threads_dir, "test-topic")
+
+    memory_calls = []
+
+    def mock_sync_to_memory(*args, **kwargs):
+        memory_calls.append(True)
+        return True
+
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.sync_to_memory_backend",
+        mock_sync_to_memory,
+    )
+    # Mock LLM as available and returning a summary
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.is_llm_service_available",
+        lambda config=None: True,
+    )
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.summarize_entry",
+        lambda *args, **kwargs: "mock summary for testing",
+    )
+    # No embeddings
+    monkeypatch.setattr(
+        "watercooler.baseline_graph.sync.is_embedding_available",
+        lambda config=None: False,
+    )
+
+    result = enrich_graph_entry(
+        threads_dir=threads_dir,
+        topic="test-topic",
+        entry_id="01TEST00000000000000000001",
+        generate_summaries=True,
+        generate_embeddings=False,
+    )
+
+    assert result.success
+    assert result.summary_generated
+    # sync_to_memory_backend should NOT have been called from enrich_graph_entry
+    assert len(memory_calls) == 0
+
+
+# ============================================================================
+# LOCAL_NO_KEY Sentinel Tests
+# ============================================================================
+
+
+def test_is_embedding_available_local_no_key_sentinel():
+    """Test is_embedding_available skips auth header for LOCAL_NO_KEY sentinel."""
+    config = EmbeddingConfig(
+        api_base="http://localhost:1/v1",
+        api_key="LOCAL_NO_KEY",
+    )
+    # Should return False (no server) but not crash due to auth header
+    assert not is_embedding_available(config)
+
+
+def test_is_llm_service_available_local_no_key_sentinel():
+    """Test is_llm_service_available skips auth header for LOCAL_NO_KEY sentinel."""
+    config = SummarizerConfig(
+        api_base="http://localhost:1/v1",
+        api_key="LOCAL_NO_KEY",
+    )
+    # Should return False (no server) but not crash due to auth header
+    assert not is_llm_service_available(config)

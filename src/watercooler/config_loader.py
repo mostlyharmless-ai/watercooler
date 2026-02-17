@@ -185,6 +185,7 @@ def _env_to_config_key(env_var: str) -> tuple[list[str], str]:
         "WATERCOOLER_FAIL_ON_VIOLATION": (["validation"], "fail_on_violation"),
         # Memory global
         "WATERCOOLER_MEMORY_BACKEND": (["memory"], "backend"),
+        "WATERCOOLER_MEMORY_QUEUE": (["memory"], "queue_enabled"),
         # Memory LLM
         "LLM_API_KEY": (["memory", "llm"], "api_key"),
         "LLM_API_BASE": (["memory", "llm"], "api_base"),
@@ -240,6 +241,7 @@ def _apply_env_overlay(config_dict: Dict[str, Any]) -> Dict[str, Any]:
         "WATERCOOLER_FAIL_ON_VIOLATION",
         # Memory settings
         "WATERCOOLER_MEMORY_BACKEND",
+        "WATERCOOLER_MEMORY_QUEUE",
         "LLM_API_KEY",
         "LLM_API_BASE",
         "LLM_MODEL",

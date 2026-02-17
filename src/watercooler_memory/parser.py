@@ -6,28 +6,30 @@ function, adding graph-specific metadata and temporal sequencing.
 The parser produces:
 - ThreadNode for the thread
 - EntryNode for each entry (with FOLLOWS edges between sequential entries)
-- Hyperedge for thread membership
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
-from watercooler.thread_entries import ThreadEntry, parse_thread_entries, parse_thread_header
+from watercooler.fs import discover_thread_files
+from watercooler.thread_entries import parse_thread_entries, parse_thread_header
 
 from .schema import (
     ThreadNode,
     EntryNode,
     Edge,
-    Hyperedge,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def parse_thread_to_nodes(
     thread_path: Path,
     branch_context: Optional[str] = None,
-) -> tuple[ThreadNode, list[EntryNode], list[Edge], list[Hyperedge]]:
+) -> tuple[ThreadNode, list[EntryNode], list[Edge]]:
     """Parse a thread file into graph nodes and edges.
 
     Args:
@@ -35,7 +37,7 @@ def parse_thread_to_nodes(
         branch_context: Optional git branch name for context.
 
     Returns:
-        Tuple of (thread_node, entry_nodes, edges, hyperedges)
+        Tuple of (thread_node, entry_nodes, edges)
 
     Raises:
         FileNotFoundError: If thread file doesn't exist.
@@ -61,10 +63,6 @@ def parse_thread_to_nodes(
         entry_id = entry.entry_id or f"{thread_id}:{i}"
         entry_id_list.append(entry_id)
 
-        # Determine preceding/following entry IDs
-        preceding_id = entry_id_list[i - 1] if i > 0 else None
-        # following_id will be set in a second pass
-
         entry_node = EntryNode(
             entry_id=entry_id,
             thread_id=thread_id,
@@ -76,32 +74,8 @@ def parse_thread_to_nodes(
             timestamp=entry.timestamp,
             body=entry.body,
             sequence_index=i,
-            preceding_entry_id=preceding_id,
         )
         entry_nodes.append(entry_node)
-
-    # Second pass: set following_entry_id
-    for i, node in enumerate(entry_nodes):
-        if i < len(entry_nodes) - 1:
-            # Create new node with following_entry_id set
-            entry_nodes[i] = EntryNode(
-                entry_id=node.entry_id,
-                thread_id=node.thread_id,
-                index=node.index,
-                agent=node.agent,
-                role=node.role,
-                entry_type=node.entry_type,
-                title=node.title,
-                timestamp=node.timestamp,
-                body=node.body,
-                chunk_ids=node.chunk_ids,
-                summary=node.summary,
-                embedding=node.embedding,
-                sequence_index=node.sequence_index,
-                preceding_entry_id=node.preceding_entry_id,
-                following_entry_id=entry_id_list[i + 1],
-                ingestion_time=node.ingestion_time,
-            )
 
     # Create thread node
     created_at = entries[0].timestamp if entries else last_update
@@ -139,27 +113,14 @@ def parse_thread_to_nodes(
             )
         )
 
-    # Build hyperedges
-    hyperedges: list[Hyperedge] = []
-
-    # Thread membership hyperedge
-    if entry_id_list:
-        hyperedges.append(
-            Hyperedge.thread_membership(
-                thread_id=thread_id,
-                entry_ids=entry_id_list,
-                event_time=created_at,
-            )
-        )
-
-    return thread_node, entry_nodes, edges, hyperedges
+    return thread_node, entry_nodes, edges
 
 
 def parse_threads_directory(
     threads_dir: Path,
     branch_context: Optional[str] = None,
     thread_filter: Optional[list[str]] = None,
-) -> tuple[list[ThreadNode], list[EntryNode], list[Edge], list[Hyperedge]]:
+) -> tuple[list[ThreadNode], list[EntryNode], list[Edge]]:
     """Parse all threads in a directory into graph nodes.
 
     Args:
@@ -168,15 +129,14 @@ def parse_threads_directory(
         thread_filter: Optional list of thread .md filenames to process (None = all).
 
     Returns:
-        Tuple of (thread_nodes, entry_nodes, edges, hyperedges)
+        Tuple of (thread_nodes, entry_nodes, edges)
     """
     if not threads_dir.exists():
-        return [], [], [], []
+        return [], [], []
 
     all_threads: list[ThreadNode] = []
     all_entries: list[EntryNode] = []
     all_edges: list[Edge] = []
-    all_hyperedges: list[Hyperedge] = []
 
     # Determine which thread files to process
     if thread_filter:
@@ -187,11 +147,11 @@ def parse_threads_directory(
             if thread_path.exists():
                 thread_paths.append(thread_path)
             else:
-                print(f"Warning: Thread file not found: {thread_path}")
+                logger.warning("Thread file not found: %s", thread_path)
         thread_paths = sorted(thread_paths)
     else:
-        # Process all *.md files in directory
-        thread_paths = sorted(threads_dir.glob("*.md"))
+        # Process all *.md files in directory (including subdirectories)
+        thread_paths = discover_thread_files(threads_dir)
 
     for thread_path in thread_paths:
         # Skip index.md or other non-thread files
@@ -199,15 +159,14 @@ def parse_threads_directory(
             continue
 
         try:
-            thread, entries, edges, hyperedges = parse_thread_to_nodes(
+            thread, entries, edges = parse_thread_to_nodes(
                 thread_path, branch_context
             )
             all_threads.append(thread)
             all_entries.extend(entries)
             all_edges.extend(edges)
-            all_hyperedges.extend(hyperedges)
         except Exception as e:
             # Log but continue with other threads
-            print(f"Warning: Failed to parse {thread_path}: {e}")
+            logger.warning("Failed to parse %s: %s", thread_path, e)
 
-    return all_threads, all_entries, all_edges, all_hyperedges
+    return all_threads, all_entries, all_edges
