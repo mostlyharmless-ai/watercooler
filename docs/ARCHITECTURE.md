@@ -151,10 +151,6 @@ Authentication approach approved. All edge cases covered.
 
 ---
 
-> Memory integration is available as an optional add-on; see the memory backend documentation for the multi-tier memory system (Graphiti, LeanRAG).
-
----
-
 ## Git Sync Architecture
 
 Watercooler implements a 7-layer modular sync architecture for reliable distributed collaboration:
@@ -165,7 +161,7 @@ Watercooler implements a 7-layer modular sync architecture for reliable distribu
 │           Commit batching, priority flushing, retry queue       │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 6: Branch Parity (branch_parity.py)                      │
-│           Cross-repo T2C sync, topic locking, auto-merge        │
+│           Cross-repo branch sync, topic locking, auto-merge     │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 5: Local-Remote Sync (local_remote.py)                   │
 │           Single-repo L2R sync, ahead/behind tracking           │
@@ -411,7 +407,7 @@ watercooler-cloud/
 │       │   ├── state.py          # Parity state
 │       │   ├── conflict.py       # Merge strategies
 │       │   ├── local_remote.py   # L2R sync
-│       │   ├── branch_parity.py  # T2C sync
+│       │   ├── branch_parity.py  # branch sync
 │       │   └── async_coordinator.py  # Batching
 │       ├── server.py             # FastMCP server
 │       ├── middleware.py         # run_with_sync wrapper

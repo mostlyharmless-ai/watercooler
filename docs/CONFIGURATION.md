@@ -247,8 +247,6 @@ max_headers = 3              # Max headers to include
 
 See [Baseline Graph Documentation](baseline-graph.md) for full usage guide.
 
-> Memory integration is available as an optional add-on. Memory backends (Graphiti, LeanRAG) are configured via environment variables when enabled.
-
 ## Migrating from Environment Variables
 
 If you're currently using environment variables, you can migrate to config files:

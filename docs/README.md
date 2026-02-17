@@ -111,9 +111,7 @@ File-based collaboration protocol for agentic coding projects with CLI tools and
 - **[Decision Trace Extraction Guide](DECISION_TRACE_EXTRACTION_GUIDE.md)** - Extracting decision traces
 
 ### Subdirectories
-- **[adr/](adr/)** - Architecture Decision Records
 - **[archive/](archive/)** - Historical and legacy documentation
-- **[examples/](examples/)** - Example configurations and workflows
 - **[images/](images/)** - Documentation images
 
 ---

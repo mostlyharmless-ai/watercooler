@@ -529,56 +529,6 @@ See [Git Setup Guide](../../.github/WATERCOOLER_SETUP.md) for detailed configura
 
 ---
 
-## Cloud Sync for Team Collaboration
-
-Watercooler supports **git-based cloud sync** for distributed team collaboration. When enabled, the MCP server automatically pulls before reads and commits+pushes after writes.
-
-### Quick Setup
-
-1. **Create a git repository for threads:**
-   ```bash
-   # Option A: Dedicated repo (recommended)
-   git init watercooler-threads
-   cd watercooler-threads
-   git remote add origin https://github.com/org/watercooler-threads.git
-
-   # Option B: Use existing project repo
-   # (place threads under a dedicated subdirectory such as threads/)
-   ```
-
-2. **Configure environment variables:**
-   ```bash
-   export WATERCOOLER_GIT_REPO=https://github.com/org/watercooler-threads.git
-   export WATERCOOLER_GIT_SSH_KEY=/path/to/deploy/key
-   export WATERCOOLER_GIT_AUTHOR="Agent Name"
-   export WATERCOOLER_GIT_EMAIL=agent@example.com
-   ```
-
-3. **Restart your MCP client** (Claude Code, Claude Desktop, etc.)
-
-### How It Works
-
-**Local Mode (default):**
-- Reads/writes directly to the sibling threads repo on disk
-- No network operations
-- Fast and simple
-
-**Cloud Mode (when `WATERCOOLER_GIT_REPO` is set):**
-- **Reads**: `git pull` before returning thread content
-- **Writes**: Append entry, `git commit`, `git push`
-- **Conflicts**: Automatic retry with fresh pull (3 attempts)
-- **Latency**: ~500ms-1s per operation
-
-### Documentation
-
-> **Note**: Cloud sync features have been mothballed in favor of local-first architecture. See [SETUP_AND_QUICKSTART.md](./SETUP_AND_QUICKSTART.md) for current setup.
-
-- **[Cloud Sync Guide](../../.mothballed/docs/CLOUD_SYNC_GUIDE.md)** - 5-minute setup walkthrough (archived)
-- **[Cloud Sync Strategy](../../.mothballed/docs/CLOUD_SYNC_STRATEGY.md)** - Decision rationale and trade-offs (archived)
-- **[Cloud Sync Architecture](../../.mothballed/docs/CLOUD_SYNC_ARCHITECTURE.md)** - Technical implementation details (archived)
-
----
-
 ## Integration Patterns
 
 ### Pattern 1: Automation Script
@@ -803,11 +753,6 @@ CONFLICT (content): Merge conflict in threads/feature-auth.md
 - [Environment Variables](./ENVIRONMENT_VARS.md) - Complete configuration reference
 - [Agent Registry](AGENT_REGISTRY.md) - Agent configuration guide
 - [Templates Guide](TEMPLATES.md) - Template customization reference
-
-### Cloud Sync (Archived)
-- [Cloud Sync Guide](../../.mothballed/docs/CLOUD_SYNC_GUIDE.md) - User-facing setup walkthrough (archived)
-- [Cloud Sync Strategy](../../.mothballed/docs/CLOUD_SYNC_STRATEGY.md) - Decision rationale (archived)
-- [Cloud Sync Architecture](../../.mothballed/docs/CLOUD_SYNC_ARCHITECTURE.md) - Technical details (archived)
 
 ### Reference
 - [MCP Server Guide](./mcp-server.md) - MCP tool documentation

@@ -294,25 +294,7 @@ Otherwise, emit a `Note` explaining why no decision was extracted, or emit nothi
 
 ---
 
-## 9. Memory System Integration
-
-> **Note:** This section describes integration with Watercooler's tiered memory system
-> (T2/T3 backends such as Graphiti). It is optional -- the decision extraction workflow
-> in Sections 1-8 works independently of any memory backend. Skip this section if you
-> are not using a memory backend.
-
-Extracted decision traces are high-value content for watercooler's tiered memory system. After extraction:
-
-* All entry types (including Decision) are indexed as entry nodes in the **T1 baseline graph** with `entry_type` as a filterable string property. There is no distinct Decision node type — Decision entries are the same nodes, queryable via `entry_type` filter.
-* Decision, Closure, and Plan entries are treated as **arc-changing** types that trigger thread summary regeneration. Bulk-extracting many decisions into a single thread may cause repeated re-summarization — consider batching or extracting into a dedicated thread.
-* If a memory backend is configured (`WATERCOOLER_MEMORY_BACKEND`), entries are also synced as episodes and become searchable in T2/T3. Entity and fact extraction depends on the backend.
-* The `entry_id` provenance chain allows memory queries to trace results back to their source thread and entry
-
-No additional indexing steps are required by the extracting agent — the standard write-then-sync pipeline handles propagation.
-
----
-
-## 10. Agent Reminder
+## 9. Agent Reminder
 
 > **Your job is not to be helpful — it is to be correct.**
 
