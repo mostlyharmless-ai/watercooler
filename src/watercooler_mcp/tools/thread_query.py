@@ -25,7 +25,6 @@ from watercooler.thread_entries import ThreadEntry
 
 from ..config import (
     get_agent_name,
-    get_git_sync_manager_from_context,
     resolve_thread_context,
 )
 from ..helpers import (
@@ -243,30 +242,6 @@ def _list_threads_impl(
             total_entries = sum(len(v) for v in entry_scan.values())
             log_debug(f"list_threads scan loaded {total_entries} entries across {len(entry_scan)} threads in {scan_entries_elapsed:.2f}s")
 
-        sync = get_git_sync_manager_from_context(context)
-        pending_topics: set[str] = set()
-        async_summary = ""
-        if sync:
-            status_info = sync.get_async_status()
-            if status_info.get("mode") == "async":
-                pending_topics = {topic for topic in (status_info.get("pending_topics") or []) if topic}
-                summary_parts: list[str] = []
-                if status_info.get("is_syncing"):
-                    summary_parts.append("syncing…")
-                last_pull_age = status_info.get("last_pull_age_seconds")
-                if status_info.get("last_pull"):
-                    age_fragment = f"{int(last_pull_age)}s ago" if last_pull_age is not None else "recently"
-                    if status_info.get("stale"):
-                        age_fragment += " (stale)"
-                    summary_parts.append(f"last refresh {age_fragment}")
-                else:
-                    summary_parts.append("no refresh yet")
-                next_eta = status_info.get("next_pull_eta_seconds")
-                if next_eta is not None:
-                    summary_parts.append(f"next sync in {int(next_eta)}s")
-                summary_parts.append(f"pending {status_info.get('pending', 0)}")
-                async_summary = "*Async sync: " + ", ".join(summary_parts) + "*\n"
-
         if not threads:
             status_filter = "open " if open_only is True else ("closed " if open_only is False else "")
             log_debug(f"list_threads no {status_filter or ''}threads found")
@@ -346,19 +321,15 @@ def _list_threads_impl(
         output: list[str] = []
         scan_label = " — Scan" if scan else ""
         output.append(f"# Watercooler Threads ({len(threads)} total){scan_label}\n")
-        if async_summary:
-            output.append(async_summary)
 
         def _render_thread_md(
             title: str, status: str, ball: str, updated: str,
             topic: str, summary: str, entry_count: int,
             marker: str = "",
         ) -> None:
-            local_marker = " ⏳" if topic in pending_topics else ""
-            updated_label = updated + (" (local)" if topic in pending_topics else "")
             ec = f" | Entries: {entry_count}" if entry_count else ""
-            output.append(f"- {marker}**{topic}**{local_marker} - {title}")
-            output.append(f"  Status: {status} | Ball: {ball}{ec} | Updated: {updated_label}")
+            output.append(f"- {marker}**{topic}** - {title}")
+            output.append(f"  Status: {status} | Ball: {ball}{ec} | Updated: {updated}")
             if summary:
                 output.append(f"  {summary}")
             # Scan mode: append per-entry summaries

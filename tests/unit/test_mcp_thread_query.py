@@ -137,9 +137,6 @@ def patched_context(mock_context, monkeypatch):
     # Mock ensure_readable (sync function)
     monkeypatch.setattr("watercooler_mcp.tools.thread_query.ensure_readable", lambda *args, **kwargs: (True, []))
 
-    # Mock get_git_sync_manager_from_context to return None (no sync manager)
-    monkeypatch.setattr("watercooler_mcp.tools.thread_query.get_git_sync_manager_from_context", lambda ctx: None)
-
     # Mock graph functions to use markdown fallback
     monkeypatch.setattr(
         "watercooler_mcp.tools.thread_query._list_threads",

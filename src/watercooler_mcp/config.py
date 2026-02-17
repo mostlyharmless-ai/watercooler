@@ -262,6 +262,12 @@ def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
             )
         else:
             log_debug("CONFIG: Worktree creation failed, falling back to _local")
+            from .helpers import _add_startup_warning
+            _add_startup_warning(
+                "Worktree creation failed — threads will be stored in a local "
+                "_local/ directory instead of the orphan branch. New writes will "
+                "NOT be synced to the remote. Check git permissions and retry."
+            )
 
     # =========================================================================
     # Fallback: no git context (or worktree failed)
@@ -288,10 +294,6 @@ def get_threads_dir() -> Path:
 def get_threads_dir_for(code_root: Optional[Path]) -> Path:
     return resolve_thread_context(code_root).threads_dir
 
-
-def get_git_sync_manager_from_context(ctx: ThreadContext) -> None:
-    """Stub — legacy sync manager is removed. Always returns None."""
-    return None
 
 
 def get_code_context(code_root: Optional[Path]) -> Dict[str, str]:

@@ -46,7 +46,7 @@ watercooler-cloud is a file-based collaboration protocol for agentic coding proj
 - **Constants**: `UPPER_SNAKE_CASE` (e.g., `DEFAULT_THREADS_DIR`)
 - **Private**: `_leading_underscore` for internal use
 - **CLI commands**: kebab-case (e.g., `init-thread`, `append-entry`)
-- **Python modules**: `snake_case` (e.g., `git_sync.py`, `structured_entries.py`)
+- **Python modules**: `snake_case` (e.g., `path_resolver.py`, `structured_entries.py`)
 - **Agent roles**: lowercase (e.g., `planner`, `critic`, `implementer`, `tester`, `pm`, `scribe`)
 - **Entry types**: PascalCase (e.g., `Note`, `Plan`, `Decision`, `PR`, `Closure`)
 
@@ -504,18 +504,11 @@ python3 -m watercooler_mcp
 - **MCP server**: `src/watercooler_mcp/` - MCP integration
   - `server.py` - FastMCP server implementation
   - `config.py` - MCP-specific configuration
-  - `sync/` - **Modular git sync package** (preferred for new code):
+  - `sync/` - Git sync primitives and locking:
     - `primitives.py` - Pure git operations (fetch, pull, push, stash, checkout)
-    - `state.py` - Parity state management with live git checks
-    - `conflict.py` - Conflict detection and resolution (JSONL, markdown)
-    - `local_remote.py` - Single-repo sync operations (L2R)
-    - `branch_parity.py` - Cross-repo coordination (T2C)
-    - `async_coordinator.py` - Background sync with batching
     - `errors.py` - Rich exception hierarchy
-  - `git_sync.py` - Legacy facade (deprecated, use `sync/` package)
-  - `branch_parity.py` - Legacy facade (deprecated, use `sync/` package)
+    - `__init__.py` - Per-topic advisory locks, topic sanitization
   - `observability.py` - Logging and monitoring
-  - `provisioning.py` - Resource provisioning
 
 ## Best Practices
 

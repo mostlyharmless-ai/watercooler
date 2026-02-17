@@ -108,7 +108,6 @@ from watercooler.path_resolver import (
 from .auth import is_hosted_mode
 from .config import (
     ThreadContext,
-    get_git_sync_manager_from_context,
     resolve_thread_context,
 )
 from .context import get_http_context, HttpRequestContext
@@ -344,22 +343,15 @@ def _dynamic_context_missing(context: ThreadContext) -> bool:
 def _refresh_threads(context: ThreadContext, skip_validation: bool = False) -> None:
     """Refresh threads repo by pulling latest changes.
 
-    This function ensures the threads repository is synchronized before any
-    read or write operation by pulling the latest changes from the remote.
+    In orphan-worktree mode, pulling is handled by the middleware
+    (run_with_sync) before write operations and by ensure_readable
+    before read operations. This function is a no-op.
 
     Args:
         context: Thread context with repo information
         skip_validation: If True, skip validation (kept for API compatibility)
     """
-    sync = get_git_sync_manager_from_context(context)
-    if not sync:
-        return
-
-    status = sync.get_async_status()
-    if status.get("mode") == "async":
-        # Async mode relies on background pulls; avoid blocking operations.
-        return
-    sync.pull()
+    return
 
 
 def _validate_thread_context(code_path: str) -> tuple[str | None, ThreadContext | None]:

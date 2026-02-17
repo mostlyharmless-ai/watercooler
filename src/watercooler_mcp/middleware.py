@@ -295,13 +295,28 @@ def run_with_sync(
         log_debug("[SYNC] Simple sync flow")
         if context.threads_dir and (context.threads_dir / ".git").exists():
             from .sync.primitives import pull_ff_only, fetch_with_timeout
-            from git import Repo
+            from .sync.errors import AuthenticationError, ConflictError
+            from git import Repo, GitCommandError
             try:
                 threads_repo = Repo(context.threads_dir)
                 fetch_with_timeout(threads_repo, timeout=30)
                 pull_ff_only(threads_repo)
+            except GitCommandError as git_err:
+                err_msg = str(git_err).lower()
+                if "authentication" in err_msg or "permission denied" in err_msg or "could not read from remote" in err_msg:
+                    raise AuthenticationError(
+                        message=f"Git authentication failed during pull: {git_err}",
+                        recovery_hint="Check SSH keys or GitHub token credentials.",
+                    )
+                if "conflict" in err_msg or "merge" in err_msg:
+                    raise ConflictError(
+                        message=f"Merge conflict during pull: {git_err}",
+                        recovery_hint="Resolve conflicts in the worktree manually.",
+                    )
+                # Network/transient errors — log and continue
+                log_warning(f"[SYNC] Pull failed (transient, continuing): {git_err}")
             except Exception as pull_err:
-                log_debug(f"[SYNC] Pull failed (continuing): {pull_err}")
+                log_warning(f"[SYNC] Pull failed (continuing): {pull_err}")
 
         # Build commit footers
         footers = _build_commit_footers(
