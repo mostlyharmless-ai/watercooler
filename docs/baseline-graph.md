@@ -2,7 +2,7 @@
 
 **Baseline graph JSONL (canonical representation) for Watercooler collaboration.**
 
-The baseline graph module maintains Watercooler’s canonical, git-friendly graph representation in JSONL.
+The baseline graph module maintains Watercooler's canonical, git-friendly graph representation in JSONL.
 Markdown thread files remain available as a **human projection**, but the baseline graph JSONL is the
 authoritative record going forward.
 
@@ -457,6 +457,10 @@ watercooler_health
 
 ### Auto-Start Services (Optional)
 
+> **Note:** Auto-start is an optional convenience feature that requires `watercooler_memory`
+> with `ServerManager`. Most users do not need this -- the MCP server works without it
+> by gracefully falling back to extractive summarization when local LLM services are unavailable.
+
 If you have `watercooler_memory` installed with `ServerManager`, you can enable auto-start:
 
 ```bash
@@ -494,5 +498,4 @@ When enabled, the MCP server will attempt to start local LLM/embedding services 
 
 - [Configuration Guide](CONFIGURATION.md) - Config file reference
 - [Environment Variables](ENVIRONMENT_VARS.md) - All environment variables
-- [Memory Module](MEMORY.md) - Full RAG pipeline documentation
 - [Graph Sync](GRAPH_SYNC.md) - Real-time graph synchronization

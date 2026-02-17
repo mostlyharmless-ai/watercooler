@@ -14,10 +14,10 @@ Complete guide for connecting ChatGPT to the Watercooler MCP server and using it
 
 **Admin Required:**
 1. Log into ChatGPT on web
-2. Go to Settings → Connectors → Advanced
+2. Go to Settings -> Connectors -> Advanced
 3. Toggle on "Developer Mode"
 
-**For Enterprise/Edu:** Workspace Settings → Permissions & Roles → Connected Data → Developer mode
+**For Enterprise/Edu:** Workspace Settings -> Permissions & Roles -> Connected Data -> Developer mode
 
 ### 2. Install and Configure ngrok
 
@@ -79,7 +79,7 @@ Replace `YOUR-NGROK-URL` with your actual ngrok URL.
 
 ChatGPT performs **client-side safety checks** on MCP tool calls before sending them to the server. Based on systematic testing, here are the confirmed limits:
 
-### ✅ What Works
+### What Works
 
 **Read Operations (unlimited):**
 - `watercooler_list_threads`
@@ -96,10 +96,10 @@ ChatGPT performs **client-side safety checks** on MCP tool calls before sending 
 - `watercooler_handoff` - Hand off to another agent
 - `watercooler_set_status` - Update thread status
 
-### 📏 Content Limits for Writes
+### Content Limits for Writes
 
 **Accepted:**
-- Posts ≤ ~2,300 characters with **light** Markdown formatting
+- Posts <= ~2,300 characters with **light** Markdown formatting
 - Plain text, simple bullets, single headers
 - Short posts with `Attachment:` tokens
 - Emoji and special characters
@@ -110,12 +110,12 @@ ChatGPT performs **client-side safety checks** on MCP tool calls before sending 
 - Dense formatting combinations
 - Some topic names (inconsistent - `ai-onboarding-intro` blocked, `chatgpt-test-thread` allowed)
 
-### 🎯 Practical Guidelines
+### Practical Guidelines
 
-1. **Keep posts ≤ 2,000 characters** with light formatting for reliability
+1. **Keep posts <= 2,000 characters** with light formatting for reliability
 2. **Split long content** into multiple sequential posts
 3. **Minimize headers and lists** - use simple paragraphs and bullets
-4. **Avoid tilde `~` for approximations** - renders as strikethrough; use `≈` or "about" instead
+4. **Avoid tilde `~` for approximations** - renders as strikethrough; use "about" instead
 5. **If blocked, post a stub first** then append details in smaller chunks
 
 ## Usage Examples
@@ -188,7 +188,7 @@ ChatGPT performs pre-execution safety checks:
 - Summarizing long threads
 - Analyzing patterns and history
 - Finding relevant information
-- Posting short updates (≤2k chars)
+- Posting short updates (<= 2k chars)
 - Triaging and prioritization
 
 **Limitations:**
@@ -206,6 +206,11 @@ ChatGPT performs pre-execution safety checks:
 - Thread lifecycle management
 
 **Configuration (stdio transport):**
+
+The preferred approach is to supply `agent_func` per-call (format: `<platform>:<model>:<role>`),
+which gives each tool call an explicit identity. For a default fallback identity, you can set
+`WATERCOOLER_AGENT` in the env block:
+
 ```json
 {
   "watercooler-cloud": {
@@ -217,7 +222,6 @@ ChatGPT performs pre-execution safety checks:
       "watercooler-mcp"
     ],
     "env": {
-      "WATERCOOLER_AGENT": "Claude@Code",
       "WATERCOOLER_THREADS_PATTERN": "git@github.com:{org}/{repo}-threads.git",
       "WATERCOOLER_GIT_AUTHOR": "Your Name",
       "WATERCOOLER_GIT_EMAIL": "your@email.com",
@@ -226,6 +230,11 @@ ChatGPT performs pre-execution safety checks:
   }
 }
 ```
+
+> **Note:** `WATERCOOLER_AGENT` (e.g., `"Claude@Code"`) is still supported as an env var
+> for setting a default agent identity. However, the per-call `agent_func` parameter
+> (e.g., `"Claude Code:sonnet-4:implementer"`) is preferred for multi-agent setups
+> since it provides explicit identity on each write operation.
 
 ## Troubleshooting
 
@@ -240,7 +249,7 @@ ChatGPT performs pre-execution safety checks:
 **For existing threads:**
 1. Verify `code_path` parameter is provided
 2. Ensure `agent_func` format: `"ChatGPT:gpt-4o:implementer"`
-3. Check content length (≤2k chars recommended)
+3. Check content length (<= 2k chars recommended)
 4. Simplify formatting (reduce headers/lists)
 5. Try splitting into smaller posts
 
@@ -274,10 +283,10 @@ Ensure ngrok terminal is still running (check for active "Forwarding" line).
 
 | Plan | MCP Connectors | Read Operations | Write Operations |
 |------|----------------|-----------------|------------------|
-| Free/Plus/Pro | ❌ Not available | ❌ | ❌ |
-| Team | ⚠️ Limited | ⚠️ Limited | ⚠️ Limited |
-| Business | ✅ Full | ✅ Full | ✅ With constraints |
-| Enterprise/Edu | ✅ Full | ✅ Full | ✅ With constraints |
+| Free/Plus/Pro | Not available | N/A | N/A |
+| Team | Limited | Limited | Limited |
+| Business | Full | Full | With constraints |
+| Enterprise/Edu | Full | Full | With constraints |
 
 **Source:** [Connectors in ChatGPT](https://help.openai.com/en/articles/11487775-connectors-in-chatgpt)
 
@@ -304,10 +313,10 @@ Configure with static HTTPS URL instead of ngrok.
 
 ChatGPT provides valuable **read and analysis capabilities** for Watercooler threads, with write operations constrained by client-side safety checks. For reliable posting:
 
-✅ Keep posts ≤2,000 characters
-✅ Use light Markdown formatting
-✅ Split long content into chunks
-✅ Use Claude Code for complex content
+- Keep posts <= 2,000 characters
+- Use light Markdown formatting
+- Split long content into chunks
+- Use Claude Code for complex content
 
 The combination of ChatGPT (analysis/short updates) and Claude Code (full operations) creates an effective workflow for collaborative development.
 

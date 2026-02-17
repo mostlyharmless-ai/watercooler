@@ -25,16 +25,13 @@ Watercooler implements thread-based collaboration with a layered architecture:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     MCP Server Layer                             │
-│  tools/thread_write.py │ tools/thread_query.py │ tools/memory.py│
+│  tools/thread_write.py │ tools/thread_query.py                  │
 ├─────────────────────────────────────────────────────────────────┤
 │                    Middleware Layer                              │
 │     middleware.py (run_with_sync) │ sync/ (git coordination)    │
 ├─────────────────────────────────────────────────────────────────┤
 │                   Graph-First Layer                              │
 │   baseline_graph/writer.py │ projector.py │ sync.py │ search.py │
-├─────────────────────────────────────────────────────────────────┤
-│                    Memory Layer                                  │
-│  T1 (Baseline JSONL) │ T2 (Graphiti/FalkorDB) │ T3 (LeanRAG)   │
 ├─────────────────────────────────────────────────────────────────┤
 │                    Storage Layer                                 │
 │         nodes.jsonl │ edges.jsonl │ *.md (projection)           │
@@ -74,7 +71,6 @@ threads/{topic}.md        # Markdown projection (derived)
 4. Markdown projected from graph (for human readability)
 5. Release lock
 6. Enrichment (summaries, embeddings) added asynchronously
-7. Memory backend sync (Graphiti/LeanRAG indexing)
 
 **Benefits:**
 - Fast queries without parsing markdown
@@ -85,7 +81,7 @@ threads/{topic}.md        # Markdown projection (derived)
 
 **Key Modules:**
 - `src/watercooler/baseline_graph/writer.py` - Graph mutations (`upsert_thread_node`, `upsert_entry_node`)
-- `src/watercooler/baseline_graph/projector.py` - Graph → Markdown conversion
+- `src/watercooler/baseline_graph/projector.py` - Graph -> Markdown conversion
 - `src/watercooler/baseline_graph/storage.py` - JSONL persistence
 - `src/watercooler/baseline_graph/reader.py` - Graph reading interface
 
@@ -155,127 +151,7 @@ Authentication approach approved. All edge cases covered.
 
 ---
 
-## Multi-Tier Memory System
-
-Watercooler implements a sophisticated three-tier memory architecture for intelligent retrieval:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Smart Query Orchestrator                      │
-│              (tier_strategy.py - intent detection)               │
-├─────────────────────────────────────────────────────────────────┤
-│  T1 (Baseline)    │  T2 (Graphiti)      │  T3 (LeanRAG)         │
-│  Cost: 1 unit     │  Cost: 10 units     │  Cost: 100 units      │
-│  JSONL + embed    │  FalkorDB temporal  │  Hierarchical cluster │
-│  No LLM @ query   │  LLM @ index time   │  LLM @ query time     │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Tier Overview
-
-| Tier | Backend | Cost | LLM Usage | Best For |
-|------|---------|------|-----------|----------|
-| **T1** | Baseline JSONL | 1 | None at query time | Simple lookups, keyword search |
-| **T2** | FalkorDB (Graphiti) | 10 | Entity extraction at index | Entity search, temporal queries, relationships |
-| **T3** | LeanRAG | 100 | Clustering + reasoning | Multi-hop reasoning, synthesis, narratives |
-
-### T1: Baseline Graph
-
-- **Storage:** `nodes.jsonl` + `search-index.jsonl` (embeddings)
-- **Search:** Keyword matching + cosine similarity on embeddings
-- **No LLM calls** during search - just vector operations
-- **Always available** (default tier)
-
-### T2: Graphiti (FalkorDB Temporal Graph)
-
-- **Storage:** FalkorDB graph database
-- **Entity extraction:** LLM extracts entities/relationships during indexing
-- **Temporal queries:** "What was decided last week about auth?"
-- **Relationship traversal:** Find connected concepts
-- **Enable:** `WATERCOOLER_TIER_T2_ENABLED=1`
-
-**Implementation:** `src/watercooler_memory/backends/graphiti.py`
-
-### T3: LeanRAG (Hierarchical Clustering)
-
-- **Storage:** Hierarchical cluster structure
-- **GMM clustering:** Groups related content at multiple levels
-- **Multi-hop reasoning:** Synthesizes across clusters
-- **Expensive:** Uses LLM for clustering and reasoning
-- **Enable:** `WATERCOOLER_TIER_T3_ENABLED=1` (explicit opt-in)
-
-**Implementation:** `src/watercooler_memory/backends/leanrag.py`
-
-### Query Intent Detection
-
-The orchestrator detects query intent to select the optimal starting tier:
-
-| Intent | Starting Tier | Example Query |
-|--------|---------------|---------------|
-| `LOOKUP` | T1 | "What is the API endpoint for auth?" |
-| `ENTITY_SEARCH` | T2 | "Find all discussions about Redis" |
-| `TEMPORAL` | T2 | "What changed in the last sprint?" |
-| `RELATIONAL` | T2 | "How is auth related to the user service?" |
-| `SUMMARIZE` | T2/T3 | "Summarize the architecture decisions" |
-| `MULTI_HOP` | T3 | "Trace the evolution of our caching strategy" |
-
-### Escalation Path
-
-```
-T1 (Scout) → T2 (Resolve) → T3 (Synthesize)
-```
-
-**Escalation triggers:**
-- Insufficient results (fewer than `min_results`, default: 3)
-- Low confidence scores
-- Query intent requires higher tier
-
-**Safety rules:**
-- Never escalate to T3 "just to be helpful"
-- Never allow T3 to invent facts beyond what T1/T2 provide
-- Surface uncertainty explicitly instead of hallucinating
-
-### Unified Result Format
-
-All tiers return normalized `TierEvidence`:
-
-```python
-TierEvidence:
-  tier: Tier              # T1, T2, or T3
-  id: str                 # Backend-specific ID
-  content: str            # The actual content
-  score: float            # Relevance score (0.0-1.0)
-  name: str               # Entity/fact name (optional)
-  provenance: dict        # Source tracking
-  metadata: dict          # Backend-specific metadata
-```
-
-**Implementation:** `src/watercooler_memory/tier_strategy.py`
-
-### Configuration
-
-```toml
-[memory]
-enabled = true
-backend = "graphiti"  # or "leanrag", "null"
-
-[memory.tiers]
-t1_enabled = true
-t2_enabled = false    # Requires FalkorDB
-t3_enabled = false    # Expensive, explicit opt-in
-max_tiers = 2         # Don't go beyond T2 by default
-min_results = 3       # Escalate if fewer results
-min_confidence = 0.5
-
-[memory.embeddings]
-api_base = "http://localhost:8080/v1"  # Local llama.cpp server
-model = "bge-m3"
-dim = 1024
-
-[memory.llm]
-api_base = "http://localhost:8000/v1"  # Local llama-server
-model = "qwen2.5:1.5b"
-```
+> Memory integration is available as an optional add-on; see the memory backend documentation for the multi-tier memory system (Graphiti, LeanRAG).
 
 ---
 
@@ -407,34 +283,11 @@ max_delay = 30          # seconds
 max_batch_size = 50
 max_retries = 5
 
-[memory]
-enabled = true
-backend = "graphiti"
-
-[memory.tiers]
-t1_enabled = true
-t2_enabled = false
-t3_enabled = false
-max_tiers = 2
-min_results = 3
-
-[memory.embeddings]
-api_base = "http://localhost:8080/v1"
-model = "bge-m3"
-
-[memory.llm]
-api_base = "http://localhost:8000/v1"
-model = "qwen2.5:1.5b"
-
 [logging]
 level = "INFO"
 dir = "~/.watercooler/logs"
 max_bytes = 10485760    # 10MB
 backup_count = 5
-
-[slack]
-webhook_url = ""        # For notifications
-bot_token = ""          # For full API access
 ```
 
 ### Model Registry
@@ -460,20 +313,6 @@ Watercooler includes a model registry for embedding and LLM models:
 
 Watercooler implements the Model Context Protocol (MCP) for AI agent integration.
 
-### Dual Mode Operations
-
-The MCP server supports two operational modes:
-
-**Local Mode (Default):**
-- Reads/writes directly to filesystem
-- Uses advisory file locking
-- Git sync via subprocess
-
-**Hosted Mode:**
-- Uses GitHub API for persistence
-- Token-based authentication
-- Concurrent write handling via API
-
 ### Tool Categories
 
 **Thread Write Tools** (`tools/thread_write.py`):
@@ -488,11 +327,6 @@ The MCP server supports two operational modes:
 - `watercooler_list_thread_entries` - Paginated entry listing
 - `watercooler_get_thread_entry` - Get specific entry by ID or index
 - `watercooler_get_thread_entry_range` - Get range of entries
-
-**Memory Tools** (`tools/memory.py`):
-- `watercooler_smart_query` - Multi-tier intelligent query with auto-escalation
-- `watercooler_search` - Unified search (entries, entities, episodes)
-- `watercooler_find_similar` - Find similar entries by embedding
 
 **Graph Tools** (`tools/graph.py`):
 - `watercooler_graph_enrich` - Generate summaries and embeddings
@@ -513,15 +347,6 @@ User calls watercooler_say()
 └────────────┬────────────┘
              │
              ▼
-┌─────────────────────────┐
-│   Mode Detection        │  ← is_hosted_context()?
-└────────────┬────────────┘
-             │
-    ┌────────┴────────┐
-    ▼                 ▼
-[LOCAL]           [HOSTED]
-    │                 │
-    ▼                 ▼
 ┌─────────────────────────┐
 │   run_with_sync()       │  ← Middleware wrapper
 └────────────┬────────────┘
@@ -546,74 +371,8 @@ User calls watercooler_say()
 └────────────┬────────────┘
              │
              ▼
-┌─────────────────────────┐
-│   Memory Backend Sync   │  ← Graphiti/LeanRAG indexing
-└────────────┬────────────┘
-             │
-             ▼
-┌─────────────────────────┐
-│   Slack Notification    │  ← Fire and forget
-└────────────┬────────────┘
-             │
-             ▼
          Response
 ```
-
----
-
-## HTTP Deployment
-
-The MCP server supports both STDIO (local) and HTTP (hosted) transport modes.
-
-### Transport Modes
-
-**STDIO Mode (Default):**
-- Used by local AI assistants (Claude Code, Cursor, etc.)
-- Launched as subprocess via MCP configuration
-- No network exposure, direct process communication
-
-**HTTP Mode:**
-- Used for hosted deployments (Vercel, Railway, etc.)
-- Exposes MCP tools via HTTP endpoints
-- Supports token-based authentication
-
-### Environment Variables
-
-```bash
-# Transport
-WATERCOOLER_MCP_TRANSPORT=http  # "stdio" or "http"
-WATERCOOLER_MCP_HOST=0.0.0.0
-WATERCOOLER_MCP_PORT=8080
-
-# Authentication (Hosted)
-WATERCOOLER_AUTH_MODE=hosted
-WATERCOOLER_TOKEN_API_URL=https://...
-WATERCOOLER_TOKEN_API_KEY=...
-
-# Memory Tiers
-WATERCOOLER_TIER_T1_ENABLED=1
-WATERCOOLER_TIER_T2_ENABLED=1
-WATERCOOLER_TIER_T3_ENABLED=0
-WATERCOOLER_TIER_MAX_TIERS=2
-```
-
----
-
-## Slack Integration
-
-Two-phase Slack integration for notifications and bidirectional sync:
-
-**Phase 1: Webhooks (Notifications)**
-- Fire-and-forget notifications
-- New entry alerts
-- Status change alerts
-
-**Phase 2: Bot API (Bidirectional Sync)**
-- Full Slack API access
-- Thread ↔ Channel mapping
-- Message sync
-
-**Note:** Block Kit formatting is implemented in TypeScript (watercooler-site) for the production service. Python implementation in `src/watercooler_mcp/slack/blocks.py` is for reference only.
 
 ---
 
@@ -628,7 +387,7 @@ watercooler-cloud/
 │   │   │   ├── projector.py      # Graph → Markdown
 │   │   │   ├── reader.py         # Graph queries
 │   │   │   ├── storage.py        # JSONL persistence
-│   │   │   ├── sync.py           # FalkorDB sync
+│   │   │   ├── sync.py           # Graph sync
 │   │   │   ├── search.py         # Semantic search
 │   │   │   ├── parser.py         # Thread parsing
 │   │   │   └── summarizer.py     # LLM summarization
@@ -636,46 +395,31 @@ watercooler-cloud/
 │   │   ├── commands_graph.py     # Graph-first commands
 │   │   ├── config_facade.py      # Unified config entry point
 │   │   ├── config_schema.py      # Pydantic config models
-│   │   ├── memory_config.py      # Memory backend config
 │   │   ├── models.py             # Model registry
 │   │   ├── agents.py             # Agent canonicalization
 │   │   ├── lock.py               # Advisory locking
 │   │   └── thread_entries.py     # Entry parsing
 │   │
-│   ├── watercooler_mcp/          # MCP server
-│   │   ├── tools/                # MCP tool implementations
-│   │   │   ├── thread_write.py   # say, ack, handoff
-│   │   │   ├── thread_query.py   # list, read, get
-│   │   │   ├── memory.py         # smart_query, search
-│   │   │   ├── graph.py          # enrich, recover
-│   │   │   └── branch_parity.py  # sync validation
-│   │   ├── sync/                 # 7-layer git sync
-│   │   │   ├── primitives.py     # Git operations
-│   │   │   ├── state.py          # Parity state
-│   │   │   ├── conflict.py       # Merge strategies
-│   │   │   ├── local_remote.py   # L2R sync
-│   │   │   ├── branch_parity.py  # T2C sync
-│   │   │   └── async_coordinator.py  # Batching
-│   │   ├── slack/                # Slack integration
-│   │   ├── server.py             # FastMCP server
-│   │   ├── middleware.py         # run_with_sync wrapper
-│   │   └── config.py             # MCP config
-│   │
-│   └── watercooler_memory/       # Memory backends
-│       ├── backends/
-│       │   ├── graphiti.py       # FalkorDB temporal graph
-│       │   ├── leanrag.py        # Hierarchical clustering
-│       │   └── null.py           # No-op backend
-│       ├── tier_strategy.py      # Multi-tier orchestrator
-│       ├── embeddings.py         # Embedding client
-│       └── chunker.py            # Document chunking
+│   └── watercooler_mcp/          # MCP server
+│       ├── tools/                # MCP tool implementations
+│       │   ├── thread_write.py   # say, ack, handoff
+│       │   ├── thread_query.py   # list, read, get
+│       │   ├── graph.py          # enrich, recover
+│       │   └── branch_parity.py  # sync validation
+│       ├── sync/                 # 7-layer git sync
+│       │   ├── primitives.py     # Git operations
+│       │   ├── state.py          # Parity state
+│       │   ├── conflict.py       # Merge strategies
+│       │   ├── local_remote.py   # L2R sync
+│       │   ├── branch_parity.py  # T2C sync
+│       │   └── async_coordinator.py  # Batching
+│       ├── server.py             # FastMCP server
+│       ├── middleware.py         # run_with_sync wrapper
+│       └── config.py             # MCP config
 │
 ├── tests/                        # Test suite
-│   ├── unit/                     # Unit tests
-│   └── integration/              # Integration tests
 ├── docs/                         # Documentation
 └── external/                     # Vendored dependencies
-    └── graphiti/                 # Graphiti core
 ```
 
 ---
@@ -724,5 +468,4 @@ Agents are identified using the format: `Platform (user)`
 - **[CLI Reference](CLI_REFERENCE.md)** - Command documentation
 - **[MCP Server Guide](mcp-server.md)** - AI agent integration
 - **[Baseline Graph](baseline-graph.md)** - Graph storage details
-- **[Graph Sync](GRAPH_SYNC.md)** - Sync architecture
 - **[Troubleshooting](TROUBLESHOOTING.md)** - Common issues

@@ -4,7 +4,7 @@ This document defines a simple, durable pairing between a code repository and it
 
 ## Principles
 - 1:1 Repositories: Each code repo pairs with exactly one threads repo.
-- 1:1 Branches: Each code branch has a same‑named branch in the threads repo.
+- 1:1 Branches: Each code branch has a same-named branch in the threads repo.
 - Ground Truth: Every thread entry commit records the code branch and exact commit SHA.
 
 ## Pairing
@@ -20,7 +20,7 @@ This document defines a simple, durable pairing between a code repository and it
 
 ### Write (say/ack/handoff/set_status)
 1) **Validate branch pairing** - Automatically checks that code and threads repos are on matching branches
-2) Ensure a same‑named branch exists in the threads repo
+2) Ensure a same-named branch exists in the threads repo
 3) Append entry and commit
 4) Push with rebase + retry on rejection
 5) Include the following footers in the commit message:
@@ -77,7 +77,7 @@ This section documents the actual execution of the branch pairing protocol durin
 5. Repository made public
 
 **Phase 2: Threads Repo Merge**
-- **Initial assumption**: threads already merged ❌
+- **Initial assumption**: threads already merged
 - **Reality**: `threads:main` had 1 file, `threads:open-source-prep` had 21 files
 - **Critical learning**: Merging code branch does NOT automatically merge threads branch
 - **Action required**: Explicit manual merge of threads branch
@@ -118,10 +118,10 @@ cd /path/to/watercooler-cloud-threads && \
 ### Best Practices from This Execution
 
 **When merging code branch → main:**
-1. ✅ Merge code PR
-2. ✅ Tag release on code repo (if applicable)
-3. ✅ **Immediately** merge corresponding threads branch
-4. ✅ Verify both repos show merged state
+1. Merge code PR
+2. Tag release on code repo (if applicable)
+3. **Immediately** merge corresponding threads branch
+4. Verify both repos show merged state
 
 **Merge command template:**
 ```bash
@@ -138,24 +138,6 @@ git push origin main
 - [ ] Both repos pushed to remote
 - [ ] File counts match expectations
 - [ ] Git log shows merge commits on both repos
-
-### Future Automation Opportunities
-
-**GitHub Actions workflow** (possible enhancement):
-- Trigger on: code repo branch merge to main
-- Action: Automatically merge corresponding threads branch or open PR
-- Benefits: Enforces protocol, prevents human error
-- Risks: Could merge threads with conflicts or outdated state
-
-**Git hook approach**:
-- Pre-push hook in code repo
-- Check if corresponding threads branch exists and is ahead of main
-- Warn if threads branch not merged
-
-**MCP Server enhancement**:
-- Watch for code branch state changes
-- Prompt user to merge corresponding threads branch
-- Verify both repos are synchronized
 
 ## Branch Sync Enforcement
 
@@ -431,8 +413,7 @@ watercooler merge-branch feature-auth
 watercooler archive-branch feature-experimental --abandon --force
 ```
 
-### Related Documentation
-- Thread: `github-threads-integration` - Contains detailed case study of this execution
-- Thread: `branch-lifecycle-mapping` - Comprehensive branch operations planning
-- Thread: `branch-sync-enforcement-system` - Design and implementation of enforcement tools
-- Thread: `open-source-launch` - The actual launch planning and execution
+## Related Documentation
+- [Graph Sync](GRAPH_SYNC.md) - Baseline graph synchronization contract
+- [Threads Repo Lifecycle](THREADS_REPO_LIFECYCLE.md) - Repository bootstrap and branch states
+- [Configuration](CONFIGURATION.md) - Environment variables and settings

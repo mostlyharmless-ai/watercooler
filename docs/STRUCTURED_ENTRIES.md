@@ -403,33 +403,33 @@ watercooler handoff topic --agent Codex --note "Your turn"
 
 ### 1. Use Appropriate Roles
 Match the role to the activity:
-- Planning → `planner`
-- Code review → `critic`
-- Implementation → `implementer`
-- Testing → `tester`
-- Coordination → `pm`
-- Documentation → `scribe`
+- Planning -> `planner`
+- Code review -> `critic`
+- Implementation -> `implementer`
+- Testing -> `tester`
+- Coordination -> `pm`
+- Documentation -> `scribe`
 
 ### 2. Meaningful Titles
 Titles should be concise but descriptive:
 
-✅ Good:
+Good:
 - "JWT Implementation Complete"
 - "Security Review Passed"
 - "Migration Plan Approved"
 
-❌ Bad:
+Bad:
 - "Update"
 - "Note"
 - "Done"
 
 ### 3. Choose Correct Entry Types
 Use types for semantic meaning:
-- Decisions → `Decision`
-- Plans → `Plan`
-- PRs → `PR`
-- Closures → `Closure`
-- Everything else → `Note`
+- Decisions -> `Decision`
+- Plans -> `Plan`
+- PRs -> `PR`
+- Closures -> `Closure`
+- Everything else -> `Note`
 
 ### 4. Ball Management
 - Use `say` for normal back-and-forth
@@ -466,7 +466,7 @@ In general, threads follow a natural progression that helps maintain context and
 This arc ensures threads remain self-documenting and provide valuable context for future reference.
 
 ### 7. File References
-Thread entries should **explicitly reference any files changed** in the entry body. Use file paths (e.g., `src/watercooler_mcp/server.py`, `docs/README.md`) to maintain clear traceability of what was modified. This helps readers quickly understand the scope of changes and locate relevant code or documentation.
+Thread entries should **explicitly reference any files changed** in the entry body. Use file paths (e.g., `src/watercooler_mcp/server.py`, `docs/README.md`) to maintain clear traceability of what was modified. This helps readers quickly locate relevant code or documentation.
 
 ## Examples
 
@@ -537,6 +537,6 @@ watercooler ack feature-auth \
 
 ## See Also
 
-- [TEMPLATES.md](TEMPLATES.md) - Customizing entry templates
-- [AGENT_REGISTRY.md](AGENT_REGISTRY.md) - Configuring agents and counterparts
+- [TEMPLATES.md](archive/TEMPLATES.md) - Customizing entry templates
+- [AGENT_REGISTRY.md](archive/AGENT_REGISTRY.md) - Configuring agents and counterparts
 - [README.md](../README.md) - General usage guide

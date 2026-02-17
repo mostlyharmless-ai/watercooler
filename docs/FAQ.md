@@ -25,7 +25,7 @@ A file-based collaboration protocol for agentic coding projects. It provides:
 - **Threaded discussions** that live alongside your code in git
 - **Ball ownership** tracking - always clear who has the next action
 - **Structured entries** with roles (planner, critic, implementer) and types (Plan, Decision, Note)
-- **Memory system** for recalling past decisions and context
+- **Search** for recalling past decisions and context
 - **Branch pairing** - threads branch mirrors code branch automatically
 
 Think of it as "git-native project memory" - every decision, discussion, and handoff is versioned and searchable.
@@ -61,7 +61,8 @@ The protocol doesn't care who's writing entries - it just tracks who has the bal
 **For enhanced features**:
 - **Entry/thread summaries**: Requires LLM (local or API)
 - **Semantic search**: Requires embedding model (local or API)
-- **Memory tiers T2/T3**: Requires FalkorDB and/or LLM
+
+> Memory integration is available as an optional add-on for advanced search and recall features.
 
 A typical local setup uses:
 - `llama-server` with `qwen2.5:1.5b` for summaries
@@ -274,7 +275,7 @@ Closed threads remain in listings by default. Use `open_only=True` to filter to 
 watercooler_search(query="authentication decision", code_path=".")
 ```
 
-**Smart query (multi-tier with context):**
+**Smart query (with context):**
 ```python
 watercooler_smart_query(
     query="What was decided about the caching strategy?",
@@ -282,40 +283,14 @@ watercooler_smart_query(
 )
 ```
 
-Smart query automatically escalates through memory tiers if initial results are insufficient.
-
-### What are the memory tiers?
-
-| Tier | Backend | Cost | Best for |
-|------|---------|------|----------|
-| **T1** | JSONL + embeddings | 1 | Keyword search, simple lookups |
-| **T2** | FalkorDB (Graphiti) | 10 | Entity search, temporal queries, relationships |
-| **T3** | LeanRAG | 100 | Multi-hop reasoning, synthesis |
-
-Most queries are satisfied by T1/T2. T3 is opt-in for complex analysis.
+Smart query automatically searches across available memory tiers if initial results are insufficient.
 
 ### When do thread summaries get regenerated?
 
 Thread summaries update automatically when:
-1. **Entry count threshold**: First few entries (≤3), or every 5th entry
-2. **Arc change detection**: When entry types shift (e.g., Plan → Decision → Closure)
+1. **Entry count threshold**: First few entries (<=3), or every 5th entry
+2. **Arc change detection**: When entry types shift (e.g., Plan -> Decision -> Closure)
 3. **Embedding divergence**: When new entry's embedding diverges significantly from previous entry
-
-The embedding divergence threshold is configurable:
-```bash
-# Environment variable (default: 0.6, range: 0.0-1.0)
-WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD=0.5
-```
-
-**Tuning guide:**
-| Threshold | Sensitivity | Use case |
-|-----------|-------------|----------|
-| 0.3-0.4 | Very high | Regenerate on small topic shifts (higher LLM cost) |
-| 0.5-0.6 | Balanced | Detect moderate divergence (recommended) |
-| 0.7-0.8 | Conservative | Only regenerate on major shifts (lower cost) |
-| 0.9+ | Minimal | Mostly rely on entry count triggers |
-
-**Rule of thumb**: Start with default (0.6). Lower to 0.5 if summaries feel stale. Raise to 0.7 if LLM costs are high.
 
 To force-regenerate thread summaries:
 ```python
@@ -373,9 +348,9 @@ Since each entry has a unique ULID, Git can merge both entries automatically.
 **Advisory locking** prevents corruption:
 
 1. Agent A acquires lock on `feature-auth`
-2. Agent B tries to write → waits (or fails after timeout)
-3. Agent A completes → releases lock
-4. Agent B acquires lock → writes
+2. Agent B tries to write -> waits (or fails after timeout)
+3. Agent A completes -> releases lock
+4. Agent B acquires lock -> writes
 
 Locks are topic-specific and have TTL (default 30 seconds, configurable via `WCOOLER_LOCK_TTL`) to prevent deadlocks from crashed processes.
 
@@ -400,7 +375,6 @@ The async coordinator batches commits, so even rapid offline work results in cle
 
 - Thread files: Your filesystem + your git remote (GitHub, GitLab, etc.)
 - Embeddings: Local `graph/baseline/search-index.jsonl`
-- FalkorDB (T2): Local Docker container
 - LLM calls: Your configured endpoint (local llama-server or API)
 
 **No data is sent to Anthropic, OpenAI, or watercooler servers** unless you explicitly configure an external API.
@@ -459,8 +433,6 @@ Threads are in git - your backup strategy is your git remote:
 - Your git host (GitHub, GitLab) provides redundancy
 - Clone to multiple machines if desired
 
-For the local graph database (FalkorDB), standard Docker volume backup applies.
-
 ### Can I migrate from another tool?
 
 Watercooler uses plain text. To migrate:
@@ -508,15 +480,6 @@ The format is `<platform>:<model>:<role>`. Ensure you include all three parts se
 3. Check async coordinator logs: `~/.watercooler/logs/`
 4. Check branch parity: `watercooler_health(code_path=".")`
 
-### Smart query returns empty results
-
-**Symptom**: `watercooler_smart_query` finds nothing
-
-**Check**:
-1. Embeddings generated? Run `watercooler_graph_enrich(embeddings=True)`
-2. T2 enabled? Check `WATERCOOLER_TIER_T2_ENABLED`
-3. FalkorDB running? Check `watercooler_health()`
-
 ### Entry summaries not generating
 
 **Symptom**: Entries have no summary field
@@ -532,6 +495,5 @@ The format is `<platform>:<model>:<role>`. Ensure you include all three parts se
 
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Detailed problem-solving guide with flowcharts
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design and internals
-- **[USE_CASES.md](archive/USE_CASES.md)** - End-to-end workflow examples
 - **[mcp-server.md](mcp-server.md)** - MCP tool reference
-- **[SETUP_AND_QUICKSTART.md](SETUP_AND_QUICKSTART.md)** - Getting started guide
+- **[QUICKSTART.md](QUICKSTART.md)** - Getting started guide
