@@ -108,11 +108,9 @@ from watercooler.path_resolver import (
 from .auth import is_hosted_mode
 from .config import (
     ThreadContext,
-    get_git_sync_manager_from_context,
     resolve_thread_context,
 )
 from .context import get_http_context, HttpRequestContext
-from .sync import BranchPairingError
 from .observability import log_debug
 
 
@@ -187,12 +185,10 @@ def _require_context_hosted(
     context = ThreadContext(
         code_root=None,  # No local filesystem in hosted mode
         threads_dir=HOSTED_MODE_SENTINEL,  # Sentinel indicating hosted mode
-        threads_repo_url=f"https://github.com/{owner}/{threads_repo_name}",
         code_repo=repo,  # The CODE repo (from X-Repo header)
         code_branch=branch,
         code_commit=None,  # No local git commit info
         code_remote=f"https://github.com/{owner}/{repo_name}.git",
-        threads_slug=threads_repo_name,
         explicit_dir=True,  # We have explicit context from HTTP headers
     )
 
@@ -341,39 +337,21 @@ def _dynamic_context_missing(context: ThreadContext) -> bool:
             "WATERCOOLER_CODE_REPO",
         )
     )
-    return dynamic_env and not context.explicit_dir and context.threads_slug is None
+    return dynamic_env and not context.explicit_dir
 
 
 def _refresh_threads(context: ThreadContext, skip_validation: bool = False) -> None:
-    """Refresh threads repo by validating branch pairing and pulling latest changes.
+    """Refresh threads repo by pulling latest changes.
 
-    This function ensures the threads repository is synchronized before any
-    read or write operation. It validates that code and threads branches match,
-    and pulls the latest changes from the remote.
+    In orphan-worktree mode, pulling is handled by the middleware
+    (run_with_sync) before write operations and by ensure_readable
+    before read operations. This function is a no-op.
 
     Args:
         context: Thread context with repo information
-        skip_validation: If True, skip branch validation (used for recovery operations)
-
-    Raises:
-        BranchPairingError: If branch validation fails and skip_validation=False
+        skip_validation: If True, skip validation (kept for API compatibility)
     """
-    # Import here to avoid circular import - _validate_and_sync_branches
-    # depends on other helpers.py functions
-    from .helpers import _validate_and_sync_branches
-
-    # Validate and sync branches (will raise if validation fails)
-    _validate_and_sync_branches(context, skip_validation=skip_validation)
-
-    sync = get_git_sync_manager_from_context(context)
-    if not sync:
-        return
-
-    status = sync.get_async_status()
-    if status.get("mode") == "async":
-        # Async mode relies on background pulls; avoid blocking operations.
-        return
-    sync.pull()
+    return
 
 
 def _validate_thread_context(code_path: str) -> tuple[str | None, ThreadContext | None]:

@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from watercooler.fs import discover_thread_files
 from watercooler.thread_entries import parse_thread_entries, parse_thread_header
 
 from .schema import (
@@ -149,8 +150,8 @@ def parse_threads_directory(
                 logger.warning("Thread file not found: %s", thread_path)
         thread_paths = sorted(thread_paths)
     else:
-        # Process all *.md files in directory
-        thread_paths = sorted(threads_dir.glob("*.md"))
+        # Process all *.md files in directory (including subdirectories)
+        thread_paths = discover_thread_files(threads_dir)
 
     for thread_path in thread_paths:
         # Skip index.md or other non-thread files

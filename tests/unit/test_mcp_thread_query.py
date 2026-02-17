@@ -113,12 +113,10 @@ def mock_context(tmp_path, threads_dir):
     return ThreadContext(
         code_root=tmp_path,
         threads_dir=threads_dir,
-        threads_repo_url=None,
         code_repo="test-org/test-repo",
         code_branch="main",
         code_commit="abc1234",
         code_remote="origin",
-        threads_slug="test-repo",
         explicit_dir=True,
     )
 
@@ -138,9 +136,6 @@ def patched_context(mock_context, monkeypatch):
 
     # Mock ensure_readable (sync function)
     monkeypatch.setattr("watercooler_mcp.tools.thread_query.ensure_readable", lambda *args, **kwargs: (True, []))
-
-    # Mock get_git_sync_manager_from_context to return None (no sync manager)
-    monkeypatch.setattr("watercooler_mcp.tools.thread_query.get_git_sync_manager_from_context", lambda ctx: None)
 
     # Mock graph functions to use markdown fallback
     monkeypatch.setattr(

@@ -180,7 +180,7 @@ class Config:
             ctx = config.context()
             print(ctx.code_branch)
             print(ctx.threads_dir)
-            print(ctx.threads_repo_url)
+            print(ctx.code_remote)
         """
         from watercooler_mcp.config import resolve_thread_context
         return resolve_thread_context(code_root)

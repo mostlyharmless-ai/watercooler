@@ -3,7 +3,6 @@
 This module contains:
 - Startup warnings system
 - Context validation helpers
-- Branch validation and sync helpers
 - Thread parsing and metadata extraction
 - Entry loading and formatting
 - Graph-canonical read helpers
@@ -15,8 +14,6 @@ These are extracted from server.py for modularity and testability.
 import re
 from pathlib import Path
 from typing import Dict, List, Optional
-
-from git import Repo
 
 # Local application imports
 from watercooler import commands, fs
@@ -32,17 +29,7 @@ from watercooler.baseline_graph.reader import (
 )
 from .config import (
     ThreadContext,
-    get_git_sync_manager_from_context,
     resolve_thread_context,
-)
-from .sync import (
-    BranchPairingError,
-    BranchMismatch,
-    BranchPairingResult,
-    validate_branch_pairing,
-    sync_branch_history,
-    auto_merge_to_main,
-    _find_main_branch,
 )
 from .observability import log_debug
 
@@ -131,301 +118,6 @@ from .validation import (
     _dynamic_context_missing,
     _validate_thread_context,
 )
-
-
-# ============================================================================
-# Branch Validation and Sync Helpers
-# ============================================================================
-
-
-def _attempt_auto_fix_divergence(
-    context: ThreadContext,
-    validation_result: BranchPairingResult,
-) -> Optional[BranchPairingResult]:
-    """Attempt to auto-fix branch history divergence via rebase or merge.
-
-    Args:
-        context: Thread context with code and threads repo info
-        validation_result: The failed validation result containing divergence info
-
-    Returns:
-        New BranchPairingResult on successful fix, None on failure.
-        On failure, raises BranchPairingError with details.
-
-    Raises:
-        BranchPairingError: If auto-fix fails and requires manual intervention
-    """
-    log_debug("Detected branch history divergence, attempting auto-fix")
-
-    # Check if this is a "merge to main" case (code PR merged, threads needs to follow)
-    merge_to_main_mismatch = None
-    for mismatch in validation_result.mismatches:
-        if mismatch.type == "branch_history_diverged" and mismatch.needs_merge_to_main:
-            merge_to_main_mismatch = mismatch
-            break
-
-    # Handle merge-to-main case: code branch merged to main, threads should follow
-    # Apply conservative evidence gating: only attempt auto-merge when the validation
-    # result explicitly requests merge-to-main (needs_merge_to_main=True) AND a main
-    # branch exists. Otherwise, surface the mismatch for explicit resolution.
-    if merge_to_main_mismatch:
-        try:
-            threads_repo = Repo(context.threads_dir, search_parent_directories=True)
-            main_branch = _find_main_branch(threads_repo)
-            if not main_branch:
-                raise BranchPairingError(
-                    "Cannot auto-merge: main branch not found in threads repo"
-                )
-
-            feature_branch = validation_result.threads_branch or context.code_branch
-
-            success, message = auto_merge_to_main(
-                threads_repo,
-                feature_branch,
-                main_branch,
-            )
-
-            if success:
-                log_debug(f"Auto-merged threads to main: {message}")
-                # Re-validate to confirm fix worked
-                revalidation = validate_branch_pairing(
-                    code_repo=context.code_root,
-                    threads_repo=context.threads_dir,
-                    strict=True,
-                    check_history=True,
-                )
-                if revalidation.valid:
-                    log_debug("Branch pairing now valid after auto-merge to main")
-                    return revalidation
-                else:
-                    log_debug(
-                        f"Auto-merge completed but validation still failing: "
-                        f"{revalidation.warnings}"
-                    )
-                    return revalidation
-            else:
-                # Surface for explicit resolution
-                raise BranchPairingError(
-                    f"Auto-merge to main failed: {message}\n"
-                    f"Manual recovery: cd <threads-repo> && git checkout main && "
-                    f"git merge {feature_branch} && git push origin main"
-                )
-        except BranchPairingError:
-            raise
-        except Exception as e:
-            raise BranchPairingError(f"Auto-merge to main failed: {e}")
-
-    # Check if this is a "behind-main" divergence (threads behind main but code not)
-    # vs a local-vs-origin divergence. They require different fix strategies.
-    behind_main_mismatch = None
-    for mismatch in validation_result.mismatches:
-        if mismatch.type == "branch_history_diverged" and "behind main" in mismatch.recovery.lower():
-            behind_main_mismatch = mismatch
-            break
-
-    # Determine the target for rebase
-    onto_branch: Optional[str] = None
-    if behind_main_mismatch:
-        # Need to rebase onto main, not origin/branch
-        try:
-            threads_repo = Repo(context.threads_dir, search_parent_directories=True)
-            onto_branch = _find_main_branch(threads_repo)
-            if onto_branch:
-                log_debug(
-                    f"Behind-main divergence detected, will rebase onto {onto_branch}"
-                )
-            else:
-                log_debug(
-                    "Behind-main divergence detected but couldn't find main branch"
-                )
-        except Exception as e:
-            log_debug(f"Error finding main branch: {e}")
-
-    try:
-        sync_result = sync_branch_history(
-            threads_repo_path=context.threads_dir,
-            branch=validation_result.threads_branch or context.code_branch,
-            strategy="rebase",
-            force=True,  # Uses --force-with-lease for safety
-            onto=onto_branch,  # None for origin/branch, "main" for behind-main fix
-        )
-
-        if not sync_result.success:
-            log_debug(f"Auto-fix failed: {sync_result.details}")
-            error_parts = [
-                "Branch history divergence detected and auto-fix failed:",
-                f"  Code branch: {validation_result.code_branch or '(detached/unknown)'}",
-                f"  Threads branch: {validation_result.threads_branch or '(detached/unknown)'}",
-                f"  Fix attempt: {sync_result.details}",
-            ]
-            if sync_result.needs_manual_resolution:
-                error_parts.append("  Manual resolution required.")
-            error_parts.append(
-                "\nManual recovery: watercooler_sync_branch_state with operation='recover'"
-            )
-            raise BranchPairingError("\n".join(error_parts))
-
-        log_debug(f"Auto-fixed branch divergence: {sync_result.details}")
-
-        # Re-validate to confirm fix worked
-        revalidation = validate_branch_pairing(
-            code_repo=context.code_root,
-            threads_repo=context.threads_dir,
-            strict=True,
-            check_history=True,
-        )
-
-        if revalidation.valid:
-            log_debug("Branch pairing now valid after auto-fix")
-            return revalidation
-        else:
-            log_debug(
-                f"Auto-fix completed but validation still failing: "
-                f"{revalidation.warnings}"
-            )
-            # Return the updated result so caller can report remaining issues
-            return revalidation
-
-    except BranchPairingError:
-        raise
-    except Exception as fix_error:
-        log_debug(f"Auto-fix exception: {fix_error}")
-        error_parts = [
-            "Branch history divergence detected, auto-fix failed:",
-            f"  Code branch: {validation_result.code_branch or '(detached/unknown)'}",
-            f"  Threads branch: {validation_result.threads_branch or '(detached/unknown)'}",
-            f"  Error: {fix_error}",
-            "\nManual recovery: watercooler_sync_branch_state with operation='recover'",
-        ]
-        raise BranchPairingError("\n".join(error_parts))
-
-
-def _validate_and_sync_branches(
-    context: ThreadContext,
-    skip_validation: bool = False,
-) -> None:
-    """Validate branch pairing and sync branches if needed.
-
-    This helper is used by both read and write operations to ensure
-    the threads repo is on the correct branch before any operation.
-
-    Includes automatic detection and repair of:
-    1. Branch name mismatch: Checks out threads repo to match code repo branch
-    2. Branch history divergence: Rebases threads branch after code repo rebase/force-push
-
-    When auto-fix is enabled (WATERCOOLER_AUTO_BRANCH=1, default), these issues
-    are resolved automatically. If auto-fix fails, raises BranchPairingError.
-
-    Side effects:
-        - May checkout threads repo to different branch
-        - May rebase threads branch to match code branch history
-        - May push to remote with --force-with-lease if divergence detected
-        - Blocks operation if conflicts occur during auto-fix
-
-    Args:
-        context: Thread context with code and threads repo info
-        skip_validation: If True, skip strict validation (used for recovery operations)
-
-    Raises:
-        BranchPairingError: If branch validation fails and auto-fix is not possible,
-                           or if auto-fix encounters conflicts requiring manual resolution
-    """
-    sync = get_git_sync_manager_from_context(context)
-    if not sync:
-        return
-
-    # Validate branch pairing before any operation
-    if not skip_validation and context.code_root and context.threads_dir:
-        try:
-            validation_result = validate_branch_pairing(
-                code_repo=context.code_root,
-                threads_repo=context.threads_dir,
-                strict=True,
-                check_history=True,  # Enable divergence detection
-            )
-            if not validation_result.valid:
-                # Check if this is a branch name mismatch we can auto-fix via checkout
-                branch_mismatch: Optional[BranchMismatch] = next(
-                    (
-                        m
-                        for m in validation_result.mismatches
-                        if m.type == "branch_name_mismatch"
-                    ),
-                    None,
-                )
-
-                if branch_mismatch and context.code_branch and _should_auto_branch():
-                    log_debug(
-                        f"Branch name mismatch detected, auto-fixing via checkout "
-                        f"to {context.code_branch}"
-                    )
-                    try:
-                        sync.ensure_branch(context.code_branch)
-                        # Re-validate after branch checkout
-                        validation_result = validate_branch_pairing(
-                            code_repo=context.code_root,
-                            threads_repo=context.threads_dir,
-                            strict=True,
-                            check_history=True,
-                        )
-                        if validation_result.valid:
-                            log_debug(
-                                f"Branch name mismatch auto-fixed: checked out to "
-                                f"{context.code_branch}"
-                            )
-                        else:
-                            log_debug(
-                                f"Branch checkout completed but validation still "
-                                f"failing: {validation_result.warnings}"
-                            )
-                    except Exception as e:
-                        log_debug(f"Auto-fix branch checkout failed: {e}")
-
-                # Check if this is a history divergence we can auto-fix
-                history_mismatch: Optional[BranchMismatch] = next(
-                    (
-                        m
-                        for m in validation_result.mismatches
-                        if m.type == "branch_history_diverged"
-                    ),
-                    None,
-                )
-
-                if history_mismatch:
-                    # Attempt auto-fix - may raise BranchPairingError on failure
-                    validation_result = _attempt_auto_fix_divergence(
-                        context, validation_result
-                    )
-
-                # Unified error reporting for any remaining validation failures
-                # (non-history issues, or edge case where auto-fix succeeded but
-                # other mismatches remain)
-                if not validation_result.valid:
-                    error_parts = [
-                        "Branch pairing validation failed:",
-                        f"  Code branch: {validation_result.code_branch or '(detached/unknown)'}",
-                        f"  Threads branch: {validation_result.threads_branch or '(detached/unknown)'}",
-                    ]
-                    if validation_result.mismatches:
-                        error_parts.append("\nMismatches:")
-                        for mismatch in validation_result.mismatches:
-                            error_parts.append(
-                                f"  - {mismatch.type}: {mismatch.recovery}"
-                            )
-                    if validation_result.warnings:
-                        error_parts.append("\nWarnings:")
-                        for warning in validation_result.warnings:
-                            error_parts.append(f"  - {warning}")
-                    error_parts.append(
-                        "\nRun: watercooler_sync_branch_state with "
-                        "operation='checkout' to sync branches"
-                    )
-                    raise BranchPairingError("\n".join(error_parts))
-        except BranchPairingError:
-            raise
-        except Exception as e:
-            # Log but don't block on validation errors (e.g., repo not initialized)
-            log_debug(f"Branch validation warning: {e}")
 
 
 # _refresh_threads is now in validation.py - re-export for backward compatibility
@@ -559,7 +251,7 @@ def _load_entries_from_md(
 
     if not thread_path.exists():
         if threads_dir.exists():
-            available_list = sorted(p.stem for p in threads_dir.glob("*.md"))
+            available_list = [p.stem for p in fs.discover_thread_files(threads_dir)]
             if len(available_list) > 10:
                 available = (
                     ", ".join(available_list[:10])
@@ -693,6 +385,7 @@ def _graph_entry_to_thread_entry(
 def _load_entries(
     topic: str,
     context: ThreadContext,
+    code_branch: str | None = None,
 ) -> tuple[str | None, list[ThreadEntry], dict[str, str]]:
     """Load thread entries from canonical graph JSONL, with legacy markdown backfill.
 
@@ -717,7 +410,7 @@ def _load_entries(
     # Try graph first if available
     if _use_graph_for_reads(threads_dir):
         try:
-            result = read_thread_from_graph(threads_dir, topic)
+            result = read_thread_from_graph(threads_dir, topic, code_branch=code_branch)
             if not result:
                 log_debug(f"[GRAPH] Topic '{topic}' not in graph, falling back to markdown")
             if result:

@@ -10,7 +10,6 @@ from watercooler_mcp.sync import (
     PullError,
     PushError,
     ConflictError,
-    BranchPairingError,
     LockError,
     NetworkError,
     AuthenticationError,
@@ -94,17 +93,6 @@ class TestSyncErrors:
         files = [f"file{i}.py" for i in range(10)]
         err = ConflictError(message="Conflict", conflicting_files=files)
         assert "+5 more" in str(err)
-
-    def test_branch_pairing_error(self):
-        """BranchPairingError tracks both branches."""
-        err = BranchPairingError(
-            message="Branches don't match",
-            code_branch="feature",
-            threads_branch="main",
-        )
-        assert err.code_branch == "feature"
-        assert err.threads_branch == "main"
-        assert err.is_retryable is False
 
     def test_lock_error_has_holder(self):
         """LockError tracks lock holder."""

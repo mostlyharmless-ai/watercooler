@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from watercooler.fs import discover_thread_files
+
 from ..graph import MemoryGraph, GraphConfig
 from ..leanrag_export import export_to_leanrag
 from .config import PipelineConfig
@@ -174,7 +176,7 @@ class ExportStageRunner(StageRunner):
 
         if not threads_dir.exists():
             errors.append(f"Threads directory not found: {threads_dir}")
-        elif not any(threads_dir.glob("*.md")):
+        elif not discover_thread_files(threads_dir):
             errors.append(f"No .md files found in {threads_dir}")
 
         return errors

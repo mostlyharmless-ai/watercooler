@@ -26,6 +26,8 @@ from fastmcp import Context
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
+from watercooler.fs import discover_thread_files
+
 from ..observability import log_action, log_error, log_warning
 from .. import validation  # Import module for runtime access (enables test patching)
 
@@ -1234,7 +1236,7 @@ async def _bulk_index_impl(
             )])
 
         # Get list of thread topics
-        all_topics = [p.stem for p in sorted(threads_dir.glob("*.md"))]
+        all_topics = [p.stem for p in discover_thread_files(threads_dir)]
 
         if threads:
             selected = [t.strip() for t in threads.split(",")]

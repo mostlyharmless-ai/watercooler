@@ -25,7 +25,6 @@ from watercooler.thread_entries import ThreadEntry
 
 from ..config import (
     get_agent_name,
-    get_git_sync_manager_from_context,
     resolve_thread_context,
 )
 from ..helpers import (
@@ -243,30 +242,6 @@ def _list_threads_impl(
             total_entries = sum(len(v) for v in entry_scan.values())
             log_debug(f"list_threads scan loaded {total_entries} entries across {len(entry_scan)} threads in {scan_entries_elapsed:.2f}s")
 
-        sync = get_git_sync_manager_from_context(context)
-        pending_topics: set[str] = set()
-        async_summary = ""
-        if sync:
-            status_info = sync.get_async_status()
-            if status_info.get("mode") == "async":
-                pending_topics = {topic for topic in (status_info.get("pending_topics") or []) if topic}
-                summary_parts: list[str] = []
-                if status_info.get("is_syncing"):
-                    summary_parts.append("syncing…")
-                last_pull_age = status_info.get("last_pull_age_seconds")
-                if status_info.get("last_pull"):
-                    age_fragment = f"{int(last_pull_age)}s ago" if last_pull_age is not None else "recently"
-                    if status_info.get("stale"):
-                        age_fragment += " (stale)"
-                    summary_parts.append(f"last refresh {age_fragment}")
-                else:
-                    summary_parts.append("no refresh yet")
-                next_eta = status_info.get("next_pull_eta_seconds")
-                if next_eta is not None:
-                    summary_parts.append(f"next sync in {int(next_eta)}s")
-                summary_parts.append(f"pending {status_info.get('pending', 0)}")
-                async_summary = "*Async sync: " + ", ".join(summary_parts) + "*\n"
-
         if not threads:
             status_filter = "open " if open_only is True else ("closed " if open_only is False else "")
             log_debug(f"list_threads no {status_filter or ''}threads found")
@@ -346,19 +321,15 @@ def _list_threads_impl(
         output: list[str] = []
         scan_label = " — Scan" if scan else ""
         output.append(f"# Watercooler Threads ({len(threads)} total){scan_label}\n")
-        if async_summary:
-            output.append(async_summary)
 
         def _render_thread_md(
             title: str, status: str, ball: str, updated: str,
             topic: str, summary: str, entry_count: int,
             marker: str = "",
         ) -> None:
-            local_marker = " ⏳" if topic in pending_topics else ""
-            updated_label = updated + (" (local)" if topic in pending_topics else "")
             ec = f" | Entries: {entry_count}" if entry_count else ""
-            output.append(f"- {marker}**{topic}**{local_marker} - {title}")
-            output.append(f"  Status: {status} | Ball: {ball}{ec} | Updated: {updated_label}")
+            output.append(f"- {marker}**{topic}** - {title}")
+            output.append(f"  Status: {status} | Ball: {ball}{ec} | Updated: {updated}")
             if summary:
                 output.append(f"  {summary}")
             # Scan mode: append per-entry summaries
@@ -418,6 +389,7 @@ def _read_thread_impl(
     format: str = "markdown",
     summary_only: bool = False,
     code_path: str = "",
+    code_branch: str | None = None,
 ) -> str:
     """Read the complete content of a watercooler thread.
 
@@ -431,6 +403,8 @@ def _read_thread_impl(
         code_path: Path to the code repository directory containing the files most immediately
             under discussion. This establishes the code context for branch pairing.
             Should point to the root of your working repository.
+        code_branch: Filter entries by code branch. Auto-populated from current
+            branch in orphan mode. Pass "*" to see all branches.
 
     Returns:
         Full thread content (or summary-only condensed view) including:
@@ -506,6 +480,10 @@ def _read_thread_impl(
                 code_path=code_path,
             )
 
+        # Auto-populate code_branch from context
+        if code_branch is None:
+            code_branch = context.code_branch
+
         # Lightweight read sync: auto-pull if behind origin (never blocks)
         sync_ok, sync_actions = ensure_readable(context.threads_dir, context.code_root)
         if sync_actions:
@@ -532,7 +510,7 @@ def _read_thread_impl(
             return _format_warnings_for_response(content)
 
         # Load entries from graph (canonical) with MD fallback
-        load_error, entries, summaries = _load_entries(topic, context)
+        load_error, entries, summaries = _load_entries(topic, context, code_branch=code_branch)
         if load_error:
             return load_error
 
@@ -624,8 +602,19 @@ def _list_thread_entries_impl(
     limit: int | None = None,
     format: str = "json",
     code_path: str = "",
+    code_branch: str | None = None,
 ) -> ToolResult:
-    """Return thread entry headers (metadata only) with optional pagination."""
+    """Return thread entry headers (metadata only) with optional pagination.
+
+    Args:
+        topic: Thread topic identifier
+        offset: Starting entry offset
+        limit: Maximum entries to return
+        format: Output format ("json" or "markdown")
+        code_path: Path to code repository
+        code_branch: Filter entries by code branch. Auto-populated from current
+            branch in orphan mode. Pass "*" to see all branches.
+    """
 
     fmt_error, resolved_format = _resolve_format(format, default="json")
     if fmt_error:
@@ -634,6 +623,10 @@ def _list_thread_entries_impl(
     error, context = validation._validate_thread_context(code_path)
     if error or context is None:
         raise ContextError(error or "Unknown context error", code_path=code_path)
+
+    # Auto-populate code_branch from context
+    if code_branch is None:
+        code_branch = context.code_branch
 
     if offset < 0:
         raise ValidationError("offset must be non-negative", field="offset")
@@ -694,7 +687,7 @@ def _list_thread_entries_impl(
         log_debug(f"list_thread_entries read sync: {sync_actions}")
 
     validation._refresh_threads(context)
-    load_error, entries, summaries = _load_entries(topic, context)
+    load_error, entries, summaries = _load_entries(topic, context, code_branch=code_branch)
     if load_error:
         if "not found" in load_error.lower():
             raise ThreadNotFoundError(topic=topic)
@@ -710,6 +703,7 @@ def _list_thread_entries_impl(
         "entry_count": total,
         "offset": start,
         "limit": limit,
+        "code_branch": code_branch,
         "entries": [
             _entry_header_payload(
                 entry,
@@ -721,6 +715,8 @@ def _list_thread_entries_impl(
 
     if resolved_format == "markdown":
         lines = [f"Entries for '{topic}' ({total} total)"]
+        if code_branch and code_branch != "*":
+            lines[0] += f" [branch: {code_branch}]"
         if slice_entries:
             for entry in slice_entries:
                 timestamp = entry.timestamp or "unknown"
@@ -866,6 +862,7 @@ def _get_thread_entry_range_impl(
     format: str = "json",
     summary_only: bool = False,
     code_path: str = "",
+    code_branch: str | None = None,
 ) -> ToolResult:
     """Return a contiguous range of entries (inclusive).
 
@@ -877,6 +874,8 @@ def _get_thread_entry_range_impl(
         summary_only: When True, returns only entry summaries (no bodies).
             Reduces token usage by ~90% — ideal for scanning a range.
         code_path: Code repository path for branch pairing context
+        code_branch: Filter entries by code branch. Auto-populated from current
+            branch in orphan mode. Pass "*" to see all branches.
     """
 
     fmt_error, resolved_format = _resolve_format(format, default="json")
@@ -943,13 +942,17 @@ def _get_thread_entry_range_impl(
     # =========================================================================
     # Local Mode Path (Filesystem)
     # =========================================================================
+    # Auto-populate code_branch from context
+    if code_branch is None:
+        code_branch = context.code_branch
+
     # Lightweight read sync: auto-pull if behind origin (never blocks)
     _sync_ok, sync_actions = ensure_readable(context.threads_dir, context.code_root)
     if sync_actions:
         log_debug(f"get_thread_entry_range read sync: {sync_actions}")
 
     validation._refresh_threads(context)
-    load_error, entries, summaries = _load_entries(topic, context)
+    load_error, entries, summaries = _load_entries(topic, context, code_branch=code_branch)
     if load_error:
         if "not found" in load_error.lower():
             raise ThreadNotFoundError(topic=topic)

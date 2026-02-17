@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Iterator, Tuple
 
+from watercooler.fs import discover_thread_files
 from watercooler.thread_entries import parse_thread_entries, parse_thread_header, ThreadEntry
 
 from .summarizer import (
@@ -178,7 +179,7 @@ def iter_threads(
         return
 
     # Find all .md files (exclude index.md)
-    for md_file in sorted(threads_dir.glob("*.md")):
+    for md_file in discover_thread_files(threads_dir):
         if md_file.name == "index.md":
             continue
 

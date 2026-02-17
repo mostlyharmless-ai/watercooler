@@ -29,7 +29,7 @@ from ..memory_queue import (
     MemoryTaskWorker,
     QueueFullError,
 )
-from ..sync import BranchPairingError
+from ..sync import SyncError
 from ..middleware import run_with_graph_sync
 from .. import validation  # Import module for runtime access (enables test patching)
 from watercooler.path_resolver import derive_group_id
@@ -1138,7 +1138,7 @@ async def _graph_enrich_impl(
 
         return json.dumps(output, indent=2)
 
-    except BranchPairingError as e:
+    except SyncError as e:
         return f"Branch parity error: {str(e)}"
     except Exception as e:
         return f"Error enriching graph: {str(e)}"
@@ -1268,7 +1268,7 @@ async def _graph_recover_impl(
         )
         return json.dumps(output, indent=2)
 
-    except BranchPairingError as e:
+    except SyncError as e:
         return f"Branch parity error: {str(e)}"
     except Exception as e:
         return f"Error recovering graph: {str(e)}"
@@ -1447,7 +1447,7 @@ def _graph_project_impl(
 
         return json.dumps(output, indent=2)
 
-    except BranchPairingError as e:
+    except SyncError as e:
         return f"Branch parity error: {str(e)}"
     except Exception as e:
         return f"Error projecting graph: {str(e)}"

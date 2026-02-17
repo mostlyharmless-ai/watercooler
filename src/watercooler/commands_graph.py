@@ -139,6 +139,7 @@ def append_entry(
     registry: dict | None = None,
     user_tag: str | None = None,
     entry_id: str | None = None,
+    code_branch: Optional[str] = None,
 ) -> Path:
     """Append a structured entry using graph-canonical approach.
 
@@ -203,6 +204,7 @@ def append_entry(
             body=body,
             timestamp=now,
             summary="",  # Summary generated later by enrichment
+            code_branch=code_branch,
         )
 
         success = upsert_entry_node(
@@ -252,6 +254,7 @@ def say(
     registry: dict | None = None,
     user_tag: str | None = None,
     entry_id: str | None = None,
+    code_branch: Optional[str] = None,
 ) -> Path:
     """Quick team note with auto-ball-flip using graph-canonical approach.
 
@@ -296,6 +299,7 @@ def say(
         registry=registry,
         user_tag=user_tag,
         entry_id=entry_id,
+        code_branch=code_branch,
     )
 
 
@@ -313,6 +317,7 @@ def ack(
     registry: dict | None = None,
     user_tag: str | None = None,
     entry_id: str | None = None,
+    code_branch: Optional[str] = None,
 ) -> Path:
     """Acknowledge without auto-flipping ball using graph-canonical approach.
 
@@ -360,6 +365,7 @@ def ack(
         registry=registry,
         user_tag=user_tag,
         entry_id=entry_id,
+        code_branch=code_branch,
     )
 
 
@@ -373,6 +379,7 @@ def handoff(
     registry: dict | None = None,
     user_tag: str | None = None,
     entry_id: str | None = None,
+    code_branch: Optional[str] = None,
 ) -> Path:
     """Flip the ball to the counterpart using graph-canonical approach.
 
@@ -419,6 +426,7 @@ def handoff(
         registry=registry,
         user_tag=user_tag,
         entry_id=entry_id,
+        code_branch=code_branch,
     )
 
 

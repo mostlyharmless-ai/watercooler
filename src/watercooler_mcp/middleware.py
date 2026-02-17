@@ -15,22 +15,15 @@ from watercooler.memory_config import is_anthropic_url, AUTH_SKIP_SENTINELS
 
 from .config import (
     ThreadContext,
-    get_git_sync_manager_from_context,
     get_watercooler_config,
 )
 # Import from sync package
 from .sync import (
-    BranchPairingError,
-    ParityStatus,
-    read_parity_state,
-    write_parity_state,
-    run_preflight,
+    SyncError,
     acquire_topic_lock,
-    acquire_parity_lock,
-    _now_iso,
 )
 from .observability import log_debug, log_action, log_warning
-from .helpers import _should_auto_branch, _build_commit_footers
+from .helpers import _build_commit_footers
 
 # NOTE: Graph-first mode is now ALWAYS enabled. The WATERCOOLER_GRAPH_FIRST env var
 # is deprecated and ignored. All writes go through commands_graph.py which writes
@@ -281,63 +274,49 @@ def run_with_sync(
     priority_flush: bool = False,
     skip_validation: bool = False,
 ) -> T:
-    """Execute operation with git sync and branch parity enforcement.
+    """Execute operation with git sync.
 
-    Flow: acquire lock → run preflight → operation → commit → push → release lock
-
-    The new preflight state machine replaces the old _validate_and_sync_branches()
-    with comprehensive auto-remediation:
-    - Branch mismatch: auto-checkout threads to match code
-    - Missing remote branch: auto-push threads branch
-    - Threads behind origin: auto-pull with ff-only or rebase
-    - Main protection: block writes when threads=main but code=feature
+    Flow: acquire lock -> pull -> operation -> commit -> push -> release lock
+    No preflight state machine, no branch switching.
     """
-    sync = get_git_sync_manager_from_context(context)
-    if not sync:
-        return operation()
-
-    # Per-topic locking to serialize concurrent writes
-    parity_lock = None
     lock = None
     try:
-        # Parity/lifecycle lock serializes branch topology-sensitive actions
-        if context.threads_dir:
-            try:
-                parity_lock = acquire_parity_lock(context.threads_dir, timeout=30)
-                log_debug("[PARITY] Acquired parity lock")
-                log_action("parity.lock.acquire", scope="repo-pair", outcome="ok")
-            except TimeoutError as e:
-                log_action("parity.lock.acquire", scope="repo-pair", outcome="timeout")
-                raise BranchPairingError(f"Failed to acquire parity lock: {e}")
-
+        # Per-topic locking to serialize concurrent writes
         if topic and context.threads_dir:
             try:
                 lock = acquire_topic_lock(context.threads_dir, topic, timeout=30)
-                log_debug(f"[PARITY] Acquired lock for topic '{topic}'")
+                log_debug(f"[SYNC] Acquired lock for topic '{topic}'")
                 log_action("parity.lock.acquire", scope="topic", topic=topic, outcome="ok")
             except TimeoutError as e:
                 log_action("parity.lock.acquire", scope="topic", topic=topic, outcome="timeout")
-                raise BranchPairingError(f"Failed to acquire lock for topic '{topic}': {e}")
+                raise SyncError(f"Failed to acquire lock for topic '{topic}': {e}")
 
-        # Run preflight with auto-remediation instead of old validation
-        log_debug(f"[PARITY] Preflight check: skip_validation={skip_validation}, code_root={context.code_root}, threads_dir={context.threads_dir}")
-        if not skip_validation and context.code_root and context.threads_dir:
-            log_debug("[PARITY] Running run_preflight...")
-            preflight_result = run_preflight(
-                code_repo_path=context.code_root,
-                threads_repo_path=context.threads_dir,
-                auto_fix=_should_auto_branch(),
-                fetch_first=True,
-            )
-            if not preflight_result.can_proceed:
-                raise BranchPairingError(
-                    preflight_result.blocking_reason or "Branch parity preflight failed"
-                )
-            if preflight_result.auto_fixed:
-                log_debug(f"[PARITY] Auto-fixed: {preflight_result.state.actions_taken}")
-            log_debug(f"[PARITY] Preflight result: can_proceed={preflight_result.can_proceed}")
-        else:
-            log_debug(f"[PARITY] Skipping preflight (condition not met)")
+        # Pull latest (if remote exists)
+        log_debug("[SYNC] Simple sync flow")
+        if context.threads_dir and (context.threads_dir / ".git").exists():
+            from .sync.primitives import pull_ff_only, fetch_with_timeout
+            from .sync.errors import AuthenticationError, ConflictError
+            from git import Repo, GitCommandError
+            try:
+                threads_repo = Repo(context.threads_dir)
+                fetch_with_timeout(threads_repo, timeout=30)
+                pull_ff_only(threads_repo)
+            except GitCommandError as git_err:
+                err_msg = str(git_err).lower()
+                if "authentication" in err_msg or "permission denied" in err_msg or "could not read from remote" in err_msg:
+                    raise AuthenticationError(
+                        message=f"Git authentication failed during pull: {git_err}",
+                        recovery_hint="Check SSH keys or GitHub token credentials.",
+                    )
+                if "conflict" in err_msg or "merge" in err_msg:
+                    raise ConflictError(
+                        message=f"Merge conflict during pull: {git_err}",
+                        recovery_hint="Resolve conflicts in the worktree manually.",
+                    )
+                # Network/transient errors — log and continue
+                log_warning(f"[SYNC] Pull failed (transient, continuing): {git_err}")
+            except Exception as pull_err:
+                log_warning(f"[SYNC] Pull failed (continuing): {pull_err}")
 
         # Build commit footers
         footers = _build_commit_footers(
@@ -461,43 +440,37 @@ def run_with_sync(
 
             return result
 
-        # Execute operation with git sync (pull → operation+graph → commit → push)
-        result = sync.with_sync(
-            operation_with_graph_sync,
-            commit_message,
-            topic=topic,
-            entry_id=entry_id,
-            priority_flush=priority_flush,
-        )
+        # Run operation, then commit+push directly
+        result = operation_with_graph_sync()
 
-        # NOTE: Enrichment (summaries/embeddings) is now handled in operation_with_graph_sync
-        # above, within the same atomic commit. If services are unavailable, structural-only
-        # sync is performed. Use watercooler_backfill_graph to add enrichment later.
-        # This eliminates the race condition from the previous two-phase commit approach.
-
-        # Update parity state file after successful write
-        if context.code_root and context.threads_dir:
+        # Commit and push in the worktree
+        if context.threads_dir and (context.threads_dir / ".git").exists():
             try:
-                state = read_parity_state(context.threads_dir)
-                # Mark as clean after successful sync
-                state.status = ParityStatus.CLEAN.value
-                state.pending_push = False
-                state.last_check_at = _now_iso()
-                state.last_error = None
-                write_parity_state(context.threads_dir, state)
-            except Exception as state_err:
-                log_debug(f"[PARITY] Failed to update state after write: {state_err}")
+                from git import Repo
+                from .sync.primitives import push_with_retry
+                threads_repo = Repo(context.threads_dir)
+                # Stage all changes
+                threads_repo.git.add("-A")
+                if threads_repo.is_dirty(index=True):
+                    threads_repo.index.commit(commit_message)
+                    log_debug(f"[SYNC] Commit: {commit_title}")
+                    # Push with retry
+                    try:
+                        push_with_retry(threads_repo, max_retries=5)
+                        log_debug("[SYNC] Push succeeded")
+                    except Exception as push_err:
+                        log_warning(f"[SYNC] Push failed: {push_err}")
+                else:
+                    log_debug("[SYNC] No changes to commit")
+            except Exception as commit_err:
+                log_warning(f"[SYNC] Commit/push failed: {commit_err}")
 
         return result
     finally:
         if lock:
             lock.release()
-            log_debug(f"[PARITY] Released lock for topic '{topic}'")
+            log_debug(f"[SYNC] Released lock for topic '{topic}'")
             log_action("parity.lock.release", scope="topic", topic=topic)
-        if parity_lock:
-            parity_lock.release()
-            log_debug("[PARITY] Released parity lock")
-            log_action("parity.lock.release", scope="repo-pair")
 
 
 def run_with_graph_sync(
@@ -505,55 +478,25 @@ def run_with_graph_sync(
     operation: Callable[[], T],
     commit_msg: str,
 ) -> T:
-    """Execute graph operation with full parity protocol.
+    """Execute graph operation with sync.
 
-    Flow: preflight → operation → commit graph files → push with retry
-
-    Unlike run_with_sync, this is simpler:
-    - No per-topic lock — the repo-pair parity lock (below) serializes all
-      graph write operations. If a worker thread continues after timeout,
-      a retry will block on this lock until the first operation completes.
-    - No entry footers (graph files, not thread entries)
-    - Commits only graph/baseline/* files
+    Flow: operation -> commit graph files -> push
     """
-    sync = get_git_sync_manager_from_context(context)
+    result = operation()
 
-    parity_lock = None
-    try:
-        # 1. Preflight (Factor 1 + Factor 2 pre-check) with parity lock
-        if context.threads_dir:
-            try:
-                parity_lock = acquire_parity_lock(context.threads_dir, timeout=30)
-                log_debug("[PARITY] Acquired parity lock")
-                log_action("parity.lock.acquire", scope="repo-pair", outcome="ok")
-            except TimeoutError as e:
-                log_action("parity.lock.acquire", scope="repo-pair", outcome="timeout")
-                raise BranchPairingError(f"Failed to acquire parity lock: {e}")
+    if context.threads_dir and (context.threads_dir / ".git").exists():
+        try:
+            from git import Repo
+            from .sync.primitives import push_with_retry
+            threads_repo = Repo(context.threads_dir)
+            threads_repo.git.add("-A")
+            if threads_repo.is_dirty(index=True):
+                threads_repo.index.commit(commit_msg)
+                try:
+                    push_with_retry(threads_repo, max_retries=5)
+                except Exception as push_err:
+                    log_warning(f"[SYNC] Graph push failed: {push_err}")
+        except Exception as commit_err:
+            log_warning(f"[SYNC] Graph commit/push failed: {commit_err}")
 
-        if context.code_root and context.threads_dir:
-            preflight_result = run_preflight(
-                code_repo_path=context.code_root,
-                threads_repo_path=context.threads_dir,
-                auto_fix=True,
-                fetch_first=True,
-            )
-            if not preflight_result.can_proceed:
-                raise BranchPairingError(
-                    preflight_result.blocking_reason or "Branch parity preflight failed"
-                )
-            if preflight_result.auto_fixed:
-                log_debug(f"[GRAPH-SYNC] Preflight auto-fixed: {preflight_result.state.actions_taken}")
-
-        # 2. Execute operation
-        result = operation()
-
-        # 3. Commit and push graph files (blocking)
-        if sync and context.threads_dir:
-            sync.commit_graph_changes_sync(commit_msg)
-
-        return result
-    finally:
-        if parity_lock:
-            parity_lock.release()
-            log_debug("[PARITY] Released parity lock")
-            log_action("parity.lock.release", scope="repo-pair")
+    return result

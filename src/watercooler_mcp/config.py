@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import os
 import subprocess
-import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 try:
     from importlib import metadata as importlib_metadata  # type: ignore
@@ -14,7 +13,6 @@ except ImportError:  # pragma: no cover - Python <3.8 fallback
 
 from watercooler.agents import _canonical_agent, _load_agents_registry
 
-from .git_sync import GitSyncManager
 from .observability import log_debug
 
 # Import shared git discovery and path helpers from path_resolver (consolidates logic)
@@ -22,16 +20,8 @@ from watercooler.path_resolver import (
     discover_git_info as _discover_git_shared,
     _expand_path,
     _resolve_path,
-    _default_threads_base,
-    _strip_repo_suffix,
     _extract_repo_path,
-    _split_namespace_repo,
-    _compose_local_threads_path,
-    derive_threads_repo_name,
-    get_threads_suffix,
 )
-
-from .provisioning import is_auto_provision_requested
 
 
 __all__ = [
@@ -39,9 +29,6 @@ __all__ = [
     "resolve_thread_context",
     "get_threads_dir",
     "get_threads_dir_for",
-    "get_git_sync_manager",
-    "get_git_sync_manager_for",
-    "get_git_sync_manager_from_context",
     "get_code_context",
     "get_agent_name",
     "get_version",
@@ -50,18 +37,20 @@ __all__ = [
 ]
 
 
+ORPHAN_BRANCH_NAME = "watercooler/threads"
+WORKTREE_BASE = Path("~/.watercooler/worktrees").expanduser()
+
+
 @dataclass(frozen=True)
 class ThreadContext:
     """Resolved configuration for operating on watercooler threads."""
 
     code_root: Optional[Path]
     threads_dir: Path
-    threads_repo_url: Optional[str]
     code_repo: Optional[str]
     code_branch: Optional[str]
     code_commit: Optional[str]
     code_remote: Optional[str]
-    threads_slug: Optional[str]
     explicit_dir: bool
 
 
@@ -71,14 +60,6 @@ class _GitDetails:
     branch: Optional[str]
     commit: Optional[str]
     remote: Optional[str]
-
-
-_SYNC_MANAGER_CACHE: Dict[Tuple[str, str], GitSyncManager] = {}
-_SYNC_MANAGER_LOCK = threading.Lock()
-
-
-# Helper functions _expand_path, _resolve_path, and _default_threads_base
-# are now imported from watercooler.path_resolver to eliminate duplication
 
 
 def _normalize_code_root(code_root: Optional[Path]) -> Optional[Path]:
@@ -132,75 +113,95 @@ def _discover_git(code_root: Optional[Path]) -> _GitDetails:
     )
 
 
-def _branch_has_upstream(code_root: Optional[Path], branch: Optional[str]) -> bool:
-    """Check if branch has upstream using subprocess git calls."""
-    if code_root is None or branch is None:
-        return False
-
-    try:
-        # Check if branch exists
-        branches = _run_git(["branch", "--list", branch], code_root)
-        if not branches:
-            return False
-
-        # Check if branch has upstream
-        upstream = _run_git(["rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}"], code_root)
-        return upstream is not None
-    except Exception:
-        return False
 
 
+def _worktree_path_for(code_root: Path) -> Path:
+    """Compute the worktree path for a code repo."""
+    return WORKTREE_BASE / code_root.name
 
 
-def _compose_threads_slug_from_code(code_repo: str) -> str:
-    """Compose threads repository slug from code repository path.
+def _orphan_branch_exists(code_root: Path) -> bool:
+    """Check if the orphan branch exists (local or remote)."""
+    result = _run_git(["branch", "-a", "--list", f"*{ORPHAN_BRANCH_NAME}*"], code_root)
+    return bool(result and ORPHAN_BRANCH_NAME in result)
 
-    Uses config-aware suffix (default: "-threads").
+
+def _create_orphan_branch(code_root: Path) -> bool:
+    """Create the orphan branch with an empty initial commit.
+
+    Creates the branch without switching the code working tree.
     """
-    namespace, repo = _split_namespace_repo(code_repo)
-    slug_repo = derive_threads_repo_name(repo)
-    if namespace:
-        return f"{namespace}/{slug_repo}"
-    return slug_repo
+    log_debug(f"CONFIG: Creating orphan branch '{ORPHAN_BRANCH_NAME}' in {code_root}")
+
+    # Use git worktree to create the orphan branch without touching the main tree.
+    # Step 1: Create a temporary orphan branch via low-level commands
+    wt_path = _worktree_path_for(code_root)
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    # Create orphan branch and worktree in one step
+    result = _run_git(
+        ["worktree", "add", "--orphan", "-b", ORPHAN_BRANCH_NAME, str(wt_path)],
+        code_root,
+    )
+    if result is None:
+        # Fallback for older git: create orphan branch manually
+        log_debug("CONFIG: git worktree add --orphan failed, trying manual approach")
+
+        # Create a detached worktree first
+        _run_git(["worktree", "add", "--detach", str(wt_path)], code_root)
+
+        # Create orphan branch in the worktree
+        _run_git(["checkout", "--orphan", ORPHAN_BRANCH_NAME], wt_path)
+        _run_git(["rm", "-rf", "."], wt_path)
+
+    # Create initial empty commit in the worktree
+    _run_git(["commit", "--allow-empty", "-m", "Initialize watercooler threads"], wt_path)
+
+    # Push to origin if remote exists
+    _run_git(["push", "-u", "origin", ORPHAN_BRANCH_NAME], wt_path)
+
+    log_debug(f"CONFIG: Orphan branch '{ORPHAN_BRANCH_NAME}' created")
+    return True
 
 
-def _infer_threads_repo_from_code(ctx: ThreadContext) -> Optional[str]:
-    """Infer a threads repo URL from the code repo remote when explicit config is missing.
-    
-    Always uses HTTPS to avoid SSH passphrase prompts and ensure compatibility with
-    credential helpers and tokens.
+def _ensure_worktree(code_root: Path) -> Optional[Path]:
+    """Ensure the orphan branch worktree exists, creating it if needed.
+
+    Returns:
+        Path to the worktree directory, or None if creation failed.
     """
+    wt_path = _worktree_path_for(code_root)
 
-    if ctx.threads_slug is None:
-        return None
+    # Check if worktree already exists and is valid
+    if wt_path.exists() and (wt_path / ".git").exists():
+        # Verify it's on the right branch
+        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], wt_path)
+        if branch == ORPHAN_BRANCH_NAME:
+            return wt_path
+        # Worktree exists but wrong branch — remove and recreate
+        log_debug(f"CONFIG: Worktree at {wt_path} on wrong branch '{branch}', recreating")
+        _run_git(["worktree", "remove", "--force", str(wt_path)], code_root)
 
-    remote = ctx.code_remote or ""
-    remote = remote.strip()
-    if not remote:
-        return None
+    # Check if orphan branch exists
+    if not _orphan_branch_exists(code_root):
+        try:
+            _create_orphan_branch(code_root)
+        except Exception as e:
+            log_debug(f"CONFIG: Failed to create orphan branch: {e}")
+            return None
+    else:
+        # Branch exists but no worktree — create worktree
+        wt_path.mkdir(parents=True, exist_ok=True)
+        result = _run_git(
+            ["worktree", "add", str(wt_path), ORPHAN_BRANCH_NAME],
+            code_root,
+        )
+        if result is None:
+            log_debug(f"CONFIG: Failed to create worktree at {wt_path}")
+            return None
 
-    slug = ctx.threads_slug.strip("/")
-    if not slug:
-        return None
-
-    # Extract host from any remote format and construct HTTPS URL
-    # The slug already contains the full path (e.g., "org/repo-threads")
-    # Handle SSH format: git@github.com:org/repo.git
-    if remote.startswith("git@"):
-        # Extract host: git@github.com:org/repo.git -> github.com
-        host = remote.split("@", 1)[-1].split(":", 1)[0]
-        return f"https://{host}/{slug}.git"
-
-    # Handle HTTPS format: https://github.com/org/repo.git
-    if "://" in remote:
-        scheme, rest = remote.split("://", 1)
-        host = rest.split("/", 1)[0]
-        return f"https://{host}/{slug}.git"
-
-    # Fallback: construct HTTPS URL for cases like 'github.com/org/repo'
-    if "/" in remote:
-        host = remote.split("/", 1)[0]
-        return f"https://{host}/{slug}.git"
+    if wt_path.exists() and (wt_path / ".git").exists():
+        return wt_path
 
     return None
 
@@ -210,7 +211,6 @@ def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
     git_details = _discover_git(normalized_root)
 
     explicit_dir_env = os.getenv("WATERCOOLER_DIR")
-    explicit_dir = bool(explicit_dir_env)
     if explicit_dir_env:
         threads_dir = _resolve_path(_expand_path(explicit_dir_env))
     else:
@@ -228,75 +228,62 @@ def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
             if parts:
                 code_repo = "/".join(parts)
 
-    threads_repo_env = os.getenv("WATERCOOLER_GIT_REPO")
-    threads_repo_url = threads_repo_env or None
+    effective_root = git_details.root or normalized_root
 
-    if not threads_repo_url and code_repo:
-        namespace, repo = _split_namespace_repo(code_repo)
-        pattern = os.getenv("WATERCOOLER_THREADS_PATTERN")
-        if not pattern:
-            # Get default pattern from config system
-            try:
-                config = get_watercooler_config()
-                config_pattern = config.common.threads_pattern
-            except Exception:
-                config_pattern = None
+    # =========================================================================
+    # Explicit directory override (WATERCOOLER_DIR)
+    # =========================================================================
+    if explicit_dir_env and threads_dir is not None:
+        return ThreadContext(
+            code_root=effective_root,
+            threads_dir=threads_dir,
+            code_repo=code_repo,
+            code_branch=git_details.branch,
+            code_commit=git_details.commit,
+            code_remote=code_remote,
+            explicit_dir=True,
+        )
 
-            if config_pattern:
-                pattern = config_pattern
-            else:
-                # Always default to HTTPS - works with credential helpers/tokens
-                # and prevents SSH passphrase prompts that hang Codex/AI tools
-                pattern = "https://github.com/{org}/{repo}-threads.git"
-        format_kwargs = {
-            "repo": repo,
-            "namespace": namespace or "",
-            "org": (namespace.split("/", 1)[0] if namespace else repo),
-        }
-        try:
-            threads_repo_url = pattern.format(**format_kwargs)
-        except (KeyError, IndexError, ValueError):
-            threads_repo_url = None
-
-    threads_slug = None
-    if threads_repo_url:
-        repo_path = _extract_repo_path(threads_repo_url)
-        if repo_path:
-            threads_slug = repo_path
-    elif code_repo:
-        threads_slug = _compose_threads_slug_from_code(code_repo)
-
-    if threads_dir is None:
-        env_base = os.getenv("WATERCOOLER_THREADS_BASE")
-        base = _default_threads_base(git_details.root or normalized_root)
-
-        if env_base:
-            if threads_slug:
-                threads_dir = _compose_local_threads_path(base, threads_slug)
-            else:
-                threads_dir = _resolve_path(base / "_local")
-        elif git_details.root is not None:
-            threads_name = derive_threads_repo_name(git_details.root.name)
-            threads_dir = _resolve_path(git_details.root.parent / threads_name)
-        elif normalized_root is not None:
-            threads_name = derive_threads_repo_name(normalized_root.name)
-            threads_dir = _resolve_path(normalized_root.parent / threads_name)
-        elif threads_slug:
-            local_name = threads_slug.split("/")[-1]
-            threads_dir = _resolve_path(base / local_name)
+    # =========================================================================
+    # Orphan Branch Worktree (the architecture)
+    # =========================================================================
+    if effective_root is not None:
+        wt_dir = _ensure_worktree(effective_root)
+        if wt_dir is not None:
+            log_debug(f"CONFIG: Orphan worktree active, threads_dir={wt_dir}")
+            return ThreadContext(
+                code_root=effective_root,
+                threads_dir=wt_dir,
+                code_repo=code_repo,
+                code_branch=git_details.branch,
+                code_commit=git_details.commit,
+                code_remote=code_remote,
+                explicit_dir=False,
+            )
         else:
-            threads_dir = _resolve_path(base / "_local")
+            log_debug("CONFIG: Worktree creation failed, falling back to _local")
+            from .helpers import _add_startup_warning
+            _add_startup_warning(
+                "Worktree creation failed — threads will be stored in a local "
+                "_local/ directory instead of the orphan branch. New writes will "
+                "NOT be synced to the remote. Check git permissions and retry."
+            )
+
+    # =========================================================================
+    # Fallback: no git context (or worktree failed)
+    # =========================================================================
+    if threads_dir is None:
+        base = Path.cwd()
+        threads_dir = _resolve_path(base / "_local")
 
     return ThreadContext(
-        code_root=git_details.root or normalized_root,
+        code_root=effective_root,
         threads_dir=threads_dir,
-        threads_repo_url=threads_repo_url,
         code_repo=code_repo,
         code_branch=git_details.branch,
         code_commit=git_details.commit,
         code_remote=code_remote,
-        threads_slug=threads_slug,
-        explicit_dir=explicit_dir,
+        explicit_dir=False,
     )
 
 
@@ -308,110 +295,6 @@ def get_threads_dir_for(code_root: Optional[Path]) -> Path:
     return resolve_thread_context(code_root).threads_dir
 
 
-def _get_cache_key(threads_dir: Path, repo_url: str) -> Tuple[str, str]:
-    resolved_dir = _resolve_path(threads_dir)
-    return (str(resolved_dir), repo_url)
-
-
-def _get_git_identity() -> Tuple[str, str]:
-    """Get git author name and email for commits.
-
-    Resolution order:
-    1. WATERCOOLER_GIT_AUTHOR / WATERCOOLER_GIT_EMAIL env vars
-    2. WATERCOOLER_AGENT env var (for author)
-    3. Config file values (mcp.git.author / mcp.git.email)
-    4. Hardcoded fallbacks (only if config unavailable)
-    """
-    # Try to get defaults from config system
-    try:
-        config = get_watercooler_config()
-        default_author = config.mcp.git.author or config.mcp.default_agent
-        default_email = config.mcp.git.email
-    except Exception:
-        # Config not available, use hardcoded fallbacks
-        default_author = "Watercooler MCP"
-        default_email = "mcp@watercooler.dev"
-
-    author = os.getenv("WATERCOOLER_GIT_AUTHOR")
-    if not author:
-        author = os.getenv("WATERCOOLER_AGENT", default_author)
-    email = os.getenv("WATERCOOLER_GIT_EMAIL", default_email)
-    return author, email
-
-
-def _get_git_ssh_key() -> Optional[Path]:
-    key = os.getenv("WATERCOOLER_GIT_SSH_KEY")
-    if not key:
-        return None
-    return _resolve_path(_expand_path(key))
-
-
-def get_git_sync_manager() -> Optional[GitSyncManager]:
-    ctx = resolve_thread_context()
-    return _build_sync_manager(ctx)
-
-
-def get_git_sync_manager_for(code_root: Optional[Path]) -> Optional[GitSyncManager]:
-    ctx = resolve_thread_context(code_root)
-    return _build_sync_manager(ctx)
-
-
-def get_git_sync_manager_from_context(ctx: ThreadContext) -> Optional[GitSyncManager]:
-    return _build_sync_manager(ctx)
-
-
-def _build_sync_manager(ctx: ThreadContext) -> Optional[GitSyncManager]:
-    repo_url = ctx.threads_repo_url or _infer_threads_repo_from_code(ctx)
-    if not repo_url:
-        return None
-
-    branch_published = _branch_has_upstream(ctx.code_root, ctx.code_branch)
-
-    key = _get_cache_key(ctx.threads_dir, repo_url)
-    with _SYNC_MANAGER_LOCK:
-        manager = _SYNC_MANAGER_CACHE.get(key)
-        if manager:
-            manager.set_remote_allowed(branch_published)
-            return manager
-
-        provision_requested = is_auto_provision_requested()
-        # Enable provisioning for both HTTPS and SSH URLs
-        # HTTPS URLs are preferred and work with credential helpers/tokens
-        enable_provision = bool(
-            provision_requested
-            and not ctx.explicit_dir
-            and repo_url
-            and ctx.threads_slug
-            and (repo_url.startswith("https://") or repo_url.startswith("git@"))
-        )
-
-        # Clear any stale cache entry for this directory (repo URL changed)
-        stale_keys = [k for k in _SYNC_MANAGER_CACHE if k[0] == key[0]]
-        for stale in stale_keys:
-            old_manager = _SYNC_MANAGER_CACHE.pop(stale, None)
-            if old_manager is not None:
-                try:
-                    old_manager.shutdown()
-                except Exception:
-                    pass
-
-        author, email = _get_git_identity()
-        ssh_key = _get_git_ssh_key()
-
-        manager = GitSyncManager(
-            repo_url=repo_url,
-            local_path=ctx.threads_dir,
-            ssh_key_path=ssh_key,
-            author_name=author,
-            author_email=email,
-            threads_slug=ctx.threads_slug,
-            code_repo=ctx.code_repo,
-            enable_provision=enable_provision,
-            remote_allowed=branch_published,
-        )
-        _SYNC_MANAGER_CACHE[key] = manager
-        return manager
-
 
 def get_code_context(code_root: Optional[Path]) -> Dict[str, str]:
     ctx = resolve_thread_context(code_root)
@@ -420,7 +303,6 @@ def get_code_context(code_root: Optional[Path]) -> Dict[str, str]:
         "code_repo": ctx.code_repo or "",
         "code_branch": ctx.code_branch or "",
         "code_commit": ctx.code_commit or "",
-        "threads_repo": ctx.threads_repo_url or "",
         "threads_dir": str(ctx.threads_dir),
     }
 

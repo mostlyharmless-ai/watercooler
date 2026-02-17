@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from fastmcp import Context
 
+from watercooler.fs import discover_thread_files
 from watercooler.thread_entries import parse_thread_entries, ThreadEntry
 from watercooler_memory.backends import TransientError, BackendError
 from watercooler_memory.backends.graphiti import _derive_database_name
@@ -529,7 +530,7 @@ async def _migration_preflight_impl(
         result["threads_dir_exists"] = True
 
         # Count threads and estimate entries
-        thread_files = list(threads_dir.glob("*.md"))
+        thread_files = discover_thread_files(threads_dir)
         result["thread_count"] = len(thread_files)
 
         total_entries = 0
@@ -641,7 +642,7 @@ async def _migrate_to_memory_backend_impl(
     result["unified_group_id"] = unified_group_id
 
     # Get thread files
-    thread_files = list(threads_dir.glob("*.md"))
+    thread_files = discover_thread_files(threads_dir)
 
     # Filter by topics if specified
     if topics:
