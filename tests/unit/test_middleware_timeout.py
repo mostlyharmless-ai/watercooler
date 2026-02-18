@@ -42,7 +42,6 @@ def test_known_tools_have_custom_timeouts():
     assert _TOOL_TIMEOUTS["watercooler_graph_recover"] == 300.0
     assert _TOOL_TIMEOUTS["watercooler_leanrag_run_pipeline"] == 300.0
     assert _TOOL_TIMEOUTS["watercooler_smart_query"] == 120.0
-    assert _TOOL_TIMEOUTS["watercooler_audit_branch_pairing"] == 120.0
 
 
 def test_default_timeout_applies_to_unknown_tool():

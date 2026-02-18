@@ -18,6 +18,7 @@ Common issues and solutions for the watercooler MCP server.
   - [Client ID is None](#client-id-is-none)
   - [Tools Not Working](#tools-not-working)
   - [JSON Parse Error: Unexpected EOF (mcp-cli)](#json-parse-error-unexpected-eof-mcp-cli)
+  - [mcp-cli call Returns Empty Output](#mcp-cli-call-returns-empty-output)
   - [Git Not Found](#git-not-found)
   - [Git Authentication](#git-authentication)
   - [GitHub CLI Token Expiration](#github-cli-token-expiration)
@@ -312,19 +313,59 @@ mcp-cli call watercooler-cloud/watercooler_say - < /tmp/payload.json
 ```
 
 ### Solution
-Use `jq` command substitution:
+Use the two-step variable pattern — assign JSON to a variable first, then pass it:
 ```bash
-mcp-cli call watercooler-cloud/watercooler_say "$(jq -n \
+PAYLOAD=$(jq -n \
   --arg topic 'my-topic' \
   --arg title 'My Title' \
   --arg body 'Body content' \
+  '{topic: $topic, title: $title, body: $body}') && \
+mcp-cli call watercooler-cloud/watercooler_say "$PAYLOAD"
+```
+
+## mcp-cli call Returns Empty Output
+
+### Symptom
+`mcp-cli call` returns no output, no error, and no side effect. The command
+appears to succeed (exit code 0) but nothing happens.
+
+### Cause
+Inline `$(...)` command substitution in `mcp-cli call` arguments can be
+corrupted by Claude Code's Bash tool eval wrapper. This is especially
+common with complex payloads (~2 KB+ bodies, 5+ `--arg` flags, or multi-line
+content).
+
+```bash
+# UNRELIABLE — may silently produce empty output
+mcp-cli call watercooler-cloud/watercooler_say "$(jq -n \
+  --arg topic 'my-topic' \
+  --arg title 'My Title' \
+  --arg body 'Long multi-line body...' \
   '{topic: $topic, title: $title, body: $body}')"
 ```
 
-Or pipe from a file:
+Note: `mcp-cli info` always works because it takes no complex arguments.
+
+### Solution
+Use the two-step variable pattern:
 ```bash
-cat /tmp/payload.json | mcp-cli call watercooler-cloud/watercooler_say -
+PAYLOAD=$(jq -n \
+  --arg topic 'my-topic' \
+  --arg title 'My Title' \
+  --arg body 'Long multi-line body...' \
+  '{topic: $topic, title: $title, body: $body}') && \
+mcp-cli call watercooler-cloud/watercooler_say "$PAYLOAD"
 ```
+
+The variable assignment happens outside the eval context, so `mcp-cli`
+receives a plain string. See Claude Code issues
+[#24956](https://github.com/anthropics/claude-code/issues/24956) and
+[#11551](https://github.com/anthropics/claude-code/issues/11551).
+
+### Also Check
+- `mcp-cli call tool '{}' > /tmp/out.json` will fail with `command not found`
+  because `mcp-cli` is a shell alias and redirects break alias resolution.
+- Pipes (`cmd | mcp-cli call tool -`) also lose output in Claude Code's Bash tool.
 
 ## Git Not Found
 
@@ -847,23 +888,17 @@ watercooler unlock <topic> --threads-dir ../repo-threads
 watercooler unlock <topic> --threads-dir ../repo-threads --force
 ```
 
-### Using Recovery Tools
+### Branch Sync Recovery
 
-The MCP server provides tools for diagnosis and recovery:
+Branch pairing is enforced automatically by write-path middleware. Use the
+health tool to diagnose parity issues:
 
 ```python
-# Diagnose issues
-watercooler_recover_branch_state(code_path=".", diagnose_only=True)
-
-# Auto-fix safe issues
-watercooler_recover_branch_state(code_path=".", auto_fix=True)
-
-# Sync branches manually
-watercooler_sync_branch_state(code_path=".", operation="checkout")
-
-# Full audit
-watercooler_audit_branch_pairing(code_path=".")
+watercooler_health(code_path=".")
 ```
+
+The preflight auto-remediation system will attempt to fix common issues
+(branch mismatch, threads behind origin) on the next write operation.
 
 ### Checking Parity Health
 

@@ -499,11 +499,8 @@ The MCP server supports two operational modes:
 - `watercooler_graph_recover` - Repair corrupted graph state
 - `watercooler_graph_health` - Diagnostic health check
 
-**Branch Parity Tools** (`tools/branch_parity.py`):
-- `watercooler_validate_branch_pairing` - Verify branch setup
-- `watercooler_sync_branch_state` - Force sync
-- `watercooler_audit_branch_pairing` - Detailed audit
-- `watercooler_recover_branch_state` - Recover from divergence
+**Branch Sync**: Branch pairing is enforced automatically by write-path
+middleware (preflight checks + auto-remediation). No standalone tools required.
 
 ### Write Flow (Complete)
 

@@ -263,6 +263,37 @@ watercooler append-entry topic \
   --body "Auth system deployed to production. All tests passing."
 ```
 
+#### Closure Entry Body Convention
+
+When closing a thread, use this structured template to maximize retrieval value and compounding:
+
+```
+## Decisions Made
+- [Decision 1]: [rationale] (ref: entry [N] or external link)
+- [Decision 2]: [rationale]
+
+## Open Questions
+- [Question]: [current understanding] → [suggested next thread or owner]
+
+## Lessons Learned
+- **[lesson-slug]**
+  - Problem pattern: [what went wrong or what was discovered]
+  - Insight: [the transferable knowledge]
+  - Applicability: [repo-wide | directory-scoped | pattern-specific]
+  - Evidence: [entry IDs, commit SHAs, or PR numbers]
+
+## Policy Proposals
+- [Proposed change]: [scope] → [target file, e.g. CLAUDE.md section]
+  - Rationale: [why]
+  - Promotion gate: [e.g., "ship after 2 successful uses"]
+
+## Retrieval Smoke Test
+- Query: "[natural language question this thread should answer]"
+- Expected: [which lessons/decisions should surface]
+```
+
+This template is a **convention, not enforcement** — use the sections that apply, skip those that don't. The structured fields (especially Lessons) enable `watercooler_smart_query` to surface thread conclusions in future planning sessions.
+
 ## CLI Commands with Structured Entries
 
 ### append-entry
