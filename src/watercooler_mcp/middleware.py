@@ -193,8 +193,6 @@ _TOOL_TIMEOUTS: dict[str, float] = {
     "watercooler_graphiti_add_episode": 120.0,
     # Smart query T3 escalation can be slow
     "watercooler_smart_query": 120.0,
-    # Branch operations with git fetch + checkout loop
-    "watercooler_audit_branch_pairing": 120.0,
 }
 
 
