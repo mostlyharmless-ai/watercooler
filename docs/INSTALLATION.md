@@ -8,69 +8,6 @@ Complete setup instructions for watercooler-cloud.
 - **Git** (authentication handled automatically via credentials file)
 - Basic GitHub permissions to push to threads repositories
 
-## System Requirements
-
-### Memory Graph Features (Optional)
-
-The memory graph features require local model inference via llama-server. Below are the resource requirements for different configurations.
-
-#### Embedding Models
-
-| Model | Quantization | Disk | RAM | Use Case |
-|-------|--------------|------|-----|----------|
-| bge-m3 | Q8_0 | ~700 MB | ~1 GB | Default, multilingual, high quality |
-| nomic-embed-text | Q8_0 | ~550 MB | ~800 MB | Lightweight alternative |
-| e5-mistral-7b | Q4_K_M | ~4.5 GB | ~6 GB | Highest quality, instruction-aware |
-
-#### LLM Models (for summarization and extraction)
-
-| Model | Quantization | Disk | RAM | Notes |
-|-------|--------------|------|-----|-------|
-| llama3.2:1b | Q8_0 | ~1.2 GB | ~2 GB | Minimal, basic summarization |
-| llama3.2:3b | Q8_0 | ~3.2 GB | ~5 GB | Good balance, heavier |
-| qwen3:0.6b | Q4_K_M | ~400 MB | ~1 GB | Ultra-light, basic extraction |
-| qwen3:1.7b | Q4_K_M | ~1.1 GB | ~2 GB | **Default**, fast with /no_think |
-| qwen3:4b | Q4_K_M | ~2.5 GB | ~4 GB | Balanced with thinking mode |
-| qwen3:8b | Q4_K_M | ~5 GB | ~7 GB | Quality with thinking mode |
-| qwen3:30b | Q4_K_M | ~17 GB | ~20 GB | Best quality (MoE, 3B active) |
-
-#### Hardware Profiles
-
-**Minimal (8 GB RAM):**
-```toml
-[memory.embedding]
-model = "bge-m3"
-
-[memory.llm]
-model = "llama3.2:1b"
-```
-- Total disk: ~2 GB
-- Total RAM: ~3 GB (models can share if run sequentially)
-
-**Recommended (16 GB RAM):**
-```toml
-[memory.embedding]
-model = "bge-m3"
-
-[memory.llm]
-model = "qwen3:1.7b"
-```
-- Total disk: ~2.5 GB
-- Total RAM: ~4 GB (allows concurrent operation)
-
-**High Quality (32+ GB RAM):**
-```toml
-[memory.embedding]
-model = "bge-m3"
-
-[memory.llm]
-model = "qwen3:8b"
-```
-- Total disk: ~6 GB
-- Total RAM: ~8 GB (thinking mode improves extraction quality)
-
-**Note:** Memory requirements are additive when running embedding and LLM servers concurrently. The llama-server binary itself (~200 MB) is auto-downloaded on first use if enabled in config.
-
 ## Installation Methods
 
 ### Option 1: Install from Source (Recommended for Development)
@@ -102,35 +39,22 @@ For MCP server integration with AI agents:
 pip install -e ".[mcp]"
 ```
 
-## Running the Dashboard
-
-Start the local dashboard server:
-
-```bash
-python -m watercooler_dashboard.local_app
-```
-
-The dashboard will be available at [http://127.0.0.1:8080](http://127.0.0.1:8080).
-
 > **Windows tip:** If your shell exposes `py`, use `py -3 -m pip install -e .` or `python -m pip ...`
 
 ---
 
 ## Authentication Setup
 
-**One-time GitHub authorization** enables seamless access for all your AI agents:
+**Set a GitHub Personal Access Token (PAT)** to enable git sync for your threads:
 
-1. Visit the [Watercooler Dashboard](https://watercoolerdev.com)
-2. Click "Sign in with GitHub"
-3. Grant access to your organizations
-4. Download credentials file from Settings → GitHub Connection
-5. Place it at `~/.watercooler/credentials.json`
+```bash
+export WATERCOOLER_GITHUB_TOKEN="ghp_your_token_here"
+```
 
-That's it! All MCP servers will automatically authenticate using this file.
+Or use standard GitHub environment variables (`GITHUB_TOKEN` or `GH_TOKEN`).
 
 **Alternative authentication methods:**
-- Set `WATERCOOLER_GITHUB_TOKEN` environment variable with your GitHub PAT
-- Set `GITHUB_TOKEN` or `GH_TOKEN` (standard GitHub environment variables)
+- Place a credentials file at `~/.watercooler/credentials.json`
 - CI/CD: Use GitHub Actions secrets or environment-specific tokens
 
 **Advanced configuration:**
@@ -224,10 +148,7 @@ See [WATERCOOLER_SETUP.md](../.github/WATERCOOLER_SETUP.md) for the detailed set
 
 ## Additional Resources
 
-- **[Setup & Quickstart](archive/SETUP_AND_QUICKSTART.md)** - Step-by-step walkthrough
 - **[Environment Variables](ENVIRONMENT_VARS.md)** - Advanced configuration reference
-- **[Claude Code Setup](archive/CLAUDE_CODE_SETUP.md)** - Client-specific details
-- **[Claude Desktop Setup](archive/CLAUDE_DESKTOP_SETUP.md)** - Desktop app setup
 - **[MCP Server Guide](mcp-server.md)** - Tool reference and parameters
 - **[Troubleshooting](TROUBLESHOOTING.md)** - Common issues and solutions
 
@@ -236,7 +157,6 @@ See [WATERCOOLER_SETUP.md](../.github/WATERCOOLER_SETUP.md) for the detailed set
 ## Next Steps
 
 After installation:
-1. Start the dashboard with `python -m watercooler_dashboard.local_app`
-2. Configure your MCP client using one of the methods above
-3. See the [CLI Reference](CLI_REFERENCE.md) for command examples
-4. Read the [Quick Start](../README.md#quick-start) to create your first thread
+1. Configure your MCP client using one of the methods above
+2. See the [CLI Reference](CLI_REFERENCE.md) for command examples
+3. Read the [Quick Start](QUICKSTART.md) to create your first thread

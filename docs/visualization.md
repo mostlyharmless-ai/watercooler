@@ -141,8 +141,8 @@ options:
 
 ### Edge Styles
 
-- **Solid**: `contains` (thread → entry)
-- **Dashed**: `followed_by` (entry → entry)
+- **Solid**: `contains` (thread -> entry)
+- **Dashed**: `followed_by` (entry -> entry)
 
 ## Generating the Baseline Graph
 
@@ -221,4 +221,3 @@ For graphs with 1000+ nodes, consider:
 ## See Also
 
 - [baseline-graph.md](baseline-graph.md) - Memory pipeline and graph generation
-- [Memory Pipeline](MEMORY.md) - Full memory system documentation
