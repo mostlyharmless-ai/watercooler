@@ -380,7 +380,7 @@ Each Watercooler entry includes:
 
 Update these files as needed:
 - `docs/QUICKSTART.md` - Getting started guide
-- `docs/archive/integration.md` - Integration patterns
+- `docs/CONFIGURATION.md` - Configuration reference
 - `docs/mcp-server.md` - MCP tool reference
 - `docs/TROUBLESHOOTING.md` - Common issues
 - `README.md` - Project overview

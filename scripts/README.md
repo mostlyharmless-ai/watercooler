@@ -96,8 +96,6 @@ Output:
 - `threads.json` - Thread metadata
 - `manifest.json` - Export statistics
 
-See [docs/MEMORY.md](../docs/MEMORY.md) for the full LeanRAG integration pipeline.
-
 ## MCP Server
 
 ### install-mcp.sh / install-mcp.ps1
