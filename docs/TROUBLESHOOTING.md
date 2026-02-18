@@ -575,6 +575,8 @@ Per-topic advisory locks prevent concurrent writes to the same thread.
 3. **Force unlock**:
    ```bash
    watercooler unlock <topic> --force
+   # If using a non-standard worktree path:
+   watercooler unlock <topic> --threads-dir /path/to/worktree --force
    ```
 
 ### Sync Recovery
@@ -585,6 +587,35 @@ write → commit → push` with rebase+retry). Use the health tool to diagnose:
 ```python
 watercooler_health(code_path=".")
 ```
+
+---
+
+## Migrating from a separate `-threads` repository
+
+If you previously used the separate `<repo>-threads` repository model, your
+thread data needs to move to the orphan branch:
+
+1. **Copy thread files** into the worktree:
+   ```bash
+   WORKTREE="$HOME/.watercooler/worktrees/<repo>"
+   mkdir -p "$WORKTREE"
+   # Trigger worktree creation first:
+   watercooler_health(code_path=".")
+   # Then copy your thread files:
+   cp ../<repo>-threads/*.md "$WORKTREE"/
+   cp -r ../<repo>-threads/graph/ "$WORKTREE"/graph/ 2>/dev/null || true
+   ```
+
+2. **Commit on the orphan branch**:
+   ```bash
+   cd "$WORKTREE"
+   git add -A && git commit -m "migrate threads from separate repo"
+   git push origin watercooler/threads
+   ```
+
+3. **Verify** with `watercooler_health(code_path=".")` — threads should appear.
+
+4. **Archive** the old `-threads` repo once you confirm everything works.
 
 ---
 

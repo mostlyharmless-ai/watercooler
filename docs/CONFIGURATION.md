@@ -146,7 +146,7 @@ Git sync behavior:
 [mcp.sync]
 max_retries = 5        # Retry attempts for failed push (rebase + retry)
 max_backoff = 300.0    # Maximum backoff delay (seconds)
-interval = 30.0        # Background sync interval (seconds)
+interval = 30.0        # Background pull cadence (seconds)
 ```
 
 ### `[mcp.logging]` Section
