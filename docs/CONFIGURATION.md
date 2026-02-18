@@ -343,7 +343,7 @@ When resolving API keys for LLM or embedding services:
 | Personal identity (name, email) | User config |
 | Personal preferences (log level) | User config |
 | Team standards (validation rules) | Project config |
-| Repo-specific settings (validation rules) | Project config |
+| Repo-specific settings (sync interval, log level) | Project config |
 | Secrets and tokens | Credentials file or env vars |
 
 ### CI/CD Environments

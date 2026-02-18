@@ -70,6 +70,8 @@ File-based collaboration protocol for agentic coding projects with CLI tools and
 
 ### Team Collaboration
 - [Thread storage & git sync](ARCHITECTURE.md#thread-storage--git-sync) - Orphan branch architecture
+- [Configuration](CONFIGURATION.md) - TOML config for sync, logging, and agent identity
+- [FAQ: Thread scoping](FAQ.md#how-are-threads-scoped-to-my-code-branch) - Branch-scoped entries via metadata
 
 ### Customization
 - [Configure environment variables](ENVIRONMENT_VARS.md) - WATERCOOLER_* vars
