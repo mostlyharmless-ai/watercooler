@@ -87,11 +87,7 @@ Team-shared settings checked into the repository:
 ```toml
 # .watercooler/config.toml
 
-[common]
-threads_pattern = "git@github.com:myorg/{repo}-threads.git"
-
 [mcp.sync]
-batch_window = 10.0
 interval = 60.0
 
 [validation]
@@ -106,13 +102,6 @@ Shared settings for MCP and Dashboard:
 
 ```toml
 [common]
-# URL pattern for threads repos
-# Placeholders: {org}, {repo}, {namespace}
-threads_pattern = "git@github.com:{org}/{repo}-threads.git"
-
-# Suffix for threads repo naming
-threads_suffix = "-threads"
-
 # Custom templates directory (empty = use bundled)
 templates_dir = ""
 ```
@@ -134,13 +123,8 @@ port = 3000
 default_agent = "Agent"
 agent_tag = ""
 
-# Behavior
-auto_branch = true      # Auto-create matching threads branches
-auto_provision = true   # Auto-create threads repos if missing
-
-# Explicit paths (empty = auto-discover)
+# Explicit threads directory (empty = auto-discover via orphan branch worktree)
 threads_dir = ""
-threads_base = ""
 ```
 
 ### `[mcp.git]` Section
@@ -160,11 +144,7 @@ Git sync behavior:
 
 ```toml
 [mcp.sync]
-async = true           # Enable async git operations
-batch_window = 5.0     # Seconds to batch commits before push
-max_delay = 30.0       # Maximum delay before forcing push
-max_batch_size = 50    # Maximum entries per batch
-max_retries = 5        # Retry attempts for failed operations
+max_retries = 5        # Retry attempts for failed push (rebase + retry)
 max_backoff = 300.0    # Maximum backoff delay (seconds)
 interval = 30.0        # Background sync interval (seconds)
 ```
@@ -209,7 +189,6 @@ Protocol validation settings:
 on_write = true              # Validate on write operations
 on_commit = true             # Validate on commit
 fail_on_violation = false    # Fail vs warn on violation
-check_branch_pairing = true  # Validate branch pairing
 check_commit_footers = true  # Validate commit footers
 check_entry_format = true    # Validate entry format
 ```
@@ -282,16 +261,10 @@ level = "DEBUG"
 |---------------------|-------------|
 | `WATERCOOLER_AGENT` | `mcp.default_agent` |
 | `WATERCOOLER_AGENT_TAG` | `mcp.agent_tag` |
-| `WATERCOOLER_AUTO_BRANCH` | `mcp.auto_branch` |
-| `WATERCOOLER_AUTO_PROVISION` | `mcp.auto_provision` |
 | `WATERCOOLER_DIR` | `mcp.threads_dir` |
-| `WATERCOOLER_THREADS_BASE` | `mcp.threads_base` |
-| `WATERCOOLER_THREADS_PATTERN` | `common.threads_pattern` |
 | `WATERCOOLER_GIT_AUTHOR` | `mcp.git.author` |
 | `WATERCOOLER_GIT_EMAIL` | `mcp.git.email` |
 | `WATERCOOLER_GIT_SSH_KEY` | `mcp.git.ssh_key` |
-| `WATERCOOLER_ASYNC_SYNC` | `mcp.sync.async` |
-| `WATERCOOLER_BATCH_WINDOW` | `mcp.sync.batch_window` |
 | `WATERCOOLER_SYNC_INTERVAL` | `mcp.sync.interval` |
 | `WATERCOOLER_LOG_LEVEL` | `mcp.logging.level` |
 | `WATERCOOLER_LOG_DIR` | `mcp.logging.dir` |
@@ -370,7 +343,7 @@ When resolving API keys for LLM or embedding services:
 | Personal identity (name, email) | User config |
 | Personal preferences (log level) | User config |
 | Team standards (validation rules) | Project config |
-| Repo-specific settings (threads pattern) | Project config |
+| Repo-specific settings (validation rules) | Project config |
 | Secrets and tokens | Credentials file or env vars |
 
 ### CI/CD Environments
@@ -381,23 +354,14 @@ For CI/CD, prefer environment variables over config files:
 # GitHub Actions example
 env:
   WATERCOOLER_LOG_LEVEL: "DEBUG"
-  WATERCOOLER_ASYNC_SYNC: "false"
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ### Multi-Project Setup
 
-For multiple projects with different threads repos:
-
-```toml
-# Project A: .watercooler/config.toml
-[common]
-threads_pattern = "git@github.com:team-a/{repo}-threads.git"
-
-# Project B: .watercooler/config.toml
-[common]
-threads_pattern = "git@github.com:team-b/{repo}-threads.git"
-```
+Each project's threads live on its own `watercooler/threads` orphan branch. No
+extra configuration is needed — threads are automatically scoped to the code
+repository. Just pass `code_path` pointing to each project root.
 
 ## Troubleshooting
 
@@ -439,7 +403,6 @@ templates_dir = config.paths.templates_dir
 # Full config (lazy-loads TOML + Pydantic)
 cfg = config.full()
 log_level = cfg.mcp.logging.level
-sync_enabled = cfg.mcp.sync.async_sync
 
 # Environment variables with type coercion
 level = config.env.get("WATERCOOLER_LOG_LEVEL", "INFO")

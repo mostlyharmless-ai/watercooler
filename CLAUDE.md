@@ -364,19 +364,20 @@ Each Watercooler entry includes:
 - **PR**: Pull request related entries
 - **Closure**: Thread conclusion and summary
 
-## Branch Pairing Contract (Team Invariant)
+## Thread Storage Contract (Team Invariant)
 
-- **Repositories**: Pair each code repo with a dedicated threads repo named `<repo>-threads`.
-- **Branches**: Mirror code branches in the threads repo (same branch name).
-- **Write behavior**: Before a write, ensure the threads repo is on the same-named branch; push with rebase+retry.
-- **Commit footer convention** (in threads repo):
+- **Orphan branch**: Threads live on a `watercooler/threads` orphan branch in the code repo (no separate `-threads` repository).
+- **Worktree**: Accessed via git worktree at `~/.watercooler/worktrees/<repo>/`, created automatically on first write.
+- **Branch scoping**: Entries are tagged with `code_branch` metadata (auto-populated from current code branch). Reads filter by `code_branch` by default.
+- **Write behavior**: `lock → pull → write → commit → push` with rebase+retry.
+- **Commit footer convention** (on orphan branch):
   - `Code-Repo: <org>/<repo>`
   - `Code-Branch: <branch>`
   - `Code-Commit: <short-sha>`
   - `Watercooler-Entry-ID: <ULID>`
   - `Watercooler-Topic: <topic>`
 - **Authoring**: Include a visible `Spec: <value>` in the entry body and align the Role to the specialization (pm/planner/implementer/tester/docs/ops/etc.).
-- **Closure**: On merge, post a Closure entry referencing the PR; optionally consolidate to `threads:main` with a brief summary.
+- **Closure**: On merge, post a Closure entry referencing the PR.
 
 ## Security & Configuration
 

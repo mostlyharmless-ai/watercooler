@@ -142,7 +142,7 @@ like this:
    and flipping the ball back when done.
 
 That’s the workflow we recommend because the MCP layer enforces formatting,
-branch pairing, git commits, and identity footers automatically. If you do need
+git sync, commits, and identity footers automatically. If you do need
 to work manually (for example, repairing a thread offline), the legacy CLI is
 still available:
 

@@ -54,7 +54,7 @@ graph/baseline/
 +-- nodes.jsonl      # Thread and entry nodes
 +-- edges.jsonl      # Relationships between nodes
 +-- manifest.json    # Metadata and checksums
-+-- sync_state.json  # Per-topic sync status
++-- sync_state.json  # Per-topic graph→markdown sync status
 ```
 
 ### Node Schema
@@ -349,6 +349,6 @@ Graph reads scan the entire `nodes.jsonl` linearly. For graphs with 1000+ thread
 
 ## Related Documentation
 
-- [Branch Pairing](BRANCH_PAIRING.md) - Branch pairing contract
+- [Architecture: Thread Storage](ARCHITECTURE.md#thread-storage--git-sync) - Orphan branch + worktree model
 - [Baseline Graph](baseline-graph.md) - Baseline graph pipeline and format
 - [Visualization](visualization.md) - Interactive graph visualization

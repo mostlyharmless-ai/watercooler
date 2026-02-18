@@ -26,7 +26,7 @@ A file-based collaboration protocol for agentic coding projects. It provides:
 - **Ball ownership** tracking - always clear who has the next action
 - **Structured entries** with roles (planner, critic, implementer) and types (Plan, Decision, Note)
 - **Search** for recalling past decisions and context
-- **Branch pairing** - threads branch mirrors code branch automatically
+- **Branch scoping** - entries auto-tagged with code branch for context
 
 Think of it as "git-native project memory" - every decision, discussion, and handoff is versioned and searchable.
 
@@ -79,7 +79,7 @@ See [INSTALLATION.md](INSTALLATION.md) for setup options.
 1. Configure your MCP client with the watercooler-cloud server
 2. Start writing via MCP tools
 
-That's it. The MCP server handles installation automatically via `uvx`, and threads directories and branch pairing are created on first write.
+That's it. The MCP server handles installation automatically via `uvx`, and the orphan branch and worktree are created on first write.
 
 ### How do I configure my MCP client?
 
@@ -124,38 +124,29 @@ The `uvx` command (from `uv`) automatically downloads and runs watercooler-mcp i
 
 **For CLI usage or development**: Yes, use `pip install -e .[mcp]` from a clone of the repository.
 
-### How does the agent know where my threads repo is?
+### Where do threads live?
 
-The MCP server automatically derives the threads repo from your code repo using a naming convention:
+Threads live on an **orphan branch** (`watercooler/threads`) inside your code
+repository. The MCP server accesses this branch via a git worktree at
+`~/.watercooler/worktrees/<repo>/`.
 
-- Code repo: `github.com/myorg/myproject`
-- Threads repo: `github.com/myorg/myproject-threads` (default pattern)
+There is no separate `-threads` repository. Everything stays in the same repo.
 
 On first write, the server:
 1. Detects your code repo from `code_path`
-2. Derives the threads repo URL (appends `-threads` suffix)
-3. Clones it as a sibling directory (e.g., `../myproject-threads`)
-4. Creates matching branches automatically
-
-To customize the pattern (e.g., for GitLab or self-hosted), set `WATERCOOLER_THREADS_PATTERN` in your MCP config's `env` block.
-
-### Where do threads live?
-
-In a paired repository: `<your-repo>-threads`
+2. Creates the `watercooler/threads` orphan branch (if it doesn't exist)
+3. Sets up a worktree at `~/.watercooler/worktrees/<repo>/`
+4. Tags entries with `code_branch` metadata for branch scoping
 
 ```
-myproject/              # Your code
-myproject-threads/      # Your threads (auto-created)
-  ├── my-feature.md     # Human-readable markdown
-  └── graph/
-      └── baseline/
-          ├── manifest.json       # Global manifest
-          ├── search-index.jsonl  # Embeddings for cross-thread search
-          └── threads/            # Per-thread data (source of truth)
-              └── my-feature/
-                  ├── meta.json       # Thread metadata (status, ball, summary)
-                  ├── entries.jsonl   # Entry nodes
-                  └── edges.jsonl     # Thread-local edges
+~/.watercooler/worktrees/myproject/    # Worktree (orphan branch)
+  ├── my-feature.md                    # Human-readable markdown
+  └── .watercooler/
+      ├── nodes.jsonl                  # Thread and entry nodes
+      ├── edges.jsonl                  # Relationships
+      ├── search-index.jsonl           # Embeddings for semantic search
+      ├── manifest.jsonl               # Metadata manifest
+      └── locks/                       # Topic locks
 ```
 
 ### How do I set my agent identity?
@@ -192,24 +183,27 @@ The JSONL graph is the source of truth; markdown is a projection for human reada
 
 You can always read the `.md` files directly - they're real markdown. But writes go through the graph layer.
 
-### What's the relationship between my code repo and threads repo?
+### How are threads scoped to my code branch?
 
-**1:1 branch pairing**:
+Entries are tagged with **`code_branch` metadata** (auto-populated from the
+current code branch). When you read a thread, only entries for the active
+branch are shown by default:
 
 ```
-Code: main              ↔  Threads: main
-Code: feature/auth      ↔  Threads: feature/auth
-Code: fix/bug-123       ↔  Threads: fix/bug-123
+Working on feature/auth  →  see entries tagged code_branch=feature/auth
+Switch to main           →  see entries tagged code_branch=main
+Pass code_branch="*"     →  see all entries across branches
 ```
 
-When you create a code branch, the matching threads branch is created automatically on first write. This keeps discussions scoped to the work they describe.
+No branch switching happens in the threads worktree — all branches share the
+same orphan branch. Scoping is purely metadata-based.
 
-### Why separate repos instead of a folder in my code repo?
+### Why an orphan branch instead of a folder in my code repo?
 
-- **Clean git history**: Code commits separate from discussion commits
-- **Different access patterns**: Threads sync frequently, code syncs on push
-- **Size management**: Thread history doesn't bloat code repo
-- **Permissions**: Can have different access controls if needed
+- **Clean git history**: Thread commits never appear in code `git log` or trigger CI
+- **Single repo**: No companion `-threads` repository to create, manage, or sync
+- **Automatic setup**: Worktree and branch created on first write — zero config
+- **No branch mirroring**: Entries tagged with `code_branch` instead of separate git branches
 
 ---
 
@@ -356,14 +350,11 @@ Locks are topic-specific and have TTL (default 30 seconds, configurable via `WCO
 
 ### Can I work offline?
 
-Yes. Threads are local files until you push:
+Yes. Threads are local files in the worktree until you push:
 
-1. Write entries offline
-2. Commits queue locally
-3. Push when back online
-4. Conflicts auto-resolve via content-aware merging
-
-The async coordinator batches commits, so even rapid offline work results in clean history.
+1. Write entries offline (commits to orphan branch locally)
+2. Push when back online (rebase+retry handles divergence)
+3. JSONL append-only format minimizes conflicts
 
 ---
 
@@ -475,10 +466,10 @@ The format is `<platform>:<model>:<role>`. Ensure you include all three parts se
 **Symptom**: Local changes not appearing on GitHub
 
 **Check**:
-1. Run `watercooler_health()` - check git status
+1. Run `watercooler_health()` - check git and worktree status
 2. Verify SSH keys / GitHub auth: `gh auth status`
-3. Check async coordinator logs: `~/.watercooler/logs/`
-4. Check branch parity: `watercooler_health(code_path=".")`
+3. Check server logs: `~/.watercooler/logs/`
+4. Verify worktree exists: `ls ~/.watercooler/worktrees/<repo>/`
 
 ### Entry summaries not generating
 

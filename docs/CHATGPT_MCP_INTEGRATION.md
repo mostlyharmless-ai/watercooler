@@ -222,10 +222,8 @@ which gives each tool call an explicit identity. For a default fallback identity
       "watercooler-mcp"
     ],
     "env": {
-      "WATERCOOLER_THREADS_PATTERN": "git@github.com:{org}/{repo}-threads.git",
       "WATERCOOLER_GIT_AUTHOR": "Your Name",
-      "WATERCOOLER_GIT_EMAIL": "your@email.com",
-      "WATERCOOLER_AUTO_BRANCH": "1"
+      "WATERCOOLER_GIT_EMAIL": "your@email.com"
     }
   }
 }
