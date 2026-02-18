@@ -599,12 +599,13 @@ is your repository's directory name (e.g., `myproject` for `~/projects/myproject
    `watercooler_health` with `code_path` pointing to your repo). This creates
    the orphan branch and worktree at `~/.watercooler/worktrees/<repo>/`.
 
-2. **Copy thread files** into the worktree:
+2. **Copy thread markdown files** into the worktree:
    ```bash
    WORKTREE="$HOME/.watercooler/worktrees/<repo>"
    cp ../<repo>-threads/*.md "$WORKTREE"/
-   cp -r ../<repo>-threads/graph/ "$WORKTREE"/graph/ 2>/dev/null || true
    ```
+   Graph data (`.watercooler/` internals) is **not portable** from the old layout
+   and will be rebuilt automatically on the next reindex or enrich operation.
 
 3. **Commit on the orphan branch**:
    ```bash
