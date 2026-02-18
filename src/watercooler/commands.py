@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
-from .fs import write, thread_path, lock_path_for_topic, utcnow_iso, read_body, is_closed, discover_thread_files
+from .fs import write, thread_path, find_thread_path, lock_path_for_topic, utcnow_iso, read_body, is_closed, discover_thread_files
 from .lock import AdvisoryLock
 from .baseline_graph.writer import get_thread_from_graph, get_entries_for_thread
+from .baseline_graph.reader import list_threads_from_graph, is_graph_available
 from .thread_entries import parse_thread_header, parse_thread_entries
 from .agents import _counterpart_of, _canonical_agent, _default_agent_and_role
 from .path_resolver import load_template, resolve_templates_dir
@@ -20,12 +21,15 @@ except ImportError:
 
 
 def _thread_meta_from_graph(threads_dir: Path, topic: str) -> tuple[str, str, str, str]:
-    """Get thread metadata from graph, with markdown fallback.
+    """Get thread metadata from graph, with markdown fallback for writes.
+
+    Write operations (handoff, ack, set_ball) need current state even when
+    graph is unavailable. Falls back to markdown parsing so write commands
+    work on repos without a graph.
 
     Returns:
-        Tuple of (title, status, ball, last_updated) or defaults if not found
+        Tuple of (title, status, ball, last_updated) or defaults if not found.
     """
-    # Try graph first
     thread = get_thread_from_graph(threads_dir, topic)
     if thread:
         return (
@@ -34,7 +38,7 @@ def _thread_meta_from_graph(threads_dir: Path, topic: str) -> tuple[str, str, st
             thread.get("ball", ""),
             thread.get("last_updated", ""),
         )
-    # Fall back to markdown parsing if graph data unavailable
+    # Fallback to markdown for write-side operations
     tp = thread_path(topic, threads_dir)
     if tp.exists():
         return parse_thread_header(tp)
@@ -285,10 +289,26 @@ def set_ball(topic: str, *, threads_dir: Path, ball: str) -> Path:
 
 
 def list_threads(*, threads_dir: Path, open_only: bool | None = None) -> list[tuple[str, str, str, str, Path, bool]]:
-    """Return list of (title, status, ball, updated_iso, path, is_new)."""
+    """Return list of (title, status, ball, updated_iso, path, is_new).
+
+    Uses graph as primary source for topic discovery. Falls back to
+    markdown file scanning only when no graph is available.
+    """
     out: list[tuple[str, str, str, str, Path, bool]] = []
     if not threads_dir.exists():
         return out
+
+    # Graph-first: discover topics from graph
+    if is_graph_available(threads_dir):
+        graph_threads = list_threads_from_graph(threads_dir, open_only)
+        for gt in graph_threads:
+            p = thread_path(gt.topic, threads_dir)
+            who = (_last_entry_by_from_graph(threads_dir, gt.topic) or "").strip().lower()
+            is_new = bool(who and who != (gt.ball or "").strip().lower()) and not is_closed(gt.status)
+            out.append((gt.title, gt.status, gt.ball, gt.last_updated, p, is_new))
+        return out
+
+    # Fallback: discover topics from markdown files (no graph available)
     for p in discover_thread_files(threads_dir):
         topic = p.stem
         title, status, ball, updated = _thread_meta_from_graph(threads_dir, topic)
@@ -297,7 +317,6 @@ def list_threads(*, threads_dir: Path, open_only: bool | None = None) -> list[tu
         if open_only is False and not is_closed(status):
             continue
         who = (_last_entry_by_from_graph(threads_dir, topic) or "").strip().lower()
-        # NEW marker if last entry author differs from current ball owner
         is_new = bool(who and who != (ball or "").strip().lower()) and not is_closed(status)
         out.append((title, status, ball, updated, p, is_new))
     return out

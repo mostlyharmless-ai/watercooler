@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from watercooler import fs as _fs
+
 logger = logging.getLogger(__name__)
 
 
@@ -181,10 +183,10 @@ def write_thread_markdown(
     Returns:
         Path to written file
     """
-    thread_path = threads_dir / f"{topic}.md"
-    _atomic_write_text(thread_path, content)
-    logger.debug(f"Wrote thread markdown: {thread_path}")
-    return thread_path
+    tp = _fs.thread_path(topic, threads_dir)
+    _atomic_write_text(tp, content)
+    logger.debug(f"Wrote thread markdown: {tp}")
+    return tp
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -265,21 +267,21 @@ def append_entry_and_project(
     Returns:
         Path to updated file, or None on error
     """
-    thread_path = threads_dir / f"{topic}.md"
+    tp = _fs.thread_path(topic, threads_dir)
 
-    if not thread_path.exists():
+    if not tp.exists():
         # Need to create from scratch
         return project_and_write_thread(threads_dir, topic)
 
     try:
-        existing = thread_path.read_text(encoding="utf-8")
+        existing = tp.read_text(encoding="utf-8")
         entry_block = project_entry_to_markdown(entry)
 
         # Append entry (ensure single newline separation)
         new_content = existing.rstrip() + "\n\n" + entry_block
 
         write_thread_markdown(threads_dir, topic, new_content)
-        return thread_path
+        return tp
 
     except Exception as e:
         logger.error(f"Failed to append entry to {topic}: {e}")
@@ -306,14 +308,14 @@ def update_header_and_write(
     Returns:
         Path to updated file, or None on error
     """
-    thread_path = threads_dir / f"{topic}.md"
+    tp = _fs.thread_path(topic, threads_dir)
 
-    if not thread_path.exists():
+    if not tp.exists():
         logger.warning(f"Thread file not found for header update: {topic}")
         return None
 
     try:
-        content = thread_path.read_text(encoding="utf-8")
+        content = tp.read_text(encoding="utf-8")
 
         if status is not None:
             # Replace Status: line
@@ -338,7 +340,7 @@ def update_header_and_write(
             )
 
         write_thread_markdown(threads_dir, topic, content)
-        return thread_path
+        return tp
 
     except Exception as e:
         logger.error(f"Failed to update header for {topic}: {e}")
@@ -376,7 +378,7 @@ def create_thread_file(
     from datetime import datetime, timezone
 
     threads_dir.mkdir(parents=True, exist_ok=True)
-    thread_path = threads_dir / f"{topic}.md"
+    tp = _fs.thread_path(topic, threads_dir)
 
     if created is None:
         created = datetime.now(timezone.utc).isoformat()
@@ -389,7 +391,7 @@ def create_thread_file(
     )
 
     write_thread_markdown(threads_dir, topic, content)
-    return thread_path
+    return tp
 
 
 # ============================================================================
@@ -491,8 +493,7 @@ def project_graph(
     # Process each topic
     for topic in target_topics:
         try:
-            thread_path = threads_dir / f"{topic}.md"
-            file_exists = thread_path.exists()
+            file_exists = _fs.find_thread_path(topic, threads_dir) is not None
 
             # Check if we should process this topic
             if mode == "missing" and file_exists:

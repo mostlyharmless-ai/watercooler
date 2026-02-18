@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from watercooler import fs as _fs
 from .config import PipelineConfig
 from .state import PipelineState
 from .. import storage
@@ -151,8 +152,8 @@ class BaselineGraphRunner:
             current_topics.add(topic)
 
             # Get thread file mtime
-            thread_path = self.config.threads_dir / f"{topic}.md"
-            mtime = thread_path.stat().st_mtime if thread_path.exists() else 0
+            tp = _fs.find_thread_path(topic, self.config.threads_dir)
+            mtime = tp.stat().st_mtime if tp else 0
 
             # Collect entry summaries and embeddings
             entry_summaries = {}
@@ -205,8 +206,8 @@ class BaselineGraphRunner:
         ):
             # Check if thread changed (incremental mode)
             if self.config.incremental and self._state:
-                thread_path = self.config.threads_dir / f"{thread.topic}.md"
-                mtime = thread_path.stat().st_mtime if thread_path.exists() else 0
+                tp = _fs.find_thread_path(thread.topic, self.config.threads_dir)
+                mtime = tp.stat().st_mtime if tp else 0
 
                 if self._state.is_thread_changed(thread.topic, mtime, len(thread.entries)):
                     # Thread changed, mark for reprocessing

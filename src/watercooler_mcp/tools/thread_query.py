@@ -36,18 +36,20 @@ from ..helpers import (
     _format_warnings_for_response,
     # Thread parsing
     _extract_thread_metadata_from_md,  # MD-only: for hosted mode
-    _get_thread_metadata,  # Canonical: graph with MD fallback
+    _get_thread_metadata,  # Canonical: graph-first
     _resolve_format,
     # Entry loading
     _entry_header_payload,
     _entry_full_payload,
     # Graph helpers
     _track_access,
+    _use_graph_for_reads,
     _load_entries,
     _list_threads,
     _get_thread_summary,
     _scan_thread_entries,
 )
+from watercooler.baseline_graph.reader import read_thread_from_graph
 from ..errors import (
     ContextError,
     EntryNotFoundError,
@@ -496,26 +498,34 @@ def _read_thread_impl(
         if not threads_dir.exists():
             threads_dir.mkdir(parents=True, exist_ok=True)
 
-        thread_path = fs.thread_path(topic, threads_dir)
-
-        if not thread_path.exists():
-            raise ThreadNotFoundError(topic=topic)
+        # Check thread existence via graph (source of truth)
+        if _use_graph_for_reads(threads_dir):
+            graph_result = read_thread_from_graph(threads_dir, topic)
+            if not graph_result:
+                raise ThreadNotFoundError(topic=topic)
+        else:
+            # No graph available — check markdown as last resort
+            thread_path = fs.thread_path(topic, threads_dir)
+            if not thread_path.exists():
+                raise ThreadNotFoundError(topic=topic)
 
         # Track thread access (non-blocking)
         _track_access(threads_dir, "thread", topic)
 
-        # Read full thread content
-        content = fs.read_body(thread_path)
+        # Serve markdown format directly from projection file
         if resolved_format == "markdown" and not summary_only:
-            return _format_warnings_for_response(content)
+            thread_path = fs.thread_path(topic, threads_dir)
+            if thread_path.exists():
+                content = fs.read_body(thread_path)
+                return _format_warnings_for_response(content)
 
-        # Load entries from graph (canonical) with MD fallback
+        # Load entries from graph (canonical)
         load_error, entries, summaries = _load_entries(topic, context, code_branch=code_branch)
         if load_error:
             return load_error
 
-        # Extract metadata from graph (preferred) with MD fallback
-        title, status, ball, last = _get_thread_metadata(threads_dir, topic, content)
+        # Extract metadata from graph
+        title, status, ball, last = _get_thread_metadata(threads_dir, topic)
         thread_summary = _get_thread_summary(threads_dir, topic)
 
         if summary_only:

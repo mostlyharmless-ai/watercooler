@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
+from watercooler import fs as _fs
 from watercooler.fs import discover_thread_files
 from watercooler.baseline_graph import storage
 from watercooler.baseline_graph.export import (
@@ -1157,9 +1158,9 @@ def sync_entry_structure_only(
     Returns:
         True if sync succeeded, False otherwise
     """
-    thread_path = threads_dir / f"{topic}.md"
-    if not thread_path.exists():
-        logger.warning(f"Thread file not found for structural sync: {thread_path}")
+    thread_path = _fs.find_thread_path(topic, threads_dir)
+    if not thread_path:
+        logger.warning(f"Thread file not found for structural sync: {topic}")
         return False
 
     try:
@@ -1486,9 +1487,9 @@ def sync_entry_to_graph(
             stacklevel=2,
         )
         _sync_entry_deprecation_warned = True
-    thread_path = threads_dir / f"{topic}.md"
-    if not thread_path.exists():
-        logger.warning(f"Thread file not found for sync: {thread_path}")
+    thread_path = _fs.find_thread_path(topic, threads_dir)
+    if not thread_path:
+        logger.warning(f"Thread file not found for sync: {topic}")
         return False
 
     try:
@@ -1728,9 +1729,9 @@ def sync_thread_to_graph(
     Returns:
         True if sync succeeded, False otherwise
     """
-    thread_path = threads_dir / f"{topic}.md"
-    if not thread_path.exists():
-        logger.warning(f"Thread file not found for sync: {thread_path}")
+    thread_path = _fs.find_thread_path(topic, threads_dir)
+    if not thread_path:
+        logger.warning(f"Thread file not found for sync: {topic}")
         return False
 
     try:
@@ -2606,8 +2607,8 @@ def recover_graph(
     # Count for dry run
     if dry_run:
         for topic in target_topics:
-            thread_path = threads_dir / f"{topic}.md"
-            if thread_path.exists():
+            thread_path = _fs.find_thread_path(topic, threads_dir)
+            if thread_path:
                 try:
                     parsed = parse_thread_file(thread_path, generate_summaries=False)
                     if parsed:
@@ -2633,8 +2634,8 @@ def recover_graph(
             if success:
                 result.threads_recovered += 1
                 # Count entries from the thread
-                thread_path = threads_dir / f"{topic}.md"
-                if thread_path.exists():
+                thread_path = _fs.find_thread_path(topic, threads_dir)
+                if thread_path:
                     parsed = parse_thread_file(thread_path, generate_summaries=False)
                     if parsed:
                         result.entries_parsed += len(parsed.entries)
