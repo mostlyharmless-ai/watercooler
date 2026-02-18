@@ -161,13 +161,10 @@ git push origin main
 
 **Automatic Validation**: All write operations (`say`, `ack`, `handoff`, `set_status`) automatically validate branch pairing before execution. If branches don't match, the operation is blocked with a clear error message and recovery steps.
 
-**MCP Tools for Branch Management**:
-
-- `watercooler_validate_branch_pairing` - Explicitly check branch pairing status
-- `watercooler_sync_branch_state` - Synchronize branch state (create, delete, merge, checkout)
-- `watercooler_audit_branch_pairing` - Comprehensive audit of all branches across repo pair
-- `watercooler_recover_branch_state` - Diagnose and recover from branch state inconsistencies
-- `watercooler_reconcile_parity` - Reconcile parity state (pull threads if behind, retry push)
+**Branch Sync**: Branch pairing is enforced automatically by the write-path
+middleware. All write operations run preflight checks that detect mismatches
+and auto-remediate when safe. Use `watercooler_health(code_path=".")` to
+inspect current parity status.
 
 **Enforcement Rules**:
 
@@ -178,11 +175,9 @@ git push origin main
 
 **Common Scenarios**:
 
-- **Branch mismatch detected**: Use `watercooler_sync_branch_state` with `operation="checkout"` to sync
-- **Orphaned threads branch**: Use `watercooler_audit_branch_pairing` to identify, then `sync_branch_state` with `operation="delete"` to clean up
-- **Git state issues**: Use `watercooler_recover_branch_state` to diagnose and fix rebase conflicts, detached HEAD, etc.
-- **Threads behind origin**: Use `watercooler_reconcile_parity` to pull latest commits and sync state
-- **Push failed / pending push**: Use `watercooler_reconcile_parity` to retry the push with rebase-on-reject
+- **Branch mismatch detected**: The preflight auto-remediation will attempt to sync branches on the next write operation
+- **Git state issues**: Check `watercooler_health(code_path=".")` for diagnostic details
+- **Threads behind origin**: The preflight system automatically pulls with rebase when safe
 
 ## Auto-Remediation System
 
@@ -248,10 +243,10 @@ The following states block writes and require explicit action:
    - Blocks to prevent entries with incorrect `Code-Branch` metadata
    - User must either checkout code to the feature branch or merge threads to main
 
-2. **Threads Behind Origin → Block (use `reconcile_parity`)**
+2. **Threads Behind Origin → Block (auto-remediation pulls)**
    - Detects when threads repo is behind origin (another agent pushed commits)
    - Blocks to prevent auto-pulling changes that may conflict
-   - Use `watercooler_reconcile_parity` to pull and sync, then retry
+   - Auto-remediation pulls with rebase when safe; retry the write operation
 
 3. **Code Behind Origin → Block**
    - Detects when code repo is behind origin
@@ -330,7 +325,7 @@ When the git remote is unreachable (network issues, VPN disconnected, etc.):
 **Recovery**:
 1. Restore network connectivity
 2. Retry the write operation
-3. If commits were made locally before disconnect, use `watercooler_reconcile_parity` to push pending commits
+3. If commits were made locally before disconnect, retry the write operation — the preflight system will push pending commits
 
 **Future Enhancement** (not implemented): Opt-in local-only mode for offline work with explicit sync on reconnect.
 
@@ -348,13 +343,11 @@ Force-push scenarios are detected through **divergence detection**: when the loc
 **Error Message**:
 ```
 Threads branch is N commits behind origin.
-Use watercooler_reconcile_parity or
-watercooler_sync_branch_state with operation='recover' to sync.
 ```
 
-**Recovery Options**:
-1. `watercooler_reconcile_parity` - Pulls threads with rebase and pushes pending commits
-2. `watercooler_sync_branch_state(operation='recover')` - More comprehensive recovery for complex divergence
+**Recovery**: The preflight auto-remediation pulls threads with rebase and
+retries the push. If auto-remediation cannot resolve the divergence, manual
+git intervention may be needed.
 
 **Note**: The system never force-pushes (neutral origin principle). If remote was force-pushed, the local agent must explicitly recover.
 
@@ -398,7 +391,7 @@ architectural limitation that affects how push failures are reported.
 **Workarounds for Async Limitations**:
 - Use `watercooler_sync(action='status')` to check actual async queue state
 - Use `watercooler_sync(action='now')` to flush the queue and push immediately
-- Use `watercooler_reconcile_parity` to force sync and update parity state
+- Retry the write operation — the preflight system will sync and update parity state
 - Set `priority_flush=True` on critical writes to flush queue after that entry
 
 **Future Enhancement**: Upgrade async path to use unified `push_after_commit()`

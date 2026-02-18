@@ -506,7 +506,7 @@ The format is `<platform>:<model>:<role>`. Ensure you include all three parts se
 1. Run `watercooler_health()` - check git status
 2. Verify SSH keys / GitHub auth: `gh auth status`
 3. Check async coordinator logs: `~/.watercooler/logs/`
-4. Force sync: `watercooler_sync_branch_state()`
+4. Check branch parity: `watercooler_health(code_path=".")`
 
 ### Smart query returns empty results
 
