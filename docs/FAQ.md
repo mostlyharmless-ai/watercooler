@@ -128,7 +128,8 @@ The `uvx` command (from `uv`) automatically downloads and runs watercooler-mcp i
 
 Threads live on an **orphan branch** (`watercooler/threads`) inside your code
 repository. The MCP server accesses this branch via a git worktree at
-`~/.watercooler/worktrees/<repo>/`.
+`~/.watercooler/worktrees/<repo>/` (where `<repo>` is your repository's
+directory name, e.g., `myproject` for `~/projects/myproject`).
 
 There is no separate `-threads` repository. Everything stays in the same repo.
 
@@ -194,6 +195,10 @@ Working on feature/auth  →  see entries tagged code_branch=feature/auth
 Switch to main           →  see entries tagged code_branch=main
 Pass code_branch="*"     →  see all entries across branches
 ```
+
+Most read tools (`watercooler_read_thread`, `watercooler_list_thread_entries`,
+`watercooler_get_thread_entry_range`, etc.) accept a `code_branch` parameter.
+See the [MCP Server Reference](mcp-server.md) for full parameter details.
 
 No branch switching happens in the threads worktree — all branches share the
 same orphan branch. Scoping is purely metadata-based.

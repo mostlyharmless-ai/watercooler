@@ -62,7 +62,7 @@ For fine-grained control, see [Environment Variables Reference](ENVIRONMENT_VARS
 - Agent identity (`WATERCOOLER_AGENT`)
 - Thread directory override (`WATERCOOLER_DIR`)
 - Git authorship (`WATERCOOLER_GIT_AUTHOR`, `WATERCOOLER_GIT_EMAIL`)
-- And 20+ other optional settings
+- And other optional settings (logging, sync tuning, baseline graph, etc.)
 
 ---
 

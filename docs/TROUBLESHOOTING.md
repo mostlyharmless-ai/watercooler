@@ -584,38 +584,39 @@ Per-topic advisory locks prevent concurrent writes to the same thread.
 Git sync is handled automatically by write-path middleware (`lock → pull →
 write → commit → push` with rebase+retry). Use the health tool to diagnose:
 
-```python
-watercooler_health(code_path=".")
-```
+Call `watercooler_health` with `code_path` pointing to your repo root. The health
+output shows the resolved worktree path and sync status.
 
 ---
 
 ## Migrating from a separate `-threads` repository
 
 If you previously used the separate `<repo>-threads` repository model, your
-thread data needs to move to the orphan branch:
+thread data needs to move to the orphan branch. In the examples below, `<repo>`
+is your repository's directory name (e.g., `myproject` for `~/projects/myproject`).
 
-1. **Copy thread files** into the worktree:
+1. **Trigger worktree creation** by calling any Watercooler MCP tool (e.g.,
+   `watercooler_health` with `code_path` pointing to your repo). This creates
+   the orphan branch and worktree at `~/.watercooler/worktrees/<repo>/`.
+
+2. **Copy thread files** into the worktree:
    ```bash
    WORKTREE="$HOME/.watercooler/worktrees/<repo>"
-   mkdir -p "$WORKTREE"
-   # Trigger worktree creation first:
-   watercooler_health(code_path=".")
-   # Then copy your thread files:
    cp ../<repo>-threads/*.md "$WORKTREE"/
    cp -r ../<repo>-threads/graph/ "$WORKTREE"/graph/ 2>/dev/null || true
    ```
 
-2. **Commit on the orphan branch**:
+3. **Commit on the orphan branch**:
    ```bash
    cd "$WORKTREE"
    git add -A && git commit -m "migrate threads from separate repo"
    git push origin watercooler/threads
    ```
 
-3. **Verify** with `watercooler_health(code_path=".")` — threads should appear.
+4. **Verify** by calling `watercooler_health` again — threads should appear in
+   the output.
 
-4. **Archive** the old `-threads` repo once you confirm everything works.
+5. **Archive** the old `-threads` repo once you confirm everything works.
 
 ---
 

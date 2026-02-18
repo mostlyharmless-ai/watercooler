@@ -153,7 +153,8 @@ Authentication approach approved. All edge cases covered.
 ## Thread Storage & Git Sync
 
 Threads live on an **orphan branch** (`watercooler/threads`) inside the code
-repository, accessed via a git worktree at `~/.watercooler/worktrees/<repo>/`.
+repository, accessed via a git worktree at `~/.watercooler/worktrees/<repo>/`
+(where `<repo>` is your repository's directory name).
 
 ```
 Code Repo (main, feature/…)
