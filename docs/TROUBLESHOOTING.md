@@ -566,7 +566,7 @@ git checkout main  # or your target branch
 Per-topic advisory locks prevent concurrent writes to the same thread.
 
 **Lock Mechanism:**
-- Locks are stored in the worktree at `<worktree>/.wc-locks/<topic>.lock`
+- Locks are stored in the worktree at `<worktree>/.watercooler/locks/<topic>.lock`
 - **Automatic TTL cleanup**: Locks expire after 60 seconds
 
 **Resolution:**
