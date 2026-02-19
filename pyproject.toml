@@ -49,8 +49,9 @@ dev = [
     "tqdm>=4.0",
 ]
 mcp = [
-    "fastmcp>=2.0,<3",  # pin until fastmcp 3.x migration (#189) — keep in sync with [dependencies]
-    "python-ulid>=2.0",
+    # All MCP deps (fastmcp, python-ulid) are already in [project].dependencies.
+    # This extras group is kept as a valid install target (pip install .[mcp])
+    # but carries no additional packages.
 ]
 http = [
     "fastapi>=0.100",

@@ -584,8 +584,11 @@ Per-topic advisory locks prevent concurrent writes to the same thread.
 Git sync is handled automatically by write-path middleware (`lock → pull →
 write → commit → push` with rebase+retry). Use the health tool to diagnose:
 
-Call `watercooler_health` with `code_path` pointing to your repo root. The health
-output shows the resolved worktree path and sync status.
+```
+watercooler_health(code_path="/path/to/your/repo")
+```
+
+The health output shows the resolved worktree path and sync status.
 
 ---
 
@@ -602,6 +605,8 @@ is your repository's directory name (e.g., `myproject` for `~/projects/myproject
 2. **Copy thread markdown files** into the worktree:
    ```bash
    WORKTREE="$HOME/.watercooler/worktrees/<repo>"
+   # Adjust the source path if your old threads repo is not a sibling directory.
+   # This copies top-level .md files only; subdirectories are not migrated.
    cp ../<repo>-threads/*.md "$WORKTREE"/
    ```
    Graph data (`.watercooler/` internals) is **not portable** from the old layout

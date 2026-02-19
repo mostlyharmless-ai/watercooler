@@ -52,6 +52,7 @@ threads/.watercooler/
 ├── edges.jsonl           # Relationships (thread→entry, entry→entry)
 ├── search-index.jsonl    # Embeddings for semantic search
 ├── manifest.jsonl        # Metadata manifest
+├── sync_state.json       # Per-topic graph→markdown sync status
 └── locks/                # Topic locks for concurrent write protection
 
 threads/{topic}.md        # Markdown projection (derived)
