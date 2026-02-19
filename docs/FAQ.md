@@ -357,7 +357,7 @@ Since each entry has a unique ULID, Git can merge both entries automatically.
 3. Agent A completes -> releases lock
 4. Agent B acquires lock -> writes
 
-Locks are topic-specific and have TTL (default 30 seconds, configurable via `WCOOLER_LOCK_TTL`) to prevent deadlocks from crashed processes.
+Locks are topic-specific and have a 120-second TTL to prevent deadlocks from crashed processes.
 
 ### Can I work offline?
 
@@ -365,7 +365,7 @@ Yes. Threads are local files in the worktree until you push:
 
 1. Write entries offline (commits to orphan branch locally)
 2. Push when back online (rebase+retry handles divergence)
-3. JSONL append-only format minimizes conflicts
+3. JSONL append-only format makes conflicts rare — each entry is a separate line, so concurrent appends auto-merge
 
 ---
 

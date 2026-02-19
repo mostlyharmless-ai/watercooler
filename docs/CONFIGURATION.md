@@ -193,6 +193,9 @@ check_commit_footers = true  # Validate commit footers
 check_entry_format = true    # Validate entry format
 ```
 
+> **Note:** Removed config keys (e.g., `check_branch_pairing` from pre-orphan-branch versions) are
+> silently ignored — no config file changes needed after upgrading.
+
 ### `[baseline_graph]` Section
 
 Settings for the baseline graph module (free-tier knowledge graph generation):
