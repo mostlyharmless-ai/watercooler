@@ -624,6 +624,8 @@ is your repository's directory name (e.g., `myproject` for `~/projects/myproject
    the output.
 
 5. **Archive** the old `-threads` repo once you confirm everything works.
+   Any `graph/` or `.watercooler/` data in the old repo can be safely deleted —
+   it will be rebuilt automatically from the migrated thread files.
 
 Removed config keys (like `check_branch_pairing`) are silently ignored — no
 config file changes needed. If you previously set `WATERCOOLER_GIT_REPO` for
