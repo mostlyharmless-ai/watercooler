@@ -438,12 +438,11 @@ Update these files as needed:
 ### Installation
 
 ```bash
-# Install with all development dependencies
-pip install -e ".[dev,mcp]"
-
-# Or with specific extras
+# Install with development dependencies
 pip install -e ".[dev]"  # pytest, mypy, black, ruff
-pip install -e ".[mcp]"   # MCP server dependencies
+
+# MCP server dependencies (fastmcp, python-ulid) are core deps —
+# no extras group needed.
 ```
 
 ### Code Quality
