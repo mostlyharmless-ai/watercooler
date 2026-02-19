@@ -69,8 +69,9 @@ File-based collaboration protocol for agentic coding projects with CLI tools and
 - [Set up ball flipping](STRUCTURED_ENTRIES.md#ball-auto-flip) - Automatic handoffs
 
 ### Team Collaboration
-- [Configure branch pairing](BRANCH_PAIRING.md) - Code + threads repo pairing
-- [Understand the threads lifecycle](THREADS_REPO_LIFECYCLE.md) - Repo bootstrap and sync
+- [Thread storage & git sync](ARCHITECTURE.md#thread-storage--git-sync) - Orphan branch architecture
+- [Configuration](CONFIGURATION.md) - TOML config for sync, logging, and agent identity
+- [FAQ: Thread scoping](FAQ.md#how-are-threads-scoped-to-my-code-branch) - Branch-scoped entries via metadata
 
 ### Customization
 - [Configure environment variables](ENVIRONMENT_VARS.md) - WATERCOOLER_* vars
@@ -99,10 +100,9 @@ File-based collaboration protocol for agentic coding projects with CLI tools and
 - **[Authentication](AUTHENTICATION.md)** - GitHub OAuth, credential helpers, SSH setup
 - **[Contributing](CONTRIBUTING.md)** - Contribution guidelines and workflow
 
-### Git Sync & Branch Management
-- **[Branch Pairing](BRANCH_PAIRING.md)** - Code/threads repo pairing contract
+### Git Sync
+- **[Architecture: Thread Storage](ARCHITECTURE.md#thread-storage--git-sync)** - Orphan branch + worktree model
 - **[Graph Sync](GRAPH_SYNC.md)** - Baseline graph synchronization
-- **[Threads Repo Lifecycle](THREADS_REPO_LIFECYCLE.md)** - Repository bootstrap and states
 
 ### Advanced Topics
 - **[HTTP Transport](http-transport.md)** - Local HTTP daemon setup
@@ -124,7 +124,7 @@ File-based collaboration protocol for agentic coding projects with CLI tools and
 
 ### Intermediate
 4. Configure [Structured Entries](STRUCTURED_ENTRIES.md) - Understand entry format
-5. Set up [Branch Pairing](BRANCH_PAIRING.md) - Team collaboration
+5. Study [Architecture](ARCHITECTURE.md#thread-storage--git-sync) - Thread storage model
 6. Explore [CLI Reference](CLI_REFERENCE.md) - Full command reference
 
 ### Advanced

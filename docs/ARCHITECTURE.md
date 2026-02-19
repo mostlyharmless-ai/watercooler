@@ -28,7 +28,7 @@ Watercooler implements thread-based collaboration with a layered architecture:
 │  tools/thread_write.py │ tools/thread_query.py                  │
 ├─────────────────────────────────────────────────────────────────┤
 │                    Middleware Layer                              │
-│     middleware.py (run_with_sync) │ sync/ (git coordination)    │
+│     middleware.py (run_with_sync) │ sync/ (git primitives)      │
 ├─────────────────────────────────────────────────────────────────┤
 │                   Graph-First Layer                              │
 │   baseline_graph/writer.py │ projector.py │ sync.py │ search.py │
@@ -52,7 +52,7 @@ threads/.watercooler/
 ├── edges.jsonl           # Relationships (thread→entry, entry→entry)
 ├── search-index.jsonl    # Embeddings for semantic search
 ├── manifest.jsonl        # Metadata manifest
-├── sync_state.json       # Branch parity state
+├── sync_state.json       # Per-topic graph→markdown sync status
 └── locks/                # Topic locks for concurrent write protection
 
 threads/{topic}.md        # Markdown projection (derived)
@@ -151,48 +151,45 @@ Authentication approach approved. All edge cases covered.
 
 ---
 
-## Git Sync Architecture
+## Thread Storage & Git Sync
 
-Watercooler implements a 7-layer modular sync architecture for reliable distributed collaboration:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Layer 7: Async Coordinator (async_coordinator.py)              │
-│           Commit batching, priority flushing, retry queue       │
-├─────────────────────────────────────────────────────────────────┤
-│  Layer 6: Branch Parity (branch_parity.py)                      │
-│           Cross-repo branch sync, topic locking, auto-merge     │
-├─────────────────────────────────────────────────────────────────┤
-│  Layer 5: Local-Remote Sync (local_remote.py)                   │
-│           Single-repo L2R sync, ahead/behind tracking           │
-├─────────────────────────────────────────────────────────────────┤
-│  Layer 4: Conflict Resolution (conflict.py)                     │
-│           JSONL merge, markdown merge, metadata merge           │
-├─────────────────────────────────────────────────────────────────┤
-│  Layer 3: State Management (state.py)                           │
-│           ParityState, StateManager, live git checks            │
-├─────────────────────────────────────────────────────────────────┤
-│  Layer 2: Git Primitives (primitives.py)                        │
-│           fetch, pull, push, checkout, stash, validation        │
-├─────────────────────────────────────────────────────────────────┤
-│  Layer 1: Git CLI                                               │
-│           Subprocess calls to git                               │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Two-Repo Architecture
-
-Watercooler pairs each code repository with a dedicated threads repository:
+Threads live on an **orphan branch** (`watercooler/threads`) inside the code
+repository, accessed via a git worktree at `~/.watercooler/worktrees/<repo>/`
+(where `<repo>` is your repository's directory name).
 
 ```
-Code Repo:    org/watercooler-cloud
-Threads Repo: org/watercooler-cloud-threads
-
-Branch Pairing:
-  code:main           ↔  threads:main
-  code:feature/auth   ↔  threads:feature/auth
-  code:fix/bug-123    ↔  threads:fix/bug-123
+Code Repo (main, feature/…)
+  └── orphan branch: watercooler/threads   ← thread files live here
+        accessed via worktree at ~/.watercooler/worktrees/<repo>/
 ```
+
+### Why an orphan branch?
+
+- **Clean separation**: Thread commits never appear in code history or trigger CI
+- **Single repo**: No companion `-threads` repository to manage
+- **Automatic setup**: `_ensure_worktree()` creates the branch and worktree on
+  first write — zero manual steps
+
+### Sync Flow
+
+Every write operation follows a simple linear flow:
+
+```
+lock → pull → write → commit → push (with rebase+retry)
+```
+
+**Implementation:**
+- `middleware.py` → `run_with_sync()` orchestrates the flow
+- `sync/__init__.py` → per-topic advisory locks (serialize concurrent writes)
+- `sync/primitives.py` → git operations (fetch, pull, push with retry)
+- `sync/errors.py` → rich exception hierarchy
+
+### Branch Scoping via Metadata
+
+Entries are tagged with `code_branch` metadata (auto-populated from the current
+code branch). Read operations filter by `code_branch` so you only see entries
+relevant to the branch you're working on. Pass `code_branch="*"` to see all
+entries across branches.
 
 ### Commit Footers
 
@@ -205,44 +202,6 @@ Code-Commit: abc1234
 Watercooler-Entry-ID: 01ARZ3NdgoZmqjDLLsrwNlM2S53
 Watercooler-Topic: feature-auth
 ```
-
-### Async Batching
-
-The `AsyncSyncCoordinator` batches multiple writes into single commits:
-
-```python
-AsyncSyncCoordinator:
-  batch_window: 5s      # Time to accumulate writes
-  max_delay: 30s        # Force flush after this delay
-  max_batch_size: 50    # Max entries per commit
-  retry_backoff: exponential (max 300s)
-```
-
-**Priority flushing:** Interactive operations (say, ack, handoff) trigger immediate flush.
-
-### Conflict Resolution
-
-Pluggable merge strategies for different file types:
-
-| File Type | Strategy |
-|-----------|----------|
-| `nodes.jsonl` | Line-based merge (JSONL is append-friendly) |
-| `edges.jsonl` | Line-based merge |
-| `*.md` | Block-aware merge (preserve entry boundaries) |
-| `sync_state.json` | Metadata merge (take latest timestamps) |
-
-### Parity States
-
-```python
-ParityStatus:
-  SYNCED      # Local and remote are identical
-  AHEAD       # Local has commits not on remote
-  BEHIND      # Remote has commits not in local
-  DIVERGED    # Both have unique commits (needs merge)
-  IN_PROGRESS # Sync operation in progress
-```
-
-**Implementation:** `src/watercooler_mcp/sync/` package
 
 ---
 
@@ -260,10 +219,6 @@ Priority (lowest to highest):
 ### Configuration Sections
 
 ```toml
-[common]
-threads_pattern = "https://github.com/{org}/{repo}-threads"
-threads_suffix = "-threads"
-
 [agent]
 name = "Claude Code"
 default_spec = "implementer"
@@ -273,10 +228,6 @@ author = "Your Name"
 email = "you@example.com"
 
 [sync]
-async_sync = true
-batch_window = 5        # seconds
-max_delay = 30          # seconds
-max_batch_size = 50
 max_retries = 5
 
 [logging]
@@ -329,8 +280,8 @@ Watercooler implements the Model Context Protocol (MCP) for AI agent integration
 - `watercooler_graph_recover` - Repair corrupted graph state
 - `watercooler_graph_health` - Diagnostic health check
 
-**Branch Sync**: Branch pairing is enforced automatically by write-path
-middleware (preflight checks + auto-remediation). No standalone tools required.
+**Sync Tools** (`tools/sync.py`):
+- `watercooler_health` - Git and system health check
 
 ### Write Flow (Complete)
 
@@ -360,10 +311,9 @@ User calls watercooler_say()
              │
              ▼
 ┌─────────────────────────┐
-│   Async Sync            │
-│  • Queue commit         │
-│  • Batch or flush       │
-│  • git add/commit/push  │
+│   Git Sync              │
+│  • git add/commit       │
+│  • push (rebase+retry)  │
 └────────────┬────────────┘
              │
              ▼
@@ -400,18 +350,19 @@ watercooler-cloud/
 │       ├── tools/                # MCP tool implementations
 │       │   ├── thread_write.py   # say, ack, handoff
 │       │   ├── thread_query.py   # list, read, get
-│       │   ├── graph.py          # enrich, recover
-│       │   └── branch_parity.py  # sync validation
-│       ├── sync/                 # 7-layer git sync
-│       │   ├── primitives.py     # Git operations
-│       │   ├── state.py          # Parity state
-│       │   ├── conflict.py       # Merge strategies
-│       │   ├── local_remote.py   # L2R sync
-│       │   ├── branch_parity.py  # branch sync
-│       │   └── async_coordinator.py  # Batching
+│       │   ├── graph.py          # enrich, recover, health
+│       │   ├── diagnostic.py     # diagnostic tools
+│       │   ├── memory.py         # memory backend tools
+│       │   ├── migration.py      # migration tools
+│       │   └── sync.py           # health, sync tools
+│       ├── sync/                 # Git sync primitives
+│       │   ├── __init__.py       # Advisory locking, topic sanitization
+│       │   ├── primitives.py     # Git operations (fetch, pull, push, stash)
+│       │   └── errors.py         # Rich exception hierarchy
 │       ├── server.py             # FastMCP server
 │       ├── middleware.py         # run_with_sync wrapper
-│       └── config.py             # MCP config
+│       ├── validation.py         # Context validation
+│       └── config.py             # MCP config (orphan branch, worktree)
 │
 ├── tests/                        # Test suite
 ├── docs/                         # Documentation

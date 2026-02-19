@@ -2,7 +2,7 @@
 
 Common issues and solutions for the watercooler MCP server.
 
-> Replace any repo-local thread folders with your actual threads repository (for example, the sibling `../<repo>-threads` directory).
+> Threads live on the `watercooler/threads` orphan branch, accessed via a worktree at `~/.watercooler/worktrees/<repo>/`.
 
 > Start with [INSTALLATION.md](INSTALLATION.md) to ensure you're following the universal flow. Many issues disappear once `code_path` and identity are configured there.
 
@@ -24,7 +24,7 @@ Common issues and solutions for the watercooler MCP server.
   - [GitHub CLI Token Expiration](#github-cli-token-expiration)
   - [SSH Agent Issues (WSL2/Headless)](#ssh-agent-issues-wsl2headless)
   - [Git Sync Issues (Cloud Mode)](#git-sync-issues-cloud-mode)
-- [Branch Parity Errors](#branch-parity-errors)
+- [Worktree Issues](#worktree-issues)
 - [Thread folder inside code repo](#thread-folder-inside-code-repo)
 - [Ball Not Flipping](#ball-not-flipping)
 - [Server Crashes or Hangs](#server-crashes-or-hangs)
@@ -54,7 +54,7 @@ graph TD
     Q3 -->|"git command not found"| GitNotFound[<b>Git Not Found</b><br/>Jump to section below]
     Q3 -->|Git sync errors| GitSync[<b>Git Sync Issues</b><br/>Jump to section below]
     Q3 -->|"authentication failed"| GHAuth[<b>GitHub CLI Token Expiration</b><br/>Jump to section below]
-    Q3 -->|"branch parity" or "preflight"| ParityError[<b>Branch Parity Errors</b><br/>Jump to section below]
+    Q3 -->|"worktree" or "orphan branch"| WorktreeError[<b>Worktree Issues</b><br/>Jump to section below]
     Q3 -->|"JSON Parse error"| JsonEof[<b>JSON Parse Error: Unexpected EOF</b><br/>Jump to section below]
     Q3 -->|Other errors| ToolError[<b>Tools Not Working</b><br/>Jump to section below]
 
@@ -71,7 +71,7 @@ graph TD
     style GitNotFound fill:#ffcccc
     style GitSync fill:#ffcccc
     style GHAuth fill:#ffcccc
-    style ParityError fill:#ffcccc
+    style WorktreeError fill:#ffcccc
     style JsonEof fill:#ffcccc
     style ToolError fill:#ffcccc
     style WrongAgent fill:#ffffcc
@@ -185,7 +185,7 @@ No threads directory found at: /some/path/threads-local
    ```bash
    watercooler_health(code_path=".")
    ```
-   Expect `Threads Dir` to live in the sibling `<repo>-threads` directory (e.g., `/workspace/<repo>-threads`)
+   Expect `Threads Dir` to live in the worktree at `~/.watercooler/worktrees/<repo>/`
 
 3. **Remove manual overrides**
    - Unset `WATERCOOLER_DIR` in your environment or MCP config
@@ -203,14 +203,14 @@ No threads directory found at: /some/path/threads-local
 
 ### Symptom
 ```
-PermissionError: [Errno 13] Permission denied: '/workspace/<repo>-threads/thread.md'
+PermissionError: [Errno 13] Permission denied: '/home/user/.watercooler/worktrees/my-repo/thread.md'
 ```
 
 ### Solutions
 
 1. **Check directory permissions**
    ```bash
-   THREADS_DIR="../<repo>-threads"
+   THREADS_DIR="$HOME/.watercooler/worktrees/<repo>"
    ls -la "$THREADS_DIR"
    ```
 
@@ -532,32 +532,28 @@ If you enabled cloud sync via `WATERCOOLER_GIT_REPO`, here are common problems a
 - **Push rejected (non-fast-forward)**: Pull (`git pull --rebase --autostash`) and retry push
 - **Rate limits / GitHub API**: Check `watercooler_health(code_path=".")` for rate limit status
 
-## Branch Parity Errors
+## Worktree Issues
 
 ### Symptom
 Write operations (`say`, `ack`, `handoff`, `set_status`) fail with errors like:
-- "Branch parity preflight failed"
-- "Code branch 'X' but threads branch is 'Y'"
+- "Worktree not found"
+- "Orphan branch does not exist"
+- "Failed to create worktree"
 
-### Understanding Parity States
+### Common Issues
 
-| State | Meaning | Auto-Fixed? |
+| Issue | Meaning | Auto-Fixed? |
 |-------|---------|-------------|
-| `branch_mismatch` | Code and threads on different branches | Yes |
-| `main_protection` | Would write to threads:main from feature | Yes |
-| `detached_head` | Code repo not on a branch | No |
-| `code_behind_origin` | Code repo behind remote | No |
-| `rebase_in_progress` | Incomplete git rebase | No |
+| Missing worktree | Worktree at `~/.watercooler/worktrees/<repo>/` doesn't exist | Yes (on first write) |
+| Missing orphan branch | `watercooler/threads` branch not in repo | Yes (on first write) |
+| Detached HEAD | Code repo not on a branch | No |
+| Rebase in progress | Incomplete git rebase in worktree | No |
 
-### Solutions by Error Type
+### Solutions
 
-**Branch Mismatch (auto-fixed)**
-- Normally auto-fixed by checking out/creating the threads branch
-- If `WATERCOOLER_AUTO_BRANCH=0`, manually sync:
-  ```bash
-  cd ../repo-threads
-  git checkout <branch-name>
-  ```
+**Missing worktree/orphan branch (auto-fixed)**
+- The server creates both automatically on first write
+- If creation fails, check git permissions and remote access
 
 **Detached HEAD**
 ```bash
@@ -570,66 +566,90 @@ git checkout main  # or your target branch
 Per-topic advisory locks prevent concurrent writes to the same thread.
 
 **Lock Mechanism:**
-- Locks are stored in `<threads-repo>/.wc-locks/<topic>.lock`
-- **Automatic TTL cleanup**: Locks expire after 60 seconds
+- Locks are stored in the worktree at `<worktree>/.watercooler/locks/<topic>.lock`
+- **Automatic TTL cleanup**: Locks expire after 120 seconds
 
 **Resolution:**
 1. **Wait**: If another operation is genuinely in progress
-2. **Wait for TTL**: If the holder crashed, wait up to 60 seconds for auto-cleanup
+2. **Wait for TTL**: If the holder crashed, wait up to 120 seconds for auto-cleanup
 3. **Force unlock**:
    ```bash
-   watercooler unlock <topic> --threads-dir ../repo-threads --force
+   watercooler unlock <topic> --force
+   # If using a non-standard worktree path:
+   watercooler unlock <topic> --threads-dir /path/to/worktree --force
    ```
 
-**CLI unlock command:**
-```bash
-# Show lock status
-watercooler unlock <topic> --threads-dir ../repo-threads
+### Sync Recovery
 
-# Force remove lock (with --force)
-watercooler unlock <topic> --threads-dir ../repo-threads --force
+Git sync is handled automatically by write-path middleware (`lock → pull →
+write → commit → push` with rebase+retry). Use the health tool to diagnose:
+
+```
+watercooler_health(code_path="/path/to/your/repo")
 ```
 
-### Branch Sync Recovery
+The health output shows the resolved worktree path and sync status.
 
-Branch pairing is enforced automatically by write-path middleware. Use the
-health tool to diagnose parity issues:
+---
 
-```python
-watercooler_health(code_path=".")
-```
+## Migrating from a separate `-threads` repository
 
-The preflight auto-remediation system will attempt to fix common issues
-(branch mismatch, threads behind origin) on the next write operation.
+If you previously used the separate `<repo>-threads` repository model, your
+thread data needs to move to the orphan branch. In the examples below, `<repo>`
+is your repository's directory name (e.g., `myproject` for `~/projects/myproject`).
+
+1. **Trigger worktree creation** by calling any Watercooler MCP tool (e.g.,
+   `watercooler_health` with `code_path` pointing to your repo). This creates
+   the orphan branch and worktree at `~/.watercooler/worktrees/<repo>/`.
+
+2. **Copy thread markdown files** into the worktree:
+   ```bash
+   WORKTREE="$HOME/.watercooler/worktrees/<repo>"
+   # Adjust the source path if your old threads repo is not a sibling directory.
+   # This copies top-level .md files only — if you have .md files in
+   # subdirectories, copy those manually.
+   cp ../<repo>-threads/*.md "$WORKTREE"/
+   ```
+   Graph data (`.watercooler/` internals) is **not portable** from the old layout
+   and will be rebuilt automatically on the next reindex or enrich operation.
+
+3. **Commit on the orphan branch**:
+   ```bash
+   cd "$WORKTREE"
+   git add . && git commit -m "migrate threads from separate repo"
+   git push origin watercooler/threads
+   ```
+
+4. **Verify** by calling `watercooler_health` again — threads should appear in
+   the output.
+
+5. **Archive** the old `-threads` repo once you confirm everything works.
+   Any `graph/` or `.watercooler/` data in the old repo can be safely deleted —
+   it will be rebuilt automatically from the migrated thread files.
+
+Removed config keys (like `check_branch_pairing`) are silently ignored — no
+config file changes needed. If you previously set `WATERCOOLER_GIT_REPO` for
+cloud sync, you can unset it — syncing now happens automatically via the code
+repo's origin remote.
 
 ---
 
 ## Thread folder inside code repo
 
 ### Symptom
-Server resolves threads inside the code repository instead of the sibling `<repo>-threads` directory.
+Server resolves threads inside the code repository instead of the orphan branch worktree.
 
 ### Solutions
 
-1. **Confirm universal location**
+1. **Confirm worktree location**
    ```bash
    watercooler_health(code_path=".")
    ```
-   Check the `Threads Dir` line (should be the sibling `<repo>-threads` path).
+   Check the `Threads Dir` line (should be `~/.watercooler/worktrees/<repo>/`).
 
-2. **Move stray data**
-   ```bash
-   THREADS_DIR="../<repo>-threads"
-   mkdir -p "$THREADS_DIR"
-   STRAY_DIR="./threads-local"
-   if [ -d "$STRAY_DIR" ]; then
-     rsync -av --remove-source-files "$STRAY_DIR"/ "$THREADS_DIR"/
-     rm -rf "$STRAY_DIR"
-   fi
-   ```
-
-3. **Remove manual overrides**
+2. **Remove manual overrides**
    Delete any `WATERCOOLER_DIR` overrides unless you intentionally need them.
+   The server will auto-create the orphan branch and worktree on next write.
 
 ## Ball Not Flipping
 
@@ -640,8 +660,7 @@ Server resolves threads inside the code repository instead of the sibling `<repo
 
 1. **Check agents.json configuration**
    ```bash
-   THREADS_DIR="../<repo>-threads"
-   cat "$THREADS_DIR"/agents.json
+   cat ~/.watercooler/worktrees/<repo>/agents.json
    ```
 
    Should define counterparts:

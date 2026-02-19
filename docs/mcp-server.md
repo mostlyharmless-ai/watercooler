@@ -46,8 +46,6 @@ args = ["--from", "git+https://github.com/mostlyharmless-ai/watercooler-cloud@st
 
 [mcp_servers.watercooler_cloud.env]
 WATERCOOLER_AGENT = "Codex"
-WATERCOOLER_THREADS_PATTERN = "https://github.com/{org}/{repo}-threads.git"
-WATERCOOLER_AUTO_BRANCH = "1"
 ```
 
 **Claude Desktop (`~/.config/Claude/claude_desktop_config.json` on Linux, `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):**
@@ -62,9 +60,7 @@ WATERCOOLER_AUTO_BRANCH = "1"
         "watercooler-mcp"
       ],
       "env": {
-        "WATERCOOLER_AGENT": "Claude@Desktop",
-        "WATERCOOLER_THREADS_PATTERN": "https://github.com/{org}/{repo}-threads.git",
-        "WATERCOOLER_AUTO_BRANCH": "1"
+        "WATERCOOLER_AGENT": "Claude@Desktop"
       }
     }
   }
@@ -83,9 +79,7 @@ WATERCOOLER_AUTO_BRANCH = "1"
         "watercooler-mcp"
       ],
       "env": {
-        "WATERCOOLER_AGENT": "Claude@Code",
-        "WATERCOOLER_THREADS_PATTERN": "https://github.com/{org}/{repo}-threads.git",
-        "WATERCOOLER_AUTO_BRANCH": "1"
+        "WATERCOOLER_AGENT": "Claude@Code"
       }
     }
   }
@@ -104,9 +98,7 @@ WATERCOOLER_AUTO_BRANCH = "1"
         "watercooler-mcp"
       ],
       "env": {
-        "WATERCOOLER_AGENT": "Cursor",
-        "WATERCOOLER_THREADS_PATTERN": "https://github.com/{org}/{repo}-threads.git",
-        "WATERCOOLER_AUTO_BRANCH": "1"
+        "WATERCOOLER_AGENT": "Cursor"
       }
     }
   }
@@ -128,53 +120,18 @@ set this variable.
 
 Only set `WATERCOOLER_DIR` when you require a fixed threads directory (for example, while debugging environments where the server cannot infer the correct repository).
 
-### Universal thread location controls
+### Thread storage
 
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `WATERCOOLER_THREADS_BASE` | Optional root for local thread clones | _Sibling of the code repo_ |
-| `WATERCOOLER_THREADS_PATTERN` | Remote URL pattern for auto-clone | `https://github.com/{org}/{repo}-threads.git` |
-| `WATERCOOLER_THREADS_AUTO_PROVISION` | Opt-in creation of missing threads repos | `0` |
-| `WATERCOOLER_THREADS_CREATE_CMD` | Command template for provisioning | _Unset_ |
-| `WATERCOOLER_AUTO_BRANCH` | Auto create / checkout matching branch | `1` |
-
-Example (Claude Desktop, macOS):
-
-```json
-{
-  "mcpServers": {
-    "watercooler-cloud": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/mostlyharmless-ai/watercooler-cloud@stable",
-        "watercooler-mcp"
-      ],
-      "env": {
-        "WATERCOOLER_AGENT": "Claude@Desktop",
-        "WATERCOOLER_THREADS_PATTERN": "https://github.com/{org}/{repo}-threads.git",
-        "WATERCOOLER_AUTO_BRANCH": "1"
-      }
-    }
-  }
-}
-```
+Threads are stored on a `watercooler/threads` orphan branch in the code repository,
+accessed via a git worktree at `~/.watercooler/worktrees/<repo>/`. The orphan branch
+and worktree are created automatically on first write — no separate threads
+repository is needed.
 
 **Manual override:**
 
-If you set `WATERCOOLER_DIR`, that path takes priority and the sibling repo rules are skipped. Use the override sparingly--it's easy to create stray repo-local thread folders inside the code repo when this variable stays set.
-
-**Auto-provisioning (optional):**
-
-- Set `WATERCOOLER_THREADS_AUTO_PROVISION=1` to allow the server to create the
-  missing `<repo>-threads` repository when the initial clone returns
-  "repository not found".
-- Provide `WATERCOOLER_THREADS_CREATE_CMD` with a one-line shell command (for
-  example, `gh repo create {slug} --private`). The command receives useful
-  placeholders (`{slug}`, `{repo_url}`, `{code_repo}`, `{namespace}`, `{repo}`,
-  `{org}`) and its stdout/stderr is surfaced on failure.
-- Auto-provisioning is skipped when `WATERCOOLER_DIR` is set or when the remote
-  uses HTTPS.
+If you set `WATERCOOLER_DIR`, that path takes priority and the orphan branch
+worktree is skipped. Use the override sparingly — it's mainly useful for
+testing or debugging.
 
 ## Available Tools
 
@@ -183,7 +140,7 @@ All tools are namespaced as `watercooler_*`:
 ### Diagnostic Tools
 
 #### `watercooler_health`
-Check server health and configuration including branch parity, git authentication, and GitHub API status.
+Check server health and configuration including worktree status, git authentication, and GitHub API status.
 
 **Parameters:**
 - `code_path` (str): Path to code repository for parity checks (optional)
@@ -192,7 +149,7 @@ Check server health and configuration including branch parity, git authenticatio
 - Server version and agent identity
 - Threads directory configuration
 - Graph services status (LLM, embeddings)
-- Branch parity health
+- Worktree and orphan branch status
 - Git authentication status
 - GitHub CLI version and API rate limits
 
@@ -329,12 +286,11 @@ Generate index summary of all threads.
 
 > Memory query tools are available as an optional add-on. When the memory backend is enabled, additional search and query tools become available for semantic search across project context.
 
-### Branch Sync
+### Git Sync
 
-Branch pairing between code and threads repos is enforced automatically by the
-write-path middleware. All write operations (`say`, `ack`, `handoff`, `set_status`)
-run preflight checks that detect mismatches and auto-remediate when safe. Use
-`watercooler_health(code_path=".")` to inspect current branch parity status.
+Write operations follow a `lock → pull → write → commit → push` flow on the
+orphan branch worktree. Use `watercooler_health(code_path=".")` to inspect the
+current worktree and sync status.
 
 ## Configuration
 
@@ -342,11 +298,8 @@ run preflight checks that detect mismatches and auto-remediate when safe. Use
 
 - **`WATERCOOLER_AGENT`**: Agent identity (default: `Agent`). Determines entry authorship and ball ownership.
 
-- **Universal overrides (optional):**
-  - `WATERCOOLER_THREADS_BASE` -- optional override when you want all threads repos under a fixed root
-  - `WATERCOOLER_THREADS_PATTERN` -- pattern for building the remote URL
-  - `WATERCOOLER_AUTO_BRANCH` -- set to `0` to skip auto-creating the matching branch
-  - `WATERCOOLER_GIT_AUTHOR` / `WATERCOOLER_GIT_EMAIL` -- override commit metadata in the threads repo
+- **Git overrides (optional):**
+  - `WATERCOOLER_GIT_AUTHOR` / `WATERCOOLER_GIT_EMAIL` -- override commit metadata on the orphan branch
 
 - **Manual override:** `WATERCOOLER_DIR` forces a specific threads directory. Use only if you must disable universal repo discovery.
 
@@ -400,9 +353,9 @@ watercooler_handoff(
 ## Troubleshooting
 ### Git authentication issues
 
-- HTTPS is the default and uses your credential helper; ensure a manual `git push https://...` succeeds.
-- For SSH, set `WATERCOOLER_THREADS_PATTERN` to `git@github.com:{org}/{repo}-threads.git` and load your SSH key.
-- After changing the pattern, restart the MCP server/client so the env var is picked up.
+- HTTPS is the default and uses your credential helper; ensure a manual `git push` succeeds in your code repo.
+- For SSH remotes, ensure your SSH key is loaded (`ssh-add -l`).
+- After changing credentials, restart the MCP server/client.
 
 
 ### Server Not Found
@@ -436,12 +389,13 @@ export WATERCOOLER_AGENT="YourAgentName"
 
 ### Threads Directory Not Found
 
-If the server can't resolve the threads repository:
+If the server can't resolve the threads worktree:
 
-- Ensure `code_path` points inside a git repository with a configured remote.
-- Run `watercooler_health(code_path=".")` to confirm the expected sibling directory.
-- If health reports any location inside the code repository, remove stale overrides, copy the data into the sibling `<repo>-threads` directory, and delete the stray directory.
-- As a last resort, set `WATERCOOLER_DIR` to a specific path while you move data into the sibling `<repo>-threads` repository.
+- Ensure `code_path` points inside a git repository.
+- Run `watercooler_health(code_path=".")` to check worktree status.
+- Verify the worktree exists: `ls ~/.watercooler/worktrees/<repo>/`
+- If the worktree is missing, the server creates it on next write.
+- As a last resort, set `WATERCOOLER_DIR` to a specific path.
 
 ## Development
 
@@ -475,12 +429,14 @@ asyncio.run(show_tools())
 
 **See [ROADMAP.md](../ROADMAP.md) for complete phase history and future plans.**
 
-### Completed
+### Milestones
 - **Phase 1A (v0.1.0)**: MVP MCP server with 9 tools + 1 resource
 - **Phase 1B (v0.2.0)**: Upward directory search, comprehensive documentation, Python 3.10+
 - **Phase 2A**: Git-based cloud sync with Entry-ID idempotency and retry logic
-- **Branch Sync Enforcement**: Automatic validation and tools for maintaining 1:1 branch correspondence
-- **Auto-Remediation**: Preflight state machine with per-topic locking, automatic branch checkout/creation, and safe push-with-retry
+- **Phase 2B**: Orphan branch migration — simplified thread storage to single orphan branch + worktree model (PR #179)
+
+### Next
+- Migrate to fastmcp 3.x ([#189](https://github.com/mostlyharmless-ai/watercooler-cloud/issues/189))
 
 ## See Also
 
