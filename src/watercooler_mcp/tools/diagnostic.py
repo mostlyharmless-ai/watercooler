@@ -603,6 +603,46 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
         except Exception as e:
             status_lines.append(f"\nBackend Services: Error - {e}")
 
+        # Add daemon status summary
+        try:
+            from watercooler_mcp.daemons import get_daemon_manager
+
+            manager = get_daemon_manager()
+            if manager is not None:
+                daemon_statuses = manager.status_all()
+                if daemon_statuses:
+                    status_lines.extend(["", "Daemons:"])
+                    daemon_icons = {
+                        "running": "✓",
+                        "stopped": "○",
+                        "disabled": "○",
+                        "paused": "⏸",
+                        "failed": "✗",
+                        "starting": "⏳",
+                    }
+                    for dname, dinfo in daemon_statuses.items():
+                        dstate = dinfo.get("status", "unknown")
+                        dicon = daemon_icons.get(dstate, "?")
+                        interval = dinfo.get("interval", 0)
+                        ticks = dinfo.get("total_ticks", 0)
+                        findings = dinfo.get("total_findings", 0)
+                        errors = dinfo.get("error_count", 0)
+
+                        if dstate == "running":
+                            status_lines.append(
+                                f"  {dicon} {dname}: {dstate} "
+                                f"(interval={interval}s, ticks={ticks}, "
+                                f"findings={findings}, errors={errors})"
+                            )
+                        elif dstate == "disabled":
+                            status_lines.append(f"  {dicon} {dname}: {dstate}")
+                        else:
+                            last_err = dinfo.get("last_error", "")
+                            suffix = f" - {last_err}" if last_err else ""
+                            status_lines.append(f"  {dicon} {dname}: {dstate}{suffix}")
+        except Exception as e:
+            status_lines.append(f"\nDaemons: Error - {e}")
+
         # Add thread storage info
         if context.threads_dir:
             try:
