@@ -606,7 +606,8 @@ is your repository's directory name (e.g., `myproject` for `~/projects/myproject
    ```bash
    WORKTREE="$HOME/.watercooler/worktrees/<repo>"
    # Adjust the source path if your old threads repo is not a sibling directory.
-   # This copies top-level .md files only; subdirectories are not migrated.
+   # This copies top-level .md files only — if you have .md files in
+   # subdirectories, copy those manually.
    cp ../<repo>-threads/*.md "$WORKTREE"/
    ```
    Graph data (`.watercooler/` internals) is **not portable** from the old layout
@@ -625,7 +626,9 @@ is your repository's directory name (e.g., `myproject` for `~/projects/myproject
 5. **Archive** the old `-threads` repo once you confirm everything works.
 
 Removed config keys (like `check_branch_pairing`) are silently ignored — no
-config file changes needed.
+config file changes needed. If you previously set `WATERCOOLER_GIT_REPO` for
+cloud sync, you can unset it — syncing now happens automatically via the code
+repo's origin remote.
 
 ---
 
