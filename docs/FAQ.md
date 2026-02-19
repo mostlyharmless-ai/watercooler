@@ -141,7 +141,9 @@ On first write, the server:
 1. Detects your code repo from `code_path`
 2. Creates the `watercooler/threads` orphan branch (if it doesn't exist)
 3. Sets up a worktree at `~/.watercooler/worktrees/<repo>/`
-4. Tags entries with `code_branch` metadata for branch scoping
+
+Every write tags entries with `code_branch` metadata so reads are automatically
+scoped to the active branch.
 
 ```
 ~/.watercooler/worktrees/myproject/    # Worktree (orphan branch)

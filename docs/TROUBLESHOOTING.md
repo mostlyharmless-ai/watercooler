@@ -552,7 +552,7 @@ Write operations (`say`, `ack`, `handoff`, `set_status`) fail with errors like:
 ### Solutions
 
 **Missing worktree/orphan branch (auto-fixed)**
-- The server creates both on first write via `_ensure_worktree()`
+- The server creates both automatically on first write
 - If creation fails, check git permissions and remote access
 
 **Detached HEAD**
@@ -567,11 +567,11 @@ Per-topic advisory locks prevent concurrent writes to the same thread.
 
 **Lock Mechanism:**
 - Locks are stored in the worktree at `<worktree>/.watercooler/locks/<topic>.lock`
-- **Automatic TTL cleanup**: Locks expire after 60 seconds
+- **Automatic TTL cleanup**: Locks expire after 120 seconds
 
 **Resolution:**
 1. **Wait**: If another operation is genuinely in progress
-2. **Wait for TTL**: If the holder crashed, wait up to 60 seconds for auto-cleanup
+2. **Wait for TTL**: If the holder crashed, wait up to 120 seconds for auto-cleanup
 3. **Force unlock**:
    ```bash
    watercooler unlock <topic> --force
@@ -610,7 +610,7 @@ is your repository's directory name (e.g., `myproject` for `~/projects/myproject
 3. **Commit on the orphan branch**:
    ```bash
    cd "$WORKTREE"
-   git add *.md && git commit -m "migrate threads from separate repo"
+   git add . && git commit -m "migrate threads from separate repo"
    git push origin watercooler/threads
    ```
 
@@ -618,6 +618,9 @@ is your repository's directory name (e.g., `myproject` for `~/projects/myproject
    the output.
 
 5. **Archive** the old `-threads` repo once you confirm everything works.
+
+Removed config keys (like `check_branch_pairing`) are silently ignored — no
+config file changes needed.
 
 ---
 

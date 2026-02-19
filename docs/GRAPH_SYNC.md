@@ -217,7 +217,6 @@ entries with the same ID that need deduplication.
 3. Write merged result atomically (temp file + rename)
 
 ```python
-# From sync/conflict.py
 def upsert_jsonl_nodes(path: Path, new_nodes: list[dict]) -> int:
     """Upsert nodes into JSONL file.
 

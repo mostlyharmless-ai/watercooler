@@ -49,7 +49,7 @@ dev = [
     "tqdm>=4.0",
 ]
 mcp = [
-    "fastmcp>=2.0,<3",  # pin until fastmcp 3.x migration (#189)
+    "fastmcp>=2.0,<3",  # pin until fastmcp 3.x migration (#189) — keep in sync with [dependencies]
     "python-ulid>=2.0",
 ]
 http = [
