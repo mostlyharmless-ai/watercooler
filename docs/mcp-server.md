@@ -429,11 +429,14 @@ asyncio.run(show_tools())
 
 **See [ROADMAP.md](../ROADMAP.md) for complete phase history and future plans.**
 
-### Completed
+### Milestones
 - **Phase 1A (v0.1.0)**: MVP MCP server with 9 tools + 1 resource
 - **Phase 1B (v0.2.0)**: Upward directory search, comprehensive documentation, Python 3.10+
 - **Phase 2A**: Git-based cloud sync with Entry-ID idempotency and retry logic
-- **Orphan Branch Migration**: Simplified thread storage to single orphan branch + worktree model
+- **Phase 2B**: Orphan branch migration — simplified thread storage to single orphan branch + worktree model (PR #179)
+
+### Next
+- Migrate to fastmcp 3.x ([#189](https://github.com/mostlyharmless-ai/watercooler-cloud/issues/189))
 
 ## See Also
 

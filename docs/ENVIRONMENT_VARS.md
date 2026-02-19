@@ -12,7 +12,7 @@
 |----------|----------|---------|---------|---------|
 | [`WATERCOOLER_AGENT`](#watercooler_agent) | No (auto-detected) | Auto from client | MCP Server | Override agent identity |
 | [`WATERCOOLER_DIR`](#watercooler_dir) | No | _Unset_ | MCP & CLI | Manual override for threads directory (bypasses orphan branch worktree) |
-| [`WATERCOOLER_GIT_REPO`](#watercooler_git_repo) | Cloud: Yes<br>Local: No | None | MCP Server | Git repository URL (enables cloud sync) |
+| [`WATERCOOLER_GIT_REPO`](#watercooler_git_repo) | No | None | MCP Server | Override remote URL for thread sync (default: code repo's origin) |
 | [`WATERCOOLER_GIT_SSH_KEY`](#watercooler_git_ssh_key) | No | None | MCP Server | Path to SSH private key |
 | [`WATERCOOLER_GIT_AUTHOR`](#watercooler_git_author) | No | `"Watercooler MCP"` | MCP Server | Git commit author name |
 | [`WATERCOOLER_GIT_EMAIL`](#watercooler_git_email) | No | `"mcp@watercooler.dev"` | MCP Server | Git commit author email |
@@ -220,11 +220,11 @@ These variables enable git-based cloud synchronization for team collaboration. O
 
 ### WATERCOOLER_GIT_REPO
 
-**Purpose:** Git repository URL for cloud sync (enables cloud mode).
+**Purpose:** Override the remote URL used for pushing/pulling the orphan branch.
 
-**Required:** Yes (for cloud sync), No (for local mode)
+**Required:** No
 
-**Default:** None
+**Default:** None (uses the code repo's `origin` remote)
 
 **Format:** Git URL (SSH or HTTPS)
 
@@ -232,22 +232,16 @@ These variables enable git-based cloud synchronization for team collaboration. O
 
 **Details:**
 
-Setting this variable **enables cloud sync mode**:
-- **Pull before read** - Always fetches latest thread content
-- **Commit + push after write** - Automatic sync on every change
-- **Entry-ID idempotency** - Prevents duplicate entries on retry
-- **Retry logic** - Handles concurrent writes gracefully
+By default, threads are pushed to the code repo's own `origin` remote on the
+`watercooler/threads` orphan branch. Set this variable only when you need to
+push threads to a different remote URL (e.g., a separate hosting endpoint).
 
-**Supported URL formats:**
+Cloud sync features (pull before read, commit + push after write, Entry-ID
+idempotency, retry logic) are always active when the repo has a remote.
 
-**SSH (recommended):**
 ```bash
-export WATERCOOLER_GIT_REPO="git@github.com:my-team/watercooler-threads.git"
-```
-
-**HTTPS:**
-```bash
-export WATERCOOLER_GIT_REPO="https://github.com/my-team/watercooler-threads.git"
+# Only needed to override the default remote:
+export WATERCOOLER_GIT_REPO="git@github.com:my-team/my-project.git"
 ```
 
 ---
@@ -544,9 +538,9 @@ WATERCOOLER_AGENT = "Claude"
 WATERCOOLER_GIT_SSH_KEY = "/Users/agent/.ssh/id_ed25519_watercooler"
 WATERCOOLER_GIT_AUTHOR = "Alice's Claude"
 WATERCOOLER_GIT_EMAIL = "alice+claude@team.com"
+# WATERCOOLER_GIT_REPO is not needed — threads push to the code repo's origin automatically.
+# Set it only to override the remote URL: WATERCOOLER_GIT_REPO = "git@github.com:..."
 ```
-
-Threads are automatically pushed to the code repo's origin on the orphan branch.
 
 ---
 
