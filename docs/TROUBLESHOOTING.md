@@ -610,7 +610,7 @@ is your repository's directory name (e.g., `myproject` for `~/projects/myproject
 3. **Commit on the orphan branch**:
    ```bash
    cd "$WORKTREE"
-   git add -A && git commit -m "migrate threads from separate repo"
+   git add *.md && git commit -m "migrate threads from separate repo"
    git push origin watercooler/threads
    ```
 

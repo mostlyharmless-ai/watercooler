@@ -133,6 +133,10 @@ directory name, e.g., `myproject` for `~/projects/myproject`).
 
 There is no separate `-threads` repository. Everything stays in the same repo.
 
+**Note:** The worktree path is derived from the directory name only. If you have
+two repos with the same name (e.g., `~/org1/myapp` and `~/org2/myapp`), set
+`WATERCOOLER_DIR` to give one of them a custom threads location.
+
 On first write, the server:
 1. Detects your code repo from `code_path`
 2. Creates the `watercooler/threads` orphan branch (if it doesn't exist)

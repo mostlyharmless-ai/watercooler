@@ -560,7 +560,9 @@ WATERCOOLER_AGENT = "Claude"
 # No additional environment variables needed
 ```
 
-The server resolves the correct sibling threads repository for whichever code repo you open (based on `code_path`).
+Each project's threads live on its own `watercooler/threads` orphan branch. No
+extra configuration is needed — threads are automatically scoped to the code
+repository. Just pass `code_path` pointing to each project root.
 
 ---
 
