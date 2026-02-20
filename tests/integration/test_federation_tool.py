@@ -427,6 +427,67 @@ class TestFederatedSearchHappyPath:
         assert "watercooler_health" in site_status["action_hint"]
 
 
+class TestFederatedSearchSchemaVersion:
+    """Tests that all error responses include schema_version."""
+
+    @pytest.mark.anyio
+    async def test_empty_query_has_schema_version(self, ctx):
+        result = await _federated_search_impl(ctx, query="")
+        data = json.loads(result)
+        assert data["schema_version"] == 1
+
+    @pytest.mark.anyio
+    async def test_disabled_has_schema_version(self, ctx):
+        wc_config = _make_federation_config(enabled=False)
+        with patch("watercooler_mcp.tools.federation.config") as mock_config:
+            mock_config.full.return_value = wc_config
+            result = await _federated_search_impl(ctx, query="test")
+        data = json.loads(result)
+        assert data["schema_version"] == 1
+
+    @pytest.mark.anyio
+    async def test_hosted_mode_has_schema_version(self, ctx, tmp_path):
+        wc_config = _make_federation_config(enabled=True)
+        primary_ctx = _make_primary_ctx(tmp_path)
+        with (
+            patch("watercooler_mcp.tools.federation.config") as mock_config,
+            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
+            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=True),
+        ):
+            mock_config.full.return_value = wc_config
+            mock_validation._require_context.return_value = (None, primary_ctx)
+            result = await _federated_search_impl(ctx, query="test")
+        data = json.loads(result)
+        assert data["schema_version"] == 1
+
+    @pytest.mark.anyio
+    async def test_query_sanitization_strips_control_chars(self, ctx, tmp_path):
+        """Query with control characters is sanitized before processing."""
+        wc_config = _make_federation_config(enabled=True, namespaces={})
+        primary_ctx = _make_primary_ctx(tmp_path)
+
+        mock_search = _mock_search_graph([MockGraphEntry(entry_id="01A")])
+
+        with (
+            patch("watercooler_mcp.tools.federation.config") as mock_config,
+            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
+            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=False),
+            patch("watercooler_mcp.tools.federation.search_graph", mock_search),
+        ):
+            mock_config.full.return_value = wc_config
+            mock_validation._require_context.return_value = (None, primary_ctx)
+            result = await _federated_search_impl(ctx, query="test\ninjection\r\x1b[31m")
+
+        data = json.loads(result)
+        # Should succeed (sanitized, not rejected)
+        assert data["schema_version"] == 1
+        assert "error" not in data
+        # Sanitized query in envelope
+        assert "\n" not in data["query"]
+        assert "\r" not in data["query"]
+        assert "\x1b" not in data["query"]
+
+
 class TestFederatedSearchErrorHandling:
     """Tests for catch-all error handler."""
 

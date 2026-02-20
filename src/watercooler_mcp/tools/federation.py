@@ -111,18 +111,22 @@ async def _federated_search_inner(
     """Inner implementation of federated search (unwrapped)."""
     # 1. Validate inputs
     if not query or not query.strip():
-        return json.dumps({"error": "EMPTY_QUERY", "message": "Query cannot be empty"})
+        return json.dumps({"schema_version": 1, "error": "EMPTY_QUERY", "message": "Query cannot be empty"})
     if len(query) > MAX_QUERY_LENGTH:
         return json.dumps({
+            "schema_version": 1,
             "error": "VALIDATION_ERROR",
             "message": f"Query exceeds maximum length ({MAX_QUERY_LENGTH} chars)",
         })
+    # Sanitize query for safe logging (strip control chars)
+    query = query.replace("\n", " ").replace("\r", " ").replace("\x1b", "")
     limit = max(1, min(limit, MAX_LIMIT))
 
     # 2. Feature gate check (fail fast before git overhead)
     fed_config = config.full().federation
     if not fed_config.enabled:
         return json.dumps({
+            "schema_version": 1,
             "error": "FEDERATION_DISABLED",
             "message": "Federation is not enabled. Set federation.enabled = true in config.toml",
         })
@@ -130,11 +134,12 @@ async def _federated_search_inner(
     # 3. Resolve primary context
     error, primary_ctx = validation._require_context(code_path)
     if error:
-        return json.dumps({"error": "CONTEXT_ERROR", "message": error})
+        return json.dumps({"schema_version": 1, "error": "CONTEXT_ERROR", "message": error})
 
     # 4. Hosted mode guard
     if is_hosted_mode():
         return json.dumps({
+            "schema_version": 1,
             "error": "FEDERATION_NOT_AVAILABLE",
             "message": "Federated search is not available in hosted mode",
         })
@@ -150,6 +155,7 @@ async def _federated_search_inner(
     # 7. Check max_namespaces cap
     if len(resolutions) > fed_config.max_namespaces:
         return json.dumps({
+            "schema_version": 1,
             "error": "TOO_MANY_NAMESPACES",
             "message": (
                 f"Query spans {len(resolutions)} namespaces, "
@@ -165,7 +171,7 @@ async def _federated_search_inner(
             break
 
     if primary_ns_id is None:
-        return json.dumps({"error": "NO_PRIMARY", "message": "Could not identify primary namespace"})
+        return json.dumps({"schema_version": 1, "error": "NO_PRIMARY", "message": "Could not identify primary namespace"})
 
     # 8. Access control
     all_ns_ids = list(resolutions.keys())
@@ -193,6 +199,7 @@ async def _federated_search_inner(
     if primary_ns_id not in searchable:
         # Primary must be searchable
         return json.dumps({
+            "schema_version": 1,
             "error": "PRIMARY_NOT_AVAILABLE",
             "message": f"Primary namespace '{primary_ns_id}' is not available: "
                        f"{resolutions[primary_ns_id].status}",
@@ -312,6 +319,7 @@ async def _federated_search_inner(
     primary_status_val = primary_status.get("status") if isinstance(primary_status, dict) else primary_status
     if primary_status_val != "ok":
         return json.dumps({
+            "schema_version": 1,
             "error": "PRIMARY_SEARCH_FAILED",
             "message": f"Primary namespace '{primary_ns_id}' search failed: "
                        f"{primary_status_val or 'unknown'}",
