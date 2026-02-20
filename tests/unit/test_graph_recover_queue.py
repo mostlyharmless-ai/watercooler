@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from watercooler.baseline_graph import storage
 from watercooler_mcp.memory_queue import (
     DuplicateTaskError,
     MemoryTask,
@@ -49,6 +50,15 @@ class TestResolveRecoveryTargets:
         (tmp_path / "alpha.md").write_text("# Alpha")
         (tmp_path / "beta.md").write_text("# Beta")
 
+        # Write graph data so topics are discoverable
+        graph_dir = storage.ensure_graph_dir(tmp_path)
+        for topic in ("alpha", "beta"):
+            td = storage.ensure_thread_graph_dir(graph_dir, topic)
+            storage.atomic_write_json(td / "meta.json", {
+                "id": f"thread:{topic}", "type": "thread", "topic": topic,
+                "status": "OPEN", "entry_count": 0,
+            })
+
         topics, errors = resolve_recovery_targets(
             tmp_path, mode="selective", topics=["alpha", "gamma"]
         )
@@ -72,6 +82,15 @@ class TestResolveRecoveryTargets:
         (tmp_path / "one.md").write_text("# One")
         (tmp_path / "two.md").write_text("# Two")
         (tmp_path / "three.md").write_text("# Three")
+
+        # Write graph data so topics are discoverable
+        graph_dir = storage.ensure_graph_dir(tmp_path)
+        for topic in ("one", "two", "three"):
+            td = storage.ensure_thread_graph_dir(graph_dir, topic)
+            storage.atomic_write_json(td / "meta.json", {
+                "id": f"thread:{topic}", "type": "thread", "topic": topic,
+                "status": "OPEN", "entry_count": 0,
+            })
 
         topics, errors = resolve_recovery_targets(tmp_path, mode="all")
         assert errors == []

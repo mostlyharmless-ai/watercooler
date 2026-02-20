@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
+
 import tempfile
 import uuid
 from dataclasses import dataclass, field
@@ -20,8 +20,12 @@ from typing import Any, Dict, List, Optional
 
 from fastmcp import Context
 
-from watercooler.fs import discover_thread_files
-from watercooler.thread_entries import parse_thread_entries, ThreadEntry
+from watercooler.baseline_graph import storage as _graph_storage
+from watercooler.baseline_graph.storage import get_graph_dir as _get_graph_dir
+from watercooler.baseline_graph.writer import (
+    get_thread_from_graph as _get_thread_from_graph,
+    get_entries_for_thread as _get_entries_for_thread,
+)
 from watercooler_memory.backends import TransientError, BackendError
 from watercooler_memory.backends.graphiti import _derive_database_name
 from watercooler_memory.chunker import chunk_entry, ChunkerConfig, ChunkNode
@@ -210,7 +214,7 @@ def _entry_dict_to_node(entry: Dict[str, Any], index: int = 0) -> EntryNode:
     """Convert a parsed entry dict to an EntryNode.
 
     Args:
-        entry: Parsed entry dict from _parse_thread_entries_from_file
+        entry: Parsed entry dict from _parse_thread_entries_from_graph
         index: Entry index within thread
 
     Returns:
@@ -243,7 +247,7 @@ def _chunk_entry_for_migration(
     - Returns ChunkNode objects with full metadata
 
     Args:
-        entry: Parsed entry dict from _parse_thread_entries_from_file
+        entry: Parsed entry dict from _parse_thread_entries_from_graph
         index: Entry index within thread
         max_tokens: Maximum tokens per chunk
         overlap: Overlap tokens between chunks
@@ -339,72 +343,61 @@ def _get_migration_backend(backend: str, code_path: str = ""):
     return None
 
 
-def _parse_thread_entries_from_file(thread_path: Path) -> List[Dict[str, Any]]:
-    """Parse entries from a thread markdown file using the robust parser.
-
-    Uses the well-tested parse_thread_entries() from watercooler.thread_entries
-    which properly handles code blocks, deduplication, and edge cases.
+def _parse_thread_entries_from_graph(threads_dir: Path, topic: str) -> List[Dict[str, Any]]:
+    """Read entries from baseline graph for a thread.
 
     Args:
-        thread_path: Path to thread file
+        threads_dir: Path to threads directory
+        topic: Thread topic identifier
 
     Returns:
         List of entry dicts with id, content, timestamp, etc.
     """
     try:
-        content = thread_path.read_text(encoding="utf-8", errors="replace")
-    except (OSError, IOError, UnicodeDecodeError) as e:
-        logger.warning(f"Failed to read thread file {thread_path}: {e}")
+        graph_entries = _get_entries_for_thread(threads_dir, topic)
+    except Exception as e:
+        logger.warning(f"Failed to read graph entries for {topic}: {e}")
         return []
 
-    # Use the robust parser from thread_entries module
-    parsed_entries: List[ThreadEntry] = parse_thread_entries(content)
     entries: List[Dict[str, Any]] = []
-
-    for entry in parsed_entries:
-        # Skip entries without body content
-        if not entry.body or not entry.body.strip():
+    for i, entry in enumerate(graph_entries):
+        body = entry.get("body", "")
+        if not body or not body.strip():
             continue
 
         entry_dict: Dict[str, Any] = {
-            "index": entry.index,
-            "topic": thread_path.stem,
-            "id": entry.entry_id or f"{thread_path.stem}-{entry.index}",
-            "body": entry.body.strip(),
+            "index": entry.get("index", i),
+            "topic": topic,
+            "id": entry.get("entry_id", "") or f"{topic}-{i}",
+            "body": body.strip(),
         }
 
         # Add optional fields if present
-        if entry.timestamp:
-            entry_dict["timestamp"] = entry.timestamp
-        if entry.agent:
-            entry_dict["agent"] = entry.agent
-        if entry.role:
-            entry_dict["role"] = entry.role
-        if entry.entry_type:
-            entry_dict["entry_type"] = entry.entry_type
-        if entry.title:
-            entry_dict["title"] = entry.title
+        for field in ("timestamp", "agent", "role", "entry_type", "title"):
+            val = entry.get(field)
+            if val:
+                entry_dict[field] = val
 
         entries.append(entry_dict)
 
     return entries
 
 
-def _get_thread_status(thread_path: Path) -> str:
-    """Get thread status from file.
+def _get_thread_status_from_graph(threads_dir: Path, topic: str) -> str:
+    """Get thread status from graph.
 
     Args:
-        thread_path: Path to thread file
+        threads_dir: Path to threads directory
+        topic: Thread topic identifier
 
     Returns:
         Status string or "UNKNOWN"
     """
     try:
-        content = thread_path.read_text(encoding="utf-8", errors="replace")
-        status_match = re.search(r"^Status:\s*(\w+)", content, re.MULTILINE)
-        if status_match:
-            return status_match.group(1).upper()
-    except (OSError, IOError, UnicodeDecodeError):
+        meta = _get_thread_from_graph(threads_dir, topic)
+        if meta:
+            return meta.get("status", "UNKNOWN").upper()
+    except Exception:
         pass
     return "UNKNOWN"
 
@@ -529,17 +522,18 @@ async def _migration_preflight_impl(
     if threads_dir.exists():
         result["threads_dir_exists"] = True
 
-        # Count threads and estimate entries
-        thread_files = discover_thread_files(threads_dir)
-        result["thread_count"] = len(thread_files)
+        # Count threads and estimate entries from graph
+        graph_dir = _get_graph_dir(threads_dir)
+        topics = _graph_storage.list_thread_topics(graph_dir)
+        result["thread_count"] = len(topics)
 
         total_entries = 0
-        for thread_file in thread_files:
+        for topic in topics:
             try:
-                entries = _parse_thread_entries_from_file(thread_file)
+                entries = _parse_thread_entries_from_graph(threads_dir, topic)
                 total_entries += len(entries)
             except Exception as e:
-                result["issues"].append(f"Error parsing {thread_file.name}: {e}")
+                result["issues"].append(f"Error reading graph for {topic}: {e}")
 
         result["estimated_entries"] = total_entries
     else:
@@ -641,13 +635,14 @@ async def _migrate_to_memory_backend_impl(
     unified_group_id = _derive_database_name(code_path)
     result["unified_group_id"] = unified_group_id
 
-    # Get thread files
-    thread_files = discover_thread_files(threads_dir)
+    # Get thread topics from graph
+    graph_dir = _get_graph_dir(threads_dir)
+    all_topics = _graph_storage.list_thread_topics(graph_dir)
 
     # Filter by topics if specified
     if topics:
         topic_list = [t.strip() for t in topics.split(",") if t.strip()]
-        thread_files = [f for f in thread_files if f.stem in topic_list]
+        all_topics = [t for t in all_topics if t in topic_list]
 
     # Load checkpoint for resume (now returns CheckpointV2)
     checkpoint = _load_checkpoint(threads_dir)
@@ -679,13 +674,13 @@ async def _migrate_to_memory_backend_impl(
     # Collect entries to migrate
     would_migrate: List[Dict[str, Any]] = []
 
-    for thread_file in thread_files:
+    for topic_name in all_topics:
         # Check if thread is closed
-        if skip_closed and _get_thread_status(thread_file) == "CLOSED":
+        if skip_closed and _get_thread_status_from_graph(threads_dir, topic_name) == "CLOSED":
             continue
 
         try:
-            entries = _parse_thread_entries_from_file(thread_file)
+            entries = _parse_thread_entries_from_graph(threads_dir, topic_name)
             for entry_idx, entry in enumerate(entries):
                 entry_id = entry.get("id", "")
                 body = entry.get("body", "").strip()
@@ -732,12 +727,12 @@ async def _migrate_to_memory_backend_impl(
         return json.dumps(result, indent=2)
 
     # Process entries with chunking
-    for thread_file in thread_files:
-        if skip_closed and _get_thread_status(thread_file) == "CLOSED":
+    for topic_name in all_topics:
+        if skip_closed and _get_thread_status_from_graph(threads_dir, topic_name) == "CLOSED":
             continue
 
         try:
-            entries = _parse_thread_entries_from_file(thread_file)
+            entries = _parse_thread_entries_from_graph(threads_dir, topic_name)
             for entry_idx, entry in enumerate(entries):
                 entry_id = entry.get("id", "")
 

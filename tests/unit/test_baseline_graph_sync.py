@@ -50,7 +50,7 @@ def threads_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def sample_thread(threads_dir: Path) -> Path:
-    """Create a sample thread file."""
+    """Create a sample thread file with matching graph data."""
     thread_content = """# test-topic — Thread
 Status: OPEN
 Ball: Claude (user)
@@ -77,6 +77,45 @@ This is the second entry body.
 """
     thread_path = threads_dir / "test-topic.md"
     thread_path.write_text(thread_content, encoding="utf-8")
+
+    # Write graph data alongside .md file
+    graph_dir = storage.ensure_graph_dir(threads_dir)
+    thread_dir = storage.ensure_thread_graph_dir(graph_dir, "test-topic")
+    storage.atomic_write_json(thread_dir / "meta.json", {
+        "id": "thread:test-topic",
+        "type": "thread",
+        "topic": "test-topic",
+        "title": "test-topic",
+        "status": "OPEN",
+        "ball": "Claude (user)",
+        "entry_count": 2,
+        "last_updated": "2025-01-01T01:00:00Z",
+    })
+    storage.atomic_write_jsonl(thread_dir / "entries.jsonl", [
+        {
+            "id": "entry:01TEST00000000000000000001",
+            "entry_id": "01TEST00000000000000000001",
+            "index": 0,
+            "agent": "Claude (user)",
+            "role": "planner",
+            "entry_type": "Note",
+            "title": "First Entry",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "body": "This is the first entry body.",
+        },
+        {
+            "id": "entry:01TEST00000000000000000002",
+            "entry_id": "01TEST00000000000000000002",
+            "index": 1,
+            "agent": "Claude (user)",
+            "role": "implementer",
+            "entry_type": "Note",
+            "title": "Second Entry",
+            "timestamp": "2025-01-01T01:00:00Z",
+            "body": "This is the second entry body.",
+        },
+    ])
+
     return thread_path
 
 
@@ -328,8 +367,7 @@ def test_check_graph_health_after_sync(threads_dir: Path, sample_thread: Path):
 
 def test_check_graph_health_with_errors(threads_dir: Path, sample_thread: Path):
     """Test check_graph_health reports error threads."""
-    # Create graph dir first
-    (threads_dir / "graph" / "baseline").mkdir(parents=True)
+    # Graph data already exists from sample_thread fixture
 
     # Record an error
     record_graph_sync_error(
@@ -412,8 +450,7 @@ def test_concurrent_sync_operations(threads_dir: Path, sample_thread: Path):
 
 def test_sync_failure_does_not_block(threads_dir: Path, sample_thread: Path):
     """Test that sync failure is recorded but doesn't raise."""
-    # Create graph dir
-    (threads_dir / "graph" / "baseline").mkdir(parents=True)
+    # Graph dir already exists from sample_thread fixture
 
     # Mock parse_thread_file to raise
     with patch(
@@ -1196,7 +1233,7 @@ def test_sync_entry_succeeds_when_memory_hook_fails(threads_dir: Path, sample_th
 
 @pytest.fixture
 def thread_with_graph(threads_dir: Path) -> Path:
-    """Create a thread with a matching graph entry."""
+    """Create a thread with a matching graph entry (per-thread format)."""
     # Create thread markdown
     thread_file = threads_dir / "parity-test.md"
     thread_file.write_text("""# parity-test — Thread
@@ -1224,22 +1261,24 @@ Another entry.
 <!-- Entry-ID: 01TEST002 -->
 """)
 
-    # Create graph with matching data
-    graph_dir = threads_dir / "graph" / "baseline"
-    graph_dir.mkdir(parents=True)
+    # Create per-thread graph with matching data
+    graph_dir = storage.ensure_graph_dir(threads_dir)
+    thread_graph_dir = storage.ensure_thread_graph_dir(graph_dir, "parity-test")
 
-    nodes_file = graph_dir / "nodes.jsonl"
-    nodes = [
-        {"id": "topic:parity-test", "type": "thread", "entry_count": 2, "last_updated": "2025-01-01T00:02:00Z"},
-        {"id": "entry:01TEST001", "type": "entry"},
-        {"id": "entry:01TEST002", "type": "entry"},
-    ]
-    with open(nodes_file, "w") as f:
-        for node in nodes:
-            f.write(json.dumps(node) + "\n")
+    storage.atomic_write_json(thread_graph_dir / "meta.json", {
+        "id": "thread:parity-test",
+        "type": "thread",
+        "topic": "parity-test",
+        "entry_count": 2,
+        "last_updated": "2025-01-01T00:02:00Z",
+    })
+    storage.atomic_write_jsonl(thread_graph_dir / "entries.jsonl", [
+        {"id": "entry:01TEST001", "type": "entry", "index": 0},
+        {"id": "entry:01TEST002", "type": "entry", "index": 1},
+    ])
 
     # Create sync state (must match _get_state_file path)
-    state_file = threads_dir / "graph" / "baseline" / "sync_state.json"
+    state_file = graph_dir / "sync_state.json"
     state_file.write_text(json.dumps({
         "topics": {
             "parity-test": {"status": "ok"}

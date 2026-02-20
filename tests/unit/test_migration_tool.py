@@ -12,13 +12,46 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from watercooler.baseline_graph import storage
+
 # Configure pytest-asyncio mode
 pytestmark = pytest.mark.anyio
+
+
+def _bootstrap_graph(threads_dir: Path, topic: str, entries: List[Dict[str, Any]],
+                     status: str = "OPEN", ball: str = "Claude (dev)") -> None:
+    """Write per-thread graph data alongside .md files.
+
+    Args:
+        threads_dir: Threads directory (parent of graph/)
+        topic: Thread topic slug
+        entries: List of entry dicts with at least id, entry_id, body fields
+        status: Thread status
+        ball: Thread ball holder
+    """
+    graph_dir = storage.ensure_graph_dir(threads_dir)
+    thread_dir = storage.ensure_thread_graph_dir(graph_dir, topic)
+    last_ts = ""
+    for e in entries:
+        ts = e.get("timestamp", "")
+        if ts > last_ts:
+            last_ts = ts
+    storage.atomic_write_json(thread_dir / "meta.json", {
+        "id": f"thread:{topic}",
+        "type": "thread",
+        "topic": topic,
+        "title": topic,
+        "status": status,
+        "ball": ball,
+        "entry_count": len(entries),
+        "last_updated": last_ts,
+    })
+    storage.atomic_write_jsonl(thread_dir / "entries.jsonl", entries)
 
 
 class TestMigrationPreflight:
@@ -69,6 +102,20 @@ Title: API design notes
 
 API design notes.
 """)
+
+        # Bootstrap graph data
+        _bootstrap_graph(threads_dir, "auth-feature", [
+            {"id": "entry:01ABC123", "entry_id": "01ABC123", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "Test entry", "timestamp": "2025-01-15T10:00:00Z",
+             "body": "Test content here."},
+        ])
+        _bootstrap_graph(threads_dir, "api-design", [
+            {"id": "entry:01DEF456", "entry_id": "01DEF456", "index": 0,
+             "agent": "Human (dev)", "role": "planner", "entry_type": "Plan",
+             "title": "API design notes", "timestamp": "2025-01-14T09:00:00Z",
+             "body": "API design notes."},
+        ], status="CLOSED", ball="-")
 
         return threads_dir
 
@@ -164,6 +211,13 @@ Title: Test entry
 
 Test entry content.
 """)
+
+        _bootstrap_graph(threads_dir, "test-thread", [
+            {"id": "entry:01TEST01", "entry_id": "01TEST01", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "Test entry", "timestamp": "2025-01-15T10:00:00Z",
+             "body": "Test entry content."},
+        ])
 
         return threads_dir
 
@@ -269,6 +323,17 @@ Title: Second entry
 Second entry content.
 """)
 
+        _bootstrap_graph(threads_dir, "test-thread", [
+            {"id": "entry:01ABC123", "entry_id": "01ABC123", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "First entry", "timestamp": "2025-01-15T10:00:00Z",
+             "body": "First entry content."},
+            {"id": "entry:01ABC456", "entry_id": "01ABC456", "index": 1,
+             "agent": "Human (dev)", "role": "reviewer", "entry_type": "Note",
+             "title": "Second entry", "timestamp": "2025-01-15T11:00:00Z",
+             "body": "Second entry content."},
+        ])
+
         return threads_dir
 
     async def test_actual_migration_calls_backend(self, mock_context, mock_threads_dir):
@@ -366,6 +431,13 @@ Title: Test entry
 Content.
 """)
 
+        _bootstrap_graph(mock_threads_dir, "test-thread", [
+            {"id": "entry:01ABC123", "entry_id": "01ABC123", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "Test entry", "timestamp": "2025-01-15T10:00:00Z",
+             "body": "Content."},
+        ])
+
         mock_graphiti = MagicMock()
         mock_graphiti.add_episode_direct = AsyncMock(
             return_value={"episode_uuid": "ep-123"}
@@ -419,6 +491,13 @@ Title: Already migrated
 
 Already migrated content.
 """)
+
+        _bootstrap_graph(mock_threads_dir, "test-thread", [
+            {"id": "entry:01ABC123", "entry_id": "01ABC123", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "Already migrated", "timestamp": "2025-01-15T10:00:00Z",
+             "body": "Already migrated content."},
+        ])
 
         mock_graphiti = MagicMock()
         mock_graphiti.add_episode_direct = AsyncMock(
@@ -492,6 +571,20 @@ Title: Closed entry
 
 Closed thread content.
 """)
+
+        # Bootstrap graph data
+        _bootstrap_graph(threads_dir, "open-thread", [
+            {"id": "entry:01OPEN123", "entry_id": "01OPEN123", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "Open entry", "timestamp": "2025-01-15T10:00:00Z",
+             "body": "Open thread content."},
+        ])
+        _bootstrap_graph(threads_dir, "closed-thread", [
+            {"id": "entry:01CLOSED123", "entry_id": "01CLOSED123", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "Closed entry", "timestamp": "2025-01-14T10:00:00Z",
+             "body": "Closed thread content."},
+        ], status="CLOSED", ball="-")
 
         return threads_dir
 
@@ -574,6 +667,14 @@ Title: Large entry for chunking test
 {large_body}
 """)
 
+        _bootstrap_graph(threads_dir, "large-entry", [
+            {"id": "entry:01LARGE01", "entry_id": "01LARGE01", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "Large entry for chunking test",
+             "timestamp": "2025-01-15T10:00:00Z",
+             "body": large_body},
+        ])
+
         return threads_dir
 
     @pytest.fixture
@@ -598,6 +699,13 @@ Title: Small entry
 
 This is a small entry that fits in a single chunk.
 """)
+
+        _bootstrap_graph(threads_dir, "small-entry", [
+            {"id": "entry:01SMALL01", "entry_id": "01SMALL01", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "Small entry", "timestamp": "2025-01-15T10:00:00Z",
+             "body": "This is a small entry that fits in a single chunk."},
+        ])
 
         return threads_dir
 
@@ -868,6 +976,13 @@ Title: Chain test entry
 {body}
 """)
 
+        _bootstrap_graph(threads_dir, "chain-test", [
+            {"id": "entry:01CHAIN01", "entry_id": "01CHAIN01", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "Chain test entry", "timestamp": "2025-01-15T10:00:00Z",
+             "body": body},
+        ])
+
         return threads_dir
 
     async def test_episode_chain_none_first_then_previous(
@@ -957,6 +1072,13 @@ Title: Deduplication test entry
 
 {body}
 """)
+
+        _bootstrap_graph(threads_dir, "dedup-test", [
+            {"id": "entry:01DEDUP01", "entry_id": "01DEDUP01", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "Deduplication test entry", "timestamp": "2025-01-15T10:00:00Z",
+             "body": body},
+        ])
 
         return threads_dir
 

@@ -56,7 +56,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from watercooler import fs as _fs
-from watercooler.fs import discover_thread_files
 from watercooler.baseline_graph import storage
 from watercooler.baseline_graph.export import (
     entry_to_node,
@@ -1898,15 +1897,16 @@ def check_graph_health(
     """
     report = GraphHealthReport()
 
-    # Count total threads
-    thread_files = discover_thread_files(threads_dir)
-    report.total_threads = len(thread_files)
+    # Count total threads from graph
+    graph_dir = storage.get_graph_dir(threads_dir)
+    topics = storage.list_thread_topics(graph_dir)
+    report.total_threads = len(topics)
 
     # Load sync state
     state_file = _get_state_file(threads_dir)
     if not state_file.exists():
         # No sync state = all threads need sync
-        report.stale_threads = [f.stem for f in thread_files]
+        report.stale_threads = list(topics)
         report.healthy = False
         return report
 
@@ -1919,8 +1919,7 @@ def check_graph_health(
         return report
 
     # Check each thread
-    for thread_file in thread_files:
-        topic = thread_file.stem
+    for topic in topics:
         topic_state = topic_states.get(topic)
 
         if not topic_state:
@@ -1945,6 +1944,8 @@ def check_graph_health(
     # Parity verification (optional, slower)
     if verify_parity:
         report.parity_verified = True
+        # Construct thread file paths from graph topics for parity check
+        thread_files = [threads_dir / f"{t}.md" for t in topics if (threads_dir / f"{t}.md").exists()]
         report.parity_mismatches = _verify_graph_parity(threads_dir, thread_files)
         # Parity mismatches affect health
         if report.parity_mismatches:
@@ -2540,8 +2541,8 @@ def resolve_recovery_targets(
         errors.append("Mode 'selective' requires topics list")
         return [], errors
 
-    thread_files = discover_thread_files(threads_dir)
-    available_topics = [f.stem for f in thread_files]
+    graph_dir = storage.get_graph_dir(threads_dir)
+    available_topics = storage.list_thread_topics(graph_dir)
 
     if mode == "stale":
         health = check_graph_health(threads_dir)
@@ -2552,7 +2553,7 @@ def resolve_recovery_targets(
     elif mode == "selective":
         target_topics = [t for t in topics if t in available_topics]
         if not target_topics:
-            errors.append("No matching topics found in markdown files")
+            errors.append("No matching topics found in graph")
             return [], errors
     else:  # mode == "all"
         target_topics = available_topics
