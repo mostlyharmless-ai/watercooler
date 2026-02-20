@@ -59,6 +59,7 @@ PR #190 introduced federated cross-namespace keyword search to watercooler-cloud
 3. Empty `entry_id` values collapsed all unidentified entries into a single result
 4. Config accepted `namespace_timeout > max_total_timeout` silently
 5. `PRIMARY_SEARCH_FAILED` error response lacked diagnostic metadata
+6. Comma-separated namespace override allowed unbounded fan-out, bypassing `max_namespaces` safeguard
 
 ## Root Cause Analysis
 
@@ -69,6 +70,7 @@ All five bugs share a common theme: **implicit assumptions not enforced by code*
 - Dedup assumed `entry_id` would always be non-empty — no guard
 - Config assumed users wouldn't set contradictory timeouts — no cross-field validation
 - Error path assumed callers only needed the error message — no diagnostics
+- Namespace override not validated against `max_namespaces` limit after resolution
 
 ## Fixes Applied
 
@@ -165,7 +167,7 @@ if not sr.node_id:
     continue
 ```
 
-### Fix 6: Namespace override max_namespaces validation (Earlier round)
+### Fix 6: Namespace override max_namespaces validation (Round 9)
 
 **File:** `src/watercooler_mcp/tools/federation.py`
 
@@ -229,9 +231,9 @@ Automated reviewers produce duplicates and false positives. For each finding, ch
 
 ## Related Documentation
 
-- **Architecture spec:** `docs/watercooler-planning/FEDERATED_WATERCOOLER_ARCHITECTURE.md` (906 lines, v4.5a)
-- **Implementation plan:** `docs/plans/2026-02-19-feat-federated-search-phase1-plan.md` (completed)
-- **Brainstorm:** `docs/brainstorms/2026-02-19-federation-phase1-brainstorm.md`
+- **Architecture spec:** `docs/watercooler-planning/FEDERATED_WATERCOOLER_ARCHITECTURE.md` (906 lines, v4.5a; lives in `external/` submodule)
+- **Implementation plan:** `docs/plans/2026-02-19-feat-federated-search-phase1-plan.md` (completed; gitignored, local only)
+- **Brainstorm:** `docs/brainstorms/2026-02-19-federation-phase1-brainstorm.md` (gitignored, local only)
 - **Config reference:** `docs/CONFIGURATION.md` (federation section, lines 231-260)
 - **MCP tool reference:** `docs/mcp-server.md` (watercooler_federated_search, lines 289-316)
 - **asyncio.to_thread precedent:** `docs/watercooler-planning/MEMORY_CONSOLIDATION_PHASE3.md`, PR #172

@@ -3,6 +3,7 @@ name: ship
 description: Stage, commit with a detailed conventional-commits message, and push. Use after completing work to ship changes.
 allowed-tools:
   - Bash(git *)
+  - AskUserQuestion
 ---
 
 # Ship
@@ -39,9 +40,9 @@ Optional arguments via `$ARGUMENTS`:
 
    <footer — Closes/Fixes #issue if applicable>
 
-   Signed-off-by: <git config user.name> <git config user.email>
    Co-Authored-By: Claude <noreply@anthropic.com>
    ```
+   Note: `Signed-off-by` is added automatically by the `-s` flag in step 6 — do not include it in the `-m` string.
 
    **Type**: feat, fix, refactor, test, docs, style, chore
    **Scope**: module or area affected (e.g., mcp, cli, memory, sync, skills)

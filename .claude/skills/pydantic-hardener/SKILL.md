@@ -9,6 +9,7 @@ allowed-tools:
   - Write
   - Bash(pytest *)
   - Bash(mypy *)
+  - AskUserQuestion
 ---
 
 # Pydantic Config Hardener
@@ -165,7 +166,9 @@ Present findings grouped by bug class:
 
 ### Step 5: Apply fixes (if `--fix`)
 
-For each finding, apply the fix pattern from the relevant bug class. Stage only the modified files.
+For each finding, show the proposed diff and confirm with the user before applying. Then apply the fix pattern from the relevant bug class. Stage only the modified files.
+
+**Note:** Detection is heuristic (name-based field matching). Review all findings before applying fixes — some may be false positives where application-level guarantees make validation unnecessary.
 
 ### Step 6: Generate tests (if `--tests`)
 

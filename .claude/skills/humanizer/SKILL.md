@@ -46,7 +46,9 @@ Avoiding AI patterns is only half the job. Sterile, voiceless writing is just as
 
 ### How to add voice:
 
-**Have opinions.** Don't just report facts - react to them. "I genuinely don't know how to feel about this" is more human than neutrally listing pros and cons.
+**Match the register to the content type.** For blog posts, essays, and informal writing, inject personality freely. For technical documentation, API references, academic writing, or formal business communication, "adding soul" means clarity and precision — not first-person opinions or informal asides. Always match the audience and context.
+
+**Have opinions** (when the format supports it). Don't just report facts - react to them. "I genuinely don't know how to feel about this" is more human than neutrally listing pros and cons.
 
 **Vary your rhythm.** Short punchy sentences. Then longer ones that take their time getting where they're going. Mix it up.
 
@@ -298,7 +300,7 @@ Avoiding AI patterns is only half the job. Sterile, voiceless writing is just as
 
 ### 18. Curly Quotation Marks
 
-**Problem:** ChatGPT uses curly quotes (“...”) instead of straight quotes ("...").
+**Problem:** ChatGPT uses curly quotes (U+201C/U+201D: \u201c...\u201d) instead of straight quotes (U+0022: “...”).
 
 **Before:**
 > He said “the project is on track” but others disagreed.
