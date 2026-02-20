@@ -412,7 +412,7 @@ class TestFederatedSearchPartialTimeout:
         wc_config = WatercoolerConfig(
             federation=FederationConfig(
                 enabled=True,
-                namespace_timeout=5.0,  # Per-namespace timeout is generous
+                namespace_timeout=0.2,  # Per-namespace timeout matches total
                 max_total_timeout=0.2,  # Total timeout is short
                 namespaces={"site": FederationNamespaceConfig(code_path="/home/user/site")},
                 access=FederationAccessConfig(allowlists={"watercooler-cloud": ["site"]}),
@@ -726,6 +726,34 @@ class TestFederatedSearchEdgeCases:
         # Primary results should NOT be filtered by deny_topics
         assert data["result_count"] == 1
         assert data["results"][0]["entry_data"]["topic"] == "secret-planning"
+
+
+    @pytest.mark.anyio
+    async def test_empty_entry_id_skipped_not_deduped(self, ctx, tmp_path):
+        """Entries with empty node_id are skipped to prevent dedup collapse."""
+        wc_config = _make_federation_config(enabled=True, namespaces={})
+        primary_ctx = _make_primary_ctx(tmp_path)
+
+        # Two entries with empty entry_id plus one valid entry
+        valid_entry = MockGraphEntry(entry_id="01VALID", title="Valid entry")
+        no_id_1 = MockGraphEntry(entry_id="", title="First no-id")
+        no_id_2 = MockGraphEntry(entry_id="", title="Second no-id")
+        mock_search = _mock_search_graph([no_id_1, no_id_2, valid_entry])
+
+        with (
+            patch("watercooler_mcp.tools.federation.config") as mock_config,
+            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
+            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=False),
+            patch("watercooler_mcp.tools.federation.search_graph", mock_search),
+        ):
+            mock_config.full.return_value = wc_config
+            mock_validation._require_context.return_value = (None, primary_ctx)
+            result = await _federated_search_impl(ctx, query="test")
+
+        data = json.loads(result)
+        # Only the entry with a valid ID should survive
+        assert data["result_count"] == 1
+        assert data["results"][0]["entry_id"] == "01VALID"
 
 
 class TestFederatedSearchPrimaryFailedDiagnostics:

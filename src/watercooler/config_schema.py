@@ -1026,6 +1026,16 @@ class FederationConfig(BaseModel):
     )
 
     @model_validator(mode="after")
+    def check_timeout_ordering(self) -> "FederationConfig":
+        """Ensure per-namespace timeout does not exceed total timeout budget."""
+        if self.namespace_timeout > self.max_total_timeout:
+            raise ValueError(
+                f"namespace_timeout ({self.namespace_timeout}s) must be <= "
+                f"max_total_timeout ({self.max_total_timeout}s)"
+            )
+        return self
+
+    @model_validator(mode="after")
     def check_no_basename_collisions(self) -> "FederationConfig":
         """Reject configs where two namespaces map to the same worktree basename."""
         basenames: Dict[str, str] = {}

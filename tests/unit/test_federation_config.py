@@ -136,9 +136,9 @@ class TestFederationConfig:
             FederationConfig(namespace_timeout=-1.0)
 
     def test_namespace_timeout_upper_bound(self):
-        FederationConfig(namespace_timeout=30.0)  # At limit
+        FederationConfig(namespace_timeout=30.0, max_total_timeout=30.0)  # At limit
         with pytest.raises(ValidationError):
-            FederationConfig(namespace_timeout=31.0)
+            FederationConfig(namespace_timeout=31.0, max_total_timeout=60.0)
 
     def test_max_total_timeout_upper_bound(self):
         FederationConfig(max_total_timeout=60.0)  # At limit
@@ -153,6 +153,14 @@ class TestFederationConfig:
         FederationScoringConfig(wide_weight=10.0)  # At limit
         with pytest.raises(ValidationError):
             FederationScoringConfig(wide_weight=10.1)
+
+    def test_namespace_timeout_exceeds_total_rejected(self):
+        with pytest.raises(ValidationError, match="namespace_timeout"):
+            FederationConfig(namespace_timeout=25.0, max_total_timeout=2.0)
+
+    def test_namespace_timeout_equal_to_total_accepted(self):
+        cfg = FederationConfig(namespace_timeout=2.0, max_total_timeout=2.0)
+        assert cfg.namespace_timeout == 2.0
 
     def test_basename_collision_rejected(self):
         with pytest.raises(ValidationError, match="basename collision"):

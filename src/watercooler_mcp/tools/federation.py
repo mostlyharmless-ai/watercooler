@@ -274,8 +274,12 @@ async def _federated_search_inner(
             else frozenset()
         )
 
-        for sr in search_results.results:
+        for i, sr in enumerate(search_results.results):
             if sr.entry is None:
+                continue
+
+            # Skip entries without a usable ID (prevents dedup collapse)
+            if not sr.node_id:
                 continue
 
             # Check deny_topics for secondary namespaces
