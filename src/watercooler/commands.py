@@ -97,6 +97,11 @@ def init_thread(
 ) -> Path:
     """Initialize a new thread using the topic thread template.
 
+    .. deprecated::
+        Use ``commands_graph.init_thread`` instead. This legacy version writes
+        only to .md files without creating graph data. All runtime callers
+        should use the graph-canonical version.
+
     Args:
         topic: Thread topic identifier
         threads_dir: Directory containing threads
@@ -179,6 +184,10 @@ def append_entry(
 ) -> Path:
     """Append a structured entry to a thread.
 
+    .. deprecated::
+        Use ``commands_graph.append_entry`` instead. This legacy version
+        reads and writes .md directly without graph data.
+
     Args:
         topic: Thread topic
         threads_dir: Directory containing threads
@@ -254,6 +263,7 @@ def append_entry(
 
 
 def set_status(topic: str, *, threads_dir: Path, status: str) -> Path:
+    """.. deprecated:: Use ``commands_graph.set_status`` instead."""
     tp = thread_path(topic, threads_dir)
     if not tp.exists():
         raise FileNotFoundError(f"Thread '{topic}' not found")
@@ -267,6 +277,7 @@ def set_status(topic: str, *, threads_dir: Path, status: str) -> Path:
 
 
 def set_ball(topic: str, *, threads_dir: Path, ball: str) -> Path:
+    """.. deprecated:: Use ``commands_graph.set_ball`` instead."""
     tp = thread_path(topic, threads_dir)
 
     # Initialize thread if it doesn't exist (before acquiring lock to avoid deadlock)
@@ -319,6 +330,9 @@ def say(
     entry_id: str | None = None,
 ) -> Path:
     """Quick team note with auto-ball-flip.
+
+    .. deprecated::
+        Use ``commands_graph.say`` instead.
 
     Convenience wrapper for append_entry that defaults agent to Team
     and auto-flips ball to counterpart unless explicitly provided.
@@ -375,6 +389,9 @@ def ack(
     user_tag: str | None = None,
 ) -> Path:
     """Acknowledge without auto-flipping ball.
+
+    .. deprecated::
+        Use ``commands_graph.ack`` instead.
 
     Like say() but does NOT auto-flip ball - ball only changes if explicitly provided.
     Default title is "Ack".
@@ -435,6 +452,9 @@ def handoff(
     user_tag: str | None = None,
 ) -> Path:
     """Flip the Ball to the counterpart and append a handoff entry.
+
+    .. deprecated::
+        Use ``commands_graph.handoff`` instead.
 
     Args:
         topic: Thread topic
@@ -922,10 +942,11 @@ def archive_branch(branch: str, *, code_root: Path | None = None, abandon: bool 
                 lines.append("Proceed? [y/N]")
                 return "\n".join(lines)
 
-            # Close threads
+            # Close threads (use graph-canonical set_status)
+            from .commands_graph import set_status as graph_set_status
             for topic in open_threads:
                 try:
-                    set_status(
+                    graph_set_status(
                         topic,
                         threads_dir=context.threads_dir,
                         status=status_to_set,

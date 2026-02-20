@@ -453,20 +453,23 @@ def _read_thread_impl(
             if load_error:
                 raise HostedModeError(load_error, operation="load_entries")
 
-            # Extract metadata from reconstructed content
-            from ..hosted_ops import _extract_thread_metadata
-            title, status, ball, last = _extract_thread_metadata(content, topic)
+            # Read metadata from graph (meta.json) instead of parsing markdown
+            from ..hosted_ops import load_thread_metadata_hosted
+            meta_error, meta = load_thread_metadata_hosted(topic)
+            if meta_error:
+                # Fallback to defaults if meta.json read fails
+                meta = {"title": topic, "status": "OPEN", "ball": "", "last_updated": "", "summary": ""}
 
             payload = {
                 "topic": topic,
                 "format": "json",
                 "entry_count": len(entries),
                 "meta": {
-                    "title": title,
-                    "status": status,
-                    "ball": ball,
-                    "last_entry_at": last,
-                    "summary": "",
+                    "title": meta.get("title", topic),
+                    "status": meta.get("status", "OPEN"),
+                    "ball": meta.get("ball", ""),
+                    "last_entry_at": meta.get("last_updated", ""),
+                    "summary": meta.get("summary", ""),
                 },
                 "entries": [_entry_full_payload(entry) for entry in entries],
             }

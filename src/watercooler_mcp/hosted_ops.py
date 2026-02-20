@@ -440,6 +440,50 @@ def load_thread_entries_hosted(topic: str) -> tuple[str | None, list[ThreadEntry
         return (f"Error loading thread entries: {e}", [])
 
 
+def load_thread_metadata_hosted(topic: str) -> tuple[str | None, dict]:
+    """Load thread metadata from GitHub repository (reads meta.json directly).
+
+    Args:
+        topic: Thread topic identifier
+
+    Returns:
+        Tuple of (error_message, metadata_dict). If error_message is not None,
+        metadata will be empty. metadata_dict has keys:
+        title, status, ball, last_updated, entry_count.
+    """
+    try:
+        _validate_topic(topic)
+    except ValueError as e:
+        return (str(e), {})
+
+    error, client = _get_github_client()
+    if error or not client:
+        return (error or "Failed to create GitHub client", {})
+
+    meta_path, _, _ = _get_per_thread_paths(topic)
+
+    try:
+        meta_content = client.get_file(meta_path)
+        meta = json.loads(meta_content.content)
+
+        return (None, {
+            "title": meta.get("title", topic),
+            "status": meta.get("status", "OPEN"),
+            "ball": meta.get("ball", ""),
+            "last_updated": meta.get("last_updated", meta.get("created", "")),
+            "entry_count": meta.get("entry_count", 0),
+            "summary": meta.get("summary", ""),
+        })
+
+    except GitHubNotFoundError:
+        return (f"Thread '{topic}' metadata not found", {})
+    except json.JSONDecodeError as e:
+        return (f"Invalid meta.json for thread '{topic}': {e}", {})
+    except Exception as e:
+        log_error(f"load_thread_metadata_hosted failed: {e}")
+        return (f"Error loading thread metadata: {e}", {})
+
+
 def thread_exists_hosted(topic: str) -> bool:
     """Check if a thread exists in GitHub repository (per-thread format).
 
