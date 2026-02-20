@@ -1,7 +1,12 @@
 """Parser for baseline graph - reads threads and generates summaries.
 
-Uses existing watercooler parsing infrastructure and adds summarization
-for baseline graph nodes.
+.. deprecated::
+    This module reads from .md files via ``parse_thread_entries`` and
+    ``discover_thread_files``. In graph-first architecture, prefer reading
+    from graph data directly (``storage.list_thread_topics``,
+    ``writer.get_thread_from_graph``, ``writer.get_entries_for_thread``).
+    This module is retained only for ``sync_thread_to_graph()`` and other
+    graph rebuild/reconciliation paths where .md is the recovery source.
 """
 
 import logging

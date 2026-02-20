@@ -1,13 +1,15 @@
 """Graph reader module for MCP read operations.
 
-This module provides functions to read thread/entry data from the baseline graph
-instead of parsing markdown files directly. Falls back to markdown parsing when
-graph data is unavailable.
+This module provides the **sole read path** for thread/entry data. The baseline
+graph (meta.json + entries.jsonl per topic) is the source of truth for all read
+operations. There is no markdown fallback — if graph data is unavailable, reads
+fail with a clear error.
 
 Key functions:
 - list_threads_from_graph(): List threads from graph with metadata
 - read_thread_from_graph(): Read full thread with entries from graph
 - get_entry_from_graph(): Get specific entry by ID or index
+- format_thread_markdown(): Reconstruct markdown output from graph data
 - is_graph_available(): Check if graph data exists and is usable
 """
 

@@ -218,12 +218,11 @@ def discover_thread_files(
 ) -> List[Path]:
     """Discover thread .md files in threads_dir, including subdirectories.
 
-    When a structured layout is present (threads/ subdir exists), uses an
-    allowlist of THREAD_CATEGORIES to avoid scanning non-thread dirs like
-    compound/, logs/, etc.
-
-    When no structured layout exists, scans flat root + one level of
-    subdirectories (blocklist approach, backward compat).
+    .. deprecated::
+        This function scans .md files on disk. In graph-first architecture, use
+        ``watercooler.baseline_graph.storage.list_thread_topics()`` to enumerate
+        threads from the graph. Retained only for .md projection writes and
+        graph rebuild/reconciliation paths.
 
     Args:
         threads_dir: Root threads directory

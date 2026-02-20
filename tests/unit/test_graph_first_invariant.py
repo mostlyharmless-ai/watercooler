@@ -1,0 +1,98 @@
+"""CI guard: ensure no runtime code imports deprecated .md-parsing functions.
+
+Graph is the sole source of truth for all read operations. These functions
+are deprecated and only allowed in:
+- baseline_graph/parser.py (graph rebuild from .md)
+- hosted_ops.py (hosted reconciliation)
+- tests/
+- scripts/
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+# Root of the source tree
+SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
+
+# Deprecated function names that should not appear in runtime imports
+_DEPRECATED_FUNCTIONS = {
+    "discover_thread_files",
+    "parse_thread_entries",
+    "parse_thread_header",
+}
+
+# Files that are explicitly allowed to import these (graph rebuild / reconciliation)
+_ALLOWED_FILES = {
+    # Graph rebuild from .md (sync_thread_to_graph)
+    "watercooler/baseline_graph/parser.py",
+    # Hosted reconciliation (reconcile_thread_hosted)
+    "watercooler_mcp/hosted_ops.py",
+    # The functions' own definitions
+    "watercooler/thread_entries.py",
+    "watercooler/fs.py",
+}
+
+# Import pattern: "from ... import ... <name>" or "import ... <name>"
+_IMPORT_RE = re.compile(
+    r"^\s*(?:from\s+\S+\s+import\s+.*|import\s+.*)"
+)
+
+
+def _scan_for_deprecated_imports() -> list[str]:
+    """Scan src/ for runtime files that import deprecated functions."""
+    violations = []
+
+    for py_file in SRC_ROOT.rglob("*.py"):
+        # Get path relative to src/
+        rel = py_file.relative_to(SRC_ROOT)
+        rel_str = str(rel)
+
+        # Skip allowed files
+        if rel_str in _ALLOWED_FILES:
+            continue
+
+        try:
+            content = py_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        for line_no, line in enumerate(content.splitlines(), 1):
+            # Only check import lines
+            if not _IMPORT_RE.match(line):
+                continue
+
+            for func_name in _DEPRECATED_FUNCTIONS:
+                if func_name in line:
+                    violations.append(
+                        f"{rel_str}:{line_no}: imports deprecated "
+                        f"'{func_name}' — use graph reader instead"
+                    )
+
+    return violations
+
+
+class TestGraphFirstInvariant:
+    """Ensure deprecated .md-parsing functions are not used in runtime code."""
+
+    def test_no_deprecated_md_imports_in_runtime(self):
+        """Runtime src/ code must not import discover_thread_files,
+        parse_thread_entries, or parse_thread_header.
+
+        These are deprecated in favor of graph reader functions:
+        - storage.list_thread_topics()
+        - writer.get_thread_from_graph()
+        - writer.get_entries_for_thread()
+        - reader.format_thread_markdown()
+        """
+        violations = _scan_for_deprecated_imports()
+
+        if violations:
+            msg = (
+                "Deprecated .md-parsing imports found in runtime code.\n"
+                "Graph is the sole source of truth — use graph reader "
+                "functions instead.\n\n"
+                + "\n".join(f"  {v}" for v in violations)
+            )
+            pytest.fail(msg)
