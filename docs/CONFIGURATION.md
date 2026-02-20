@@ -87,11 +87,7 @@ Team-shared settings checked into the repository:
 ```toml
 # .watercooler/config.toml
 
-[common]
-threads_pattern = "git@github.com:myorg/{repo}-threads.git"
-
 [mcp.sync]
-batch_window = 10.0
 interval = 60.0
 
 [validation]
@@ -106,13 +102,6 @@ Shared settings for MCP and Dashboard:
 
 ```toml
 [common]
-# URL pattern for threads repos
-# Placeholders: {org}, {repo}, {namespace}
-threads_pattern = "git@github.com:{org}/{repo}-threads.git"
-
-# Suffix for threads repo naming
-threads_suffix = "-threads"
-
 # Custom templates directory (empty = use bundled)
 templates_dir = ""
 ```
@@ -134,13 +123,8 @@ port = 3000
 default_agent = "Agent"
 agent_tag = ""
 
-# Behavior
-auto_branch = true      # Auto-create matching threads branches
-auto_provision = true   # Auto-create threads repos if missing
-
-# Explicit paths (empty = auto-discover)
+# Explicit threads directory (empty = auto-discover via orphan branch worktree)
 threads_dir = ""
-threads_base = ""
 ```
 
 ### `[mcp.git]` Section
@@ -160,13 +144,8 @@ Git sync behavior:
 
 ```toml
 [mcp.sync]
-async = true           # Enable async git operations
-batch_window = 5.0     # Seconds to batch commits before push
-max_delay = 30.0       # Maximum delay before forcing push
-max_batch_size = 50    # Maximum entries per batch
-max_retries = 5        # Retry attempts for failed operations
+max_retries = 5        # Retry attempts for failed push (rebase + retry)
 max_backoff = 300.0    # Maximum backoff delay (seconds)
-interval = 30.0        # Background sync interval (seconds)
 ```
 
 ### `[mcp.logging]` Section
@@ -209,10 +188,12 @@ Protocol validation settings:
 on_write = true              # Validate on write operations
 on_commit = true             # Validate on commit
 fail_on_violation = false    # Fail vs warn on violation
-check_branch_pairing = true  # Validate branch pairing
 check_commit_footers = true  # Validate commit footers
 check_entry_format = true    # Validate entry format
 ```
+
+> **Note:** Removed config keys (e.g., `check_branch_pairing` from pre-orphan-branch versions) are
+> silently ignored — no config file changes needed after upgrading.
 
 ### `[baseline_graph]` Section
 
@@ -246,111 +227,6 @@ max_headers = 3              # Max headers to include
 **Recommended models:** `qwen3:1.7b` (fast, auto `/no_think`), `qwen2.5:3b` (quality), `llama3.2:3b` (balanced).
 
 See [Baseline Graph Documentation](baseline-graph.md) for full usage guide.
-
-### Memory Backends
-
-Memory backends (Graphiti, LeanRAG) are configured **exclusively via environment variables**.
-This is intentional - each backend has its own config system, and env vars provide a consistent interface.
-
-> **Note:** There are no `[memory]` or `[servers]` sections in the TOML config.
-> Memory configuration is env-only.
-
-#### Memory Backend Environment Variables
-
-| Environment Variable | Required | Default | Description |
-|---------------------|----------|---------|-------------|
-| `WATERCOOLER_GRAPHITI_ENABLED` | No | `0` | Enable Graphiti backend |
-| `WATERCOOLER_MEMORY_DISABLED` | No | `0` | Disable all memory backends |
-| `LLM_API_KEY` | **Yes**¹ | Error | LLM authentication (no fallback) |
-| `LLM_API_BASE` | No | OpenAI | LLM endpoint URL |
-| `LLM_MODEL` | No | `gpt-4o-mini` | LLM model name |
-| `EMBEDDING_API_KEY` | **Yes**¹ | Error | Embedding authentication |
-| `EMBEDDING_API_BASE` | No | OpenAI | Embedding endpoint URL |
-| `EMBEDDING_MODEL` | No | `text-embedding-3-small` | Embedding model name |
-| `FALKORDB_HOST` | No | `localhost` | FalkorDB host (Graphiti) |
-| `FALKORDB_PORT` | No | `6379` | FalkorDB port (Graphiti) |
-
-¹ Required when `WATERCOOLER_GRAPHITI_ENABLED=1`. Falls back to `OPENAI_API_KEY` with deprecation warning if not set (fallback will be removed in a future release).
-
-#### Example: Local LLM/Embedding Setup
-
-```bash
-# Enable Graphiti with local services
-export WATERCOOLER_GRAPHITI_ENABLED=1
-
-# LLM via llama-server
-export LLM_API_KEY="local"  # Local server doesn't require a real key
-export LLM_API_BASE="http://localhost:8000/v1"
-export LLM_MODEL="qwen3:1.7b"
-
-# Embeddings via llama-server
-export EMBEDDING_API_KEY="local"  # Local server doesn't require a real key
-export EMBEDDING_API_BASE="http://localhost:8080/v1"
-export EMBEDDING_MODEL="bge-m3"
-```
-
-#### Example: OpenAI Setup
-
-```bash
-export WATERCOOLER_GRAPHITI_ENABLED=1
-export LLM_API_KEY="sk-your-openai-key"
-export EMBEDDING_API_KEY="sk-your-openai-key"
-# Uses OpenAI defaults: gpt-4o-mini, text-embedding-3-small
-```
-
-#### MCP Memory Tools
-
-When memory backend is enabled, the following MCP tools become available:
-
-| Tool | Description |
-|------|-------------|
-| `watercooler_graphiti_add_episode` | Add content directly to Graphiti temporal graph |
-| `watercooler_leanrag_run_pipeline` | Trigger LeanRAG clustering pipeline |
-| `watercooler_smart_query` | Multi-tier intelligent query with auto-escalation |
-| `watercooler_search` | Unified search (`mode`: entries/entities/episodes) |
-| `watercooler_get_entity_edge` | Get specific entity/edge by UUID |
-
-> **Note:** `watercooler_query_memory`, `watercooler_search_nodes`, and `watercooler_search_memory_facts` have been replaced. See [mcp-server.md#memory-query-tools](./mcp-server.md#memory-query-tools).
-
-#### Example: Adding an Episode to Graphiti
-
-```python
-# Add content to Graphiti with entity extraction
-result = watercooler_graphiti_add_episode(
-    code_path="/path/to/repo",
-    content="Implemented OAuth2 authentication using JWT tokens",
-    group_id="auth-feature",           # Thread topic for grouping
-    source_id="01ABC123",              # Optional: entry ID for provenance
-    timestamp="2025-01-15T10:00:00Z",  # Optional: defaults to now
-)
-
-# Response includes extracted entities
-{
-  "success": true,
-  "episode_uuid": "ep-abc-123",
-  "entities_extracted": ["OAuth2", "JWT", "authentication"]
-}
-```
-
-#### Example: Triggering LeanRAG Pipeline
-
-```python
-# Run LeanRAG clustering on Graphiti data
-result = watercooler_leanrag_run_pipeline(
-    code_path="/path/to/repo",
-    group_id="auth-feature",           # Optional: filter by topic
-    force_rebuild=False,               # Optional: rebuild from scratch
-)
-
-# Response includes clustering stats
-{
-  "success": true,
-  "clusters_created": 5,
-  "entities_processed": 42
-}
-```
-
-See [Memory Documentation](MEMORY.md) for full usage guide.
 
 ## Migrating from Environment Variables
 
@@ -387,16 +263,10 @@ level = "DEBUG"
 |---------------------|-------------|
 | `WATERCOOLER_AGENT` | `mcp.default_agent` |
 | `WATERCOOLER_AGENT_TAG` | `mcp.agent_tag` |
-| `WATERCOOLER_AUTO_BRANCH` | `mcp.auto_branch` |
-| `WATERCOOLER_AUTO_PROVISION` | `mcp.auto_provision` |
 | `WATERCOOLER_DIR` | `mcp.threads_dir` |
-| `WATERCOOLER_THREADS_BASE` | `mcp.threads_base` |
-| `WATERCOOLER_THREADS_PATTERN` | `common.threads_pattern` |
 | `WATERCOOLER_GIT_AUTHOR` | `mcp.git.author` |
 | `WATERCOOLER_GIT_EMAIL` | `mcp.git.email` |
 | `WATERCOOLER_GIT_SSH_KEY` | `mcp.git.ssh_key` |
-| `WATERCOOLER_ASYNC_SYNC` | `mcp.sync.async` |
-| `WATERCOOLER_BATCH_WINDOW` | `mcp.sync.batch_window` |
 | `WATERCOOLER_SYNC_INTERVAL` | `mcp.sync.interval` |
 | `WATERCOOLER_LOG_LEVEL` | `mcp.logging.level` |
 | `WATERCOOLER_LOG_DIR` | `mcp.logging.dir` |
@@ -462,32 +332,6 @@ When resolving API keys for LLM or embedding services:
 4. Empty string (lowest): Local servers often don't need keys
 ```
 
-### Migration from config.toml
-
-If you have API keys in config.toml, move them to credentials.toml:
-
-**Before** (deprecated):
-```toml
-# ~/.watercooler/config.toml
-[memory.llm]
-api_key = "sk-proj-..."  # ❌ Secrets don't belong here
-api_base = "https://api.openai.com/v1"
-model = "gpt-4o-mini"
-```
-
-**After** (correct):
-```toml
-# ~/.watercooler/config.toml
-[memory.llm]
-api_base = "https://api.openai.com/v1"
-model = "gpt-4o-mini"
-# No api_key here - it's in credentials.toml
-
-# ~/.watercooler/credentials.toml
-[openai]
-api_key = "sk-proj-..."
-```
-
 **Security:** Credentials files are automatically set to mode 0600 (owner read/write only).
 
 **Never commit credentials to version control.** The `.watercooler/credentials.toml` pattern is already in `.gitignore`.
@@ -501,7 +345,7 @@ api_key = "sk-proj-..."
 | Personal identity (name, email) | User config |
 | Personal preferences (log level) | User config |
 | Team standards (validation rules) | Project config |
-| Repo-specific settings (threads pattern) | Project config |
+| Repo-specific settings (sync interval, log level) | Project config |
 | Secrets and tokens | Credentials file or env vars |
 
 ### CI/CD Environments
@@ -512,23 +356,14 @@ For CI/CD, prefer environment variables over config files:
 # GitHub Actions example
 env:
   WATERCOOLER_LOG_LEVEL: "DEBUG"
-  WATERCOOLER_ASYNC_SYNC: "false"
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ### Multi-Project Setup
 
-For multiple projects with different threads repos:
-
-```toml
-# Project A: .watercooler/config.toml
-[common]
-threads_pattern = "git@github.com:team-a/{repo}-threads.git"
-
-# Project B: .watercooler/config.toml
-[common]
-threads_pattern = "git@github.com:team-b/{repo}-threads.git"
-```
+Each project's threads live on its own `watercooler/threads` orphan branch. No
+extra configuration is needed — threads are automatically scoped to the code
+repository. Just pass `code_path` pointing to each project root.
 
 ## Troubleshooting
 
@@ -570,7 +405,6 @@ templates_dir = config.paths.templates_dir
 # Full config (lazy-loads TOML + Pydantic)
 cfg = config.full()
 log_level = cfg.mcp.logging.level
-sync_enabled = cfg.mcp.sync.async_sync
 
 # Environment variables with type coercion
 level = config.env.get("WATERCOOLER_LOG_LEVEL", "INFO")

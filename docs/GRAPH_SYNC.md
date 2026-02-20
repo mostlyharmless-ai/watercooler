@@ -1,6 +1,6 @@
 # Watercooler Graph Sync
 
-This document describes the synchronization contract between Watercooler’s
+This document describes the synchronization contract between Watercooler's
 **baseline graph (JSONL)** and the **human-readable markdown thread view**.
 
 **Forward-looking contract (source of truth):**
@@ -24,22 +24,22 @@ This enables:
 
 ```
 Write Operation
-      │
-      ▼
-┌──────────────────────┐
-│ Baseline Graph Write │  ← Source of truth (JSONL)
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│ Markdown Projection  │  ← Derived view (human)
-└──────────────────────┘
+      |
+      v
++----------------------+
+| Baseline Graph Write |  <- Source of truth (JSONL)
++----------+-----------+
+           |
+           v
++----------------------+
+| Markdown Projection  |  <- Derived view (human)
++----------------------+
 ```
 
 ### Key Principles
 
 1. **Graph JSONL is source of truth** - Markdown is a derived view
-2. **Entry validity** - An entry is “real” only when it exists in the graph JSONL
+2. **Entry validity** - An entry is "real" only when it exists in the graph JSONL
 3. **Non-blocking projection** - Markdown projection failures do not invalidate the graph write
 4. **Atomic operations** - JSONL writes use temp file + rename (and projections should be atomic too)
 5. **Eventually consistent** - Reconciliation tools fix drift between graph and projections
@@ -51,10 +51,10 @@ Canonical graph data is stored in JSONL format at `{threads-repo}/graph/baseline
 
 ```
 graph/baseline/
-├── nodes.jsonl      # Thread and entry nodes
-├── edges.jsonl      # Relationships between nodes
-├── manifest.json    # Metadata and checksums
-└── sync_state.json  # Per-topic sync status
++-- nodes.jsonl      # Thread and entry nodes
++-- edges.jsonl      # Relationships between nodes
++-- manifest.json    # Metadata and checksums
++-- sync_state.json  # Per-topic graph→markdown sync status
 ```
 
 ### Node Schema
@@ -141,14 +141,14 @@ This ensures projection issues never corrupt or block the canonical record.
 
 ## Health Checking
 
-Check graph sync health:
+Check graph sync health using the MCP tool or CLI:
 
 ```bash
-# CLI (coming soon)
-watercooler graph-health
+# MCP tool
+watercooler_graph_health
 
-# MCP tool (coming soon)
-watercooler_v1_graph_health
+# CLI
+watercooler graph-health
 ```
 
 Health report includes:
@@ -217,7 +217,6 @@ entries with the same ID that need deduplication.
 3. Write merged result atomically (temp file + rename)
 
 ```python
-# From sync/conflict.py
 def upsert_jsonl_nodes(path: Path, new_nodes: list[dict]) -> int:
     """Upsert nodes into JSONL file.
 
@@ -298,7 +297,7 @@ def resolve_jsonl_merge_conflict(path: Path) -> bool:
 
 ### LLM Summaries and Embeddings Disabled by Default
 
-⚠️ **Current Status**: LLM summaries and embedding vector generation are **disabled by default**.
+**Current Status**: LLM summaries and embedding vector generation are **disabled by default**.
 
 | Feature | Default | Impact When Disabled |
 |---------|---------|---------------------|
@@ -345,11 +344,10 @@ Graph reads scan the entire `nodes.jsonl` linearly. For graphs with 1000+ thread
 1. **Graph read operations** - Query graph instead of parsing markdown
 2. **Unified search** - Keyword, semantic, and time-boxed search via graph
 3. **Odometer counters** - Track access counts for analytics
-4. **FalkorDB backend** - Optional graph database for complex queries
-5. **Incremental sync** - Only sync changed entries (sidecar index)
+4. **Incremental sync** - Only sync changed entries (sidecar index)
 
 ## Related Documentation
 
-- Thread: `graph-driven-mcp-architecture` - Architecture planning
-- Thread: `baseline-graph-thread-parser` - Parser implementation
-- Thread: `baseline-graph-enhancements` - Cross-references and summaries
+- [Architecture: Thread Storage](ARCHITECTURE.md#thread-storage--git-sync) - Orphan branch + worktree model
+- [Baseline Graph](baseline-graph.md) - Baseline graph pipeline and format
+- [Visualization](visualization.md) - Interactive graph visualization

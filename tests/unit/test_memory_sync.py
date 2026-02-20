@@ -1253,3 +1253,154 @@ class TestMiddlewareMemorySync:
         assert result.is_noop
         # Memory sync should NOT be called from enrich_graph_entry anymore
         mock_sync.assert_not_called()
+
+
+class TestLeanRAGExecutor:
+    """Tests for the LeanRAG pipeline executor in the memory task queue."""
+
+    def test_leanrag_executor_registered(self):
+        """init_memory_queue_executors() registers the leanrag_pipeline executor."""
+        from watercooler_mcp.memory_sync import init_memory_queue_executors
+
+        mock_worker = MagicMock()
+        mock_worker.register_executor = MagicMock()
+
+        with patch("watercooler_mcp.memory_queue.get_worker", return_value=mock_worker):
+            init_memory_queue_executors()
+
+        # Should register graphiti AND leanrag_pipeline (graph_recover removed — script-only)
+        registered_backends = [
+            call.args[0] for call in mock_worker.register_executor.call_args_list
+        ]
+        assert "leanrag_pipeline" in registered_backends
+        assert "graphiti" in registered_backends
+        assert "graph_recover" not in registered_backends
+
+    def test_leanrag_executor_bulk_pipeline(self):
+        """LeanRAG executor processes BULK tasks via Graphiti episodes."""
+        import asyncio
+        import json
+        from watercooler_mcp.memory_sync import _leanrag_pipeline_executor_fn
+        from watercooler_mcp.memory_queue.task import MemoryTask, TaskType
+
+        task = MemoryTask(
+            task_type=TaskType.BULK,
+            backend="leanrag_pipeline",
+            group_id="test-group",
+            content=json.dumps({}),
+        )
+
+        mock_episodes = {
+            "episodes": [
+                {"uuid": "ep1", "content": "Episode one content"},
+                {"uuid": "ep2", "content": "Episode two content"},
+            ]
+        }
+
+        mock_index_result = MagicMock()
+        mock_index_result.indexed_count = 1
+        mock_index_result.message = "Indexed 2 chunks into 1 cluster"
+
+        async def mock_get_episodes(**kwargs):
+            return mock_episodes
+
+        mock_graphiti = MagicMock()
+        mock_graphiti.get_episodes = mock_get_episodes
+
+        mock_leanrag = MagicMock()
+        mock_leanrag.index = MagicMock(return_value=mock_index_result)
+
+        with patch("watercooler_memory.backends.graphiti.GraphitiBackend", return_value=mock_graphiti), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_leanrag), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"):
+
+            result = asyncio.run(_leanrag_pipeline_executor_fn(task))
+
+        assert result["group_id"] == "test-group"
+        assert result["clusters_created"] == 1
+        assert result["chunks_processed"] == 2
+
+    def test_leanrag_executor_handles_single_tasks(self):
+        """LeanRAG executor processes SINGLE tasks via incremental/full index."""
+        import asyncio
+        from watercooler_mcp.memory_sync import _leanrag_pipeline_executor_fn
+        from watercooler_mcp.memory_queue.task import MemoryTask, TaskType
+
+        task = MemoryTask(
+            task_type=TaskType.SINGLE,
+            backend="leanrag_pipeline",
+            entry_id="E1",
+            group_id="test-group",
+            content="some content",
+        )
+
+        mock_index_result = MagicMock()
+        mock_index_result.indexed_count = 1
+        mock_index_result.message = "Indexed 1 chunk"
+
+        mock_leanrag = MagicMock()
+        mock_leanrag.has_incremental_state.return_value = False
+        mock_leanrag.index = MagicMock(return_value=mock_index_result)
+
+        with patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_leanrag), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"):
+            result = asyncio.run(_leanrag_pipeline_executor_fn(task))
+
+        assert result["episode_uuid"] == "E1"
+        assert result["entities_extracted"] == 1
+
+    def test_leanrag_run_pipeline_queued(self):
+        """_leanrag_run_pipeline_impl enqueues BULK task when queue available."""
+        import asyncio
+        import json
+        from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
+
+        mock_queue = MagicMock()
+        mock_queue.enqueue = MagicMock(return_value="task-123")
+        mock_worker = MagicMock()
+        mock_worker.has_executor = MagicMock(side_effect=lambda b: b == "leanrag_pipeline")
+        mock_worker.wake = MagicMock()
+        mock_ctx = MagicMock()
+        mock_backend = MagicMock()
+
+        with patch("watercooler_mcp.tools.memory._get_leanrag_backend", return_value=mock_backend), \
+             patch("watercooler_mcp.memory_queue.get_queue", return_value=mock_queue), \
+             patch("watercooler_mcp.memory_queue.get_worker", return_value=mock_worker):
+
+            result = asyncio.run(_leanrag_run_pipeline_impl(
+                group_id="test-group",
+                ctx=mock_ctx,
+            ))
+
+        # Should return queued response with task_id
+        result_text = result.content[0].text
+        result_data = json.loads(result_text)
+        assert result_data["success"] is True
+        assert result_data["queued"] is True
+        assert result_data["task_id"] == "task-123"
+        mock_queue.enqueue.assert_called_once()
+        mock_worker.wake.assert_called_once()
+
+    def test_leanrag_run_pipeline_falls_back_without_queue(self):
+        """_leanrag_run_pipeline_impl falls back to direct execution when no queue."""
+        import asyncio
+        import json
+        from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
+
+        mock_ctx = MagicMock()
+
+        # Queue returns None (not initialized)
+        with patch("watercooler_mcp.tools.memory._get_leanrag_backend", return_value=None), \
+             patch("watercooler_mcp.memory_queue.get_queue", return_value=None), \
+             patch("watercooler_mcp.memory_queue.get_worker", return_value=None):
+
+            result = asyncio.run(_leanrag_run_pipeline_impl(
+                group_id="test-group",
+                ctx=mock_ctx,
+            ))
+
+        # Should return backend unavailable error (since we mocked backend=None)
+        result_text = result.content[0].text
+        result_data = json.loads(result_text)
+        assert result_data["success"] is False
+        assert "unavailable" in result_data["error"].lower()

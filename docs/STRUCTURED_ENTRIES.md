@@ -263,6 +263,37 @@ watercooler append-entry topic \
   --body "Auth system deployed to production. All tests passing."
 ```
 
+#### Closure Entry Body Convention
+
+When closing a thread, use this structured template to maximize retrieval value and compounding:
+
+```
+## Decisions Made
+- [Decision 1]: [rationale] (ref: entry [N] or external link)
+- [Decision 2]: [rationale]
+
+## Open Questions
+- [Question]: [current understanding] → [suggested next thread or owner]
+
+## Lessons Learned
+- **[lesson-slug]**
+  - Problem pattern: [what went wrong or what was discovered]
+  - Insight: [the transferable knowledge]
+  - Applicability: [repo-wide | directory-scoped | pattern-specific]
+  - Evidence: [entry IDs, commit SHAs, or PR numbers]
+
+## Policy Proposals
+- [Proposed change]: [scope] → [target file, e.g. CLAUDE.md section]
+  - Rationale: [why]
+  - Promotion gate: [e.g., "ship after 2 successful uses"]
+
+## Retrieval Smoke Test
+- Query: "[natural language question this thread should answer]"
+- Expected: [which lessons/decisions should surface]
+```
+
+This template is a **convention, not enforcement** — use the sections that apply, skip those that don't. The structured fields (especially Lessons) enable `watercooler_smart_query` to surface thread conclusions in future planning sessions.
+
 ## CLI Commands with Structured Entries
 
 ### append-entry
@@ -372,33 +403,33 @@ watercooler handoff topic --agent Codex --note "Your turn"
 
 ### 1. Use Appropriate Roles
 Match the role to the activity:
-- Planning → `planner`
-- Code review → `critic`
-- Implementation → `implementer`
-- Testing → `tester`
-- Coordination → `pm`
-- Documentation → `scribe`
+- Planning -> `planner`
+- Code review -> `critic`
+- Implementation -> `implementer`
+- Testing -> `tester`
+- Coordination -> `pm`
+- Documentation -> `scribe`
 
 ### 2. Meaningful Titles
 Titles should be concise but descriptive:
 
-✅ Good:
+Good:
 - "JWT Implementation Complete"
 - "Security Review Passed"
 - "Migration Plan Approved"
 
-❌ Bad:
+Bad:
 - "Update"
 - "Note"
 - "Done"
 
 ### 3. Choose Correct Entry Types
 Use types for semantic meaning:
-- Decisions → `Decision`
-- Plans → `Plan`
-- PRs → `PR`
-- Closures → `Closure`
-- Everything else → `Note`
+- Decisions -> `Decision`
+- Plans -> `Plan`
+- PRs -> `PR`
+- Closures -> `Closure`
+- Everything else -> `Note`
 
 ### 4. Ball Management
 - Use `say` for normal back-and-forth
@@ -435,7 +466,7 @@ In general, threads follow a natural progression that helps maintain context and
 This arc ensures threads remain self-documenting and provide valuable context for future reference.
 
 ### 7. File References
-Thread entries should **explicitly reference any files changed** in the entry body. Use file paths (e.g., `src/watercooler_mcp/server.py`, `docs/README.md`) to maintain clear traceability of what was modified. This helps readers quickly understand the scope of changes and locate relevant code or documentation.
+Thread entries should **explicitly reference any files changed** in the entry body. Use file paths (e.g., `src/watercooler_mcp/server.py`, `docs/README.md`) to maintain clear traceability of what was modified. This helps readers quickly locate relevant code or documentation.
 
 ## Examples
 
@@ -506,6 +537,4 @@ watercooler ack feature-auth \
 
 ## See Also
 
-- [TEMPLATES.md](TEMPLATES.md) - Customizing entry templates
-- [AGENT_REGISTRY.md](AGENT_REGISTRY.md) - Configuring agents and counterparts
 - [README.md](../README.md) - General usage guide

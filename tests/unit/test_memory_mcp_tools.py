@@ -206,6 +206,7 @@ class TestLeanRAGRunPipelineTool:
 
         mock_backend = MagicMock()
         mock_backend.index = MagicMock(return_value=mock_index_result)
+        mock_backend.has_incremental_state.return_value = False
         return mock_backend
 
     @pytest.fixture
@@ -214,7 +215,7 @@ class TestLeanRAGRunPipelineTool:
         return MagicMock()
 
     async def test_run_pipeline_success(self, mock_leanrag_backend, mock_context):
-        """Test successful pipeline execution."""
+        """Test successful pipeline execution (direct, no queue)."""
         from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
 
         # Mock Graphiti backend to return episodes
@@ -231,6 +232,9 @@ class TestLeanRAGRunPipelineTool:
         ), patch(
             "watercooler_memory.backends.graphiti.GraphitiBackend",
             return_value=mock_graphiti,
+        ), patch(
+            "watercooler_mcp.memory_queue.get_queue",
+            return_value=None,
         ):
             result = await _leanrag_run_pipeline_impl(
                 group_id="auth-feature",
@@ -242,7 +246,7 @@ class TestLeanRAGRunPipelineTool:
             assert "clusters_created" in result_data
 
     async def test_run_pipeline_with_filters(self, mock_leanrag_backend, mock_context):
-        """Test pipeline with filter options."""
+        """Test pipeline with filter options (direct, no queue)."""
         from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
 
         # Mock Graphiti backend to return episodes
@@ -259,6 +263,9 @@ class TestLeanRAGRunPipelineTool:
         ), patch(
             "watercooler_memory.backends.graphiti.GraphitiBackend",
             return_value=mock_graphiti,
+        ), patch(
+            "watercooler_mcp.memory_queue.get_queue",
+            return_value=None,
         ):
             result = await _leanrag_run_pipeline_impl(
                 group_id="auth-feature",

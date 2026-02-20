@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import logging
@@ -710,6 +711,221 @@ class LeanRAGBackend(MemoryBackend):
         except Exception as exc:
             raise BackendError(f"Unexpected error during index: {exc}") from exc
 
+    def has_incremental_state(self) -> bool:
+        """Check if saved cluster state exists for incremental updates.
+
+        Returns True if a prior full build saved cluster centroids + UMAP
+        models that the incremental path can reuse.
+        """
+        work_dir = self.config.work_dir
+        if work_dir is None:
+            return False
+
+        work_dir = work_dir.resolve()
+        work_dir = self._apply_test_prefix(work_dir)
+        state_dir = work_dir / ".cluster_state"
+
+        if not state_dir.exists():
+            return False
+
+        try:
+            leanrag_abspath = self.config.leanrag_path.resolve()
+
+            with _chdir_lock:
+                if str(leanrag_abspath) not in sys.path:
+                    sys.path.insert(0, str(leanrag_abspath))
+
+                original_cwd = os.getcwd()
+                try:
+                    os.chdir(str(self.config.leanrag_path))
+                    from leanrag.clustering.state_manager import StateManager
+
+                    with StateManager(state_dir) as sm:
+                        return sm.has_cluster_state(layer=0)
+                finally:
+                    os.chdir(original_cwd)
+        except Exception as exc:
+            logger.debug("has_incremental_state check failed: %s", exc)
+            return False
+
+    def incremental_index(
+        self,
+        chunks: ChunkPayload,
+        progress_callback: Any | None = None,
+    ) -> IndexResult:
+        """Run incremental LeanRAG entity extraction and cluster assignment.
+
+        Uses saved cluster state from a prior full build to assign new entities
+        to existing clusters without rebuilding the entire hierarchy.
+
+        Falls back to full ``index()`` if no saved cluster state exists.
+
+        Args:
+            chunks: ChunkPayload containing new chunks to index.
+            progress_callback: Optional callback for progress updates.
+        """
+        import time
+
+        if not self.has_incremental_state():
+            # Guard against degenerate UMAP with very few chunks.
+            # UMAP requires n_neighbors > 0, which fails for N < ~5 samples.
+            # Skip the full build and return a descriptive result instead.
+            MIN_CHUNKS_FOR_INITIAL_BUILD = 5
+            if len(chunks.chunks) < MIN_CHUNKS_FOR_INITIAL_BUILD:
+                logger.info(
+                    "Too few chunks (%d) for initial build — skipping (need >= %d)",
+                    len(chunks.chunks), MIN_CHUNKS_FOR_INITIAL_BUILD,
+                )
+                return IndexResult(
+                    manifest_version=chunks.manifest_version,
+                    indexed_count=0,
+                    message=(
+                        f"Skipped: {len(chunks.chunks)} chunks insufficient for "
+                        f"initial build (need >= {MIN_CHUNKS_FOR_INITIAL_BUILD})"
+                    ),
+                )
+            logger.info("No incremental state found — falling back to full index()")
+            return self.index(chunks, progress_callback=progress_callback)
+
+        def _report(stage: str, step: str, current: int = 0, total: int = 0) -> None:
+            if progress_callback:
+                progress_callback(stage, step, current, total)
+
+        work_dir = self.config.work_dir or Path(tempfile.mkdtemp(prefix="leanrag-incr-"))
+        work_dir = work_dir.resolve()
+        work_dir = self._apply_test_prefix(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            chunk_file = self._ensure_chunk_file(work_dir, chunks)
+            leanrag_abspath = self.config.leanrag_path.resolve()
+
+            with open(chunk_file, "r") as fh:
+                corpus = json.load(fh)
+            chunks_dict = {item["hash_code"]: item["text"] for item in corpus}
+
+            # Stage 1: Triple extraction (same as full index)
+            num_chunks = len(chunks_dict)
+            _report("triple_extraction", "starting", 0, num_chunks)
+            extraction_start = time.perf_counter()
+
+            with _chdir_lock:
+                if str(leanrag_abspath) not in sys.path:
+                    sys.path.insert(0, str(leanrag_abspath))
+
+                original_cwd = os.getcwd()
+                try:
+                    os.chdir(str(self.config.leanrag_path))
+
+                    from leanrag.extraction.chunk import triple_extraction
+                    from leanrag.core.llm import generate_text_async, embedding
+
+                    async def _tracked_llm(prompt: str, **kwargs) -> str:
+                        return await generate_text_async(prompt, **kwargs)
+
+                    asyncio.run(
+                        triple_extraction(
+                            chunks_dict, _tracked_llm, str(work_dir), save_filtered=False
+                        )
+                    )
+                finally:
+                    os.chdir(original_cwd)
+
+            _report("triple_extraction", "complete", num_chunks, num_chunks)
+
+            # Stage 2: Load extracted entities and generate embeddings
+            _report("incremental_update", "embedding", 0, 3)
+
+            with _chdir_lock:
+                if str(leanrag_abspath) not in sys.path:
+                    sys.path.insert(0, str(leanrag_abspath))
+
+                original_cwd = os.getcwd()
+                try:
+                    os.chdir(str(self.config.leanrag_path))
+
+                    from leanrag.core.llm import embedding as embed_fn
+                    from leanrag.core.llm import generate_text
+                    from leanrag.pipelines.incremental import incremental_update
+
+                    # Load extracted entities
+                    entity_path = work_dir / "entity.jsonl"
+                    if not entity_path.exists():
+                        logger.warning("No entities extracted — nothing to index incrementally")
+                        return IndexResult(
+                            manifest_version=chunks.manifest_version,
+                            indexed_count=0,
+                            message="No entities extracted from chunks",
+                        )
+
+                    import json as _json
+                    entities_meta = []
+                    entity_descriptions = []
+                    with open(entity_path) as f:
+                        for line in f:
+                            ent = _json.loads(line)
+                            name = str(ent.get("entity_name", ""))
+                            entities_meta.append({
+                                "entity_id": int(hashlib.sha256(name.encode()).hexdigest(), 16) % (2**31),
+                                "entity_name": name,
+                            })
+                            entity_descriptions.append(
+                                ent.get("description", name)[:4096]
+                            )
+
+                    if not entities_meta:
+                        return IndexResult(
+                            manifest_version=chunks.manifest_version,
+                            indexed_count=0,
+                            message="No entities extracted",
+                        )
+
+                    # Generate embeddings
+                    import numpy as np
+
+                    batch_size = 64
+                    all_embeddings = []
+                    for i in range(0, len(entity_descriptions), batch_size):
+                        batch = entity_descriptions[i:i + batch_size]
+                        emb = embed_fn(batch)
+                        all_embeddings.append(emb)
+
+                    embeddings = np.vstack(all_embeddings)
+
+                    # Stage 3: Run incremental update pipeline
+                    _report("incremental_update", "assigning", 1, 3)
+                    state_dir = str(work_dir / ".cluster_state")
+
+                    # Wire up llm_func so dirty communities get re-summarized.
+                    # generate_text is the sync LLM wrapper used by the full
+                    # build pipeline (same signature: str -> str).
+                    inc_result = incremental_update(
+                        working_dir=str(work_dir),
+                        new_entity_embeddings=embeddings,
+                        new_entity_metadata=entities_meta,
+                        state_dir=state_dir,
+                        llm_func=generate_text,
+                    )
+                finally:
+                    os.chdir(original_cwd)
+
+            _report("incremental_update", "complete", 3, 3)
+
+            return IndexResult(
+                manifest_version=chunks.manifest_version,
+                indexed_count=len(chunks.chunks),
+                message=(
+                    f"Incremental index: {inc_result.entities_assigned} entities assigned, "
+                    f"{inc_result.entities_orphaned} orphaned, "
+                    f"{inc_result.communities_resummarized} communities re-summarized "
+                    f"in {inc_result.duration_seconds:.1f}s"
+                ),
+            )
+        except FileNotFoundError as exc:
+            raise ConfigError(f"Required LeanRAG files not found: {exc}") from exc
+        except Exception as exc:
+            raise BackendError(f"Incremental index error: {exc}") from exc
+
     def query(self, query: QueryPayload) -> QueryResult:
         """
         Execute queries against LeanRAG graph by calling query_graph directly.
@@ -1352,7 +1568,7 @@ class LeanRAGBackend(MemoryBackend):
             supports_falkor=True,
             supports_milvus=bool(self.config.embedding_api_base),
             supports_neo4j=False,
-            max_tokens=1024,
+            max_tokens=768,
             
             # Phase 1 protocol extensions
             supports_nodes=True,       # ✅ Via Milvus vector search on entity embeddings

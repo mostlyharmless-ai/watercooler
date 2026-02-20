@@ -118,6 +118,31 @@ class TestMemoryTask:
         t = MemoryTask(entry_id="E1", backend="graphiti")
         assert t.dedup_key() == "E1:graphiti"
 
+    def test_dedup_key_bulk(self):
+        """BULK tasks use group_id-based dedup to prevent concurrent pipeline runs."""
+        t = MemoryTask(
+            task_type=TaskType.BULK,
+            backend="leanrag_pipeline",
+            group_id="auth-feature",
+        )
+        assert t.dedup_key() == "bulk:auth-feature:leanrag_pipeline"
+
+    def test_dedup_key_bulk_different_groups_no_collision(self):
+        """Different group_ids should produce different dedup keys."""
+        t1 = MemoryTask(task_type=TaskType.BULK, backend="leanrag_pipeline", group_id="group-a")
+        t2 = MemoryTask(task_type=TaskType.BULK, backend="leanrag_pipeline", group_id="group-b")
+        assert t1.dedup_key() != t2.dedup_key()
+
+    def test_dedup_key_single_unchanged(self):
+        """SINGLE tasks still use entry_id:backend format."""
+        t = MemoryTask(
+            task_type=TaskType.SINGLE,
+            entry_id="E42",
+            backend="leanrag",
+            group_id="some-group",
+        )
+        assert t.dedup_key() == "E42:leanrag"
+
 
 # ================================================================== #
 # MemoryTaskQueue

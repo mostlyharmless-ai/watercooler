@@ -670,6 +670,7 @@ async def _leanrag_run_pipeline_impl(
     start_date: str = "",
     end_date: str = "",
     dry_run: bool = False,
+    incremental: bool = True,
 ) -> ToolResult:
     """Run LeanRAG clustering pipeline on Graphiti episodes.
 
@@ -684,6 +685,8 @@ async def _leanrag_run_pipeline_impl(
         start_date: Optional start date filter (ISO 8601)
         end_date: Optional end date filter (ISO 8601)
         dry_run: If True, only report what would be done
+        incremental: If True (default), use incremental update when saved
+            cluster state exists. If False, force a full rebuild.
 
     Returns:
         JSON with clusters_created, chunks_processed, and execution stats
@@ -739,14 +742,62 @@ async def _leanrag_run_pipeline_impl(
                 }, indent=2)
             )])
 
-        # Fetch episodes from Graphiti for this group
+        # Try queue-first: enqueue BULK task for async processing
+        try:
+            from ..memory_queue import get_queue, get_worker, MemoryTask, TaskType, DuplicateTaskError
+
+            queue = get_queue()
+            worker = get_worker()
+            if queue is not None and worker is not None and worker.has_executor("leanrag_pipeline"):
+                content_payload = json.dumps({
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "incremental": incremental,
+                })
+                task = MemoryTask(
+                    task_type=TaskType.BULK,
+                    backend="leanrag_pipeline",
+                    group_id=group_id,
+                    topic=group_id,
+                    content=content_payload,
+                    title=f"leanrag_pipeline:{group_id}",
+                    source_description=f"leanrag_run_pipeline|{group_id}",
+                )
+                try:
+                    task_id = queue.enqueue(task)
+                except DuplicateTaskError:
+                    return ToolResult(content=[TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "group_id": group_id,
+                            "queued": True,
+                            "message": f"Pipeline already queued for group '{group_id}'",
+                        }, indent=2)
+                    )])
+                worker.wake()
+                log_action(f"MEMORY: LeanRAG pipeline queued for {group_id} (task_id={task_id})")
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "group_id": group_id,
+                        "queued": True,
+                        "task_id": task_id,
+                        "message": f"Pipeline queued for async processing. Poll with watercooler_memory_task_status.",
+                    }, indent=2)
+                )])
+        except ImportError:
+            pass  # Fall through to direct execution
+
+        # Fallback: direct execution (queue unavailable)
         try:
             from watercooler_memory.backends.graphiti import GraphitiBackend
 
             graphiti = GraphitiBackend()
             episodes_result = await graphiti.get_episodes(
                 group_ids=[group_id],
-                limit=1000,  # Reasonable limit
+                limit=1000,
             )
             episodes = episodes_result.get("episodes", [])
         except ImportError:
@@ -806,7 +857,10 @@ async def _leanrag_run_pipeline_impl(
 
         # Run LeanRAG index via thread (ADR 0001 Sync Facade pattern)
         try:
-            result = await asyncio.to_thread(backend.index, chunk_payload)
+            if incremental and backend.has_incremental_state():
+                result = await asyncio.to_thread(backend.incremental_index, chunk_payload)
+            else:
+                result = await asyncio.to_thread(backend.index, chunk_payload)
 
             execution_time_ms = int((time.time() - start_time) * 1000)
             log_action(f"MEMORY: LeanRAG pipeline completed for {group_id}: {len(chunks)} chunks")

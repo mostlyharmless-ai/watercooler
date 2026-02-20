@@ -60,35 +60,7 @@ No manual git configuration required!
 
 ## Setup Options
 
-### Option 1: Using Dashboard Credentials (Recommended)
-
-**Seamless authentication with minimal setup**
-
-1. **Sign in to the dashboard** at https://watercooler-site.vercel.app
-   - Click "Sign in with GitHub"
-   - Grant access to your organizations
-   - Complete onboarding
-
-2. **Download credentials file**
-   - Go to Settings → GitHub Connection
-   - Click "Download Credentials" button
-   - File downloads as `credentials.json`
-
-3. **Place credentials file**
-   ```bash
-   # Create directory
-   mkdir -p ~/.watercooler
-
-   # Move downloaded file
-   mv ~/Downloads/credentials.json ~/.watercooler/
-   ```
-
-4. **Done!** MCP server will automatically use the credentials
-   - No environment variables needed
-   - No MCP configuration changes required
-   - Credentials auto-detected by git credential helper
-
-### Option 2: Using Environment Variables (Advanced)
+### Using Environment Variables
 
 For advanced users or CI/CD environments, set your GitHub token as an environment variable:
 
@@ -124,7 +96,7 @@ If using environment variables, create a GitHub Personal Access Token:
 
 Add to `~/.config/claude/claude-code/mcp-settings.json`:
 
-**Minimal configuration** (using credentials file from Option 1):
+**Minimal configuration**:
 
 ```json
 {
@@ -137,7 +109,7 @@ Add to `~/.config/claude/claude-code/mcp-settings.json`:
 }
 ```
 
-**With environment variable** (Option 2):
+**With environment variable**:
 
 ```json
 {
@@ -157,7 +129,7 @@ Add to `~/.config/claude/claude-code/mcp-settings.json`:
 
 Add to `.cursor/mcp.json`:
 
-**Minimal configuration** (using credentials file from Option 1):
+**Minimal configuration**:
 
 ```json
 {
@@ -170,7 +142,7 @@ Add to `.cursor/mcp.json`:
 }
 ```
 
-**With environment variable** (Option 2):
+**With environment variable**:
 
 ```json
 {
@@ -298,7 +270,7 @@ git config --global credential."https://github.com".helper "$(pwd)/scripts/git-c
    - Set up SSH keys in GitHub: https://docs.github.com/en/authentication/connecting-to-github-with-ssh
    - The credential helper won't be used (SSH authentication is separate)
 
-### ⚠️ SSH Agent Required for SSH Protocol (Critical for MCP/Headless)
+### SSH Agent Required for SSH Protocol (Critical for MCP/Headless)
 
 **Problem:** Git operations silently fail or hang when using SSH protocol without an SSH agent running.
 
@@ -383,34 +355,9 @@ If you require SSH protocol:
 
 **See Also:** [TROUBLESHOOTING.md](TROUBLESHOOTING.md#ssh-agent-issues-wsl2headless) for detailed diagnostics
 
-## Future Enhancements
-
-### Dashboard API Integration (Planned)
-
-Future versions will fetch tokens directly from the dashboard API:
-
-1. MCP server makes authenticated request to `/api/mcp/credentials`
-2. Dashboard returns GitHub token for current user
-3. Credential helper uses token from API
-4. No environment variables needed
-
-This will provide:
-- **Single sign-on**: Authenticate once in dashboard, use everywhere
-- **Token rotation**: Dashboard can rotate tokens without MCP server restart
-- **Centralized management**: Manage all credentials in one place
-
-### Session-Based Authentication (Planned)
-
-Support for session cookies or API keys:
-
-1. User logs into dashboard
-2. Dashboard issues session cookie or API key
-3. Credential helper uses session for API requests
-4. Seamless authentication without manual token management
-
 ## Related Documentation
 
 - [Environment Variables](ENVIRONMENT_VARS.md) - Complete environment variable reference
 - [MCP Server](mcp-server.md) - MCP server setup and usage
-- [Setup and Quickstart](SETUP_AND_QUICKSTART.md) - Getting started guide
+- [Quickstart](QUICKSTART.md) - Getting started guide
 - [Troubleshooting](TROUBLESHOOTING.md) - Common issues and solutions

@@ -198,5 +198,12 @@ class MemoryTask:
             self.next_retry_at = time.time() + delay + jitter
 
     def dedup_key(self) -> str:
-        """Key used for deduplication: ``(entry_id, backend)``."""
+        """Key used for deduplication.
+
+        SINGLE tasks: ``entry_id:backend`` (one task per entry per backend).
+        BULK tasks: ``bulk:group_id:backend`` (one pipeline per group per backend,
+        prevents collision while allowing concurrent pipelines for different groups).
+        """
+        if self.task_type == TaskType.BULK:
+            return f"bulk:{self.group_id}:{self.backend}"
         return f"{self.entry_id}:{self.backend}"

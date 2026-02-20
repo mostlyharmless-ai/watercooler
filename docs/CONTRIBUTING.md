@@ -95,25 +95,25 @@ pytest tests/
 
 We welcome various types of contributions:
 
-#### 🐛 Bug Reports
+#### Bug Reports
 - Search existing issues first
 - Include minimal reproduction steps
 - Provide environment details (OS, Python version)
 - Include error messages and stack traces
 
-#### ✨ Feature Requests
+#### Feature Requests
 - Check [ROADMAP.md](../ROADMAP.md) for planned features
 - Describe the use case and expected behavior
 - Explain why this would be valuable
 - Consider if it fits the project's goals
 
-#### 📝 Documentation
+#### Documentation
 - Fix typos and clarify confusing sections
 - Add examples and use cases
 - Improve API documentation
 - Update outdated information
 
-#### 🔧 Code Contributions
+#### Code Contributions
 - Bug fixes
 - New features (discuss first in an issue)
 - Performance improvements
@@ -380,13 +380,11 @@ def temp_threads_dir(tmp_path: Path) -> Path:
 
 Update these files as needed:
 - `docs/QUICKSTART.md` - Getting started guide
-- `docs/archive/integration.md` - Integration patterns
 - `docs/mcp-server.md` - MCP tool reference
 - `docs/TROUBLESHOOTING.md` - Common issues
 
 #### 3. API Documentation
 
-- `docs/archive/integration.md#python-api-reference` - Python API reference
 - Keep examples current
 - Document all public APIs
 
@@ -448,8 +446,8 @@ Fixes #456
 We use a three-branch model for development and deployment:
 
 ```
-feature/* ──PR──► main (development) ──PR──► staging (release candidate) ──FF──► stable + tag
-                                                                                    │
+feature/* --PR--> main (development) --PR--> staging (release candidate) --FF--> stable + tag
+                                                                                    |
                                                                               v0.1.2, v0.2.0
 ```
 
@@ -497,7 +495,7 @@ uvx --from "git+https://github.com/mostlyharmless-ai/watercooler-cloud@main"
 
 **Why `stable` doesn't require PRs or CI:**
 - Code is already reviewed and tested when it reaches staging
-- The staging → stable transition is a fast-forward merge only
+- The staging -> stable transition is a fast-forward merge only
 - Running tests again would be redundant
 - This is a mechanical release step, not a review step
 - The tag triggers the release workflow
@@ -528,25 +526,25 @@ __version__ = version("watercooler-cloud")
 
 ```
 v0.1.1 released on stable
-         │
-         ▼
-main: "0.1.2-dev"     ← development happens here
-         │
-         │ (bump version for release PR)
-         ▼
-main: "0.1.2"         ← version bump commit
-         │
-         │ (PR: main → staging)
-         ▼
-staging: "0.1.2"      ← release candidate validated
-         │
-         │ (FF merge + tag)
-         ▼
-stable: "0.1.2"       ← released! (tag: v0.1.2)
-         │
-         │ (bump to next dev version)
-         ▼
-main: "0.1.3-dev"     ← ready for next cycle
+         |
+         v
+main: "0.1.2-dev"     <-- development happens here
+         |
+         | (bump version for release PR)
+         v
+main: "0.1.2"         <-- version bump commit
+         |
+         | (PR: main -> staging)
+         v
+staging: "0.1.2"      <-- release candidate validated
+         |
+         | (FF merge + tag)
+         v
+stable: "0.1.2"       <-- released! (tag: v0.1.2)
+         |
+         | (bump to next dev version)
+         v
+main: "0.1.3-dev"     <-- ready for next cycle
 ```
 
 ### Semantic Versioning
@@ -572,7 +570,7 @@ The release process has **5 phases**:
 4. **Release** - Fast-forward stable, create tag
 5. **Post-release** - Bump main to next dev version
 
-### Phase 1: Development (feature → main)
+### Phase 1: Development (feature -> main)
 
 ```bash
 # Create feature branch
@@ -599,14 +597,14 @@ When ready to release, bump the version on main:
 git checkout main
 git pull origin main
 
-# Edit pyproject.toml: "0.1.2-dev" → "0.1.2"
+# Edit pyproject.toml: "0.1.2-dev" -> "0.1.2"
 # (Remove the -dev suffix)
 
 git commit -m "chore(release): prepare v0.1.2"
 git push origin main
 ```
 
-### Phase 3: Create Release PR (main → staging)
+### Phase 3: Create Release PR (main -> staging)
 
 ```bash
 # Create PR from main to staging
@@ -620,7 +618,7 @@ gh pr create --base staging --head main --title "Release v0.1.2"
 
 After approval, merge the PR (via GitHub UI).
 
-### Phase 4: Release to Production (staging → stable)
+### Phase 4: Release to Production (staging -> stable)
 
 ```bash
 git fetch origin
@@ -644,7 +642,7 @@ git push origin stable --tags
 ```bash
 git checkout main
 
-# Edit pyproject.toml: "0.1.2" → "0.1.3-dev"
+# Edit pyproject.toml: "0.1.2" -> "0.1.3-dev"
 
 git commit -m "chore: bump version to 0.1.3-dev"
 git push origin main
@@ -660,7 +658,7 @@ git push origin main
 ## Prepare
 - [ ] Bump version in pyproject.toml (remove -dev)
 - [ ] Commit: "chore(release): prepare vX.Y.Z"
-- [ ] Create PR: main → staging
+- [ ] Create PR: main -> staging
 
 ## Validate
 - [ ] CI passing on staging PR
@@ -696,8 +694,8 @@ The release workflow triggers on any `v*` tag push. Creating a tag from the wron
 
 **Prerelease detection:**
 The release workflow automatically marks tags containing `-` as prereleases:
-- `v0.1.2` → full release
-- `v0.1.2-beta` → prerelease
+- `v0.1.2` -> full release
+- `v0.1.2-beta` -> prerelease
 
 ### Rollback Procedure
 
@@ -792,33 +790,78 @@ Understanding the codebase:
 ```
 watercooler-cloud/
 ├── src/
-│   ├── watercooler/          # Core library
+│   ├── watercooler/              # Core library
 │   │   ├── __init__.py
-│   │   ├── agents.py         # Agent registry and canonicalization
-│   │   ├── cli.py            # CLI entry point
-│   │   ├── commands.py       # High-level command implementations
-│   │   ├── config.py         # Configuration resolution
-│   │   ├── entry.py          # Entry formatting
-│   │   ├── fs.py             # File system operations
-│   │   ├── header.py         # Header parsing/updating
-│   │   ├── locking.py        # Advisory file locking
-│   │   ├── metadata.py       # Thread metadata parsing
-│   │   └── templates/        # Built-in templates
-│   └── watercooler_mcp/      # MCP server
+│   │   ├── agents.py             # Agent registry and canonicalization
+│   │   ├── baseline_graph/       # Baseline graph JSONL export (package)
+│   │   ├── cli.py                # CLI entry point
+│   │   ├── commands.py           # High-level command implementations
+│   │   ├── commands_graph.py     # Graph-related CLI commands
+│   │   ├── config_facade.py      # Unified configuration facade
+│   │   ├── config_loader.py      # TOML loading and merging
+│   │   ├── config_schema.py      # Pydantic configuration models
+│   │   ├── constants.py          # Shared constants
+│   │   ├── credentials.py        # Credential management
+│   │   ├── fs.py                 # File system operations
+│   │   ├── lock.py               # Advisory file locking
+│   │   ├── memory_config.py      # Memory backend configuration
+│   │   ├── models.py             # Shared data models
+│   │   ├── path_resolver.py      # Git-aware path resolution
+│   │   ├── schema_validation.py  # Schema validation utilities
+│   │   ├── slack_cli.py          # Slack CLI commands
+│   │   ├── templates/            # Built-in templates
+│   │   ├── templates.py          # Template loading
+│   │   ├── testing.py            # Test utilities (context managers, fixtures)
+│   │   └── thread_entries.py     # Thread entry operations
+│   └── watercooler_mcp/          # MCP server
 │       ├── __init__.py
-│       ├── server.py         # FastMCP server implementation
-│       ├── config.py         # MCP-specific configuration
-│       └── git_sync.py       # Git synchronization (Phase 2A)
-├── tests/                     # Test suite
+│       ├── __main__.py           # python -m entry point
+│       ├── auth.py               # Authentication
+│       ├── cache.py              # Caching layer
+│       ├── config.py             # MCP-specific configuration
+│       ├── context.py            # Request context
+│       ├── errors.py             # Error types
+│       ├── github_api.py         # GitHub API integration
+│       ├── helpers.py            # Shared helpers
+│       ├── hosted_ops.py         # Hosted operation handlers
+│       ├── memory.py             # Memory backend integration
+│       ├── memory_queue/         # Persistent memory task queue
+│       │   ├── checkpoint.py     # Queue checkpointing
+│       │   ├── errors.py         # Queue error types
+│       │   ├── queue.py          # Queue implementation
+│       │   ├── task.py           # Task definitions
+│       │   └── worker.py         # Background worker
+│       ├── memory_sync.py        # Memory synchronization
+│       ├── middleware.py         # Request middleware
+│       ├── observability.py      # Logging and monitoring
+│       ├── repo_setup.py         # Repository setup
+│       ├── resources.py          # MCP resources
+│       ├── server.py             # FastMCP server implementation
+│       ├── server_http.py        # HTTP transport server
+│       ├── startup.py            # Server startup logic
+│       ├── sync/                 # Git sync primitives and locking
+│       │   ├── __init__.py       # Per-topic advisory locks, sanitization
+│       │   ├── errors.py         # Rich exception hierarchy
+│       │   └── primitives.py     # Pure git operations
+│       ├── tools/                # MCP tool implementations
+│       │   ├── diagnostic.py     # Diagnostic tools
+│       │   ├── graph.py          # Graph tools
+│       │   ├── memory.py         # Memory tools
+│       │   ├── migration.py      # Migration tools
+│       │   ├── sync.py           # Sync tools
+│       │   ├── thread_query.py   # Thread query tools
+│       │   └── thread_write.py   # Thread write tools
+│       ├── validation.py         # Input validation
+│       └── slack/                # Slack integration (reference)
+├── tests/                        # Test suite
 │   ├── test_commands.py
-│   ├── test_git_sync.py
+│   ├── test_cli.py
 │   └── ...
-├── docs/                      # Documentation
-│   ├── README.md
+├── docs/                         # Documentation
 │   ├── QUICKSTART.md
-│   ├── archive/integration.md
+│   ├── CONTRIBUTING.md
 │   └── ...
-└── ROADMAP.md                 # Project status and roadmap
+└── ROADMAP.md                    # Project status and roadmap
 ```
 
 ---
@@ -835,4 +878,4 @@ By contributing, you agree that your contributions will be licensed under the sa
 - **Issues**: [GitHub Issues](https://github.com/mostlyharmless-ai/watercooler-cloud/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/mostlyharmless-ai/watercooler-cloud/discussions)
 
-Thank you for contributing to watercooler-cloud! 🎉
+Thank you for contributing to watercooler-cloud!

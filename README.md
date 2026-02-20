@@ -142,7 +142,7 @@ like this:
    and flipping the ball back when done.
 
 That’s the workflow we recommend because the MCP layer enforces formatting,
-branch pairing, git commits, and identity footers automatically. If you do need
+git sync, commits, and identity footers automatically. If you do need
 to work manually (for example, repairing a thread offline), the legacy CLI is
 still available:
 
@@ -175,69 +175,6 @@ route.
 
 No manual git work, no hand-written metadata—each MCP call bundles the entry,
 ball movement, commit footers, and push.
-
----
-
-## Memory Backends
-
-Watercooler supports **pluggable memory backends** for advanced knowledge retrieval and semantic search. The backend architecture uses Python Protocols for clean decoupling - swap implementations without changing application code.
-
-### Installation
-
-```bash
-# Install with all memory backends
-pip install 'watercooler-cloud[memory]'
-
-# Install specific backends
-pip install 'watercooler-cloud[leanrag]'   # LeanRAG only
-pip install 'watercooler-cloud[graphiti]'  # Graphiti only
-```
-
-### Quick Usage Example
-
-```python
-from pathlib import Path
-from watercooler_memory.backends import get_backend, LeanRAGConfig
-
-# Initialize backend
-config = LeanRAGConfig(work_dir=Path("./memory"))
-backend = get_backend("leanrag", config)
-
-# Prepare, index, and query (see docs/examples/BACKEND_USAGE.md for full examples)
-backend.prepare(corpus)
-backend.index(chunks)
-results = backend.query(queries)
-```
-
-### Available Backends
-
-#### LeanRAG - Hierarchical Graph RAG
-
-Entity extraction with hierarchical semantic clustering. Ideal for large document corpora with redundancy reduction.
-
-**Features:**
-- Hierarchical semantic clustering (~46% redundancy reduction)
-- Batch document processing
-- Optional vector search with Milvus
-
-**Setup:** [LEANRAG_SETUP.md](docs/LEANRAG_SETUP.md)
-
-#### Graphiti - Episodic Memory
-
-Temporal entity tracking with hybrid search. Ideal for conversation tracking and time-aware retrieval.
-
-**Features:**
-- Episodic ingestion with temporal reasoning
-- Automatic fact extraction and deduplication
-- Hybrid semantic + graph search
-
-**Setup:** [GRAPHITI_SETUP.md](docs/GRAPHITI_SETUP.md)
-
-### Learn More
-
-- **[Backend Usage Examples](docs/examples/BACKEND_USAGE.md)** - Practical code examples and patterns
-- **[Memory Module Documentation](docs/MEMORY.md)** - Architecture, comparison, and API reference
-- **[ADR 0001](docs/adr/0001-memory-backend-contract.md)** - Backend contract specification
 
 ---
 
