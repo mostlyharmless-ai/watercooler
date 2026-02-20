@@ -55,7 +55,7 @@ def discover_namespace_worktree(
     code_root = Path(namespace_config.code_path)
     worktree_path = _worktree_path_for(code_root)
 
-    # Reject symlinks (TOCTOU mitigation)
+    # Reject symlinks (best-effort check — TOCTOU gap exists but is acceptable for read-only search)
     if worktree_path.is_symlink():
         logger.warning(
             "Federation: worktree path is a symlink, rejecting: %s (namespace=%s)",
@@ -67,17 +67,18 @@ def discover_namespace_worktree(
     try:
         resolved = worktree_path.resolve()
         worktree_base_resolved = WORKTREE_BASE.resolve()
-        if not str(resolved).startswith(str(worktree_base_resolved) + "/"):
-            logger.warning(
-                "Federation: worktree path escapes WORKTREE_BASE, rejecting: %s (namespace=%s)",
-                resolved, namespace_id,
-            )
-            return None
-    except (OSError, ValueError):
+        resolved.relative_to(worktree_base_resolved)
+    except ValueError:
+        logger.warning(
+            "Federation: worktree path escapes WORKTREE_BASE, rejecting: %s (namespace=%s)",
+            resolved, namespace_id,
+        )
+        return None
+    except OSError:
         return None
 
-    if worktree_path.exists() and worktree_path.is_dir():
-        return worktree_path
+    if resolved.exists() and resolved.is_dir():
+        return resolved
 
     return None
 

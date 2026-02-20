@@ -44,7 +44,8 @@ class TestDiscoverNamespaceWorktree:
                 return_value=worktree,
             ):
                 result = discover_namespace_worktree("site", ns_config)
-        assert result == worktree
+        # Returns the resolved path
+        assert result == worktree.resolve()
 
     def test_missing_worktree_returns_none(self, tmp_path):
         worktree_base = tmp_path / "worktrees"
@@ -91,6 +92,25 @@ class TestDiscoverNamespaceWorktree:
             with patch(
                 "watercooler_mcp.federation.resolver._worktree_path_for",
                 return_value=escape_path,
+            ):
+                result = discover_namespace_worktree("site", ns_config)
+        assert result is None
+
+
+    def test_similar_prefix_path_rejected(self, tmp_path):
+        """Path with similar prefix but outside WORKTREE_BASE is rejected."""
+        worktree_base = tmp_path / "worktrees"
+        worktree_base.mkdir()
+        # Similar prefix: "worktrees-other" starts with "worktrees" as string
+        similar_prefix = tmp_path / "worktrees-other"
+        similar_prefix.mkdir()
+
+        ns_config = FederationNamespaceConfig(code_path="/home/user/watercooler-site")
+
+        with patch("watercooler_mcp.federation.resolver.WORKTREE_BASE", worktree_base):
+            with patch(
+                "watercooler_mcp.federation.resolver._worktree_path_for",
+                return_value=similar_prefix,
             ):
                 result = discover_namespace_worktree("site", ns_config)
         assert result is None
