@@ -10,16 +10,15 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from fastmcp import Context
-
-from typing import Any
 
 from watercooler.baseline_graph.search import SearchQuery, search_graph
 from watercooler.config_facade import config
 
-from ..auth import is_hosted_mode
 from .. import validation
+from ..auth import is_hosted_mode
 from ..federation.access import filter_allowed_namespaces, is_topic_denied
 from ..federation.merger import (
     ScoredResult,

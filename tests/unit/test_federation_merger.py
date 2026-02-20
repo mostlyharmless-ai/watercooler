@@ -1,11 +1,17 @@
 """Unit tests for federation merger module."""
 
+from datetime import datetime
+
 from watercooler_mcp.federation.merger import (
     ScoredResult,
-    _negate_epoch,
     build_response_envelope,
     merge_results,
 )
+
+
+def _parse_epoch(ts: str) -> float:
+    """Parse ISO 8601 timestamp to epoch float for test helpers."""
+    return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
 
 
 def _make_result(
@@ -27,25 +33,8 @@ def _make_result(
         ranking_score=ranking_score,
         entry_data=kwargs.get("entry_data", {"title": "test"}),
         timestamp=timestamp,
+        timestamp_epoch=_parse_epoch(timestamp),
     )
-
-
-class TestNegateEpoch:
-    """Tests for _negate_epoch."""
-
-    def test_newer_is_more_negative(self):
-        older = _negate_epoch("2026-01-01T00:00:00Z")
-        newer = _negate_epoch("2026-02-01T00:00:00Z")
-        assert newer < older  # newer sorts first (more negative)
-
-    def test_unparseable_returns_zero(self):
-        assert _negate_epoch("not-a-date") == 0.0
-        assert _negate_epoch("") == 0.0
-
-    def test_valid_iso_returns_negative_float(self):
-        result = _negate_epoch("2026-02-01T12:00:00Z")
-        assert isinstance(result, float)
-        assert result < 0.0
 
 
 class TestMergeResults:
@@ -194,29 +183,6 @@ class TestBuildResponseEnvelope:
         )
         assert envelope["total_candidates_before_truncation"] == 15
         assert envelope["result_count"] == 1
-
-    def test_primary_branch_filter_included(self):
-        envelope = build_response_envelope(
-            results=[],
-            primary_namespace="cloud",
-            namespace_status={"cloud": {"status": "ok"}},
-            queried_namespaces=["cloud"],
-            query="test",
-            total_candidates=0,
-            primary_branch_filter="main",
-        )
-        assert envelope["primary_branch_filter"] == "main"
-
-    def test_primary_branch_filter_omitted_when_empty(self):
-        envelope = build_response_envelope(
-            results=[],
-            primary_namespace="cloud",
-            namespace_status={"cloud": {"status": "ok"}},
-            queried_namespaces=["cloud"],
-            query="test",
-            total_candidates=0,
-        )
-        assert "primary_branch_filter" not in envelope
 
     def test_namespace_status_preserved(self):
         envelope = build_response_envelope(

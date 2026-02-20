@@ -3,10 +3,11 @@
 Tests the full tool handler with mocked search_graph() and config.
 """
 
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -35,12 +36,12 @@ class MockGraphEntry:
     title: str = "Test entry"
     timestamp: str = "2026-02-01T12:00:00Z"
     summary: str = "Test summary"
-    body: Optional[str] = None
-    file_refs: Optional[List[str]] = None
-    pr_refs: Optional[List[str]] = None
-    commit_refs: Optional[List[str]] = None
+    body: str | None = None
+    file_refs: list[str] | None = None
+    pr_refs: list[str] | None = None
+    commit_refs: list[str] | None = None
     access_count: int = 0
-    code_branch: Optional[str] = None
+    code_branch: str | None = None
 
 
 @dataclass
@@ -50,7 +51,7 @@ class MockSearchResult:
     score: float = 1.7
     matched_fields: list = field(default_factory=lambda: ["title", "body"])
     thread: object = None
-    entry: Optional[MockGraphEntry] = None
+    entry: MockGraphEntry | None = None
 
 
 @dataclass

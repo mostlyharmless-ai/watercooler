@@ -969,8 +969,6 @@ auto_detect_services = true
 # --- Scoring parameters ---
 # [federation.scoring]
 # local_weight = 1.0
-# lens_weight = 0.7
 # wide_weight = 0.55
-# referenced_weight = 0.85  # Phase 2, dormant
 # recency_floor = 0.7
 # recency_half_life_days = 60.0

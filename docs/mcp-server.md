@@ -284,6 +284,36 @@ Generate index summary of all threads.
 - In Review threads
 - Closed threads (limited to 10 most recent)
 
+### Federation Tools
+
+#### `watercooler_federated_search`
+Search across federated watercooler namespaces. Performs read-only keyword search
+across configured watercooler repositories with scored, ranked results.
+
+**Parameters:**
+- `query` (str, required): Search query (max 500 chars)
+- `code_path` (str): Primary repository root path
+- `namespaces` (str): Comma-separated namespace IDs to search (leave empty for all configured)
+- `limit` (int): Max results to return (1-100, default 10)
+
+**Returns:** JSON envelope with:
+- `schema_version`: Protocol version (currently 1)
+- `results[]`: Scored results with `entry_id`, `origin_namespace`, `ranking_score`, `score_breakdown`, and `entry_data`
+- `namespace_status`: Per-namespace status (`ok`, `timeout`, `not_initialized`, `access_denied`, `security_rejected`)
+- `queried_namespaces`: All namespace IDs that were part of the query
+
+**Prerequisites:** Requires `[federation]` section in config.toml with `enabled = true` and at least one
+namespace defined. See `config.example.toml` for the full schema.
+
+**Example:**
+```python
+watercooler_federated_search(
+    query="authentication",
+    code_path=".",
+    limit=5,
+)
+```
+
 > Memory query tools are available as an optional add-on. When the memory backend is enabled, additional search and query tools become available for semantic search across project context.
 
 ### Git Sync
