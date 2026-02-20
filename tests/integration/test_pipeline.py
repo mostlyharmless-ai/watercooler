@@ -215,7 +215,7 @@ class TestStageValidation:
         assert any("not found" in e for e in errors)
 
     def test_export_stage_validation_empty_dir(self, tmp_path):
-        """Test export stage validates .md files exist."""
+        """Test export stage validates threads exist in graph."""
         from watercooler_memory.pipeline.stages import ExportStageRunner
         from watercooler_memory.pipeline.logging import PipelineLogger
 
@@ -233,7 +233,7 @@ class TestStageValidation:
         errors = runner.validate_inputs()
 
         assert len(errors) > 0
-        assert any(".md" in e for e in errors)
+        assert any("No threads found" in e for e in errors)
 
 
 class TestExportStageIntegration:
@@ -241,7 +241,9 @@ class TestExportStageIntegration:
 
     @pytest.fixture
     def sample_threads_dir(self, tmp_path):
-        """Create a sample threads directory with test threads."""
+        """Create a sample threads directory with test threads and graph data."""
+        from watercooler.baseline_graph import storage
+
         threads_dir = tmp_path / ".watercooler"
         threads_dir.mkdir()
 
@@ -263,6 +265,30 @@ This is a test entry for integration testing.
 ---
 """
         (threads_dir / "test-thread.md").write_text(thread_content)
+
+        # Write graph data
+        graph_dir = storage.ensure_graph_dir(threads_dir)
+        thread_dir = storage.ensure_thread_graph_dir(graph_dir, "test-thread")
+        storage.atomic_write_json(thread_dir / "meta.json", {
+            "id": "thread:test-thread",
+            "topic": "test-thread",
+            "title": "test-thread — Thread",
+            "status": "OPEN",
+            "ball": "Claude (user)",
+            "last_updated": "2025-01-01T12:00:00Z",
+        })
+        storage.atomic_write_jsonl(thread_dir / "entries.jsonl", [{
+            "id": "entry:test-thread:0",
+            "entry_id": "test-thread:0",
+            "agent": "Claude (user)",
+            "role": "planner",
+            "entry_type": "Plan",
+            "title": "Test entry",
+            "timestamp": "2025-01-01T12:00:00Z",
+            "body": "This is a test entry for integration testing.",
+            "index": 0,
+        }])
+
         return tmp_path  # Return parent so it finds .watercooler subdirectory
 
     def test_export_stage_runs_successfully(self, sample_threads_dir, tmp_path):

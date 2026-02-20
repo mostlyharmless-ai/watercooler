@@ -54,11 +54,49 @@ Making good progress.
 
 @pytest.fixture
 def sample_thread_file(tmp_path, sample_thread_content):
-    """Create a sample thread file."""
+    """Create a sample thread file with graph data."""
+    from watercooler.baseline_graph import storage
+
     threads_dir = tmp_path / ".watercooler"
     threads_dir.mkdir()
     thread_file = threads_dir / "test-thread.md"
     thread_file.write_text(sample_thread_content)
+
+    # Write graph data matching the markdown content
+    graph_dir = storage.ensure_graph_dir(threads_dir)
+    thread_dir = storage.ensure_thread_graph_dir(graph_dir, "test-thread")
+    storage.atomic_write_json(thread_dir / "meta.json", {
+        "id": "thread:test-thread",
+        "topic": "test-thread",
+        "title": "test-thread — Thread",
+        "status": "OPEN",
+        "ball": "Claude (user)",
+        "last_updated": "2025-01-01T13:00:00Z",
+    })
+    storage.atomic_write_jsonl(thread_dir / "entries.jsonl", [
+        {
+            "id": "entry:test-thread:0",
+            "entry_id": "test-thread:0",
+            "agent": "Claude (user)",
+            "role": "planner",
+            "entry_type": "Plan",
+            "title": "Initial planning",
+            "timestamp": "2025-01-01T12:00:00Z",
+            "body": "This is the first entry with a plan for the project.\nWe need to implement several features.",
+            "index": 0,
+        },
+        {
+            "id": "entry:test-thread:1",
+            "entry_id": "test-thread:1",
+            "agent": "Cursor (user)",
+            "role": "implementer",
+            "entry_type": "Note",
+            "title": "Implementation started",
+            "timestamp": "2025-01-01T13:00:00Z",
+            "body": "Started implementing the first feature.\nMaking good progress.",
+            "index": 1,
+        },
+    ])
     return thread_file
 
 
@@ -124,8 +162,9 @@ class TestParser:
     """Test thread parsing."""
 
     def test_parse_thread_to_nodes(self, sample_thread_file):
-        """Test parsing a thread file into nodes."""
-        thread, entries, edges = parse_thread_to_nodes(sample_thread_file)
+        """Test parsing a thread from graph into nodes."""
+        threads_dir = sample_thread_file.parent
+        thread, entries, edges = parse_thread_to_nodes(threads_dir, "test-thread")
 
         assert thread.thread_id == "test-thread"
         assert thread.status == "OPEN"
@@ -135,7 +174,8 @@ class TestParser:
 
     def test_parse_entries_have_correct_metadata(self, sample_thread_file):
         """Test that parsed entries have correct metadata."""
-        thread, entries, _ = parse_thread_to_nodes(sample_thread_file)
+        threads_dir = sample_thread_file.parent
+        thread, entries, _ = parse_thread_to_nodes(threads_dir, "test-thread")
 
         first_entry = entries[0]
         assert first_entry.agent == "Claude (user)"
@@ -203,7 +243,8 @@ class TestMemoryGraph:
     def test_add_thread(self, sample_thread_file):
         """Test adding a thread to the graph."""
         graph = MemoryGraph()
-        thread = graph.add_thread(sample_thread_file)
+        threads_dir = sample_thread_file.parent
+        thread = graph.add_thread(threads_dir, "test-thread")
 
         assert thread.thread_id == "test-thread"
         assert len(graph.threads) == 1
@@ -212,7 +253,8 @@ class TestMemoryGraph:
     def test_chunk_entries(self, sample_thread_file):
         """Test chunking all entries in graph."""
         graph = MemoryGraph()
-        graph.add_thread(sample_thread_file)
+        threads_dir = sample_thread_file.parent
+        graph.add_thread(threads_dir, "test-thread")
         chunks = graph.chunk_all_entries()
 
         assert len(chunks) >= 2  # At least one chunk per entry

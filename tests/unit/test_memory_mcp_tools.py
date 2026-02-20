@@ -373,11 +373,27 @@ class TestBulkIndexImpl:
 
     @pytest.fixture
     def threads_dir(self, tmp_path):
-        """Create a fake threads directory with .md files."""
+        """Create a fake threads directory with .md files and graph data."""
+        from watercooler.baseline_graph import storage
+
         td = tmp_path / "repo-threads"
         td.mkdir()
         (td / "topic-a.md").write_text("# topic-a\n\nentry content A")
         (td / "topic-b.md").write_text("# topic-b\n\nentry content B")
+
+        # Write graph data so list_thread_topics() discovers them
+        graph_dir = storage.ensure_graph_dir(td)
+        for topic in ("topic-a", "topic-b"):
+            thread_dir = storage.ensure_thread_graph_dir(graph_dir, topic)
+            storage.atomic_write_json(thread_dir / "meta.json", {
+                "id": f"thread:{topic}",
+                "topic": topic,
+                "title": topic,
+                "status": "OPEN",
+                "ball": "",
+                "last_updated": "",
+            })
+            storage.atomic_write_jsonl(thread_dir / "entries.jsonl", [])
         return td
 
     @pytest.fixture
