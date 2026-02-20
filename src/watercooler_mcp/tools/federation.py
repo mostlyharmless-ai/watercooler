@@ -152,8 +152,18 @@ async def _federated_search_inner(
                            f"IDs must contain only alphanumeric characters, hyphens, and underscores.",
                 "results": [],
             })
-        # Cap override list to max_namespaces to avoid unnecessary resolver I/O
-        namespace_override = parsed[:fed_config.max_namespaces]
+        # Reject override lists exceeding max_namespaces (primary doesn't count)
+        if len(parsed) > fed_config.max_namespaces:
+            return json.dumps({
+                "schema_version": 1,
+                "error": "TOO_MANY_NAMESPACES",
+                "message": (
+                    f"Requested {len(parsed)} namespaces, "
+                    f"exceeding max_namespaces={fed_config.max_namespaces}"
+                ),
+                "results": [],
+            })
+        namespace_override = parsed
 
     # 6. Resolve namespaces
     resolutions = resolve_all_namespaces(primary_ctx, fed_config, namespace_override)
