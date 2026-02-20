@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-watercooler-cloud is a file-based collaboration protocol for agentic coding projects. It provides a Python library and MCP server for managing threaded conversations between human developers and AI agents using git-friendly markdown files.
+watercooler-cloud is a graph-first collaboration protocol for agentic coding projects. It provides a Python library and MCP server for managing threaded conversations between human developers and AI agents. The baseline graph (JSON) is the sole source of truth for reads; markdown `.md` files are write-only projections for human review and git diffs.
 
 ## Project Structure & Module Organization
 
@@ -23,7 +23,7 @@ watercooler-cloud is a file-based collaboration protocol for agentic coding proj
 ## Design Principles
 
 1. **Minimal dependencies in core**: Core thread operations (init, say, ack) use stdlib-only. Config/credentials loading may use standard Python ecosystem tools (pydantic, tomllib/tomli, tomlkit) that are already MCP requirements.
-2. **File-based**: Git-friendly markdown format for threads
+2. **Graph-first**: Baseline graph (JSON) is the source of truth; `.md` files are write-only projections for git diffs and human review
 3. **Zero-config**: Works out-of-box for standard layouts
 4. **CLI parity**: Drop-in replacement workflows for existing watercooler.py
 
@@ -268,7 +268,7 @@ Standardize how Claude (this assistant) uses Watercooler tools so entries remain
 - **Browse entry headers**: Use `watercooler_list_thread_entries` with `format="json"` and explicit `offset`/`limit` to get a "TOC with abstracts" — each entry includes a `summary` field alongside metadata.
 - **Fetch specific entries**: Follow up with `watercooler_get_thread_entry` (by `entry_id` or index) for the full body when you need it.
 - **Scan a range**: Use `watercooler_get_thread_entry_range(summary_only=true)` to preview a span before fetching full bodies.
-- Switch to `format="markdown"` when you intend to quote entries back to a human. The markdown payload mirrors the thread file and avoids accidental reformatting.
+- Use `format="markdown"` when you intend to quote entries back to a human. The markdown output is reconstructed from graph data (not read from `.md` files). Prefer `format="json"` for programmatic access.
 - Use `watercooler_read_thread(format="json")` (without `summary_only`) only when you need every entry body (e.g., exporting or analytics). For routine reading, prefer summary-first or paginated entry tools to stay under stdio size caps.
 - Large threads can exceed the MCP stdio ceiling; always chunk requests (batch size of ~5–10 entries works well) before relaying content.
 - Preserve provenance by capturing the `entry_id` from JSON responses when referencing a specific entry in follow-up messages or commits.
@@ -513,7 +513,7 @@ python3 -m watercooler_mcp
 ## Best Practices
 
 1. **Keep dependencies minimal**: Core library should use stdlib-only
-2. **File-based operations**: All operations should work with git-friendly markdown files
+2. **Graph-first reads**: The baseline graph is the sole source of truth for all reads. Markdown `.md` files are write-only projections
 3. **Zero-config defaults**: Provide sensible defaults that work out-of-box
 4. **CLI parity**: Ensure CLI commands match expected workflows
 5. **Test coverage**: Maintain high test coverage for core functionality

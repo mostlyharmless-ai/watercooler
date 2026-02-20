@@ -413,22 +413,21 @@ class TestIterThreads:
         result = list(iter_threads(threads_dir))
         assert result == []
 
-    def test_iter_skips_index(self, tmp_path):
-        """Test that index.md is skipped."""
+    def test_iter_reads_from_graph(self, tmp_path):
+        """Test that iter_threads reads from graph data."""
+        from watercooler.baseline_graph.writer import init_thread_in_graph, upsert_entry_node, EntryData
+
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
-        (threads_dir / "index.md").write_text("# Index\n")
-        (threads_dir / "topic.md").write_text("""# Topic
-Status: OPEN
-Ball: User
-Last-Updated: 2024-01-01
 
----
+        # Create thread in graph (not .md)
+        init_thread_in_graph(threads_dir, "topic", title="Topic", status="OPEN", ball="User")
+        upsert_entry_node(threads_dir, EntryData(
+            entry_id="e1", thread_topic="topic", index=0, agent="User",
+            role="pm", entry_type="Note", title="Entry", body="Content.",
+            timestamp="2024-01-01T00:00:00Z", summary="",
+        ))
 
-## Entry
-
-Content.
-""")
         config = SummarizerConfig(prefer_extractive=True)
         result = list(iter_threads(threads_dir, config=config))
         assert len(result) == 1
@@ -436,25 +435,13 @@ Content.
 
     def test_iter_skip_closed(self, tmp_path):
         """Test skipping closed threads."""
+        from watercooler.baseline_graph.writer import init_thread_in_graph
+
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
-        (threads_dir / "open.md").write_text("""# Open Thread
-Status: OPEN
-Ball: User
-Last-Updated: 2024-01-01
----
-## Entry
-Content.
-""")
-        (threads_dir / "closed.md").write_text("""# Closed Thread
-Status: CLOSED
-Ball: User
-Last-Updated: 2024-01-01
----
-## Entry
-Content.
-""")
+        init_thread_in_graph(threads_dir, "open", title="Open Thread", status="OPEN", ball="User")
+        init_thread_in_graph(threads_dir, "closed", title="Closed Thread", status="CLOSED", ball="User")
 
         config = SummarizerConfig(prefer_extractive=True)
         result = list(iter_threads(threads_dir, config=config, skip_closed=True))
@@ -685,23 +672,20 @@ class TestExportAllThreads:
 
     def test_export_all_threads(self, tmp_path):
         """Test exporting all threads from directory."""
+        from watercooler.baseline_graph.writer import init_thread_in_graph, upsert_entry_node, EntryData
+
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
-        # Create test thread
-        (threads_dir / "test-topic.md").write_text("""# Test Topic
-Status: OPEN
-Ball: Claude
-Last-Updated: 2024-01-01
+        # Create thread in graph
+        init_thread_in_graph(threads_dir, "test-topic", title="Test Topic", status="OPEN", ball="Claude")
+        upsert_entry_node(threads_dir, EntryData(
+            entry_id="e1", thread_topic="test-topic", index=0, agent="Claude",
+            role="pm", entry_type="Note", title="Entry 1", body="Content here.",
+            timestamp="2024-01-01T00:00:00Z", summary="",
+        ))
 
----
-
-## Entry 1
-
-Content here.
-""")
-
-        output_dir = tmp_path / "graph"
+        output_dir = tmp_path / "graph_export"
         config = SummarizerConfig(prefer_extractive=True)
         manifest = export_all_threads(threads_dir, output_dir, config=config)
 
@@ -712,7 +696,9 @@ Content here.
 
     def test_export_clears_existing_files(self, tmp_path):
         """Test that export clears existing files before writing."""
-        output_dir = tmp_path / "graph"
+        from watercooler.baseline_graph.writer import init_thread_in_graph, upsert_entry_node, EntryData
+
+        output_dir = tmp_path / "graph_export"
         output_dir.mkdir()
 
         # Create existing files with old data
@@ -722,15 +708,13 @@ Content here.
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
-        # Create a thread so files get re-created
-        (threads_dir / "test.md").write_text("""# Test
-Status: OPEN
-Ball: User
-Last-Updated: 2024-01-01
----
-## Entry
-Content.
-""")
+        # Create thread in graph
+        init_thread_in_graph(threads_dir, "test", title="Test", status="OPEN", ball="User")
+        upsert_entry_node(threads_dir, EntryData(
+            entry_id="e1", thread_topic="test", index=0, agent="User",
+            role="pm", entry_type="Note", title="Entry", body="Content.",
+            timestamp="2024-01-01T00:00:00Z", summary="",
+        ))
 
         config = SummarizerConfig(prefer_extractive=True)
         export_all_threads(threads_dir, output_dir, config=config)

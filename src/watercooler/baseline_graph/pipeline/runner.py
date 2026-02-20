@@ -206,8 +206,13 @@ class BaselineGraphRunner:
         ):
             # Check if thread changed (incremental mode)
             if self.config.incremental and self._state:
-                tp = _fs.find_thread_path(thread.topic, self.config.threads_dir)
-                mtime = tp.stat().st_mtime if tp else 0
+                # Use graph last_updated as change signal instead of .md file mtime
+                from datetime import datetime
+                try:
+                    dt = datetime.fromisoformat(thread.last_updated) if thread.last_updated else datetime.min
+                    mtime = dt.timestamp()
+                except (ValueError, OSError):
+                    mtime = 0
 
                 if self._state.is_thread_changed(thread.topic, mtime, len(thread.entries)):
                     # Thread changed, mark for reprocessing

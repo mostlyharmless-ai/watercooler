@@ -859,28 +859,19 @@ def _find_similar_entries_impl(
 async def _graph_health_impl(
     ctx: Context,
     code_path: str = "",
-    verify_parity: bool = False,
 ) -> str:
     """Check graph synchronization health and report any issues.
 
     Reports the status of all threads in the graph:
-    - Synced threads (graph matches markdown)
+    - Synced threads (up to date)
     - Stale threads (need sync)
     - Error threads (sync failed)
     - Pending threads (sync in progress)
-
-    Optionally verifies data parity between graph nodes and parsed markdown:
-    - entry_count: Does graph node count match actual entries in markdown?
-    - last_updated: Does graph timestamp match latest entry timestamp?
 
     Use this to diagnose graph sync issues before running reconcile.
 
     Args:
         code_path: Path to code repository (for resolving threads dir).
-        verify_parity: If True, parse each thread's markdown and compare
-            entry_count and last_updated against graph node values.
-            This is slower but catches data accuracy issues that sync
-            state alone doesn't detect.
 
     Returns:
         JSON health report with thread statuses and recommendations.
@@ -903,10 +894,10 @@ async def _graph_health_impl(
         # Check if graph exists at all
         graph_available = is_graph_available(threads_dir)
 
-        # Get health report (with optional parity verification).
+        # Get health report.
         # Run in thread to avoid blocking event loop (#128).
         health = await asyncio.to_thread(
-            check_graph_health, threads_dir, verify_parity=verify_parity
+            check_graph_health, threads_dir
         )
 
         output = {
@@ -921,13 +912,6 @@ async def _graph_health_impl(
             "recommendations": [],
         }
 
-        # Add parity verification results if requested
-        if verify_parity:
-            output["parity_verified"] = health.parity_verified
-            output["parity_mismatches"] = [
-                asdict(m) for m in health.parity_mismatches
-            ]
-
         # Add recommendations
         if not graph_available:
             output["recommendations"].append(
@@ -941,21 +925,6 @@ async def _graph_health_impl(
             output["recommendations"].append(
                 f"{health.error_threads} threads have sync errors. Check error_details and run reconcile."
             )
-        if health.parity_mismatches:
-            count_mismatches = sum(
-                1 for m in health.parity_mismatches if m.field == "entry_count"
-            )
-            ts_mismatches = sum(
-                1 for m in health.parity_mismatches if m.field == "last_updated"
-            )
-            if count_mismatches:
-                output["recommendations"].append(
-                    f"{count_mismatches} threads have entry_count mismatches. Run watercooler_reconcile_graph."
-                )
-            if ts_mismatches:
-                output["recommendations"].append(
-                    f"{ts_mismatches} threads have last_updated mismatches. Run watercooler_reconcile_graph."
-                )
 
         return json.dumps(output, indent=2)
 
@@ -1147,229 +1116,41 @@ async def _graph_enrich_impl(
 async def _graph_recover_impl(
     ctx: Context,
     code_path: str = "",
-    mode: str = "stale",
-    topics: str = "",
-    generate_summaries: bool = True,
-    generate_embeddings: bool = True,
-    dry_run: bool = False,
 ) -> str:
-    """Rebuild graph from markdown (emergency recovery).
+    """Graph recovery from markdown (moved to scripts/).
 
-    WARNING: This parses markdown to rebuild graph nodes. Use only when:
-    - Graph data is corrupted or lost
-    - Manual edits were made to markdown
-    - Migrating from old format
-    - Recovering stale/error threads
+    Graph recovery is an extraordinary operation that reads .md files to
+    rebuild graph data. It has been moved out of the MCP runtime to
+    scripts/recover_baseline_graph.py.
 
-    In normal operation, the graph is the source of truth.
-    This tool is the exception for recovery scenarios.
+    Usage:
+        ./scripts/recover_baseline_graph.py /path/to/threads --mode stale
+        ./scripts/recover_baseline_graph.py /path/to/threads --mode all --dry-run
 
-    When the memory task queue is available, recovery tasks are enqueued
-    per-topic and processed asynchronously. Poll watercooler_memory_task_status
-    for progress. Falls back to synchronous recovery if queue unavailable.
-
-    Modes:
-    - "stale": Recover only stale/error threads (auto-detected)
-    - "selective": Recover specific topics only
-    - "all": Full rebuild from all markdown (slow, destructive)
+    In normal operation, the graph is the sole source of truth and .md files
+    are write-only projections. If the graph is lost, restore from git history
+    (git checkout <commit> -- graph/) or run the recovery script.
 
     Args:
-        code_path: Path to code repository (for resolving threads dir).
-        mode: Recovery mode - "stale", "selective", or "all". Default: "stale".
-        topics: Comma-separated list of topics (required for "selective" mode).
-        generate_summaries: Generate summaries during recovery. Default: True.
-        generate_embeddings: Generate embeddings during recovery. Default: True.
-        dry_run: If True, return what would be recovered without making changes.
+        code_path: Unused (retained for tool registration compatibility).
 
     Returns:
-        JSON with recovery results: threads recovered, entries parsed, errors
+        Instructions for using the recovery script.
     """
-    try:
-        from watercooler.baseline_graph.sync import (
-            recover_graph,
-            resolve_recovery_targets,
-        )
-
-        error, context = validation._require_context(code_path)
-        if error:
-            return error
-        if context is None or not context.threads_dir:
-            return "Error: Unable to resolve threads directory."
-
-        threads_dir = context.threads_dir
-        if not threads_dir.exists():
-            return f"Threads directory not found: {threads_dir}"
-
-        # Parse topics list
-        topic_list = None
-        if topics:
-            topic_list = [t.strip() for t in topics.split(",") if t.strip()]
-
-        # Resolve targets — may call check_graph_health() in "stale" mode,
-        # so run in thread to avoid blocking event loop (#128).
-        target_topics, resolve_errors = await asyncio.to_thread(
-            resolve_recovery_targets, threads_dir, mode, topic_list
-        )
-        if resolve_errors:
-            return json.dumps({"errors": resolve_errors}, indent=2)
-        if not target_topics:
-            return json.dumps(
-                {"action": "graph_recover", "mode": mode, "message": "Nothing to recover."},
-                indent=2,
-            )
-
-        # dry_run: delegate to recover_graph (no queue, no git sync)
-        if dry_run:
-            result = recover_graph(
-                threads_dir=threads_dir,
-                mode=mode,
-                topics=topic_list,
-                generate_summaries=generate_summaries,
-                generate_embeddings=generate_embeddings,
-                dry_run=True,
-            )
-            return json.dumps(result.to_dict(), indent=2)
-
-        # Try queue path: enqueue one MemoryTask per topic
-        queue, worker = _get_recover_queue()
-        if queue is not None:
-            return _enqueue_recovery_tasks(
-                queue=queue,
-                worker=worker,
-                target_topics=target_topics,
-                threads_dir=threads_dir,
-                code_root=context.code_root,
-                mode=mode,
-                generate_summaries=generate_summaries,
-                generate_embeddings=generate_embeddings,
-            )
-
-        # Fallback: synchronous recovery with git parity.
-        # Run in thread to avoid blocking event loop (#128).
-        # Note: asyncio.to_thread() worker threads continue after timeout —
-        # the operation completes in the background. This is acceptable since
-        # the server survives and the work completes.
-        def _do_recover() -> dict:
-            result = recover_graph(
-                threads_dir=threads_dir,
-                mode=mode,
-                topics=topic_list,
-                generate_summaries=generate_summaries,
-                generate_embeddings=generate_embeddings,
-                dry_run=False,
-            )
-            return result.to_dict()
-
-        output = await asyncio.to_thread(
-            run_with_graph_sync,
-            context,
-            _do_recover,
-            f"graph: recover mode={mode}",
-        )
-        return json.dumps(output, indent=2)
-
-    except SyncError as e:
-        return f"Branch parity error: {str(e)}"
-    except Exception as e:
-        return f"Error recovering graph: {str(e)}"
-
-
-def _get_recover_queue() -> tuple[Optional[MemoryTaskQueue], Optional[MemoryTaskWorker]]:
-    """Return (queue, worker) if the memory task queue is available, else (None, None)."""
-    try:
-        from ..memory_queue import get_queue, get_worker
-
-        queue = get_queue()
-        worker = get_worker()
-        if queue is None:
-            return None, None
-        return queue, worker
-    except ImportError:
-        return None, None
-
-
-def _enqueue_recovery_tasks(
-    *,
-    queue: MemoryTaskQueue,
-    worker: Optional[MemoryTaskWorker],
-    target_topics: list[str],
-    threads_dir: Path,
-    code_root: Optional[Path],
-    mode: str,
-    generate_summaries: bool,
-    generate_embeddings: bool,
-) -> str:
-    """Enqueue one MemoryTask per topic for async graph recovery.
-
-    Returns JSON response with task_ids, skipped topics, and queue status.
-    """
-    group_id = derive_group_id(code_path=code_root) if code_root else derive_group_id(threads_dir=threads_dir)
-
-    content_payload = json.dumps({
-        "schema_version": 1,
-        "threads_dir": str(threads_dir),
-        "generate_summaries": generate_summaries,
-        "generate_embeddings": generate_embeddings,
-    })
-
-    task_ids: list[str] = []
-    enqueued_topics: list[str] = []
-    skipped: list[dict[str, str]] = []
-
-    for topic in target_topics:
-        task = MemoryTask(
-            backend="graph_recover",
-            # Composite key prevents dedup collisions across repos/groups
-            entry_id=f"{group_id}:{topic}",
-            topic=topic,
-            group_id=group_id,
-            content=content_payload,
-            title=f"graph_recover:{topic}",
-            source_description=f"{threads_dir}|graph_recover|{mode}",
-        )
-        try:
-            tid = queue.enqueue(task)
-            task_ids.append(tid)
-            enqueued_topics.append(topic)
-        except DuplicateTaskError:
-            skipped.append({"topic": topic, "reason": "duplicate"})
-        except QueueFullError:
-            skipped.append({"topic": topic, "reason": "queue_full"})
-
-    # Wake worker to start processing
-    if worker is not None and task_ids:
-        worker.wake()
-
-    if task_ids:
-        message = (
-            f"Recovery queued for {len(task_ids)} threads. "
-            "Poll watercooler_memory_task_status for progress."
-        )
-    else:
-        reasons = {s["reason"] for s in skipped}
-        if reasons == {"duplicate"}:
-            message = (
-                f"All {len(skipped)} topics already queued or recently processed. "
-                "Poll watercooler_memory_task_status for existing task progress."
-            )
-        else:
-            message = (
-                f"No tasks enqueued — {len(skipped)} topics skipped. "
-                "Check 'skipped' for details."
-            )
-
-    output = {
+    return json.dumps({
         "action": "graph_recover",
-        "mode": "queued" if task_ids else "all_skipped",
-        "recovery_mode": mode,
-        "tasks_enqueued": len(task_ids),
-        "task_ids": task_ids,
-        "topics": enqueued_topics,
-        "skipped": skipped,
-        "queue_status": queue.status_summary(),
-        "message": message,
-    }
-    return json.dumps(output, indent=2)
+        "status": "moved_to_script",
+        "message": (
+            "Graph recovery has been moved out of the MCP runtime. "
+            "Use scripts/recover_baseline_graph.py instead. "
+            "For routine issues, try: git checkout <commit> -- graph/"
+        ),
+        "script": "scripts/recover_baseline_graph.py",
+        "examples": [
+            "./scripts/recover_baseline_graph.py /path/to/threads --mode stale",
+            "./scripts/recover_baseline_graph.py /path/to/threads --mode all --dry-run",
+        ],
+    }, indent=2)
 
 
 def _graph_project_impl(

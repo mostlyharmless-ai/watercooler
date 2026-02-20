@@ -1129,125 +1129,6 @@ def _atomic_write_json(path: Path, data: Any) -> None:
 # ============================================================================
 
 
-def sync_entry_structure_only(
-    threads_dir: Path,
-    topic: str,
-    entry_id: str,
-) -> bool:
-    """Create minimal graph node for entry without LLM/embedding generation.
-
-    This is called BEFORE the git commit to ensure graph files are included
-    in the same commit as the thread markdown file. It creates:
-    - Entry node (with empty summary, no embedding)
-    - Thread node (upsert)
-    - Contains edge (thread -> entry)
-    - Followed_by edge (prev_entry -> entry) if applicable
-
-    Unlike sync_entry_to_graph(), this function:
-    - NEVER calls LLM for summaries
-    - NEVER generates embeddings
-    - Is designed to be BLOCKING (errors should propagate)
-    - Creates minimal but valid graph structure
-
-    Args:
-        threads_dir: Threads directory
-        topic: Thread topic
-        entry_id: The entry ID to sync (required, not optional)
-
-    Returns:
-        True if sync succeeded, False otherwise
-    """
-    thread_path = _fs.find_thread_path(topic, threads_dir)
-    if not thread_path:
-        logger.warning(f"Thread file not found for structural sync: {topic}")
-        return False
-
-    try:
-        # Parse thread
-        parsed = parse_thread_file(
-            thread_path,
-            config=None,
-            generate_summaries=False,
-        )
-        if not parsed:
-            logger.warning(f"Failed to parse thread for structural sync: {topic}")
-            return False
-
-        # Find the entry
-        entry = next((e for e in parsed.entries if e.entry_id == entry_id), None)
-        if not entry:
-            logger.warning(f"Entry {entry_id} not found in thread {topic}")
-            return False
-
-        # Get graph directory and load existing per-thread data
-        graph_dir = storage.ensure_graph_dir(threads_dir)
-
-        # Load existing data (or empty dicts if new thread)
-        meta = storage.load_thread_meta(graph_dir, topic) or {}
-        entries = storage.load_thread_entries_dict(graph_dir, topic)
-        edges = storage.load_thread_edges(graph_dir, topic)
-
-        thread_id = f"thread:{topic}"
-        entry_node_id = f"entry:{entry.entry_id}"
-
-        # Build entry node (no embedding, empty summary if not present)
-        entry_node = entry_to_node(entry, topic)
-        if "summary" not in entry_node:
-            entry_node["summary"] = ""
-
-        # Update entries dict
-        entries[entry_node_id] = entry_node
-
-        # Build/update thread meta
-        thread_node = thread_to_node(parsed)
-        meta.update(thread_node)
-
-        # Add contains edge
-        contains_edge_id = thread_id + entry_node_id
-        edges[contains_edge_id] = {
-            "source": thread_id,
-            "target": entry_node_id,
-            "type": "contains",
-        }
-
-        # Find previous entry for followed_by edge
-        if entry.index > 0:
-            prev_entry: Optional[ParsedEntry] = None
-            prev_idx = entry.index - 1
-            # First try direct list access if entries are in order
-            if prev_idx < len(parsed.entries):
-                candidate = parsed.entries[prev_idx]
-                if candidate.index == prev_idx:
-                    prev_entry = candidate
-            # Fallback: search by index attribute
-            if prev_entry is None:
-                for e in parsed.entries:
-                    if e.index == prev_idx:
-                        prev_entry = e
-                        break
-            if prev_entry and prev_entry.entry_id:
-                prev_entry_node_id = f"entry:{prev_entry.entry_id}"
-                followed_by_edge_id = prev_entry_node_id + entry_node_id
-                edges[followed_by_edge_id] = {
-                    "source": prev_entry_node_id,
-                    "target": entry_node_id,
-                    "type": "followed_by",
-                }
-
-        # Write all per-thread files atomically
-        storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
-
-        # Update manifest
-        storage.update_manifest(graph_dir, topic, entry.entry_id)
-
-        logger.debug(f"Structural graph sync complete for {topic}/{entry_id}")
-        return True
-
-    except Exception as e:
-        logger.exception(f"Structural graph sync failed for {topic}/{entry_id}: {e}")
-        return False
-
-
 def enrich_graph_entry(
     threads_dir: Path,
     topic: str,
@@ -1842,30 +1723,17 @@ def sync_thread_to_graph(
 
 
 @dataclass
-class ParityMismatch:
-    """Record of a mismatch between graph node and parsed markdown."""
-
-    topic: str
-    field: str  # "entry_count" or "last_updated"
-    graph_value: Any  # Value in graph node
-    actual_value: Any  # Value from parsing markdown
-    difference: Optional[int] = None  # For entry_count: actual - graph
-
-
-@dataclass
 class GraphHealthReport:
     """Health report for graph sync status.
 
     Attributes:
         healthy: True if no errors, pending, or stale threads
-        total_threads: Total number of thread markdown files
+        total_threads: Total number of threads in graph
         synced_threads: Threads with 'ok' sync status
         error_threads: Threads with sync errors
         pending_threads: Threads with pending sync
         stale_threads: Threads not in sync state
         error_details: Error messages by topic
-        parity_verified: Whether parity verification was performed
-        parity_mismatches: List of entry_count/last_updated mismatches
     """
 
     healthy: bool = True
@@ -1875,25 +1743,18 @@ class GraphHealthReport:
     pending_threads: int = 0
     stale_threads: List[str] = field(default_factory=list)
     error_details: Dict[str, str] = field(default_factory=dict)
-    # Parity verification fields
-    parity_verified: bool = False
-    parity_mismatches: List[ParityMismatch] = field(default_factory=list)
 
 
 def check_graph_health(
     threads_dir: Path,
-    verify_parity: bool = False,
 ) -> GraphHealthReport:
     """Check graph sync health for all threads.
 
     Args:
         threads_dir: Path to the threads directory
-        verify_parity: If True, parse each thread's markdown and compare
-            entry_count and last_updated against graph node values.
-            This is slower but catches data accuracy issues.
 
     Returns:
-        GraphHealthReport with status of all threads and optional parity info
+        GraphHealthReport with status of all threads
     """
     report = GraphHealthReport()
 
@@ -1941,92 +1802,7 @@ def check_graph_health(
         and len(report.stale_threads) == 0
     )
 
-    # Parity verification (optional, slower)
-    if verify_parity:
-        report.parity_verified = True
-        # Construct thread file paths from graph topics for parity check
-        thread_files = [threads_dir / f"{t}.md" for t in topics if (threads_dir / f"{t}.md").exists()]
-        report.parity_mismatches = _verify_graph_parity(threads_dir, thread_files)
-        # Parity mismatches affect health
-        if report.parity_mismatches:
-            report.healthy = False
-
     return report
-
-
-def _verify_graph_parity(
-    threads_dir: Path,
-    thread_files: List[Path],
-) -> List[ParityMismatch]:
-    """Verify graph node data matches parsed markdown.
-
-    Compares entry_count and last_updated for each thread node
-    against values computed from parsing the markdown file.
-
-    Args:
-        threads_dir: Path to threads directory
-        thread_files: List of thread markdown files
-
-    Returns:
-        List of ParityMismatch records for any discrepancies
-    """
-    mismatches: List[ParityMismatch] = []
-    graph_dir = storage.get_graph_dir(threads_dir)
-
-    if not storage.is_per_thread_format(graph_dir):
-        logger.debug("No per-thread graph format found, skipping parity check")
-        return mismatches
-
-    # Compare each thread
-    for thread_file in thread_files:
-        topic = thread_file.stem
-        graph_node = storage.load_thread_meta(graph_dir, topic)
-
-        if not graph_node:
-            # No graph node for this thread - not a parity issue, just missing
-            continue
-
-        try:
-            # Parse the thread file (no summaries needed for parity check)
-            parsed = parse_thread_file(thread_file, generate_summaries=False)
-
-            # Compare entry_count
-            graph_count = graph_node.get("entry_count", 0)
-            actual_count = parsed.entry_count
-
-            if graph_count != actual_count:
-                mismatches.append(ParityMismatch(
-                    topic=topic,
-                    field="entry_count",
-                    graph_value=graph_count,
-                    actual_value=actual_count,
-                    difference=actual_count - graph_count,
-                ))
-
-            # Compare last_updated
-            graph_updated = graph_node.get("last_updated", "")
-            actual_updated = parsed.last_updated
-
-            # Normalize timestamps for comparison (strip microseconds if needed)
-            if graph_updated and actual_updated:
-                # Only compare if both exist - timestamps might differ in precision
-                # Consider them equal if the date/hour/minute/second match
-                graph_prefix = graph_updated[:19] if len(graph_updated) >= 19 else graph_updated
-                actual_prefix = actual_updated[:19] if len(actual_updated) >= 19 else actual_updated
-
-                if graph_prefix != actual_prefix:
-                    mismatches.append(ParityMismatch(
-                        topic=topic,
-                        field="last_updated",
-                        graph_value=graph_updated,
-                        actual_value=actual_updated,
-                    ))
-
-        except Exception as e:
-            logger.warning(f"Error parsing {topic} for parity check: {e}")
-            continue
-
-    return mismatches
 
 
 def reconcile_graph(
