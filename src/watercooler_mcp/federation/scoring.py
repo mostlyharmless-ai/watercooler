@@ -1,8 +1,4 @@
-"""Fixed-anchor normalization, namespace weight resolution, and recency decay.
-
-Style: modern Python 3.10+ syntax (list[str], str | None) throughout.
-Config schema additions use typing.List/Dict for consistency with config_schema.py.
-"""
+"""Fixed-anchor normalization, namespace weight resolution, and recency decay."""
 
 from __future__ import annotations
 

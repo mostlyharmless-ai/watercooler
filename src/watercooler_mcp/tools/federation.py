@@ -84,7 +84,7 @@ async def _federated_search_impl(
         logger.exception("Federation search failed unexpectedly")
         return json.dumps({
             "schema_version": 1,
-            "error": "internal_error",
+            "error": "INTERNAL_ERROR",
             "message": "Federation search encountered an unexpected error",
             "results": [],
         })
@@ -154,6 +154,8 @@ async def _federated_search_inner(
         })
 
     # Find primary namespace ID
+    # Defensive guard: resolve_all_namespaces always adds a primary entry, but
+    # we check anyway to avoid silent corruption if the resolver changes.
     primary_ns_id = None
     for ns_id, res in resolutions.items():
         if res.is_primary:
@@ -320,6 +322,9 @@ async def _federated_search_inner(
     namespace_results: dict[str, list[ScoredResult]] = {}
     total_candidates = 0
 
+    # Only searchable (status="ok") namespaces are in task_objects, so this
+    # overwrites the pre-populated diagnostics only for namespaces that were
+    # actually searched — non-ok entries from lines 186-194 are preserved.
     for task_obj in done:
         exc = task_obj.exception()
         if exc is not None:

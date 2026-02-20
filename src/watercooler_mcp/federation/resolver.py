@@ -29,6 +29,7 @@ class WorktreeStatus(enum.Enum):
     """Non-path outcomes from worktree discovery."""
 
     SECURITY_REJECTED = "security_rejected"
+    NOT_INITIALIZED = "not_initialized"
 
 
 @dataclass(frozen=True)
@@ -47,7 +48,7 @@ class NamespaceResolution:
 def discover_namespace_worktree(
     namespace_id: str,
     namespace_config: FederationNamespaceConfig,
-) -> Path | WorktreeStatus | None:
+) -> Path | WorktreeStatus:
     """Discover existing worktree via filesystem check.
 
     Security: rejects symlinked worktree paths and paths escaping WORKTREE_BASE.
@@ -59,7 +60,8 @@ def discover_namespace_worktree(
 
     Returns:
         Resolved worktree path if exists, ``WorktreeStatus.SECURITY_REJECTED``
-        if path fails security checks, None if worktree not initialized.
+        if path fails security checks, ``WorktreeStatus.NOT_INITIALIZED``
+        if worktree directory doesn't exist yet.
     """
     code_root = Path(namespace_config.code_path)
     worktree_path = _worktree_path_for(code_root)
@@ -84,12 +86,12 @@ def discover_namespace_worktree(
         )
         return WorktreeStatus.SECURITY_REJECTED
     except OSError:
-        return None
+        return WorktreeStatus.NOT_INITIALIZED
 
     if resolved.exists() and resolved.is_dir():
         return resolved
 
-    return None
+    return WorktreeStatus.NOT_INITIALIZED
 
 
 def resolve_all_namespaces(
@@ -113,7 +115,12 @@ def resolve_all_namespaces(
     """
     results: dict[str, NamespaceResolution] = {}
 
-    # Derive primary namespace ID from code_root basename
+    # Derive primary namespace ID from code_root basename.
+    # Convention: the directory basename of the checkout IS the namespace ID.
+    # This means renaming the checkout directory changes the ID, and the same
+    # repo at different paths on different machines produces different IDs.
+    # Callers should configure allowlists using the basename that matches
+    # their checkout directory (e.g., "watercooler-cloud" for ~/projects/watercooler-cloud).
     primary_ns_id = primary_context.code_root.name if primary_context.code_root else "primary"
 
     # Guard: primary ID collides with a configured secondary namespace
@@ -169,7 +176,7 @@ def resolve_all_namespaces(
                     f"(symlink or path escape)"
                 ),
             )
-        else:
+        elif worktree is WorktreeStatus.NOT_INITIALIZED:
             results[ns_id] = NamespaceResolution(
                 namespace_id=ns_id,
                 threads_dir=None,

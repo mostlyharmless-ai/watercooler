@@ -1004,7 +1004,10 @@ class FederationConfig(BaseModel):
     scoring: FederationScoringConfig = Field(default_factory=FederationScoringConfig)
     namespace_timeout: float = Field(
         default=0.4, gt=0.0,
-        description="Per-namespace search timeout in seconds",
+        description="Per-namespace search timeout in seconds. Note: cancelling a "
+                    "timed-out asyncio.to_thread task stops the coroutine wrapper "
+                    "but the underlying search_graph thread runs to completion. "
+                    "Tune conservatively to avoid thread accumulation under load.",
     )
     max_namespaces: int = Field(
         default=5, ge=1, le=20,

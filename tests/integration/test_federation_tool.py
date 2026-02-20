@@ -6,6 +6,7 @@ Tests the full tool handler with mocked search_graph() and config.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -268,7 +269,6 @@ class TestFederatedSearchHappyPath:
         site_worktree.mkdir(parents=True)
 
         def mock_search_slow(threads_dir, sq):
-            import time
             if "primary" not in str(threads_dir):
                 time.sleep(0.5)  # Exceed timeout
             return MockSearchResults(
@@ -425,7 +425,6 @@ class TestFederatedSearchPartialTimeout:
         site_worktree.mkdir(parents=True)
 
         def mock_search_variable(threads_dir, sq):
-            import time
             if "primary" not in str(threads_dir):
                 time.sleep(2.0)  # Exceed total timeout
             return MockSearchResults(
@@ -540,6 +539,78 @@ class TestFederatedSearchErrorHandling:
             result = await _federated_search_impl(ctx, query="test")
 
         data = json.loads(result)
-        assert data["error"] == "internal_error"
+        assert data["error"] == "INTERNAL_ERROR"
         assert data["schema_version"] == 1
         assert data["results"] == []
+
+
+class TestFederatedSearchEdgeCases:
+    """Tests for edge cases and negative paths."""
+
+    @pytest.mark.anyio
+    async def test_code_root_none_uses_primary_fallback(self, ctx, tmp_path):
+        """When code_root is None, primary namespace ID falls back to 'primary'."""
+        wc_config = _make_federation_config(
+            enabled=True, namespaces={},
+            allowlists={"primary": []},
+        )
+        # Create a ThreadContext with code_root=None
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+        primary_ctx = ThreadContext(
+            code_root=None,
+            threads_dir=threads_dir,
+            code_repo="",
+            code_branch="main",
+            code_commit="abc123",
+            code_remote="",
+            explicit_dir=False,
+        )
+
+        entries = [MockGraphEntry(entry_id="01A")]
+        mock_search = _mock_search_graph(entries)
+
+        with (
+            patch("watercooler_mcp.tools.federation.config") as mock_config,
+            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
+            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=False),
+            patch("watercooler_mcp.tools.federation.search_graph", mock_search),
+        ):
+            mock_config.full.return_value = wc_config
+            mock_validation._require_context.return_value = (None, primary_ctx)
+            result = await _federated_search_impl(ctx, query="test")
+
+        data = json.loads(result)
+        assert data["primary_namespace"] == "primary"
+        assert data["namespace_status"]["primary"]["status"] == "ok"
+
+    @pytest.mark.anyio
+    async def test_deny_topics_not_applied_to_primary(self, ctx, tmp_path):
+        """deny_topics filtering only applies to secondary namespaces, not primary."""
+        # Configure primary namespace ID to also have deny_topics in a secondary config.
+        # The primary should NOT be topic-filtered even if topic matches.
+        wc_config = _make_federation_config(enabled=True, namespaces={})
+        primary_ctx = _make_primary_ctx(tmp_path)
+
+        # Entry with a topic that would be denied if it were in a secondary
+        entries = [MockGraphEntry(
+            entry_id="01A",
+            thread_topic="secret-planning",
+            title="Secret plans",
+        )]
+        mock_search = _mock_search_graph(entries)
+
+        with (
+            patch("watercooler_mcp.tools.federation.config") as mock_config,
+            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
+            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=False),
+            patch("watercooler_mcp.tools.federation.search_graph", mock_search),
+        ):
+            mock_config.full.return_value = wc_config
+            mock_validation._require_context.return_value = (None, primary_ctx)
+            result = await _federated_search_impl(ctx, query="secret")
+
+        data = json.loads(result)
+        # Primary results should NOT be filtered by deny_topics
+        assert data["result_count"] == 1
+        assert data["results"][0]["entry_data"]["topic"] == "secret-planning"

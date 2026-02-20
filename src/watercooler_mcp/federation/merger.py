@@ -99,7 +99,8 @@ def build_response_envelope(
         namespace_status: Per-namespace status dicts with optional diagnostics.
         queried_namespaces: All namespaces that were queried.
         query: The original search query.
-        total_candidates: Total results before truncation.
+        total_candidates: Total scored results before limit truncation
+            (post-deny_topics filtering, pre-limit).
 
     Returns:
         Response envelope dict with schema_version for forward compatibility.

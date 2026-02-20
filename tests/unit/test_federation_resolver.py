@@ -61,7 +61,7 @@ class TestDiscoverNamespaceWorktree:
                 return_value=worktree,
             ):
                 result = discover_namespace_worktree("site", ns_config)
-        assert result is None
+        assert result is WorktreeStatus.NOT_INITIALIZED
 
     def test_symlink_rejected(self, tmp_path):
         worktree_base = tmp_path / "worktrees"
