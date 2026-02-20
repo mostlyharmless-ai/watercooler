@@ -27,10 +27,6 @@ def main(argv: list[str] | None = None) -> None:
     p_init.add_argument("--status", default="open", help="Initial status (default: open)")
     p_init.add_argument("--ball", default="codex", help="Initial ball owner (default: codex)")
     p_init.add_argument("--threads-dir", help="Threads directory (default: ./watercooler or $WATERCOOLER_DIR)")
-    p_init.add_argument("--body", help="Optional initial body text or @file path")
-    p_init.add_argument("--owner", help="Thread owner (default: Team)")
-    p_init.add_argument("--participants", help="Comma-separated list of participants")
-    p_init.add_argument("--templates-dir", help="Templates directory override")
 
     p_web = sub.add_parser("web-export", help="Generate HTML index")
     p_web.add_argument("--threads-dir")
@@ -48,7 +44,7 @@ def main(argv: list[str] | None = None) -> None:
     p_say.add_argument("--body", required=True, help="Entry body text or @file path")
     p_say.add_argument("--status", help="Optional status update")
     p_say.add_argument("--ball", help="Optional ball update (auto-flips if not provided)")
-    p_say.add_argument("--templates-dir", help="Templates directory override")
+
     p_say.add_argument("--agents-file", help="Agent registry JSON file")
 
     p_ack = sub.add_parser("ack", help="Acknowledge without ball flip")
@@ -61,7 +57,7 @@ def main(argv: list[str] | None = None) -> None:
     p_ack.add_argument("--body", help="Entry body text or @file path (default: ack)")
     p_ack.add_argument("--status", help="Optional status update")
     p_ack.add_argument("--ball", help="Optional ball update (does NOT auto-flip)")
-    p_ack.add_argument("--templates-dir", help="Templates directory override")
+
     p_ack.add_argument("--agents-file", help="Agent registry JSON file")
 
     p_handoff = sub.add_parser("handoff", help="Flip ball to counterpart and append handoff entry")
@@ -70,7 +66,7 @@ def main(argv: list[str] | None = None) -> None:
     p_handoff.add_argument("--agent", help="Agent performing handoff (defaults to Team)")
     p_handoff.add_argument("--role", default="pm", help="Agent role (default: pm)")
     p_handoff.add_argument("--note", help="Optional custom handoff message")
-    p_handoff.add_argument("--templates-dir", help="Templates directory override")
+
     p_handoff.add_argument("--agents-file", help="Agent registry JSON file")
 
     p_list = sub.add_parser("list", help="List threads")
@@ -158,7 +154,7 @@ def main(argv: list[str] | None = None) -> None:
     p_append.add_argument("--body", required=True, help="Entry body text or @file path")
     p_append.add_argument("--status", help="Optional status update")
     p_append.add_argument("--ball", help="Optional ball update (auto-flips if not provided)")
-    p_append.add_argument("--templates-dir", help="Templates directory override")
+
     p_append.add_argument("--agents-file", help="Agent registry JSON file")
 
     p_set_status = sub.add_parser("set-status", help="Update thread status")

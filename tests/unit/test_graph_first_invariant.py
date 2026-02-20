@@ -21,12 +21,15 @@ _DEPRECATED_FUNCTIONS = {
     "discover_thread_files",
     "parse_thread_entries",
     "parse_thread_header",
+    "parse_thread_file",
 }
 
 # Files that are explicitly allowed to import these (graph rebuild / reconciliation)
 _ALLOWED_FILES = {
     # Graph rebuild from .md (sync_thread_to_graph)
     "watercooler/baseline_graph/parser.py",
+    "watercooler/baseline_graph/sync.py",
+    "watercooler/baseline_graph/__init__.py",
     # Hosted reconciliation (reconcile_thread_hosted)
     "watercooler_mcp/hosted_ops.py",
     # The functions' own definitions

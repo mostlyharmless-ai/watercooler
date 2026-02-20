@@ -36,6 +36,11 @@ def list_threads(*, threads_dir: Path, open_only: bool | None = None) -> list[tu
         return out
 
     if not is_graph_available(threads_dir):
+        import sys
+        print(
+            "watercooler: graph not yet built — run 'wc reindex' to initialise.",
+            file=sys.stderr,
+        )
         return out
 
     graph_threads = list_threads_from_graph(threads_dir, open_only)

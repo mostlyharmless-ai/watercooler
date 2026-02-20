@@ -211,7 +211,7 @@ class BaselineGraphRunner:
                 try:
                     dt = datetime.fromisoformat(thread.last_updated) if thread.last_updated else datetime.min
                     mtime = dt.timestamp()
-                except (ValueError, OSError):
+                except ValueError:
                     mtime = 0
 
                 if self._state.is_thread_changed(thread.topic, mtime, len(thread.entries)):

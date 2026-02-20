@@ -125,7 +125,7 @@ def _normalize_status(s: str) -> str:
 
 
 def _get_thread_metadata(
-    threads_dir: Path, topic: str, content: str | None = None
+    threads_dir: Path, topic: str,
 ) -> tuple[str, str, str, str]:
     """Get thread metadata from canonical graph.
 
@@ -135,7 +135,6 @@ def _get_thread_metadata(
     Args:
         threads_dir: Threads directory
         topic: Thread topic
-        content: Ignored (kept for call-site compat, will be removed)
 
     Returns:
         Tuple of (title, status, ball, last_entry_timestamp)

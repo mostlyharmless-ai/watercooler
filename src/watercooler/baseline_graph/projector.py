@@ -226,6 +226,13 @@ def project_and_write_thread(
     Reads thread and entries from graph, projects to markdown,
     and writes to {topic}.md file.
 
+    Performance note: This regenerates the entire .md file from graph on
+    every call (O(entries) I/O). This is intentional — it keeps the
+    projector stateless and eliminates incremental-update bugs. For the
+    typical thread (< 100 entries) the cost is negligible. If profiling
+    shows this is a bottleneck for very large threads, consider an
+    append-only fast path in a future iteration.
+
     Args:
         threads_dir: Threads directory
         topic: Thread topic
