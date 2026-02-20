@@ -955,12 +955,7 @@ class FederationScoringConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     local_weight: float = Field(default=1.0, description="NW for primary namespace")
-    lens_weight: float = Field(default=0.7, description="NW for lens-aligned namespaces")
     wide_weight: float = Field(default=0.55, description="NW for wide-scope namespaces")
-    referenced_weight: float = Field(
-        default=0.85,
-        description="NW for explicitly referenced namespaces (Phase 2, dormant — no Phase 1 code reads this)",
-    )
     recency_floor: float = Field(default=0.7, ge=0.0, le=1.0)
     recency_half_life_days: float = Field(default=60.0, gt=0.0)
 

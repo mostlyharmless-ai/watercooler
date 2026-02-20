@@ -18,9 +18,7 @@ class TestFederationScoringConfig:
     def test_defaults(self):
         cfg = FederationScoringConfig()
         assert cfg.local_weight == 1.0
-        assert cfg.lens_weight == 0.7
         assert cfg.wide_weight == 0.55
-        assert cfg.referenced_weight == 0.85
         assert cfg.recency_floor == 0.7
         assert cfg.recency_half_life_days == 60.0
 

@@ -47,20 +47,16 @@ class TestResolveNamespaceWeight:
         return FederationScoringConfig()
 
     def test_primary_returns_local_weight(self, scoring_config):
-        w = resolve_namespace_weight("cloud", "cloud", frozenset(), scoring_config)
+        w = resolve_namespace_weight("cloud", "cloud", scoring_config)
         assert w == 1.0
 
-    def test_lens_returns_lens_weight(self, scoring_config):
-        w = resolve_namespace_weight("site", "cloud", frozenset(["site"]), scoring_config)
-        assert w == 0.7
-
-    def test_wide_returns_wide_weight(self, scoring_config):
-        w = resolve_namespace_weight("docs", "cloud", frozenset(["site"]), scoring_config)
+    def test_secondary_returns_wide_weight(self, scoring_config):
+        w = resolve_namespace_weight("docs", "cloud", scoring_config)
         assert w == 0.55
 
     def test_custom_weights(self):
-        cfg = FederationScoringConfig(local_weight=1.0, lens_weight=0.8, wide_weight=0.6)
-        w = resolve_namespace_weight("docs", "cloud", frozenset(), cfg)
+        cfg = FederationScoringConfig(local_weight=1.0, wide_weight=0.6)
+        w = resolve_namespace_weight("docs", "cloud", cfg)
         assert w == 0.6
 
 

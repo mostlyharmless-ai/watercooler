@@ -44,20 +44,16 @@ def normalize_keyword_score(raw_score: float) -> float:
 def resolve_namespace_weight(
     namespace: str,
     primary_namespace: str,
-    lens_namespaces: frozenset[str],
     scoring_config: FederationScoringConfig,
 ) -> float:
     """Resolve namespace weight tier for a namespace.
 
     Returns:
         local_weight (1.0) if namespace == primary
-        lens_weight (0.7) if namespace in lens_namespaces
         wide_weight (0.55) otherwise
     """
     if namespace == primary_namespace:
         return scoring_config.local_weight
-    if namespace in lens_namespaces:
-        return scoring_config.lens_weight
     return scoring_config.wide_weight
 
 

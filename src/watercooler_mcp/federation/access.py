@@ -55,7 +55,6 @@ def filter_allowed_namespaces(
 
 def is_topic_denied(
     topic: str,
-    namespace: str,
     namespace_config: FederationNamespaceConfig,
 ) -> bool:
     """Check if a topic is denied for a namespace.
@@ -65,7 +64,6 @@ def is_topic_denied(
 
     Args:
         topic: The thread topic to check.
-        namespace: The namespace ID (unused, for future logging).
         namespace_config: Namespace configuration with deny_topics.
 
     Returns:

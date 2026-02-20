@@ -73,31 +73,31 @@ class TestIsTopicDenied:
 
     def test_not_denied_when_empty(self):
         ns = FederationNamespaceConfig(code_path="/tmp/test")
-        assert is_topic_denied("auth-protocol", "site", ns) is False
+        assert is_topic_denied("auth-protocol", ns) is False
 
     def test_denied_exact_match(self):
         ns = FederationNamespaceConfig(
             code_path="/tmp/test", deny_topics=["internal-hiring"]
         )
-        assert is_topic_denied("internal-hiring", "site", ns) is True
+        assert is_topic_denied("internal-hiring", ns) is True
 
     def test_denied_case_insensitive(self):
         ns = FederationNamespaceConfig(
             code_path="/tmp/test", deny_topics=["internal-hiring"]
         )
-        assert is_topic_denied("Internal-Hiring", "site", ns) is True
-        assert is_topic_denied("INTERNAL-HIRING", "site", ns) is True
+        assert is_topic_denied("Internal-Hiring", ns) is True
+        assert is_topic_denied("INTERNAL-HIRING", ns) is True
 
     def test_not_denied_partial_match(self):
         ns = FederationNamespaceConfig(
             code_path="/tmp/test", deny_topics=["internal-hiring"]
         )
-        assert is_topic_denied("internal", "site", ns) is False
+        assert is_topic_denied("internal", ns) is False
 
     def test_multiple_deny_topics(self):
         ns = FederationNamespaceConfig(
             code_path="/tmp/test", deny_topics=["salaries", "internal-hiring"]
         )
-        assert is_topic_denied("salaries", "site", ns) is True
-        assert is_topic_denied("internal-hiring", "site", ns) is True
-        assert is_topic_denied("auth-protocol", "site", ns) is False
+        assert is_topic_denied("salaries", ns) is True
+        assert is_topic_denied("internal-hiring", ns) is True
+        assert is_topic_denied("auth-protocol", ns) is False

@@ -12,7 +12,6 @@ from typing import Any
 
 __all__ = [
     "ScoredResult",
-    "allocate_candidates",
     "merge_results",
     "build_response_envelope",
 ]
@@ -31,21 +30,6 @@ class ScoredResult:
     ranking_score: float
     entry_data: dict[str, Any]
     timestamp: str  # ISO 8601, for tiebreaking
-
-
-def allocate_candidates(limit: int) -> tuple[int, int]:
-    """Compute candidate allocation.
-
-    Primary: gets full `limit` candidates (uncapped).
-    Secondary: each gets max(limit // 2, 1) candidates.
-
-    Args:
-        limit: Total result limit requested by caller.
-
-    Returns:
-        (primary_limit, per_secondary_limit).
-    """
-    return limit, max(limit // 2, 1)
 
 
 def merge_results(

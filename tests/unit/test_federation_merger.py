@@ -3,7 +3,6 @@
 from watercooler_mcp.federation.merger import (
     ScoredResult,
     _negate_epoch,
-    allocate_candidates,
     build_response_envelope,
     merge_results,
 )
@@ -47,30 +46,6 @@ class TestNegateEpoch:
         result = _negate_epoch("2026-02-01T12:00:00Z")
         assert isinstance(result, float)
         assert result < 0.0
-
-
-class TestAllocateCandidates:
-    """Tests for allocate_candidates."""
-
-    def test_standard_allocation(self):
-        primary, secondary = allocate_candidates(10)
-        assert primary == 10
-        assert secondary == 5
-
-    def test_minimum_secondary(self):
-        primary, secondary = allocate_candidates(1)
-        assert primary == 1
-        assert secondary == 1
-
-    def test_odd_limit(self):
-        primary, secondary = allocate_candidates(7)
-        assert primary == 7
-        assert secondary == 3  # 7 // 2
-
-    def test_limit_two(self):
-        primary, secondary = allocate_candidates(2)
-        assert primary == 2
-        assert secondary == 1
 
 
 class TestMergeResults:

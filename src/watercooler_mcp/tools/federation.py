@@ -23,7 +23,6 @@ from .. import validation
 from ..federation.access import filter_allowed_namespaces, is_topic_denied
 from ..federation.merger import (
     ScoredResult,
-    allocate_candidates,
     build_response_envelope,
     merge_results,
 )
@@ -197,7 +196,8 @@ async def _federated_search_inner(
         })
 
     # 9. Compute allocation
-    primary_limit, per_secondary_limit = allocate_candidates(limit)
+    primary_limit = limit
+    per_secondary_limit = max(limit // 2, 1)
 
     # 10. Fan out parallel searches
     now = datetime.now(timezone.utc)
@@ -216,10 +216,6 @@ async def _federated_search_inner(
             include_entries=True,
         )
 
-        # Apply branch filter only to primary
-        if is_primary and code_branch:
-            sq.thread_topic = None  # Ensure no topic filter (branch handled downstream)
-
         try:
             search_results = await asyncio.wait_for(
                 asyncio.to_thread(search_graph, res.threads_dir, sq),
@@ -233,9 +229,7 @@ async def _federated_search_inner(
             return ns_id, None, "error"
 
         # Resolve namespace weight
-        nw = resolve_namespace_weight(
-            ns_id, primary_ns_id, frozenset(), fed_config.scoring
-        )
+        nw = resolve_namespace_weight(ns_id, primary_ns_id, fed_config.scoring)
 
         # Score results
         scored: list[ScoredResult] = []
@@ -248,7 +242,7 @@ async def _federated_search_inner(
             # Check deny_topics for secondary namespaces
             if ns_config and not is_primary:
                 topic = getattr(sr.entry, "thread_topic", "") or ""
-                if topic and is_topic_denied(topic, ns_id, ns_config):
+                if topic and is_topic_denied(topic, ns_config):
                     continue
 
             # Parse timestamp for recency decay
