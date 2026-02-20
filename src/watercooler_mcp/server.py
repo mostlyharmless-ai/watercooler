@@ -188,8 +188,7 @@ graph_project_tool = _graph_tools.graph_project_tool
 # Memory tools (some tools removed - see replacement mappings in tools/memory.py)
 get_entity_edge = _memory_tools.get_entity_edge
 diagnose_memory = _memory_tools.diagnose_memory
-# Federation tools
-federated_search_tool = _federation_tools.federated_search_tool
+# Federation tools (registered via register_federation_tools)
 
 
 # ============================================================================

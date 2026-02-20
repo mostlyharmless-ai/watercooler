@@ -370,29 +370,6 @@ class TestFederatedSearchHappyPath:
         assert data["error"] == "TOO_MANY_NAMESPACES"
 
     @pytest.mark.anyio
-    async def test_primary_branch_filter_in_envelope(self, ctx, tmp_path):
-        """code_branch parameter included in response envelope."""
-        wc_config = _make_federation_config(enabled=True, namespaces={})
-        primary_ctx = _make_primary_ctx(tmp_path)
-
-        mock_search = _mock_search_graph([MockGraphEntry(entry_id="01A")])
-
-        with (
-            patch("watercooler_mcp.tools.federation.config") as mock_config,
-            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
-            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=False),
-            patch("watercooler_mcp.tools.federation.search_graph", mock_search),
-        ):
-            mock_config.full.return_value = wc_config
-            mock_validation._require_context.return_value = (None, primary_ctx)
-            result = await _federated_search_impl(
-                ctx, query="test", code_branch="feat/auth"
-            )
-
-        data = json.loads(result)
-        assert data["primary_branch_filter"] == "feat/auth"
-
-    @pytest.mark.anyio
     async def test_action_hint_in_not_initialized_status(self, ctx, tmp_path):
         """Not-initialized namespace includes action_hint in status."""
         wc_config = _make_federation_config(enabled=True)

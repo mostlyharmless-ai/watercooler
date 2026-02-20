@@ -1008,7 +1008,8 @@ class FederationConfig(BaseModel):
     )
     max_namespaces: int = Field(
         default=5, ge=1, le=20,
-        description="Hard cap on namespaces per query",
+        description="Maximum number of secondary namespaces to query "
+                    "(primary is always included and does not count toward this limit)",
     )
     max_total_timeout: float = Field(
         default=2.0, gt=0.0,

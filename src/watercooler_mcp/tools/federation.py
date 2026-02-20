@@ -37,9 +37,6 @@ from ..observability import log_action
 
 logger = logging.getLogger(__name__)
 
-# Module-level references to registered tools (populated by register_federation_tools)
-federated_search_tool = None
-
 # Validation bounds
 MAX_QUERY_LENGTH = 500
 MAX_LIMIT = 100
@@ -62,7 +59,6 @@ async def _federated_search_impl(
     ctx: Context,
     query: str,
     code_path: str = "",
-    code_branch: str = "",
     namespaces: str = "",
     limit: int = 10,
 ) -> str:
@@ -75,11 +71,6 @@ async def _federated_search_impl(
     Args:
         query: Search query (required, max 500 chars).
         code_path: Primary repository root path.
-        code_branch: Branch hint for PRIMARY namespace only (Phase 2).
-            Currently echoed in response envelope as primary_branch_filter
-            but does NOT filter search results. Actual branch-scoped search
-            will be implemented when SearchQuery supports a code_branch field.
-            Secondary namespaces always search all branches.
         namespaces: Comma-separated namespace IDs to search (override).
             Leave empty to search all configured namespaces.
         limit: Max results to return (1-100, default 10).
@@ -89,7 +80,7 @@ async def _federated_search_impl(
         per-namespace provenance metadata.
     """
     try:
-        return await _federated_search_inner(ctx, query, code_path, code_branch, namespaces, limit)
+        return await _federated_search_inner(ctx, query, code_path, namespaces, limit)
     except Exception:
         logger.exception("Federation search failed unexpectedly")
         return json.dumps({
@@ -104,7 +95,6 @@ async def _federated_search_inner(
     ctx: Context,
     query: str,
     code_path: str,
-    code_branch: str,
     namespaces: str,
     limit: int,
 ) -> str:
@@ -350,7 +340,6 @@ async def _federated_search_inner(
         queried_namespaces=list(resolutions.keys()),
         query=query,
         total_candidates=total_candidates,
-        primary_branch_filter=code_branch,
     )
 
     log_action(
@@ -367,5 +356,4 @@ def register_federation_tools(mcp):
     Args:
         mcp: The FastMCP server instance
     """
-    global federated_search_tool
-    federated_search_tool = mcp.tool(name="watercooler_federated_search")(_federated_search_impl)
+    mcp.tool(name="watercooler_federated_search")(_federated_search_impl)

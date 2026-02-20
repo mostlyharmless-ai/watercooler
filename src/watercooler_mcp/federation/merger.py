@@ -88,7 +88,7 @@ def _negate_epoch(ts: str) -> float:
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         return -dt.timestamp()
-    except (ValueError, OSError):
+    except ValueError:
         return 0.0  # unparseable → sort last
 
 
@@ -99,7 +99,6 @@ def build_response_envelope(
     queried_namespaces: list[str],
     query: str,
     total_candidates: int,
-    primary_branch_filter: str = "",
 ) -> dict[str, Any]:
     """Build federation response envelope with provenance metadata.
 
@@ -110,7 +109,6 @@ def build_response_envelope(
         queried_namespaces: All namespaces that were queried.
         query: The original search query.
         total_candidates: Total results before truncation.
-        primary_branch_filter: Branch filter applied to primary namespace.
 
     Returns:
         Response envelope dict with schema_version for forward compatibility.
@@ -140,8 +138,5 @@ def build_response_envelope(
         "total_candidates_before_truncation": total_candidates,
         "results": result_dicts,
     }
-
-    if primary_branch_filter:
-        envelope["primary_branch_filter"] = primary_branch_filter
 
     return envelope
