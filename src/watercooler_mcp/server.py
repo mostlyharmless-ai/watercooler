@@ -82,6 +82,7 @@ from .tools.memory import register_memory_tools
 # Migration tools removed due to MCP SDK 60-second timeout limitation.
 # Use scripts/index_graphiti.py for thread migration instead.
 # See: https://github.com/modelcontextprotocol/typescript-sdk/issues/245
+from .tools.federation import register_federation_tools
 # Re-export tools for test compatibility
 from .tools import diagnostic as _diagnostic_tools
 from .tools import thread_query as _thread_query_tools
@@ -89,6 +90,7 @@ from .tools import thread_write as _thread_write_tools
 from .tools import sync as _sync_tools
 from .tools import graph as _graph_tools
 from .tools import memory as _memory_tools
+from .tools import federation as _federation_tools
 
 
 # Workaround for Windows stdio hang: Force auto-flush on every stdout write
@@ -143,6 +145,7 @@ register_graph_tools(mcp)
 register_memory_tools(mcp)
 from .tools.migration import register_migration_tools
 register_migration_tools(mcp)
+register_federation_tools(mcp)
 
 # Initialize memory sync callbacks (Issue #83 - callback registry pattern)
 from .memory_sync import init_memory_sync_callbacks
@@ -185,6 +188,7 @@ graph_project_tool = _graph_tools.graph_project_tool
 # Memory tools (some tools removed - see replacement mappings in tools/memory.py)
 get_entity_edge = _memory_tools.get_entity_edge
 diagnose_memory = _memory_tools.diagnose_memory
+# Federation tools (registered via register_federation_tools)
 
 
 # ============================================================================

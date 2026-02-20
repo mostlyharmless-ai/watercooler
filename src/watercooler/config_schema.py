@@ -6,11 +6,12 @@ Uses Pydantic for schema enforcement and clear error messages.
 
 from __future__ import annotations
 
+import os
 import warnings
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class CommonConfig(BaseModel):
@@ -944,6 +945,111 @@ class MemoryConfig(BaseModel):
     leanrag: LeanRAGBackendConfig = Field(default_factory=LeanRAGBackendConfig)
 
 
+class FederationScoringConfig(BaseModel):
+    """Scoring parameters for federated search.
+
+    Uses ConfigDict(frozen=True) — intentional Pydantic v2 pattern upgrade.
+    Existing config models use legacy `class Config:` pattern.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    local_weight: float = Field(
+        default=1.0, ge=0.0, le=10.0,
+        description="NW for primary namespace (max 10.0; 0.0 disables the namespace; values > ~1.43 produce ranking_score > 1.0)",
+    )
+    wide_weight: float = Field(
+        default=0.55, ge=0.0, le=10.0,
+        description="NW for wide-scope namespaces (max 10.0; 0.0 disables the namespace; values > ~1.43 produce ranking_score > 1.0)",
+    )
+    recency_floor: float = Field(default=0.7, ge=0.0, le=1.0)
+    recency_half_life_days: float = Field(default=60.0, gt=0.0)
+
+
+class FederationNamespaceConfig(BaseModel):
+    """Configuration for a single federated namespace."""
+
+    model_config = ConfigDict(frozen=True)
+
+    code_path: str = Field(description="Absolute path to the namespace's code repo root")
+    deny_topics: List[str] = Field(default_factory=list)
+
+    @field_validator("code_path")
+    @classmethod
+    def validate_code_path(cls, v: str) -> str:
+        """Reject null bytes, require absolute path, resolve traversals."""
+        if "\x00" in v:
+            raise ValueError("code_path contains null bytes")
+        if not os.path.isabs(v):
+            raise ValueError(f"code_path must be absolute, got: {v}")
+        return str(Path(v).resolve())
+
+
+class FederationAccessConfig(BaseModel):
+    """Per-primary-namespace access allowlists."""
+
+    model_config = ConfigDict(frozen=True)
+
+    allowlists: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Map of primary namespace -> list of allowed secondary namespaces",
+    )
+
+
+class FederationConfig(BaseModel):
+    """Top-level federation configuration.
+
+    Lives at `[federation]` in TOML config, peer of [memory], [common], etc.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = Field(default=False, description="Enable federation features")
+    namespaces: Dict[str, FederationNamespaceConfig] = Field(default_factory=dict)
+    access: FederationAccessConfig = Field(default_factory=FederationAccessConfig)
+    scoring: FederationScoringConfig = Field(default_factory=FederationScoringConfig)
+    namespace_timeout: float = Field(
+        default=0.4, gt=0.0, le=30.0,
+        description="Per-namespace search timeout in seconds (max 30). Note: cancelling "
+                    "a timed-out asyncio.to_thread task stops the coroutine wrapper "
+                    "but the underlying search_graph thread runs to completion. "
+                    "Tune conservatively to avoid thread accumulation under load.",
+    )
+    max_namespaces: int = Field(
+        default=5, ge=1, le=20,
+        description="Maximum number of secondary namespaces to query "
+                    "(primary is always included and does not count toward this limit)",
+    )
+    max_total_timeout: float = Field(
+        default=2.0, gt=0.0, le=60.0,
+        description="Total wall-clock budget for all namespace searches combined (max 60s)",
+    )
+
+    @model_validator(mode="after")
+    def check_timeout_ordering(self) -> "FederationConfig":
+        """Ensure per-namespace timeout does not exceed total timeout budget."""
+        if self.namespace_timeout > self.max_total_timeout:
+            raise ValueError(
+                f"namespace_timeout ({self.namespace_timeout}s) must be <= "
+                f"max_total_timeout ({self.max_total_timeout}s)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def check_no_basename_collisions(self) -> "FederationConfig":
+        """Reject configs where two namespaces map to the same worktree basename."""
+        basenames: Dict[str, str] = {}
+        for ns_id, ns_config in self.namespaces.items():
+            basename = Path(ns_config.code_path).name
+            if basename in basenames:
+                raise ValueError(
+                    f"Namespace basename collision: '{ns_id}' and '{basenames[basename]}' "
+                    f"both resolve to worktree basename '{basename}'"
+                )
+            basenames[basename] = ns_id
+        return self
+
+
 class WatercoolerConfig(BaseModel):
     """Root configuration model."""
 
@@ -958,6 +1064,7 @@ class WatercoolerConfig(BaseModel):
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    federation: FederationConfig = Field(default_factory=FederationConfig)
 
     @classmethod
     def default(cls) -> "WatercoolerConfig":
