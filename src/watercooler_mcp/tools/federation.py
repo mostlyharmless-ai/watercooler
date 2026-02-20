@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastmcp import Context
+from fastmcp import Context, FastMCP
 
 from watercooler.baseline_graph.search import SearchQuery, search_graph
 from watercooler.config_facade import config
@@ -100,12 +100,13 @@ async def _federated_search_inner(
     """Inner implementation of federated search (unwrapped)."""
     # 1. Validate inputs
     if not query or not query.strip():
-        return json.dumps({"schema_version": 1, "error": "EMPTY_QUERY", "message": "Query cannot be empty"})
+        return json.dumps({"schema_version": 1, "error": "EMPTY_QUERY", "message": "Query cannot be empty", "results": []})
     if len(query) > MAX_QUERY_LENGTH:
         return json.dumps({
             "schema_version": 1,
             "error": "VALIDATION_ERROR",
             "message": f"Query exceeds maximum length ({MAX_QUERY_LENGTH} chars)",
+            "results": [],
         })
     # Sanitize for safe logging only — preserve original query for search
     log_query = query.replace("\n", " ").replace("\r", " ").replace("\x1b", "")
@@ -118,6 +119,7 @@ async def _federated_search_inner(
             "schema_version": 1,
             "error": "FEDERATION_DISABLED",
             "message": "Federation is not enabled. Set federation.enabled = true in config.toml",
+            "results": [],
         })
 
     # 3. Hosted mode guard (before _require_context to avoid git overhead)
@@ -126,12 +128,13 @@ async def _federated_search_inner(
             "schema_version": 1,
             "error": "FEDERATION_NOT_AVAILABLE",
             "message": "Federated search is not available in hosted mode",
+            "results": [],
         })
 
     # 4. Resolve primary context
     error, primary_ctx = validation._require_context(code_path)
     if error:
-        return json.dumps({"schema_version": 1, "error": "CONTEXT_ERROR", "message": error})
+        return json.dumps({"schema_version": 1, "error": "CONTEXT_ERROR", "message": error, "results": []})
 
     # 5. Parse namespace override
     namespace_override = None
@@ -151,6 +154,7 @@ async def _federated_search_inner(
                 f"Query spans {secondary_count} secondary namespaces, "
                 f"exceeding max_namespaces={fed_config.max_namespaces}"
             ),
+            "results": [],
         })
 
     # Find primary namespace ID
@@ -163,7 +167,7 @@ async def _federated_search_inner(
             break
 
     if primary_ns_id is None:
-        return json.dumps({"schema_version": 1, "error": "NO_PRIMARY", "message": "Could not identify primary namespace"})
+        return json.dumps({"schema_version": 1, "error": "NO_PRIMARY", "message": "Could not identify primary namespace", "results": []})
 
     # 8. Access control
     all_ns_ids = list(resolutions.keys())
@@ -173,16 +177,14 @@ async def _federated_search_inner(
 
     # Initialize namespace_status with denied namespaces
     namespace_status: dict[str, Any] = {k: {"status": v} for k, v in denied_map.items()}
+    warnings: list[str] = []
 
     # Surface primary-secondary collision (secondary was silently skipped by resolver)
     if primary_ns_id in fed_config.namespaces:
-        namespace_status[f"{primary_ns_id}__secondary"] = {
-            "status": "skipped",
-            "error_message": (
-                f"Secondary namespace '{primary_ns_id}' collides with primary "
-                f"namespace ID — secondary config ignored"
-            ),
-        }
+        warnings.append(
+            f"Secondary namespace '{primary_ns_id}' collides with primary "
+            f"namespace ID — secondary config ignored"
+        )
 
     # Add not_initialized status for unresolved namespaces (with diagnostics)
     for ns_id in allowed_ns_ids:
@@ -205,6 +207,7 @@ async def _federated_search_inner(
             "error": "PRIMARY_NOT_AVAILABLE",
             "message": f"Primary namespace '{primary_ns_id}' is not available: "
                        f"{resolutions[primary_ns_id].status}",
+            "results": [],
         })
 
     # 9. Compute allocation
@@ -328,7 +331,9 @@ async def _federated_search_inner(
     for task_obj in done:
         exc = task_obj.exception()
         if exc is not None:
-            logger.error("Federation: unexpected error: %s", exc)
+            ns_id = task_obj.get_name().removeprefix("federation-search-")
+            logger.error("Federation: namespace '%s' error: %s", ns_id, exc)
+            namespace_status[ns_id] = {"status": "error"}
             continue
         ns_id, scored, status = task_obj.result()
         namespace_status[ns_id] = {"status": status}
@@ -336,13 +341,10 @@ async def _federated_search_inner(
             namespace_results[ns_id] = scored
             total_candidates += len(scored)
 
-    # Mark timed-out namespaces
-    completed_ns_ids = {ns_id for ns_id, _, _ in (
-        task_obj.result() for task_obj in done if task_obj.exception() is None
-    )}
-    for ns_id in searchable:
-        if ns_id not in completed_ns_ids and ns_id not in namespace_status:
-            namespace_status[ns_id] = {"status": "timeout"}
+    # Mark timed-out namespaces directly from cancelled tasks
+    for p in pending:
+        ns_id = p.get_name().removeprefix("federation-search-")
+        namespace_status[ns_id] = {"status": "timeout"}
 
     # 11. Check primary status
     primary_status = namespace_status.get(primary_ns_id, {})
@@ -353,6 +355,7 @@ async def _federated_search_inner(
             "error": "PRIMARY_SEARCH_FAILED",
             "message": f"Primary namespace '{primary_ns_id}' search failed: "
                        f"{primary_status_val or 'unknown'}",
+            "results": [],
         })
 
     # 12. Merge results
@@ -364,8 +367,9 @@ async def _federated_search_inner(
         primary_namespace=primary_ns_id,
         namespace_status=namespace_status,
         queried_namespaces=list(resolutions.keys()),
-        query=log_query,
+        query=query,
         total_candidates=total_candidates,
+        warnings=warnings,
     )
 
     log_action(
@@ -376,10 +380,10 @@ async def _federated_search_inner(
     return json.dumps(envelope)
 
 
-def register_federation_tools(mcp):
+def register_federation_tools(mcp: FastMCP) -> None:
     """Register federation tools with the MCP server.
 
     Args:
-        mcp: The FastMCP server instance
+        mcp: The FastMCP server instance.
     """
     mcp.tool(name="watercooler_federated_search")(_federated_search_impl)

@@ -242,8 +242,8 @@ max_total_timeout = 2.0      # Total wall-clock budget for all searches
 [federation.scoring]
 local_weight = 1.0           # Weight for primary namespace results
 wide_weight = 0.55           # Weight for secondary namespace results
-recency_half_life_days = 14  # Half-life for recency decay (days)
-recency_floor = 0.3          # Minimum recency multiplier
+recency_half_life_days = 60  # Half-life for recency decay (days)
+recency_floor = 0.7          # Minimum recency multiplier
 
 [federation.access]
 # Allowlist: which primary namespaces can search which secondaries

@@ -90,6 +90,7 @@ def build_response_envelope(
     queried_namespaces: list[str],
     query: str,
     total_candidates: int,
+    warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build federation response envelope with provenance metadata.
 
@@ -101,6 +102,7 @@ def build_response_envelope(
         query: The original search query.
         total_candidates: Total scored results before limit truncation
             (post-deny_topics filtering, pre-limit).
+        warnings: Optional list of warning messages (e.g., namespace collisions).
 
     Returns:
         Response envelope dict with schema_version for forward compatibility.
@@ -130,5 +132,7 @@ def build_response_envelope(
         "total_candidates_before_truncation": total_candidates,
         "results": result_dicts,
     }
+    if warnings:
+        envelope["warnings"] = warnings
 
     return envelope

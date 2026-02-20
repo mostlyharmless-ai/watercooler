@@ -465,6 +465,7 @@ class TestFederatedSearchSchemaVersion:
         result = await _federated_search_impl(ctx, query="")
         data = json.loads(result)
         assert data["schema_version"] == 1
+        assert data["results"] == []
 
     @pytest.mark.anyio
     async def test_disabled_has_schema_version(self, ctx):
@@ -474,6 +475,7 @@ class TestFederatedSearchSchemaVersion:
             result = await _federated_search_impl(ctx, query="test")
         data = json.loads(result)
         assert data["schema_version"] == 1
+        assert data["results"] == []
 
     @pytest.mark.anyio
     async def test_hosted_mode_has_schema_version(self, ctx, tmp_path):
@@ -489,10 +491,11 @@ class TestFederatedSearchSchemaVersion:
             result = await _federated_search_impl(ctx, query="test")
         data = json.loads(result)
         assert data["schema_version"] == 1
+        assert data["results"] == []
 
     @pytest.mark.anyio
-    async def test_query_sanitization_strips_control_chars(self, ctx, tmp_path):
-        """Control chars sanitized in envelope but original query reaches search_graph."""
+    async def test_query_sanitization_preserves_original_in_envelope(self, ctx, tmp_path):
+        """Original query preserved in envelope; sanitized form used only for logging."""
         wc_config = _make_federation_config(enabled=True, namespaces={})
         primary_ctx = _make_primary_ctx(tmp_path)
 
@@ -509,14 +512,12 @@ class TestFederatedSearchSchemaVersion:
             result = await _federated_search_impl(ctx, query="test\ninjection\r\x1b[31m")
 
         data = json.loads(result)
-        # Should succeed (sanitized, not rejected)
+        # Should succeed (not rejected)
         assert data["schema_version"] == 1
         assert "error" not in data
-        # Sanitized query in envelope (log-safe)
-        assert "\n" not in data["query"]
-        assert "\r" not in data["query"]
-        assert "\x1b" not in data["query"]
-        # Original query (with control chars) was passed to search_graph
+        # Original query preserved in envelope (unsanitized)
+        assert "\n" in data["query"]
+        # Original query also passed to search_graph
         call_args = mock_search.call_args
         sq = call_args[0][1]  # second positional arg is SearchQuery
         assert "\n" in sq.query  # Original control chars preserved for search
