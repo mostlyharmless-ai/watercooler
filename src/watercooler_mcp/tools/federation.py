@@ -152,17 +152,6 @@ async def _federated_search_inner(
                            f"IDs must contain only alphanumeric characters, hyphens, and underscores.",
                 "results": [],
             })
-        # Reject override lists exceeding max_namespaces (primary doesn't count)
-        if len(parsed) > fed_config.max_namespaces:
-            return json.dumps({
-                "schema_version": 1,
-                "error": "TOO_MANY_NAMESPACES",
-                "message": (
-                    f"Requested {len(parsed)} namespaces, "
-                    f"exceeding max_namespaces={fed_config.max_namespaces}"
-                ),
-                "results": [],
-            })
         namespace_override = parsed
 
     # 6. Resolve namespaces
@@ -299,7 +288,9 @@ async def _federated_search_inner(
                 try:
                     entry_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                 except (ValueError, AttributeError):
-                    pass
+                    # Bad timestamp — keep default (now) for Phase 1 pragmatism.
+                    # Phase 2: consider using datetime.min for minimum recency boost.
+                    logger.debug("Unparseable timestamp %r in entry, using now", ts_str)
 
             recency = compute_recency_decay(
                 entry_ts, now,

@@ -106,8 +106,9 @@ def build_response_envelope(
         namespace_status: Per-namespace status dicts with optional diagnostics.
         queried_namespaces: All namespaces that were queried.
         query: The original search query.
-        total_candidates: Total scored results before limit truncation
-            (post-deny_topics filtering, pre-limit).
+        total_candidates: Total scored results before min_score filtering
+            and limit truncation (post-scoring, post-deny_topics,
+            pre-min_score-filter, pre-limit).
         warnings: Optional list of warning messages (e.g., namespace collisions).
         results_complete: False if any searchable namespace timed out or errored,
             meaning total_candidates may undercount actual candidates.
@@ -141,7 +142,6 @@ def build_response_envelope(
         "results_complete": results_complete,
         "results": result_dicts,
     }
-    if warnings:
-        envelope["warnings"] = warnings
+    envelope["warnings"] = warnings or []
 
     return envelope
