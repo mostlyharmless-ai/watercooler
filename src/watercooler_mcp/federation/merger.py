@@ -132,6 +132,7 @@ def build_response_envelope(
 
     envelope: dict[str, Any] = {
         "schema_version": 1,
+        "query": query,
         "primary_namespace": primary_namespace,
         "queried_namespaces": queried_namespaces,
         "namespace_status": namespace_status,

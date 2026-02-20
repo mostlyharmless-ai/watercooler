@@ -41,6 +41,14 @@ class TestFederationScoringConfig:
         with pytest.raises(ValidationError):
             FederationScoringConfig(recency_half_life_days=-1.0)
 
+    def test_weight_non_negative(self):
+        FederationScoringConfig(local_weight=0.0)
+        FederationScoringConfig(wide_weight=0.0)
+        with pytest.raises(ValidationError):
+            FederationScoringConfig(local_weight=-0.1)
+        with pytest.raises(ValidationError):
+            FederationScoringConfig(wide_weight=-0.1)
+
 
 class TestFederationNamespaceConfig:
     """Tests for FederationNamespaceConfig."""

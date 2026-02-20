@@ -159,6 +159,7 @@ class TestBuildResponseEnvelope:
             total_candidates=1,
         )
         assert envelope["schema_version"] == 1
+        assert envelope["query"] == "test query"
         assert envelope["primary_namespace"] == "cloud"
         assert envelope["result_count"] == 1
         assert envelope["total_candidates_before_truncation"] == 1

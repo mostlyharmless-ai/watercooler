@@ -954,8 +954,8 @@ class FederationScoringConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    local_weight: float = Field(default=1.0, description="NW for primary namespace")
-    wide_weight: float = Field(default=0.55, description="NW for wide-scope namespaces")
+    local_weight: float = Field(default=1.0, ge=0.0, description="NW for primary namespace")
+    wide_weight: float = Field(default=0.55, ge=0.0, description="NW for wide-scope namespaces")
     recency_floor: float = Field(default=0.7, ge=0.0, le=1.0)
     recency_half_life_days: float = Field(default=60.0, gt=0.0)
 

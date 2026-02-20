@@ -30,7 +30,7 @@ class NamespaceResolution:
     namespace_id: str
     threads_dir: Path | None
     code_path: Path
-    status: Literal["ok", "not_initialized", "error"]
+    status: Literal["ok", "not_initialized", "security_rejected", "error"]
     is_primary: bool = False
     error_message: str = ""
     action_hint: str = ""
@@ -39,7 +39,7 @@ class NamespaceResolution:
 def discover_namespace_worktree(
     namespace_id: str,
     namespace_config: FederationNamespaceConfig,
-) -> Path | None:
+) -> Path | str | None:
     """Discover existing worktree via filesystem check.
 
     Security: rejects symlinked worktree paths and paths escaping WORKTREE_BASE.
@@ -50,7 +50,8 @@ def discover_namespace_worktree(
     config isolation.
 
     Returns:
-        Resolved worktree path if exists, None if not initialized.
+        Resolved worktree path if exists, ``"security_rejected"`` if path
+        fails security checks, None if worktree not initialized.
     """
     code_root = Path(namespace_config.code_path)
     worktree_path = _worktree_path_for(code_root)
@@ -61,7 +62,7 @@ def discover_namespace_worktree(
             "Federation: worktree path is a symlink, rejecting: %s (namespace=%s)",
             worktree_path, namespace_id,
         )
-        return None
+        return "security_rejected"
 
     # Verify resolved path stays under WORKTREE_BASE
     try:
@@ -73,7 +74,7 @@ def discover_namespace_worktree(
             "Federation: worktree path escapes WORKTREE_BASE, rejecting: %s (namespace=%s)",
             resolved, namespace_id,
         )
-        return None
+        return "security_rejected"
     except OSError:
         return None
 
@@ -135,12 +136,23 @@ def resolve_all_namespaces(
             continue
 
         worktree = discover_namespace_worktree(ns_id, ns_config)
-        if worktree is not None:
+        if isinstance(worktree, Path):
             results[ns_id] = NamespaceResolution(
                 namespace_id=ns_id,
                 threads_dir=worktree,
                 code_path=Path(ns_config.code_path),
                 status="ok",
+            )
+        elif worktree == "security_rejected":
+            results[ns_id] = NamespaceResolution(
+                namespace_id=ns_id,
+                threads_dir=None,
+                code_path=Path(ns_config.code_path),
+                status="security_rejected",
+                error_message=(
+                    f"Worktree path for namespace '{ns_id}' failed security checks "
+                    f"(symlink or path escape)"
+                ),
             )
         else:
             results[ns_id] = NamespaceResolution(

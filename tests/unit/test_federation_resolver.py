@@ -78,7 +78,7 @@ class TestDiscoverNamespaceWorktree:
                 return_value=symlink,
             ):
                 result = discover_namespace_worktree("site", ns_config)
-        assert result is None
+        assert result == "security_rejected"
 
     def test_path_escaping_worktree_base_rejected(self, tmp_path):
         worktree_base = tmp_path / "worktrees"
@@ -94,8 +94,7 @@ class TestDiscoverNamespaceWorktree:
                 return_value=escape_path,
             ):
                 result = discover_namespace_worktree("site", ns_config)
-        assert result is None
-
+        assert result == "security_rejected"
 
     def test_similar_prefix_path_rejected(self, tmp_path):
         """Path with similar prefix but outside WORKTREE_BASE is rejected."""
@@ -113,7 +112,7 @@ class TestDiscoverNamespaceWorktree:
                 return_value=similar_prefix,
             ):
                 result = discover_namespace_worktree("site", ns_config)
-        assert result is None
+        assert result == "security_rejected"
 
 
 class TestResolveAllNamespaces:
@@ -150,6 +149,33 @@ class TestResolveAllNamespaces:
         assert r.status == "not_initialized"
         assert r.action_hint  # Should include the code_path
         assert "/home/user/watercooler-site" in r.action_hint
+
+    def test_secondary_security_rejected(self, primary_context, tmp_path):
+        """Symlink/path-escape produces security_rejected, not not_initialized."""
+        worktree_base = tmp_path / "worktrees"
+        worktree_base.mkdir()
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        symlink = worktree_base / "watercooler-site"
+        symlink.symlink_to(real_dir)
+
+        fed_config = FederationConfig(
+            namespaces={
+                "site": FederationNamespaceConfig(code_path="/home/user/watercooler-site"),
+            }
+        )
+
+        with patch("watercooler_mcp.federation.resolver.WORKTREE_BASE", worktree_base):
+            with patch(
+                "watercooler_mcp.federation.resolver._worktree_path_for",
+                return_value=symlink,
+            ):
+                results = resolve_all_namespaces(primary_context, fed_config)
+
+        r = results["site"]
+        assert r.status == "security_rejected"
+        assert "security checks" in r.error_message
+        assert r.action_hint == ""  # No action hint for security rejections
 
     def test_secondary_resolved(self, primary_context, tmp_path):
         worktree_base = tmp_path / "worktrees"

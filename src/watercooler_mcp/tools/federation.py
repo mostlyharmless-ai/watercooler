@@ -75,7 +75,10 @@ async def _federated_search_impl(
     Args:
         query: Search query (required, max 500 chars).
         code_path: Primary repository root path.
-        code_branch: Branch filter for PRIMARY namespace only.
+        code_branch: Branch hint for PRIMARY namespace only (Phase 2).
+            Currently echoed in response envelope as primary_branch_filter
+            but does NOT filter search results. Actual branch-scoped search
+            will be implemented when SearchQuery supports a code_branch field.
             Secondary namespaces always search all branches.
         namespaces: Comma-separated namespace IDs to search (override).
             Leave empty to search all configured namespaces.
