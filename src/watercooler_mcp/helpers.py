@@ -11,14 +11,13 @@ This module contains:
 These are extracted from server.py for modularity and testability.
 """
 
-import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
 # Local application imports
 from watercooler import commands, fs
 from watercooler.config_facade import config
-from watercooler.thread_entries import ThreadEntry, parse_thread_entries
+from watercooler.thread_entries import ThreadEntry
 from watercooler.baseline_graph.reader import (
     is_graph_available,
     list_threads_from_graph,
@@ -44,15 +43,6 @@ _ALLOWED_FORMATS = {"markdown", "json"}
 _MAX_LIMIT = 1000  # Maximum entries that can be requested in a single call
 _MAX_OFFSET = 100000  # Maximum offset to prevent excessive memory usage
 
-# Regex patterns for extracting thread metadata from content
-_TITLE_RE = re.compile(r"^#\s*(?P<val>.+)$", re.MULTILINE)
-_STAT_RE = re.compile(r"^Status:\s*(?P<val>.+)$", re.IGNORECASE | re.MULTILINE)
-_BALL_RE = re.compile(r"^Ball:\s*(?P<val>.+)$", re.IGNORECASE | re.MULTILINE)
-_ENTRY_RE = re.compile(
-    r"^Entry:\s*(?P<who>.+?)\s+(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s*$",
-    re.MULTILINE,
-)
-_CLOSED_STATES = {"done", "closed", "merged", "resolved", "abandoned", "obsolete"}
 
 
 # ============================================================================
@@ -134,35 +124,6 @@ def _normalize_status(s: str) -> str:
     return s.strip().lower()
 
 
-def _extract_thread_metadata_from_md(content: str, topic: str) -> tuple[str, str, str, str]:
-    """Extract thread metadata from markdown content string.
-
-    This MD-parsing version is needed for hosted mode where we only have
-    GitHub API content, and as a fallback when graph data is unavailable.
-
-    Args:
-        content: Full thread markdown content
-        topic: Thread topic (used as fallback for title)
-
-    Returns:
-        Tuple of (title, status, ball, last_entry_timestamp)
-    """
-    title_match = _TITLE_RE.search(content)
-    title = title_match.group("val").strip() if title_match else topic
-
-    status_match = _STAT_RE.search(content)
-    status = _normalize_status(status_match.group("val") if status_match else "open")
-
-    ball_match = _BALL_RE.search(content)
-    ball = ball_match.group("val").strip() if ball_match else "unknown"
-
-    # Extract last entry timestamp
-    hits = list(_ENTRY_RE.finditer(content))
-    last = hits[-1].group("ts").strip() if hits else fs.utcnow_iso()
-
-    return title, status, ball, last
-
-
 def _get_thread_metadata(
     threads_dir: Path, topic: str, content: str | None = None
 ) -> tuple[str, str, str, str]:
@@ -220,48 +181,6 @@ def _resolve_format(
 # ============================================================================
 # Entry Loading Helpers
 # ============================================================================
-
-
-def _load_entries_from_md(
-    topic: str, context: ThreadContext
-) -> tuple[str | None, list[ThreadEntry]]:
-    """Load and parse thread entries from markdown on disk.
-
-    Thread Safety Note:
-        This function performs unlocked reads. This is safe because:
-        - Write operations (say, ack, handoff) use AdvisoryLock for serialization
-        - Reads may see partially written entries, but won't corrupt existing ones
-        - Thread entry boundaries (---) ensure partial writes don't break parsing
-        - File system guarantees atomic writes at the block level
-        - MCP tool calls are typically infrequent enough that read/write races are rare
-
-    For high-concurrency scenarios, consider adding shared/exclusive locking
-    or caching with mtime-based invalidation.
-    """
-    threads_dir = context.threads_dir
-    thread_path = fs.thread_path(topic, threads_dir)
-
-    if not thread_path.exists():
-        if threads_dir.exists():
-            available_list = [p.stem for p in fs.discover_thread_files(threads_dir)]
-            if len(available_list) > 10:
-                available = (
-                    ", ".join(available_list[:10])
-                    + f" (and {len(available_list) - 10} more)"
-                )
-            else:
-                available = ", ".join(available_list) if available_list else "none"
-        else:
-            available = "none"
-        return (
-            f"Error: Thread '{topic}' not found in {threads_dir}\n\n"
-            f"Available threads: {available}",
-            [],
-        )
-
-    content = fs.read_body(thread_path)
-    entries = parse_thread_entries(content)
-    return (None, entries)
 
 
 def _entry_header_payload(entry: ThreadEntry, summary: str = "") -> Dict[str, object]:
@@ -391,7 +310,7 @@ def _load_entries(
     if not _use_graph_for_reads(threads_dir):
         return (
             f"Error: Graph data not available for '{topic}'. "
-            "Run `watercooler graph-recover` to rebuild the graph from markdown.",
+            "Graph data not available. Restore from git history or run `watercooler reindex`.",
             [],
             {},
         )

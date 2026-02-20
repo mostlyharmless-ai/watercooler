@@ -38,7 +38,6 @@ from .helpers import (
     _ALLOWED_FORMATS,
     _MAX_LIMIT,
     _MAX_OFFSET,
-    _CLOSED_STATES,
     # Startup warnings
     _add_startup_warning,
     _get_startup_warnings,
@@ -49,7 +48,6 @@ from .helpers import (
     _normalize_status,
     _resolve_format,
     # Entry loading
-    _load_entries_from_md,
     _entry_header_payload,
     _entry_full_payload,
     # Graph helpers

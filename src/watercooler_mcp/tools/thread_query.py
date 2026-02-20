@@ -35,7 +35,6 @@ from ..helpers import (
     _get_startup_warnings,
     _format_warnings_for_response,
     # Thread parsing
-    _extract_thread_metadata_from_md,  # MD-only: for hosted mode
     _get_thread_metadata,  # Canonical: graph-first
     _resolve_format,
     # Entry loading
@@ -49,7 +48,10 @@ from ..helpers import (
     _get_thread_summary,
     _scan_thread_entries,
 )
-from watercooler.baseline_graph.reader import read_thread_from_graph
+from watercooler.baseline_graph.reader import (
+    read_thread_from_graph,
+    format_thread_markdown,
+)
 from ..errors import (
     ContextError,
     EntryNotFoundError,
@@ -451,8 +453,9 @@ def _read_thread_impl(
             if load_error:
                 raise HostedModeError(load_error, operation="load_entries")
 
-            # Extract metadata from content
-            title, status, ball, last = _extract_thread_metadata_from_md(content, topic)
+            # Extract metadata from reconstructed content
+            from ..hosted_ops import _extract_thread_metadata
+            title, status, ball, last = _extract_thread_metadata(content, topic)
 
             payload = {
                 "topic": topic,
@@ -499,25 +502,18 @@ def _read_thread_impl(
             threads_dir.mkdir(parents=True, exist_ok=True)
 
         # Check thread existence via graph (source of truth)
-        if _use_graph_for_reads(threads_dir):
-            graph_result = read_thread_from_graph(threads_dir, topic)
-            if not graph_result:
-                raise ThreadNotFoundError(topic=topic)
-        else:
-            # No graph available — check markdown as last resort
-            thread_path = fs.thread_path(topic, threads_dir)
-            if not thread_path.exists():
-                raise ThreadNotFoundError(topic=topic)
+        graph_result = read_thread_from_graph(threads_dir, topic, code_branch=code_branch)
+        if not graph_result:
+            raise ThreadNotFoundError(topic=topic)
 
         # Track thread access (non-blocking)
         _track_access(threads_dir, "thread", topic)
 
-        # Serve markdown format directly from projection file
+        # Serve markdown format reconstructed from graph
         if resolved_format == "markdown" and not summary_only:
-            thread_path = fs.thread_path(topic, threads_dir)
-            if thread_path.exists():
-                content = fs.read_body(thread_path)
-                return _format_warnings_for_response(content)
+            graph_thread, graph_entries = graph_result
+            content = format_thread_markdown(graph_thread, graph_entries)
+            return _format_warnings_for_response(content)
 
         # Load entries from graph (canonical)
         load_error, entries, summaries = _load_entries(topic, context, code_branch=code_branch)
