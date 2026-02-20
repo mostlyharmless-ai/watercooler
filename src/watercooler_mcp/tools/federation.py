@@ -138,6 +138,8 @@ async def _federated_search_inner(
     if error:
         return json.dumps({"schema_version": 1, "error": "CONTEXT_ERROR", "message": error, "results": []})
 
+    assert primary_ctx is not None  # guaranteed by _require_context contract
+
     # 5. Parse namespace override
     namespace_override = None
     if namespaces.strip():
@@ -243,6 +245,8 @@ async def _federated_search_inner(
             include_threads=False,
             include_entries=True,
         )
+
+        assert res.threads_dir is not None  # guaranteed: only status="ok" namespaces are searchable
 
         try:
             search_results = await asyncio.wait_for(
