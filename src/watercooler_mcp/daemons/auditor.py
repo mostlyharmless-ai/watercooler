@@ -88,7 +88,7 @@ class ThreadAuditorDaemon(BaseDaemon):
 
         try:
             from watercooler_mcp.config import resolve_thread_context
-            ctx = resolve_thread_context(None)
+            ctx = resolve_thread_context(Path.cwd())
             return ctx.threads_dir
         except Exception as exc:
             logger.debug("DAEMON[thread_auditor]: could not resolve threads_dir: %s", exc)
