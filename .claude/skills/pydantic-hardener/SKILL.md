@@ -83,10 +83,12 @@ if not entry.dedup_key:
 
 **Pattern:** Config models that should be immutable use `model_config = ConfigDict(frozen=True)` but some fields use mutable default values (`list`, `dict`) that bypass freezing.
 
+**Note:** Pydantic v2 already rejects bare mutable defaults (`= []`, `= {}`) with `PydanticSchemaGenerationError` at class-definition time. The residual risk this catches is `Optional[list]` fields with `= None` that get mutated after construction, or `field_default` bypass patterns. On a healthy v2 codebase this check may produce few findings.
+
 **Detection:**
 - Find models with `frozen=True` in their `ConfigDict`
-- Check for mutable default values (`= []`, `= {}`, `= set()`)
-- Verify `default_factory` is used instead of mutable literals
+- Check for `Optional[list]`/`Optional[dict]` fields with `= None` that may be mutated post-construction
+- Verify `default_factory` is used instead of mutable literals where applicable
 
 **Fix pattern:**
 ```python

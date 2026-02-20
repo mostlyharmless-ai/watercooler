@@ -43,6 +43,7 @@ Optional arguments via `$ARGUMENTS`:
    Co-Authored-By: Claude <noreply@anthropic.com>
    ```
    Note: `Signed-off-by` is added automatically by the `-s` flag in step 6 — do not include it in the `-m` string.
+   Substitute the running model name in `Co-Authored-By` if the project convention includes it (e.g., `Claude Opus 4.6`).
 
    **Type**: feat, fix, refactor, test, docs, style, chore
    **Scope**: module or area affected (e.g., mcp, cli, memory, sync, skills)
@@ -65,6 +66,7 @@ Optional arguments via `$ARGUMENTS`:
    ```
    Note: `-s` adds the Signed-off-by line automatically.
    If `--amend` was requested, use `git commit --amend -s -m` instead.
+   If the previous commit already has a `Signed-off-by`, omit `-s` from the amend to avoid duplicates.
 
 7. **Verify** the commit succeeded:
    ```bash

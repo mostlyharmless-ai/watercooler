@@ -29,6 +29,7 @@ root_cause:
   - "Dedup key derived from entry_id without guard for empty/missing values"
   - "Cross-field validation between namespace_timeout and max_total_timeout not implemented"
   - "Error-path return dict constructed without namespace_status field"
+  - "Namespace override not validated against max_namespaces limit after resolution"
 date_solved: 2026-02-20
 pr_number: 190
 follow_up_issues:
@@ -63,7 +64,7 @@ PR #190 introduced federated cross-namespace keyword search to watercooler-cloud
 
 ## Root Cause Analysis
 
-All five bugs share a common theme: **implicit assumptions not enforced by code**.
+All six bugs share a common theme: **implicit assumptions not enforced by code**.
 
 - mypy couldn't see through `_require_context`'s contract that non-error means non-None
 - Dedup assumed dict iteration would place primary first — no explicit sort
@@ -157,7 +158,7 @@ def check_timeout_ordering(self) -> "FederationConfig":
 
 **File:** `src/watercooler_mcp/tools/federation.py`
 
-Entries with empty `node_id` all mapped to the same dedup key (`""`), collapsing distinct results into one.
+Entries with empty `node_id` (the field that maps to `entry_id` in `ScoredResult`) all mapped to the same dedup key (`""`), collapsing distinct results into one.
 
 **Fix:** Skip guard before scoring.
 

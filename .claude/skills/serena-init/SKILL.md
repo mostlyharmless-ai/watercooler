@@ -10,6 +10,10 @@ allowed-tools:
 
 Read Serena's initial instructions and activate the current project directory.
 
+## Prerequisites
+
+The tool paths below use `plugin_serena_serena` as the MCP plugin name. If Serena is registered under a different name in your environment, run `mcp-cli tools` to find the correct prefix.
+
 ## Steps
 
 1. **Check initial_instructions schema** (mandatory):
