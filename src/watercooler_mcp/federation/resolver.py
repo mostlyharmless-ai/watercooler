@@ -6,6 +6,7 @@ WORKTREE_BASE from watercooler_mcp.config for DRY worktree path resolution.
 
 from __future__ import annotations
 
+import enum
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,11 +17,18 @@ from watercooler_mcp.config import WORKTREE_BASE, ThreadContext, _worktree_path_
 
 __all__ = [
     "NamespaceResolution",
+    "WorktreeStatus",
     "discover_namespace_worktree",
     "resolve_all_namespaces",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+class WorktreeStatus(enum.Enum):
+    """Non-path outcomes from worktree discovery."""
+
+    SECURITY_REJECTED = "security_rejected"
 
 
 @dataclass(frozen=True)
@@ -39,7 +47,7 @@ class NamespaceResolution:
 def discover_namespace_worktree(
     namespace_id: str,
     namespace_config: FederationNamespaceConfig,
-) -> Path | str | None:
+) -> Path | WorktreeStatus | None:
     """Discover existing worktree via filesystem check.
 
     Security: rejects symlinked worktree paths and paths escaping WORKTREE_BASE.
@@ -50,8 +58,8 @@ def discover_namespace_worktree(
     config isolation.
 
     Returns:
-        Resolved worktree path if exists, ``"security_rejected"`` if path
-        fails security checks, None if worktree not initialized.
+        Resolved worktree path if exists, ``WorktreeStatus.SECURITY_REJECTED``
+        if path fails security checks, None if worktree not initialized.
     """
     code_root = Path(namespace_config.code_path)
     worktree_path = _worktree_path_for(code_root)
@@ -62,7 +70,7 @@ def discover_namespace_worktree(
             "Federation: worktree path is a symlink, rejecting: %s (namespace=%s)",
             worktree_path, namespace_id,
         )
-        return "security_rejected"
+        return WorktreeStatus.SECURITY_REJECTED
 
     # Verify resolved path stays under WORKTREE_BASE
     try:
@@ -74,7 +82,7 @@ def discover_namespace_worktree(
             "Federation: worktree path escapes WORKTREE_BASE, rejecting: %s (namespace=%s)",
             resolved, namespace_id,
         )
-        return "security_rejected"
+        return WorktreeStatus.SECURITY_REJECTED
     except OSError:
         return None
 
@@ -108,6 +116,13 @@ def resolve_all_namespaces(
     # Derive primary namespace ID from code_root basename
     primary_ns_id = primary_context.code_root.name if primary_context.code_root else "primary"
 
+    # Guard: primary ID collides with a configured secondary namespace
+    if primary_ns_id in federation_config.namespaces:
+        logger.warning(
+            "Secondary namespace '%s' collides with primary — skipping secondary",
+            primary_ns_id,
+        )
+
     # Add primary namespace
     results[primary_ns_id] = NamespaceResolution(
         namespace_id=primary_ns_id,
@@ -121,7 +136,7 @@ def resolve_all_namespaces(
     if namespace_override is not None:
         ns_ids = [ns for ns in namespace_override if ns != primary_ns_id]
     else:
-        ns_ids = list(federation_config.namespaces.keys())
+        ns_ids = [ns for ns in federation_config.namespaces if ns != primary_ns_id]
 
     for ns_id in ns_ids:
         ns_config = federation_config.namespaces.get(ns_id)
@@ -143,7 +158,7 @@ def resolve_all_namespaces(
                 code_path=Path(ns_config.code_path),
                 status="ok",
             )
-        elif worktree == "security_rejected":
+        elif worktree is WorktreeStatus.SECURITY_REJECTED:
             results[ns_id] = NamespaceResolution(
                 namespace_id=ns_id,
                 threads_dir=None,

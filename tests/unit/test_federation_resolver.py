@@ -7,6 +7,7 @@ import pytest
 from watercooler.config_schema import FederationConfig, FederationNamespaceConfig
 from watercooler_mcp.config import ThreadContext
 from watercooler_mcp.federation.resolver import (
+    WorktreeStatus,
     discover_namespace_worktree,
     resolve_all_namespaces,
 )
@@ -78,7 +79,7 @@ class TestDiscoverNamespaceWorktree:
                 return_value=symlink,
             ):
                 result = discover_namespace_worktree("site", ns_config)
-        assert result == "security_rejected"
+        assert result is WorktreeStatus.SECURITY_REJECTED
 
     def test_path_escaping_worktree_base_rejected(self, tmp_path):
         worktree_base = tmp_path / "worktrees"
@@ -94,7 +95,7 @@ class TestDiscoverNamespaceWorktree:
                 return_value=escape_path,
             ):
                 result = discover_namespace_worktree("site", ns_config)
-        assert result == "security_rejected"
+        assert result is WorktreeStatus.SECURITY_REJECTED
 
     def test_similar_prefix_path_rejected(self, tmp_path):
         """Path with similar prefix but outside WORKTREE_BASE is rejected."""
@@ -112,7 +113,7 @@ class TestDiscoverNamespaceWorktree:
                 return_value=similar_prefix,
             ):
                 result = discover_namespace_worktree("site", ns_config)
-        assert result == "security_rejected"
+        assert result is WorktreeStatus.SECURITY_REJECTED
 
 
 class TestResolveAllNamespaces:
@@ -231,6 +232,39 @@ class TestResolveAllNamespaces:
         assert "nonexistent" in results
         assert results["nonexistent"].status == "error"
         assert "not found" in results["nonexistent"].error_message
+
+    def test_primary_secondary_collision_skips_secondary(self, primary_context, tmp_path):
+        """Secondary namespace ID that collides with primary is excluded."""
+        worktree_base = tmp_path / "worktrees"
+        worktree_base.mkdir()
+
+        # "watercooler-cloud" matches the primary_context.code_root.name
+        fed_config = FederationConfig(
+            namespaces={
+                "watercooler-cloud": FederationNamespaceConfig(
+                    code_path="/home/user/watercooler-cloud"
+                ),
+                "site": FederationNamespaceConfig(
+                    code_path="/home/user/watercooler-site"
+                ),
+            }
+        )
+
+        with patch("watercooler_mcp.federation.resolver.WORKTREE_BASE", worktree_base):
+            with patch(
+                "watercooler_mcp.federation.resolver._worktree_path_for",
+                return_value=worktree_base / "watercooler-site",
+            ):
+                results = resolve_all_namespaces(primary_context, fed_config)
+
+        # Primary is present and is_primary
+        assert results["watercooler-cloud"].is_primary is True
+        assert results["watercooler-cloud"].status == "ok"
+        # The colliding secondary is NOT present as a separate entry
+        # (primary wins, secondary with same ID is skipped)
+        assert len([r for r in results.values() if r.is_primary]) == 1
+        # Non-colliding secondary is still resolved
+        assert "site" in results
 
     def test_no_git_operations(self, primary_context, tmp_path):
         """Verify no subprocess calls (no git operations)."""
