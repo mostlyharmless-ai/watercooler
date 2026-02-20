@@ -175,8 +175,9 @@ class DaemonCheckpoint:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "DaemonCheckpoint":
-        ts_raw = d.pop("thread_state", {})
-        obj = cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        ts_raw = d.get("thread_state", {})
+        obj = cls(**{k: v for k, v in d.items()
+                     if k in cls.__dataclass_fields__ and k != "thread_state"})
         obj.thread_state = {
             k: ThreadCheckpoint.from_dict(v) if isinstance(v, dict) else v
             for k, v in ts_raw.items()

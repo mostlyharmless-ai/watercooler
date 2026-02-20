@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import threading
 from typing import Optional
 
 from .base import BaseDaemon, DaemonStatus
@@ -53,6 +54,7 @@ __all__ = [
 # ------------------------------------------------------------------ #
 
 _manager: Optional[DaemonManager] = None
+_init_lock = threading.Lock()
 
 
 def get_daemon_manager() -> Optional[DaemonManager]:
@@ -75,11 +77,12 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
     """
     global _manager
 
-    if _manager is not None:
-        logger.debug("DAEMONS: already initialised, skipping")
-        return _manager
+    with _init_lock:
+        if _manager is not None:
+            logger.debug("DAEMONS: already initialised, skipping")
+            return _manager
 
-    _manager = DaemonManager()
+        _manager = DaemonManager()
 
     # Load config to decide which daemons to register
     try:

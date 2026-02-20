@@ -41,7 +41,13 @@ _IMPORT_RE = re.compile(
 
 
 def _scan_for_deprecated_imports() -> list[str]:
-    """Scan src/ for runtime files that import deprecated functions."""
+    """Scan src/ for runtime files that import deprecated functions.
+
+    Handles both single-line and multi-line parenthesized imports by
+    scanning the full file content for deprecated names within import
+    blocks. Uses word-boundary matching to avoid false positives on
+    names that are substrings of longer identifiers.
+    """
     violations = []
 
     for py_file in SRC_ROOT.rglob("*.py"):
@@ -58,17 +64,36 @@ def _scan_for_deprecated_imports() -> list[str]:
         except (OSError, UnicodeDecodeError):
             continue
 
-        for line_no, line in enumerate(content.splitlines(), 1):
-            # Only check import lines
+        # Extract all import blocks (handles multi-line parenthesized imports)
+        # Join continuation lines for multi-line imports, then check
+        lines = content.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            line_no = i + 1
+
             if not _IMPORT_RE.match(line):
+                i += 1
                 continue
 
+            # Accumulate multi-line import (parenthesized)
+            import_block = line
+            if "(" in line and ")" not in line:
+                j = i + 1
+                while j < len(lines):
+                    import_block += " " + lines[j]
+                    if ")" in lines[j]:
+                        break
+                    j += 1
+
             for func_name in _DEPRECATED_FUNCTIONS:
-                if func_name in line:
+                if re.search(rf"\b{re.escape(func_name)}\b", import_block):
                     violations.append(
                         f"{rel_str}:{line_no}: imports deprecated "
                         f"'{func_name}' — use graph reader instead"
                     )
+
+            i += 1
 
     return violations
 

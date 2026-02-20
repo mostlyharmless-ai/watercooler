@@ -225,6 +225,7 @@ class BaseDaemon(ABC):
 
             except Exception as exc:
                 self._checkpoint.error_count += 1
+                save_checkpoint(self._checkpoint)
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 logger.exception("DAEMON[%s]: tick error: %s", self.name, exc)
                 # Brief sleep to avoid tight loop on persistent errors

@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Iterator
 
+from watercooler.fs import is_closed
+
 from .summarizer import (
     summarize_entry,
     summarize_thread,
@@ -180,7 +182,7 @@ def iter_threads(
         if thread is None:
             continue
 
-        if skip_closed and thread.status.upper() == "CLOSED":
+        if skip_closed and is_closed(thread.status):
             logger.debug(f"Skipping closed thread: {thread.topic}")
             continue
 

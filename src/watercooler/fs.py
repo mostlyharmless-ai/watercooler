@@ -231,6 +231,13 @@ def discover_thread_files(
     Returns:
         Sorted list of .md file paths
     """
+    import warnings
+    warnings.warn(
+        "discover_thread_files() is deprecated; use "
+        "storage.list_thread_topics() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if not threads_dir.exists():
         return []
 

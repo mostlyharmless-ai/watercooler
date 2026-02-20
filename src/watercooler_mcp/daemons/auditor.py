@@ -11,7 +11,6 @@ Checks performed:
 - missing_entry_summary: Entry node in graph has no summary
 - stale_thread: Thread has no activity in N days
 - classification_suggestion: Thread may belong in a different directory
-- compound_report_candidate: Closed thread has no compound report
 """
 
 from __future__ import annotations
@@ -106,6 +105,13 @@ class ThreadAuditorDaemon(BaseDaemon):
         if not topics:
             return []
 
+        # Load existing unacknowledged findings to suppress duplicates
+        from .state import load_findings
+        existing = load_findings(self.name, limit=5000, unacknowledged_only=True)
+        existing_keys: set[tuple[str, str]] = {
+            (f.topic, f.category) for f in existing
+        }
+
         cfg = self._config
         findings: List[Finding] = []
         processed = 0
@@ -166,7 +172,11 @@ class ThreadAuditorDaemon(BaseDaemon):
                 has_ball_line=has_ball_line,
             )
 
-            findings.extend(thread_findings)
+            # Deduplicate: skip findings that already exist unacknowledged
+            for f in thread_findings:
+                if (f.topic, f.category) not in existing_keys:
+                    findings.append(f)
+                    existing_keys.add((f.topic, f.category))
 
             # Update checkpoint for this thread
             self._checkpoint.update_thread(topic, mtime, entry_count)
@@ -175,7 +185,7 @@ class ThreadAuditorDaemon(BaseDaemon):
         self._checkpoint.threads_skipped = skipped
 
         logger.debug(
-            "DAEMON[thread_auditor]: scanned %d threads (%d skipped), %d findings",
+            "DAEMON[thread_auditor]: scanned %d threads (%d skipped), %d new findings",
             processed, skipped, len(findings),
         )
         return findings
@@ -190,10 +200,10 @@ class ThreadAuditorDaemon(BaseDaemon):
         status: str,
         ball: str,
         last_ts: str,
-        entries: list,
+        entries: List[Dict[str, Any]],
         structured: bool,
-        has_status_line: bool = True,
-        has_ball_line: bool = True,
+        has_status_line: bool = False,
+        has_ball_line: bool = False,
     ) -> List[Finding]:
         """Run all configured checks on a single thread."""
         cfg = self._config
@@ -316,7 +326,7 @@ class ThreadAuditorDaemon(BaseDaemon):
         thread_closed = is_closed(status)
 
         # Closed thread not in closed/ directory
-        if thread_closed and current_cat not in ("closed",):
+        if thread_closed and current_cat != "closed":
             findings.append(Finding(
                 finding_id=_make_finding_id(),
                 daemon_name=self.name,
