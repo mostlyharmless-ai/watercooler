@@ -954,8 +954,14 @@ class FederationScoringConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    local_weight: float = Field(default=1.0, ge=0.0, description="NW for primary namespace")
-    wide_weight: float = Field(default=0.55, ge=0.0, description="NW for wide-scope namespaces")
+    local_weight: float = Field(
+        default=1.0, ge=0.0, le=10.0,
+        description="NW for primary namespace (max 10.0; values > ~1.43 produce ranking_score > 1.0)",
+    )
+    wide_weight: float = Field(
+        default=0.55, ge=0.0, le=10.0,
+        description="NW for wide-scope namespaces (max 10.0; values > ~1.43 produce ranking_score > 1.0)",
+    )
     recency_floor: float = Field(default=0.7, ge=0.0, le=1.0)
     recency_half_life_days: float = Field(default=60.0, gt=0.0)
 
@@ -1003,9 +1009,9 @@ class FederationConfig(BaseModel):
     access: FederationAccessConfig = Field(default_factory=FederationAccessConfig)
     scoring: FederationScoringConfig = Field(default_factory=FederationScoringConfig)
     namespace_timeout: float = Field(
-        default=0.4, gt=0.0,
-        description="Per-namespace search timeout in seconds. Note: cancelling a "
-                    "timed-out asyncio.to_thread task stops the coroutine wrapper "
+        default=0.4, gt=0.0, le=30.0,
+        description="Per-namespace search timeout in seconds (max 30). Note: cancelling "
+                    "a timed-out asyncio.to_thread task stops the coroutine wrapper "
                     "but the underlying search_graph thread runs to completion. "
                     "Tune conservatively to avoid thread accumulation under load.",
     )
@@ -1015,8 +1021,8 @@ class FederationConfig(BaseModel):
                     "(primary is always included and does not count toward this limit)",
     )
     max_total_timeout: float = Field(
-        default=2.0, gt=0.0,
-        description="Total wall-clock budget for all namespace searches combined",
+        default=2.0, gt=0.0, le=60.0,
+        description="Total wall-clock budget for all namespace searches combined (max 60s)",
     )
 
     @model_validator(mode="after")

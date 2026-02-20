@@ -90,9 +90,17 @@ def compute_recency_decay(
 
 
 def compute_ranking_score(
-    raw_score: float,
+    normalized_score: float,
     namespace_weight: float,
     recency_decay: float,
 ) -> float:
-    """Multiplicative composition: normalize(raw_score) * NW * RecencyDecay."""
-    return normalize_keyword_score(raw_score) * namespace_weight * recency_decay
+    """Multiplicative composition: NormalizedScore * NW * RecencyDecay.
+
+    Args:
+        normalized_score: Pre-computed normalized keyword score (0..1).
+            Call normalize_keyword_score() once and pass the result here
+            to avoid redundant normalization.
+        namespace_weight: Namespace weight tier (local or wide).
+        recency_decay: Recency decay factor.
+    """
+    return normalized_score * namespace_weight * recency_decay

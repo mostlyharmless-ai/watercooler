@@ -27,7 +27,7 @@ class ScoredResult:
     namespace_weight: float
     recency_decay: float
     ranking_score: float
-    entry_data: dict[str, Any]
+    entry_data: dict[str, Any]  # Treat as immutable — never mutate in-place
     timestamp: str  # ISO 8601, for display
     timestamp_epoch: float  # Pre-computed epoch for sort tiebreaking
 
@@ -50,7 +50,10 @@ def merge_results(
         namespace_results: Results grouped by namespace.
         primary_namespace: The primary namespace ID.
         limit: Maximum results to return.
-        min_score: Minimum ranking score threshold.
+        min_score: Minimum ranking score threshold. The 0.01 default filters
+            out near-zero results from the multiplicative composition (e.g., a
+            barely-matching entry in a low-weight namespace with high recency
+            decay). Dedup is handled separately by entry_id.
 
     Returns:
         Sorted, deduplicated, truncated list of ScoredResults.
@@ -91,6 +94,7 @@ def build_response_envelope(
     query: str,
     total_candidates: int,
     warnings: list[str] | None = None,
+    results_complete: bool = True,
 ) -> dict[str, Any]:
     """Build federation response envelope with provenance metadata.
 
@@ -103,6 +107,8 @@ def build_response_envelope(
         total_candidates: Total scored results before limit truncation
             (post-deny_topics filtering, pre-limit).
         warnings: Optional list of warning messages (e.g., namespace collisions).
+        results_complete: False if any searchable namespace timed out or errored,
+            meaning total_candidates may undercount actual candidates.
 
     Returns:
         Response envelope dict with schema_version for forward compatibility.
@@ -130,6 +136,7 @@ def build_response_envelope(
         "namespace_status": namespace_status,
         "result_count": len(results),
         "total_candidates_before_truncation": total_candidates,
+        "results_complete": results_complete,
         "results": result_dicts,
     }
     if warnings:

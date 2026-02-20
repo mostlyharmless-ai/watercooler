@@ -85,6 +85,12 @@ def discover_namespace_worktree(
             resolved, namespace_id,
         )
         return WorktreeStatus.SECURITY_REJECTED
+    except PermissionError:
+        logger.warning(
+            "Federation: no read access to worktree path: %s (namespace=%s)",
+            worktree_path, namespace_id,
+        )
+        return WorktreeStatus.NOT_INITIALIZED
     except OSError:
         return WorktreeStatus.NOT_INITIALIZED
 

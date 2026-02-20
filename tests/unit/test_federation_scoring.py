@@ -106,7 +106,7 @@ class TestComputeRankingScore:
 
     def test_perfect_score(self):
         score = compute_ranking_score(
-            raw_score=KEYWORD_SCORE_MAX,
+            normalized_score=1.0,
             namespace_weight=1.0,
             recency_decay=1.0,
         )
@@ -114,16 +114,16 @@ class TestComputeRankingScore:
 
     def test_multiplicative_composition(self):
         score = compute_ranking_score(
-            raw_score=1.7,  # normalized to 0.5
+            normalized_score=0.5,
             namespace_weight=0.7,
             recency_decay=0.85,
         )
         expected = 0.5 * 0.7 * 0.85
         assert score == pytest.approx(expected)
 
-    def test_zero_raw_score(self):
+    def test_zero_normalized_score(self):
         score = compute_ranking_score(
-            raw_score=0.0,
+            normalized_score=0.0,
             namespace_weight=1.0,
             recency_decay=1.0,
         )
@@ -136,9 +136,10 @@ class TestRankingStability:
     def test_removing_namespace_preserves_relative_order(self):
         """Removing namespace C does not reorder A/B results."""
         # Simulate results from namespaces A and B
-        score_a1 = compute_ranking_score(2.0, 1.0, 0.95)
-        score_a2 = compute_ranking_score(1.5, 1.0, 0.90)
-        score_b1 = compute_ranking_score(1.8, 0.7, 0.85)
+        # Use pre-normalized scores (as compute_ranking_score now expects)
+        score_a1 = compute_ranking_score(normalize_keyword_score(2.0), 1.0, 0.95)
+        score_a2 = compute_ranking_score(normalize_keyword_score(1.5), 1.0, 0.90)
+        score_b1 = compute_ranking_score(normalize_keyword_score(1.8), 0.7, 0.85)
 
         # Order with just A and B
         order_ab = sorted(
@@ -148,7 +149,7 @@ class TestRankingStability:
         )
 
         # Adding namespace C results should not change A/B relative order
-        score_c1 = compute_ranking_score(2.4, 0.55, 1.0)
+        score_c1 = compute_ranking_score(normalize_keyword_score(2.4), 0.55, 1.0)
         order_abc = sorted(
             [("a1", score_a1), ("a2", score_a2), ("b1", score_b1), ("c1", score_c1)],
             key=lambda x: x[1],

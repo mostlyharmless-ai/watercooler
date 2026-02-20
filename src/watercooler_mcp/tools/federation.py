@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -139,7 +140,19 @@ async def _federated_search_inner(
     # 5. Parse namespace override
     namespace_override = None
     if namespaces.strip():
-        namespace_override = [ns.strip() for ns in namespaces.split(",") if ns.strip()]
+        parsed = [ns.strip() for ns in namespaces.split(",") if ns.strip()]
+        # Validate namespace ID format (alphanumeric, hyphens, underscores)
+        invalid = [ns for ns in parsed if not re.fullmatch(r"[\w-]+", ns)]
+        if invalid:
+            return json.dumps({
+                "schema_version": 1,
+                "error": "VALIDATION_ERROR",
+                "message": f"Invalid namespace ID(s): {', '.join(invalid)}. "
+                           f"IDs must contain only alphanumeric characters, hyphens, and underscores.",
+                "results": [],
+            })
+        # Cap override list to max_namespaces to avoid unnecessary resolver I/O
+        namespace_override = parsed[:fed_config.max_namespaces]
 
     # 6. Resolve namespaces
     resolutions = resolve_all_namespaces(primary_ctx, fed_config, namespace_override)
@@ -283,7 +296,7 @@ async def _federated_search_inner(
                 half_life_days=fed_config.scoring.recency_half_life_days,
             )
             norm_score = normalize_keyword_score(sr.score)
-            ranking = compute_ranking_score(sr.score, nw, recency)
+            ranking = compute_ranking_score(norm_score, nw, recency)
 
             entry_data = _extract_entry_data(sr.entry)
 
@@ -362,6 +375,13 @@ async def _federated_search_inner(
     merged = merge_results(namespace_results, primary_ns_id, limit)
 
     # 13. Build response envelope
+    # Determine if all searchable namespaces returned results successfully
+    failed_count = sum(
+        1 for ns_id in searchable
+        if namespace_status.get(ns_id, {}).get("status") not in ("ok",)
+    )
+    results_complete = failed_count == 0
+
     envelope = build_response_envelope(
         results=merged,
         primary_namespace=primary_ns_id,
@@ -370,6 +390,7 @@ async def _federated_search_inner(
         query=query,
         total_candidates=total_candidates,
         warnings=warnings,
+        results_complete=results_complete,
     )
 
     log_action(

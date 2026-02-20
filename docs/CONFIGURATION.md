@@ -235,13 +235,13 @@ Cross-namespace federated search settings:
 ```toml
 [federation]
 enabled = false              # Enable federation features
-namespace_timeout = 0.4      # Per-namespace search timeout (seconds)
+namespace_timeout = 0.4      # Per-namespace search timeout (seconds, max 30)
 max_namespaces = 5           # Max secondary namespaces (primary doesn't count)
-max_total_timeout = 2.0      # Total wall-clock budget for all searches
+max_total_timeout = 2.0      # Total wall-clock budget for all searches (max 60s)
 
 [federation.scoring]
-local_weight = 1.0           # Weight for primary namespace results
-wide_weight = 0.55           # Weight for secondary namespace results
+local_weight = 1.0           # Weight for primary namespace results (max 10.0)
+wide_weight = 0.55           # Weight for secondary namespace results (max 10.0)
 recency_half_life_days = 60  # Half-life for recency decay (days)
 recency_floor = 0.7          # Minimum recency multiplier
 

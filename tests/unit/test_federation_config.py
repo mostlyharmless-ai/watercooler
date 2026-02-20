@@ -135,6 +135,25 @@ class TestFederationConfig:
         with pytest.raises(ValidationError):
             FederationConfig(namespace_timeout=-1.0)
 
+    def test_namespace_timeout_upper_bound(self):
+        FederationConfig(namespace_timeout=30.0)  # At limit
+        with pytest.raises(ValidationError):
+            FederationConfig(namespace_timeout=31.0)
+
+    def test_max_total_timeout_upper_bound(self):
+        FederationConfig(max_total_timeout=60.0)  # At limit
+        with pytest.raises(ValidationError):
+            FederationConfig(max_total_timeout=61.0)
+
+    def test_weight_upper_bound(self):
+        from watercooler.config_schema import FederationScoringConfig
+        FederationScoringConfig(local_weight=10.0)  # At limit
+        with pytest.raises(ValidationError):
+            FederationScoringConfig(local_weight=10.1)
+        FederationScoringConfig(wide_weight=10.0)  # At limit
+        with pytest.raises(ValidationError):
+            FederationScoringConfig(wide_weight=10.1)
+
     def test_basename_collision_rejected(self):
         with pytest.raises(ValidationError, match="basename collision"):
             FederationConfig(

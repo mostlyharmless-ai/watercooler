@@ -545,6 +545,117 @@ class TestFederatedSearchErrorHandling:
         assert data["results"] == []
 
 
+class TestFederatedSearchResultsComplete:
+    """Tests for results_complete flag in response envelope."""
+
+    @pytest.mark.anyio
+    async def test_all_ok_is_complete(self, ctx, tmp_path):
+        """All namespaces ok → results_complete=True."""
+        wc_config = _make_federation_config(enabled=True, namespaces={})
+        primary_ctx = _make_primary_ctx(tmp_path)
+        mock_search = _mock_search_graph([MockGraphEntry(entry_id="01A")])
+
+        with (
+            patch("watercooler_mcp.tools.federation.config") as mock_config,
+            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
+            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=False),
+            patch("watercooler_mcp.tools.federation.search_graph", mock_search),
+        ):
+            mock_config.full.return_value = wc_config
+            mock_validation._require_context.return_value = (None, primary_ctx)
+            result = await _federated_search_impl(ctx, query="test")
+
+        data = json.loads(result)
+        assert data["results_complete"] is True
+
+    @pytest.mark.anyio
+    async def test_timeout_is_incomplete(self, ctx, tmp_path):
+        """Secondary timeout → results_complete=False."""
+        wc_config = WatercoolerConfig(
+            federation=FederationConfig(
+                enabled=True,
+                namespace_timeout=0.01,
+                namespaces={"site": FederationNamespaceConfig(code_path="/home/user/site")},
+                access=FederationAccessConfig(allowlists={"watercooler-cloud": ["site"]}),
+            )
+        )
+        primary_ctx = _make_primary_ctx(tmp_path)
+        worktree_base = tmp_path / "worktrees"
+        site_worktree = worktree_base / "site"
+        site_worktree.mkdir(parents=True)
+
+        def mock_search_slow(threads_dir, sq):
+            if "primary" not in str(threads_dir):
+                time.sleep(0.5)
+            return MockSearchResults(
+                results=[MockSearchResult(
+                    node_id="01A", score=1.7,
+                    entry=MockGraphEntry(entry_id="01A"),
+                )],
+            )
+
+        with (
+            patch("watercooler_mcp.tools.federation.config") as mock_config,
+            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
+            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=False),
+            patch("watercooler_mcp.tools.federation.search_graph", side_effect=mock_search_slow),
+            patch("watercooler_mcp.federation.resolver.WORKTREE_BASE", worktree_base),
+            patch("watercooler_mcp.federation.resolver._worktree_path_for", return_value=site_worktree),
+        ):
+            mock_config.full.return_value = wc_config
+            mock_validation._require_context.return_value = (None, primary_ctx)
+            result = await _federated_search_impl(ctx, query="test")
+
+        data = json.loads(result)
+        assert data["results_complete"] is False
+
+
+class TestFederatedSearchNamespaceValidation:
+    """Tests for namespace ID format validation."""
+
+    @pytest.mark.anyio
+    async def test_invalid_namespace_id_rejected(self, ctx, tmp_path):
+        """Namespace IDs with path traversal chars are rejected."""
+        wc_config = _make_federation_config(enabled=True)
+        primary_ctx = _make_primary_ctx(tmp_path)
+        with (
+            patch("watercooler_mcp.tools.federation.config") as mock_config,
+            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
+            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=False),
+        ):
+            mock_config.full.return_value = wc_config
+            mock_validation._require_context.return_value = (None, primary_ctx)
+            result = await _federated_search_impl(
+                ctx, query="test", namespaces="../escape, valid-ns"
+            )
+
+        data = json.loads(result)
+        assert data["error"] == "VALIDATION_ERROR"
+        assert "../escape" in data["message"]
+
+    @pytest.mark.anyio
+    async def test_valid_namespace_ids_accepted(self, ctx, tmp_path):
+        """Alphanumeric, hyphen, underscore namespace IDs pass validation."""
+        wc_config = _make_federation_config(enabled=True, namespaces={})
+        primary_ctx = _make_primary_ctx(tmp_path)
+        mock_search = _mock_search_graph([MockGraphEntry(entry_id="01A")])
+
+        with (
+            patch("watercooler_mcp.tools.federation.config") as mock_config,
+            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
+            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=False),
+            patch("watercooler_mcp.tools.federation.search_graph", mock_search),
+        ):
+            mock_config.full.return_value = wc_config
+            mock_validation._require_context.return_value = (None, primary_ctx)
+            result = await _federated_search_impl(
+                ctx, query="test", namespaces="my-repo, other_repo"
+            )
+
+        data = json.loads(result)
+        assert "error" not in data or data.get("error") != "VALIDATION_ERROR"
+
+
 class TestFederatedSearchEdgeCases:
     """Tests for edge cases and negative paths."""
 
