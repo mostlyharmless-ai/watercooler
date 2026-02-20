@@ -726,3 +726,54 @@ class TestFederatedSearchEdgeCases:
         # Primary results should NOT be filtered by deny_topics
         assert data["result_count"] == 1
         assert data["results"][0]["entry_data"]["topic"] == "secret-planning"
+
+
+class TestFederatedSearchPrimaryFailedDiagnostics:
+    """Tests that PRIMARY_SEARCH_FAILED includes namespace diagnostics."""
+
+    @pytest.mark.anyio
+    async def test_primary_failed_includes_namespace_status(self, ctx, tmp_path):
+        """PRIMARY_SEARCH_FAILED response must include namespace_status,
+        queried_namespaces, and primary_namespace for caller diagnostics."""
+        wc_config = _make_federation_config(enabled=True)
+        primary_ctx = _make_primary_ctx(tmp_path)
+
+        worktree_base = tmp_path / "worktrees"
+        site_worktree = worktree_base / "watercooler-site"
+        site_worktree.mkdir(parents=True)
+
+        def mock_search_primary_fails(threads_dir, sq):
+            if "primary" in str(threads_dir):
+                raise RuntimeError("disk I/O error")
+            return MockSearchResults(
+                results=[MockSearchResult(
+                    node_id="02B", score=1.5,
+                    entry=MockGraphEntry(entry_id="02B"),
+                )],
+            )
+
+        with (
+            patch("watercooler_mcp.tools.federation.config") as mock_config,
+            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
+            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=False),
+            patch("watercooler_mcp.tools.federation.search_graph", side_effect=mock_search_primary_fails),
+            patch("watercooler_mcp.federation.resolver.WORKTREE_BASE", worktree_base),
+            patch(
+                "watercooler_mcp.federation.resolver._worktree_path_for",
+                return_value=site_worktree,
+            ),
+        ):
+            mock_config.full.return_value = wc_config
+            mock_validation._require_context.return_value = (None, primary_ctx)
+            result = await _federated_search_impl(ctx, query="test")
+
+        data = json.loads(result)
+        assert data["error"] == "PRIMARY_SEARCH_FAILED"
+        assert data["schema_version"] == 1
+        assert data["results"] == []
+        # Diagnostics must be present
+        assert data["primary_namespace"] == "watercooler-cloud"
+        assert "watercooler-cloud" in data["queried_namespaces"]
+        assert "site" in data["queried_namespaces"]
+        assert "namespace_status" in data
+        assert data["namespace_status"]["watercooler-cloud"]["status"] == "error"

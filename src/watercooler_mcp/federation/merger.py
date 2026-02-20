@@ -38,12 +38,12 @@ def merge_results(
     limit: int,
     min_score: float = 0.01,
 ) -> list[ScoredResult]:
-    """Merge, filter, dedup, sort, truncate.
+    """Merge, filter, sort, dedup, truncate.
 
     1. Filter out results with RankingScore < min_score
-    2. Dedup by entry_id (safety net — ULIDs are globally unique)
-    3. Sort by RankingScore descending
-    4. Tiebreak: primary first, then newest timestamp, then entry_id
+    2. Sort by RankingScore descending
+    3. Tiebreak: primary first, then newest timestamp, then entry_id
+    4. Dedup by entry_id (keeps first = primary-preferred due to sort)
     5. Truncate to limit
 
     Args:
@@ -67,15 +67,8 @@ def merge_results(
     # Filter by min_score
     all_results = [r for r in all_results if r.ranking_score >= min_score]
 
-    # Dedup by entry_id (safety net)
-    seen: set[str] = set()
-    deduped: list[ScoredResult] = []
-    for r in all_results:
-        if r.entry_id not in seen:
-            seen.add(r.entry_id)
-            deduped.append(r)
-
-    # Sort: RankingScore desc, tiebreak primary first, newest, entry_id
+    # Sort: RankingScore desc, tiebreak primary first, newest, entry_id.
+    # Must sort BEFORE dedup so primary version wins when entry_id collides.
     def sort_key(r: ScoredResult) -> tuple[float, int, float, str]:
         return (
             -r.ranking_score,
@@ -84,7 +77,16 @@ def merge_results(
             r.entry_id,
         )
 
-    deduped.sort(key=sort_key)
+    all_results.sort(key=sort_key)
+
+    # Dedup by entry_id (keeps first = primary-preferred due to sort above)
+    seen: set[str] = set()
+    deduped: list[ScoredResult] = []
+    for r in all_results:
+        if r.entry_id not in seen:
+            seen.add(r.entry_id)
+            deduped.append(r)
+
     return deduped[:limit]
 
 

@@ -373,6 +373,9 @@ async def _federated_search_inner(
             "message": f"Primary namespace '{primary_ns_id}' search failed: "
                        f"{primary_status_val or 'unknown'}",
             "results": [],
+            "primary_namespace": primary_ns_id,
+            "queried_namespaces": list(resolutions.keys()),
+            "namespace_status": namespace_status,
         })
 
     # 12. Merge results

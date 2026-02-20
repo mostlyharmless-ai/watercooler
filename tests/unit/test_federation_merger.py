@@ -93,6 +93,19 @@ class TestMergeResults:
         merged = merge_results(results, "cloud", limit=10)
         assert len(merged) == 1
 
+    def test_dedup_favors_primary_over_secondary(self):
+        """When duplicate entry_id exists across namespaces at equal score,
+        the primary version must survive dedup regardless of dict iteration order."""
+        # Place secondary FIRST in dict to expose iteration-order sensitivity.
+        # An OrderedDict isn't needed — CPython 3.7+ preserves insertion order.
+        results = {
+            "site": [_make_result("dup-id", "site", ranking_score=0.5)],
+            "cloud": [_make_result("dup-id", "cloud", ranking_score=0.5)],
+        }
+        merged = merge_results(results, "cloud", limit=10)
+        assert len(merged) == 1
+        assert merged[0].origin_namespace == "cloud"
+
     def test_truncate_to_limit(self):
         results = {
             "cloud": [
