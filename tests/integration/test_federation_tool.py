@@ -3,12 +3,11 @@
 Tests the full tool handler with mocked search_graph() and config.
 """
 
-import asyncio
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -16,7 +15,6 @@ from watercooler.config_schema import (
     FederationAccessConfig,
     FederationConfig,
     FederationNamespaceConfig,
-    FederationScoringConfig,
     WatercoolerConfig,
 )
 from watercooler_mcp.config import ThreadContext

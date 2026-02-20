@@ -32,7 +32,7 @@ from ..federation.scoring import (
     normalize_keyword_score,
     resolve_namespace_weight,
 )
-from ..observability import log_action, log_error
+from ..observability import log_action
 
 logger = logging.getLogger(__name__)
 

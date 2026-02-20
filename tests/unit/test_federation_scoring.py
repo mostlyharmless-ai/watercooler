@@ -1,6 +1,5 @@
 """Unit tests for federation scoring module."""
 
-import math
 from datetime import datetime, timedelta, timezone
 
 import pytest

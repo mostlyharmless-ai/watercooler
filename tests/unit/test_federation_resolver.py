@@ -1,6 +1,5 @@
 """Unit tests for federation namespace resolver module."""
 
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -8,7 +7,6 @@ import pytest
 from watercooler.config_schema import FederationConfig, FederationNamespaceConfig
 from watercooler_mcp.config import ThreadContext
 from watercooler_mcp.federation.resolver import (
-    NamespaceResolution,
     discover_namespace_worktree,
     resolve_all_namespaces,
 )

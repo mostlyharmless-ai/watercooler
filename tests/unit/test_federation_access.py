@@ -1,7 +1,5 @@
 """Unit tests for federation access control module."""
 
-import pytest
-
 from watercooler.config_schema import FederationAccessConfig, FederationNamespaceConfig
 from watercooler_mcp.federation.access import filter_allowed_namespaces, is_topic_denied
 

@@ -1,7 +1,5 @@
 """Unit tests for federation merger module."""
 
-import pytest
-
 from watercooler_mcp.federation.merger import (
     ScoredResult,
     allocate_candidates,
