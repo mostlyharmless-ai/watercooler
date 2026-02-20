@@ -11,8 +11,23 @@ from watercooler.config_schema import ThreadAuditorConfig
 from watercooler_mcp.daemons.auditor import ThreadAuditorDaemon
 
 
-def _write_thread(threads_dir: Path, topic: str, content: str, *, subdir: str = "") -> Path:
-    """Helper: write a thread file."""
+from watercooler.baseline_graph import storage
+
+
+def _write_graph_thread(
+    threads_dir: Path,
+    topic: str,
+    *,
+    status: str = "OPEN",
+    ball: str = "human",
+    title: str = "Test Thread",
+    entries: list | None = None,
+    subdir: str = "",
+) -> Path:
+    """Helper: write graph data for a thread."""
+    threads_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write .md file for mtime/stale checks
     if subdir:
         d = threads_dir / subdir
         d.mkdir(parents=True, exist_ok=True)
@@ -20,87 +35,51 @@ def _write_thread(threads_dir: Path, topic: str, content: str, *, subdir: str = 
     else:
         p = threads_dir / f"{topic}.md"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
+    p.write_text(f"# {title}\nStatus: {status}\nBall: {ball}\n", encoding="utf-8")
+
+    # Write graph data
+    graph_dir = storage.ensure_graph_dir(threads_dir)
+    thread_dir = storage.ensure_thread_graph_dir(graph_dir, topic)
+
+    meta = {
+        "id": f"thread:{topic}",
+        "topic": topic,
+        "title": title,
+        "status": status,
+        "ball": ball,
+        "last_updated": "2025-01-01T00:00:00Z",
+    }
+    storage.atomic_write_json(thread_dir / "meta.json", meta)
+
+    entry_list = entries if entries is not None else []
+    storage.atomic_write_jsonl(thread_dir / "entries.jsonl", entry_list)
+
     return p
 
 
-# Minimal thread content templates
-_THREAD_COMPLETE = """\
-# Test Thread
-Status: OPEN
-Ball: human
+# Reusable entry templates
+_ENTRY_COMPLETE = {
+    "id": "entry:01ABCDEFGHIJKLMNOPQRSTUV",
+    "entry_id": "01ABCDEFGHIJKLMNOPQRSTUV",
+    "agent": "TestAgent",
+    "timestamp": "2025-01-01T00:00:00Z",
+    "role": "implementer",
+    "entry_type": "Note",
+    "title": "Test Entry",
+    "body": "Body content here.",
+    "index": 0,
+}
 
----
-
-Entry: TestAgent 2025-01-01T00:00:00Z
-<!-- Entry-ID: 01ABCDEFGHIJKLMNOPQRSTUV -->
-Role: implementer
-Type: Note
-Title: Test Entry
-
-Body content here.
-"""
-
-_THREAD_NO_STATUS = """\
-# Test Thread
-Ball: human
-
----
-
-Entry: TestAgent 2025-01-01T00:00:00Z
-<!-- Entry-ID: 01ABCDEFGHIJKLMNOPQRSTUV -->
-Role: implementer
-Type: Note
-Title: Test Entry
-
-Body content here.
-"""
-
-_THREAD_NO_BALL = """\
-# Test Thread
-Status: OPEN
-
----
-
-Entry: TestAgent 2025-01-01T00:00:00Z
-<!-- Entry-ID: 01ABCDEFGHIJKLMNOPQRSTUV -->
-Role: implementer
-Type: Note
-Title: Test Entry
-
-Body content here.
-"""
-
-_THREAD_NO_ENTRY_ID = """\
-# Test Thread
-Status: OPEN
-Ball: human
-
----
-
-Entry: TestAgent 2025-01-01T00:00:00Z
-Role: implementer
-Type: Note
-Title: Test Entry
-
-Body content here.
-"""
-
-_THREAD_CLOSED = """\
-# Closed Thread
-Status: done
-Ball: human
-
----
-
-Entry: TestAgent 2025-01-01T00:00:00Z
-<!-- Entry-ID: 01ABCDEFGHIJKLMNOPQRSTUV -->
-Role: implementer
-Type: Closure
-Title: Done
-
-All done.
-"""
+_ENTRY_NO_ID = {
+    "id": "entry:auto-0",
+    "agent": "TestAgent",
+    "timestamp": "2025-01-01T00:00:00Z",
+    "role": "implementer",
+    "entry_type": "Note",
+    "title": "Test Entry",
+    "body": "Body content here.",
+    "index": 0,
+}
 
 
 class TestThreadAuditorDaemon:
@@ -135,7 +114,7 @@ class TestThreadAuditorDaemon:
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
         )
         threads_dir = tmp_path / "threads_root"
-        _write_thread(threads_dir, "good-thread", _THREAD_COMPLETE)
+        _write_graph_thread(threads_dir, "good-thread", entries=[_ENTRY_COMPLETE])
 
         config = ThreadAuditorConfig(
             check_missing_summaries=False,  # Skip graph checks
@@ -151,7 +130,7 @@ class TestThreadAuditorDaemon:
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
         )
         threads_dir = tmp_path / "threads_root"
-        _write_thread(threads_dir, "no-status", _THREAD_NO_STATUS)
+        _write_graph_thread(threads_dir, "no-status", status="", entries=[_ENTRY_COMPLETE])
 
         config = ThreadAuditorConfig(
             check_missing_ball=False,
@@ -171,7 +150,7 @@ class TestThreadAuditorDaemon:
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
         )
         threads_dir = tmp_path / "threads_root"
-        _write_thread(threads_dir, "no-ball", _THREAD_NO_BALL)
+        _write_graph_thread(threads_dir, "no-ball", ball="", entries=[_ENTRY_COMPLETE])
 
         config = ThreadAuditorConfig(
             check_missing_status=False,
@@ -191,7 +170,7 @@ class TestThreadAuditorDaemon:
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
         )
         threads_dir = tmp_path / "threads_root"
-        _write_thread(threads_dir, "no-eid", _THREAD_NO_ENTRY_ID)
+        _write_graph_thread(threads_dir, "no-eid", entries=[_ENTRY_NO_ID])
 
         config = ThreadAuditorConfig(
             check_missing_status=False,
@@ -211,7 +190,7 @@ class TestThreadAuditorDaemon:
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
         )
         threads_dir = tmp_path / "threads_root"
-        p = _write_thread(threads_dir, "stale", _THREAD_COMPLETE)
+        p = _write_graph_thread(threads_dir, "stale", entries=[_ENTRY_COMPLETE])
 
         # Set mtime to 30 days ago
         import os
@@ -240,7 +219,10 @@ class TestThreadAuditorDaemon:
         # Create structured layout
         (threads_dir / "threads").mkdir(parents=True)
         (threads_dir / "closed").mkdir(parents=True)
-        _write_thread(threads_dir, "done-thread", _THREAD_CLOSED, subdir="threads")
+        _write_graph_thread(
+            threads_dir, "done-thread", status="CLOSED",
+            entries=[_ENTRY_COMPLETE], subdir="threads",
+        )
 
         config = ThreadAuditorConfig(
             check_missing_status=False,
@@ -260,7 +242,7 @@ class TestThreadAuditorDaemon:
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
         )
         threads_dir = tmp_path / "threads_root"
-        _write_thread(threads_dir, "thread1", _THREAD_COMPLETE)
+        _write_graph_thread(threads_dir, "thread1", entries=[_ENTRY_COMPLETE])
 
         config = ThreadAuditorConfig(
             check_missing_summaries=False,
@@ -286,7 +268,10 @@ class TestThreadAuditorDaemon:
         threads_dir = tmp_path / "threads_root"
         # Create many threads with missing status
         for i in range(10):
-            _write_thread(threads_dir, f"thread-{i}", _THREAD_NO_STATUS)
+            _write_graph_thread(
+                threads_dir, f"thread-{i}", status="",
+                entries=[_ENTRY_COMPLETE],
+            )
 
         config = ThreadAuditorConfig(
             max_findings_per_run=3,
@@ -305,7 +290,7 @@ class TestThreadAuditorDaemon:
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
         )
         threads_dir = tmp_path / "threads_root"
-        _write_thread(threads_dir, "thread", _THREAD_NO_STATUS)
+        _write_graph_thread(threads_dir, "thread", status="", entries=[_ENTRY_COMPLETE])
 
         config = ThreadAuditorConfig(
             check_missing_status=False,

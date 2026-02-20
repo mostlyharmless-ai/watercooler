@@ -27,15 +27,15 @@ from watercooler.config_schema import ThreadAuditorConfig
 from watercooler.fs import (
     CLOSED_STATES,
     THREAD_CATEGORIES,
-    discover_thread_files,
     has_structured_layout,
     is_closed,
+    thread_path,
 )
-from watercooler.thread_entries import (
-    _BALL_RE,
-    _STAT_RE,
-    parse_thread_entries,
-    parse_thread_header,
+from watercooler.baseline_graph import storage
+from watercooler.baseline_graph.storage import get_graph_dir
+from watercooler.baseline_graph.writer import (
+    get_thread_from_graph,
+    get_entries_for_thread,
 )
 
 from .base import BaseDaemon
@@ -95,14 +95,15 @@ class ThreadAuditorDaemon(BaseDaemon):
             return None
 
     def tick(self) -> List[Finding]:
-        """Run one audit cycle over all thread files."""
+        """Run one audit cycle over all threads from graph."""
         threads_dir = self._resolve_threads_dir()
         if threads_dir is None or not threads_dir.exists():
             logger.debug("DAEMON[thread_auditor]: no threads_dir, skipping")
             return []
 
-        thread_files = discover_thread_files(threads_dir)
-        if not thread_files:
+        graph_dir = get_graph_dir(threads_dir)
+        topics = storage.list_thread_topics(graph_dir)
+        if not topics:
             return []
 
         cfg = self._config
@@ -111,23 +112,28 @@ class ThreadAuditorDaemon(BaseDaemon):
         skipped = 0
         structured = has_structured_layout(threads_dir)
 
-        for thread_path in thread_files:
+        for topic in topics:
             if len(findings) >= cfg.max_findings_per_run:
                 break
 
-            topic = thread_path.stem
+            tp = thread_path(topic, threads_dir)
 
-            # Incremental: skip unchanged threads
+            # Get graph metadata
             try:
-                stat = thread_path.stat()
-                mtime = stat.st_mtime
-                # Quick entry count via parsing
-                content = thread_path.read_text(encoding="utf-8")
-                entries = parse_thread_entries(content)
-                entry_count = len(entries)
+                thread_node = get_thread_from_graph(threads_dir, topic)
+                graph_entries = get_entries_for_thread(threads_dir, topic)
+                entry_count = len(graph_entries)
             except Exception as exc:
-                logger.debug("DAEMON[thread_auditor]: error reading %s: %s", topic, exc)
+                logger.debug("DAEMON[thread_auditor]: error reading graph for %s: %s", topic, exc)
                 continue
+
+            # Incremental: skip unchanged threads (use entry count as proxy)
+            # Use mtime of meta.json if available, otherwise 0
+            try:
+                meta_file = storage.get_thread_graph_dir(graph_dir, topic) / "meta.json"
+                mtime = meta_file.stat().st_mtime if meta_file.exists() else 0.0
+            except OSError:
+                mtime = 0.0
 
             if not self._checkpoint.is_thread_changed(topic, mtime, entry_count):
                 skipped += 1
@@ -135,27 +141,26 @@ class ThreadAuditorDaemon(BaseDaemon):
 
             processed += 1
 
-            # Parse thread header (returns defaults for missing fields)
-            try:
-                title, status, ball, last_ts = parse_thread_header(thread_path)
-            except Exception:
-                title, status, ball, last_ts = "", "", "", ""
+            # Extract metadata from graph node
+            title = thread_node.get("title", "") if thread_node else ""
+            status = thread_node.get("status", "") if thread_node else ""
+            ball = thread_node.get("ball", "") if thread_node else ""
+            last_ts = thread_node.get("last_updated", "") if thread_node else ""
 
-            # Check raw content for actual header presence (parse_thread_header
-            # substitutes defaults like "open" for missing Status:)
-            has_status_line = bool(_STAT_RE.search(content))
-            has_ball_line = bool(_BALL_RE.search(content))
+            # Check for missing fields directly from graph dict
+            has_status_line = bool(status.strip())
+            has_ball_line = bool(ball.strip())
 
             # Run configured checks
             thread_findings = self._audit_thread(
                 topic=topic,
-                thread_path=thread_path,
+                thread_path=tp,
                 threads_dir=threads_dir,
                 title=title,
                 status=status,
                 ball=ball,
                 last_ts=last_ts,
-                entries=entries,
+                entries=graph_entries,
                 structured=structured,
                 has_status_line=has_status_line,
                 has_ball_line=has_ball_line,
@@ -221,7 +226,11 @@ class ThreadAuditorDaemon(BaseDaemon):
         # Check missing entry IDs
         if cfg.check_missing_entry_ids:
             for entry in entries:
-                if not entry.entry_id:
+                eid = entry.get("entry_id", "") if isinstance(entry, dict) else getattr(entry, "entry_id", "")
+                idx = entry.get("index", 0) if isinstance(entry, dict) else getattr(entry, "index", 0)
+                agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
+                ts = entry.get("timestamp", "") if isinstance(entry, dict) else getattr(entry, "timestamp", "")
+                if not eid:
                     findings.append(Finding(
                         finding_id=_make_finding_id(),
                         daemon_name=self.name,
@@ -229,11 +238,11 @@ class ThreadAuditorDaemon(BaseDaemon):
                         category="missing_entry_id",
                         topic=topic,
                         entry_id="",
-                        message=f"Entry #{entry.index} in '{topic}' has no Entry-ID",
+                        message=f"Entry #{idx} in '{topic}' has no Entry-ID",
                         details={
-                            "entry_index": entry.index,
-                            "agent": entry.agent or "",
-                            "timestamp": entry.timestamp or "",
+                            "entry_index": idx,
+                            "agent": agent,
+                            "timestamp": ts,
                         },
                     ))
 
@@ -328,14 +337,13 @@ class ThreadAuditorDaemon(BaseDaemon):
         threads_dir: Path,
         entries: list,
     ) -> List[Finding]:
-        """Check for missing graph summaries (best-effort)."""
+        """Check for missing graph summaries (best-effort).
+
+        Args:
+            entries: List of graph entry dicts from get_entries_for_thread()
+        """
         findings: List[Finding] = []
         try:
-            from watercooler.baseline_graph.writer import (
-                get_entries_for_thread,
-                get_thread_from_graph,
-            )
-
             thread_node = get_thread_from_graph(threads_dir, topic)
             if thread_node is not None:
                 summary = thread_node.get("summary", "")
@@ -349,28 +357,19 @@ class ThreadAuditorDaemon(BaseDaemon):
                         message=f"Thread '{topic}' graph node has no summary",
                     ))
 
-            graph_entries = get_entries_for_thread(threads_dir, topic)
-            graph_entry_ids = {e.get("entry_id") for e in graph_entries if e.get("entry_id")}
-
             for entry in entries:
-                if entry.entry_id and entry.entry_id in graph_entry_ids:
-                    # Find the graph entry
-                    for ge in graph_entries:
-                        if ge.get("entry_id") == entry.entry_id:
-                            if not ge.get("summary"):
-                                findings.append(Finding(
-                                    finding_id=_make_finding_id(),
-                                    daemon_name=self.name,
-                                    severity="info",
-                                    category="missing_entry_summary",
-                                    topic=topic,
-                                    entry_id=entry.entry_id,
-                                    message=f"Entry '{entry.entry_id}' in '{topic}' has no graph summary",
-                                ))
-                            break
+                eid = entry.get("entry_id", "") if isinstance(entry, dict) else getattr(entry, "entry_id", "")
+                if eid and not entry.get("summary", ""):
+                    findings.append(Finding(
+                        finding_id=_make_finding_id(),
+                        daemon_name=self.name,
+                        severity="info",
+                        category="missing_entry_summary",
+                        topic=topic,
+                        entry_id=eid,
+                        message=f"Entry '{eid}' in '{topic}' has no graph summary",
+                    ))
 
-        except ImportError:
-            pass  # Graph module not available
         except Exception as exc:
             logger.debug("DAEMON[thread_auditor]: graph summary check failed for %s: %s", topic, exc)
 
