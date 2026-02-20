@@ -1,5 +1,5 @@
 ---
-status: pending
+status: completed
 priority: p2
 issue_id: "034"
 tags: [code-review, bug-risk, federation]

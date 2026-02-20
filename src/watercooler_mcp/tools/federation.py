@@ -143,7 +143,7 @@ async def _federated_search_inner(
     if namespaces.strip():
         parsed = [ns.strip() for ns in namespaces.split(",") if ns.strip()]
         # Validate namespace ID format (alphanumeric, hyphens, underscores)
-        invalid = [ns for ns in parsed if not re.fullmatch(r"[\w-]+", ns)]
+        invalid = [ns for ns in parsed if not re.fullmatch(r"[a-zA-Z0-9_-]+", ns)]
         if invalid:
             return json.dumps({
                 "schema_version": 1,
