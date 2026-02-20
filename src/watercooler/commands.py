@@ -3,11 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
-from .fs import write, thread_path, find_thread_path, lock_path_for_topic, utcnow_iso, read_body, is_closed, discover_thread_files
+from .fs import write, thread_path, find_thread_path, lock_path_for_topic, utcnow_iso, read_body, is_closed
 from .lock import AdvisoryLock
 from .baseline_graph.writer import get_thread_from_graph, get_entries_for_thread
 from .baseline_graph.reader import list_threads_from_graph, is_graph_available
-from .thread_entries import parse_thread_header, parse_thread_entries
 from .agents import _counterpart_of, _canonical_agent, _default_agent_and_role
 from .path_resolver import load_template, resolve_templates_dir
 from .templates import _fill_template
@@ -21,11 +20,11 @@ except ImportError:
 
 
 def _thread_meta_from_graph(threads_dir: Path, topic: str) -> tuple[str, str, str, str]:
-    """Get thread metadata from graph, with markdown fallback for writes.
+    """Get thread metadata from graph, with .md header read for write ops.
 
-    Write operations (handoff, ack, set_ball) need current state even when
-    graph is unavailable. Falls back to markdown parsing so write commands
-    work on repos without a graph.
+    Write operations (handoff, ack) need current ball/status even when
+    graph is empty. Reads .md header as last resort since the .md file
+    is the write target for these operations.
 
     Returns:
         Tuple of (title, status, ball, last_updated) or defaults if not found.
@@ -38,10 +37,21 @@ def _thread_meta_from_graph(threads_dir: Path, topic: str) -> tuple[str, str, st
             thread.get("ball", ""),
             thread.get("last_updated", ""),
         )
-    # Fallback to markdown for write-side operations
+    # Read .md header for write-side state (ball/status) when graph unavailable
     tp = thread_path(topic, threads_dir)
     if tp.exists():
-        return parse_thread_header(tp)
+        import re
+        content = tp.read_text(encoding="utf-8")
+        header = content.split("\n\n", 1)[0]
+        status_m = re.search(r"^Status:\s*(.+)$", header, re.IGNORECASE | re.MULTILINE)
+        ball_m = re.search(r"^Ball:\s*(.+)$", header, re.IGNORECASE | re.MULTILINE)
+        title_m = re.search(r"^#\s*(.+)$", header, re.MULTILINE)
+        return (
+            (title_m.group(1).strip() if title_m else topic),
+            (status_m.group(1).strip() if status_m else "OPEN"),
+            (ball_m.group(1).strip() if ball_m else ""),
+            "",
+        )
     return (topic, "OPEN", "", "")
 
 
@@ -291,34 +301,21 @@ def set_ball(topic: str, *, threads_dir: Path, ball: str) -> Path:
 def list_threads(*, threads_dir: Path, open_only: bool | None = None) -> list[tuple[str, str, str, str, Path, bool]]:
     """Return list of (title, status, ball, updated_iso, path, is_new).
 
-    Uses graph as primary source for topic discovery. Falls back to
-    markdown file scanning only when no graph is available.
+    Uses graph as sole source for topic discovery.
     """
     out: list[tuple[str, str, str, str, Path, bool]] = []
     if not threads_dir.exists():
         return out
 
-    # Graph-first: discover topics from graph
-    if is_graph_available(threads_dir):
-        graph_threads = list_threads_from_graph(threads_dir, open_only)
-        for gt in graph_threads:
-            p = thread_path(gt.topic, threads_dir)
-            who = (_last_entry_by_from_graph(threads_dir, gt.topic) or "").strip().lower()
-            is_new = bool(who and who != (gt.ball or "").strip().lower()) and not is_closed(gt.status)
-            out.append((gt.title, gt.status, gt.ball, gt.last_updated, p, is_new))
+    if not is_graph_available(threads_dir):
         return out
 
-    # Fallback: discover topics from markdown files (no graph available)
-    for p in discover_thread_files(threads_dir):
-        topic = p.stem
-        title, status, ball, updated = _thread_meta_from_graph(threads_dir, topic)
-        if open_only is True and is_closed(status):
-            continue
-        if open_only is False and not is_closed(status):
-            continue
-        who = (_last_entry_by_from_graph(threads_dir, topic) or "").strip().lower()
-        is_new = bool(who and who != (ball or "").strip().lower()) and not is_closed(status)
-        out.append((title, status, ball, updated, p, is_new))
+    graph_threads = list_threads_from_graph(threads_dir, open_only)
+    for gt in graph_threads:
+        p = thread_path(gt.topic, threads_dir)
+        who = (_last_entry_by_from_graph(threads_dir, gt.topic) or "").strip().lower()
+        is_new = bool(who and who != (gt.ball or "").strip().lower()) and not is_closed(gt.status)
+        out.append((gt.title, gt.status, gt.ball, gt.last_updated, p, is_new))
     return out
 
 
@@ -525,31 +522,42 @@ def list_entries(topic: str, threads_dir: Path) -> list[dict[str, str]]:
     Returns:
         List of dicts with keys: entry_id, title, body, timestamp.
     """
-    tp = thread_path(topic, threads_dir)
-    text = tp.read_text(encoding="utf-8")
-    entries = parse_thread_entries(text)
+    entries = get_entries_for_thread(threads_dir, topic)
     return [
         {
-            "entry_id": e.entry_id or "",
-            "title": e.title or "",
-            "body": e.body or "",
-            "timestamp": e.timestamp or "",
+            "entry_id": e.get("entry_id", ""),
+            "title": e.get("title", ""),
+            "body": e.get("body", ""),
+            "timestamp": e.get("timestamp", ""),
         }
         for e in entries
     ]
 
 
 def search(*, threads_dir: Path, query: str) -> list[tuple[Path, int, str]]:
-    """Naive case-insensitive search; returns (path, line_no, line)."""
+    """Case-insensitive search across graph entries; returns (path, line_no, line).
+
+    Searches entry bodies from the graph. Returns results in the same
+    format as the legacy .md file grep for backward compatibility.
+    """
+    from .baseline_graph import storage
+
     q = query.lower()
     hits: list[tuple[Path, int, str]] = []
-    for p in discover_thread_files(threads_dir):
-        try:
-            for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), start=1):
+
+    graph_dir = storage.get_graph_dir(threads_dir)
+    topics = storage.list_thread_topics(graph_dir)
+
+    for topic in topics:
+        entries = get_entries_for_thread(threads_dir, topic)
+        p = thread_path(topic, threads_dir)
+        for entry in entries:
+            body = entry.get("body", "")
+            if not body:
+                continue
+            for i, line in enumerate(body.splitlines(), start=1):
                 if q in line.lower():
                     hits.append((p, i, line))
-        except Exception:
-            continue
     return hits
 
 
@@ -811,14 +819,9 @@ def merge_branch(branch: str, *, code_root: Path | None = None, force: bool = Fa
         if not force:
             threads_repo.git.checkout(branch)
             open_threads = []
-            for thread_file in discover_thread_files(context.threads_dir):
-                try:
-                    topic = thread_file.stem
-                    title, status, ball, updated = _thread_meta_from_graph(context.threads_dir, topic)
-                    if not is_closed(status):
-                        open_threads.append(topic)
-                except Exception:
-                    pass
+            graph_threads = list_threads_from_graph(context.threads_dir, open_only=True)
+            for gt in graph_threads:
+                open_threads.append(gt.topic)
 
             if open_threads:
                 lines = []
@@ -920,14 +923,9 @@ def archive_branch(branch: str, *, code_root: Path | None = None, abandon: bool 
         # Checkout branch and find OPEN threads
         threads_repo.git.checkout(branch)
         open_threads = []
-        for thread_file in discover_thread_files(context.threads_dir):
-            try:
-                topic = thread_file.stem
-                title, status, ball, updated = _thread_meta_from_graph(context.threads_dir, topic)
-                if not is_closed(status):
-                    open_threads.append(topic)
-            except Exception:
-                pass
+        graph_threads = list_threads_from_graph(context.threads_dir, open_only=True)
+        for gt in graph_threads:
+            open_threads.append(gt.topic)
 
         if open_threads:
             status_to_set = "ABANDONED" if abandon else "CLOSED"

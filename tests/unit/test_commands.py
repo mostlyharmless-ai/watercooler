@@ -28,6 +28,15 @@ from watercooler.commands import (
     _header_split,
     _replace_header_line,
 )
+from watercooler.baseline_graph import storage
+
+
+def _write_graph_entries(threads_dir: Path, topic: str, meta: dict, entries: list[dict]) -> None:
+    """Write graph data (meta.json + entries.jsonl) for testing."""
+    graph_dir = storage.ensure_graph_dir(threads_dir)
+    thread_dir = storage.ensure_thread_graph_dir(graph_dir, topic)
+    storage.atomic_write_json(thread_dir / "meta.json", meta)
+    storage.atomic_write_jsonl(thread_dir / "entries.jsonl", entries)
 
 
 # ============================================================================
@@ -734,33 +743,37 @@ class TestListEntries:
     """Tests for list_entries function."""
 
     def test_list_entries_returns_parsed_entries(self, threads_dir):
-        """Test list_entries extracts entry metadata correctly."""
-        thread_file = threads_dir / "le-test.md"
-        thread_file.write_text(
-            "# le-test — Thread\n"
-            "Status: OPEN\n"
-            "Ball: Claude (user)\n"
-            "Topic: le-test\n"
-            "Created: 2025-01-01T00:00:00Z\n"
-            "\n"
-            "---\n"
-            "Entry: Claude (user) 2025-01-01T12:00:00Z\n"
-            "Role: implementer\n"
-            "Type: Note\n"
-            "Title: First Entry\n"
-            "\n"
-            "Body of the first entry.\n"
-            "<!-- Entry-ID: 01AAAA0000000000AAAAAAAA01 -->\n"
-            "\n"
-            "---\n"
-            "Entry: Codex (user) 2025-01-01T13:00:00Z\n"
-            "Role: planner\n"
-            "Type: Plan\n"
-            "Title: Second Entry\n"
-            "\n"
-            "Body of the second entry.\n"
-            "<!-- Entry-ID: 01AAAA0000000000AAAAAAAA02 -->\n"
-        )
+        """Test list_entries extracts entry metadata correctly from graph."""
+        _write_graph_entries(threads_dir, "le-test", {
+            "topic": "le-test",
+            "title": "le-test",
+            "status": "OPEN",
+            "ball": "Claude (user)",
+            "last_updated": "2025-01-01T13:00:00Z",
+        }, [
+            {
+                "id": "entry:01AAAA0000000000AAAAAAAA01",
+                "entry_id": "01AAAA0000000000AAAAAAAA01",
+                "title": "First Entry",
+                "body": "Body of the first entry.",
+                "timestamp": "2025-01-01T12:00:00Z",
+                "agent": "Claude (user)",
+                "role": "implementer",
+                "entry_type": "Note",
+                "index": 0,
+            },
+            {
+                "id": "entry:01AAAA0000000000AAAAAAAA02",
+                "entry_id": "01AAAA0000000000AAAAAAAA02",
+                "title": "Second Entry",
+                "body": "Body of the second entry.",
+                "timestamp": "2025-01-01T13:00:00Z",
+                "agent": "Codex (user)",
+                "role": "planner",
+                "entry_type": "Plan",
+                "index": 1,
+            },
+        ])
 
         entries = list_entries("le-test", threads_dir)
 
@@ -773,26 +786,28 @@ class TestListEntries:
         assert entries[1]["title"] == "Second Entry"
         assert entries[1]["timestamp"] == "2025-01-01T13:00:00Z"
 
-    def test_list_entries_missing_thread_raises(self, threads_dir):
-        """Test list_entries raises FileNotFoundError for missing threads."""
-        with pytest.raises(FileNotFoundError):
-            list_entries("nonexistent-topic", threads_dir)
+    def test_list_entries_missing_thread_returns_empty(self, threads_dir):
+        """Test list_entries returns empty list for missing threads."""
+        entries = list_entries("nonexistent-topic", threads_dir)
+        assert entries == []
 
     def test_list_entries_coerces_none_to_empty_string(self, threads_dir):
-        """Test list_entries converts None values to empty strings."""
-        thread_file = threads_dir / "minimal.md"
-        thread_file.write_text(
-            "# minimal — Thread\n"
-            "Status: OPEN\n"
-            "Ball: Agent\n"
-            "Topic: minimal\n"
-            "Created: 2025-01-01T00:00:00Z\n"
-            "\n"
-            "---\n"
-            "Entry: Agent (user) 2025-01-01T12:00:00Z\n"
-            "\n"
-            "Minimal entry with no title or entry-id.\n"
-        )
+        """Test list_entries converts missing values to empty strings."""
+        _write_graph_entries(threads_dir, "minimal", {
+            "topic": "minimal",
+            "title": "minimal",
+            "status": "OPEN",
+            "ball": "Agent",
+            "last_updated": "2025-01-01T00:00:00Z",
+        }, [
+            {
+                "id": "entry:minimal-0",
+                "body": "Minimal entry with no title or entry-id.",
+                "timestamp": "2025-01-01T12:00:00Z",
+                "agent": "Agent (user)",
+                "index": 0,
+            },
+        ])
 
         entries = list_entries("minimal", threads_dir)
 
