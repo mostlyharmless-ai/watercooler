@@ -228,6 +228,37 @@ max_headers = 3              # Max headers to include
 
 See [Baseline Graph Documentation](baseline-graph.md) for full usage guide.
 
+### `[federation]` Section
+
+Cross-namespace federated search settings:
+
+```toml
+[federation]
+enabled = false              # Enable federation features
+namespace_timeout = 0.4      # Per-namespace search timeout (seconds)
+max_namespaces = 5           # Max secondary namespaces (primary doesn't count)
+max_total_timeout = 2.0      # Total wall-clock budget for all searches
+
+[federation.scoring]
+local_weight = 1.0           # Weight for primary namespace results
+wide_weight = 0.55           # Weight for secondary namespace results
+recency_half_life_days = 14  # Half-life for recency decay (days)
+recency_floor = 0.3          # Minimum recency multiplier
+
+[federation.access]
+# Allowlist: which primary namespaces can search which secondaries
+# Format: { "primary-ns-id" = ["secondary-1", "secondary-2"] }
+# allowlists = {}
+
+# Per-namespace configuration
+# [federation.namespaces.my-other-repo]
+# code_path = "/home/user/my-other-repo"
+# deny_topics = ["secret-planning"]
+```
+
+> **Note:** Federation is feature-gated. Set `federation.enabled = true` to activate.
+> See [MCP Server Reference](mcp-server.md) for `watercooler_federated_search` tool docs.
+
 ## Migrating from Environment Variables
 
 If you're currently using environment variables, you can migrate to config files:

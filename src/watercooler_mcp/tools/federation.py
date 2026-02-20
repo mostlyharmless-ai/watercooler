@@ -107,8 +107,8 @@ async def _federated_search_inner(
             "error": "VALIDATION_ERROR",
             "message": f"Query exceeds maximum length ({MAX_QUERY_LENGTH} chars)",
         })
-    # Sanitize query for safe logging (strip control chars)
-    query = query.replace("\n", " ").replace("\r", " ").replace("\x1b", "")
+    # Sanitize for safe logging only — preserve original query for search
+    log_query = query.replace("\n", " ").replace("\r", " ").replace("\x1b", "")
     limit = max(1, min(limit, MAX_LIMIT))
 
     # 2. Feature gate check (fail fast before git overhead)
@@ -120,18 +120,18 @@ async def _federated_search_inner(
             "message": "Federation is not enabled. Set federation.enabled = true in config.toml",
         })
 
-    # 3. Resolve primary context
-    error, primary_ctx = validation._require_context(code_path)
-    if error:
-        return json.dumps({"schema_version": 1, "error": "CONTEXT_ERROR", "message": error})
-
-    # 4. Hosted mode guard
+    # 3. Hosted mode guard (before _require_context to avoid git overhead)
     if is_hosted_mode():
         return json.dumps({
             "schema_version": 1,
             "error": "FEDERATION_NOT_AVAILABLE",
             "message": "Federated search is not available in hosted mode",
         })
+
+    # 4. Resolve primary context
+    error, primary_ctx = validation._require_context(code_path)
+    if error:
+        return json.dumps({"schema_version": 1, "error": "CONTEXT_ERROR", "message": error})
 
     # 5. Parse namespace override
     namespace_override = None
@@ -141,13 +141,14 @@ async def _federated_search_inner(
     # 6. Resolve namespaces
     resolutions = resolve_all_namespaces(primary_ctx, fed_config, namespace_override)
 
-    # 7. Check max_namespaces cap
-    if len(resolutions) > fed_config.max_namespaces:
+    # 7. Check max_namespaces cap (primary doesn't count toward limit)
+    secondary_count = len(resolutions) - 1  # Exclude primary
+    if secondary_count > fed_config.max_namespaces:
         return json.dumps({
             "schema_version": 1,
             "error": "TOO_MANY_NAMESPACES",
             "message": (
-                f"Query spans {len(resolutions)} namespaces, "
+                f"Query spans {secondary_count} secondary namespaces, "
                 f"exceeding max_namespaces={fed_config.max_namespaces}"
             ),
         })
@@ -170,6 +171,16 @@ async def _federated_search_inner(
 
     # Initialize namespace_status with denied namespaces
     namespace_status: dict[str, Any] = {k: {"status": v} for k, v in denied_map.items()}
+
+    # Surface primary-secondary collision (secondary was silently skipped by resolver)
+    if primary_ns_id in fed_config.namespaces:
+        namespace_status[f"{primary_ns_id}__secondary"] = {
+            "status": "skipped",
+            "error_message": (
+                f"Secondary namespace '{primary_ns_id}' collides with primary "
+                f"namespace ID — secondary config ignored"
+            ),
+        }
 
     # Add not_initialized status for unresolved namespaces (with diagnostics)
     for ns_id in allowed_ns_ids:
@@ -289,7 +300,10 @@ async def _federated_search_inner(
     # Execute searches in parallel with total timeout.
     # Use asyncio.wait() so completed results are preserved when the
     # total timeout fires (gather+wait_for discards everything).
-    task_objects = [asyncio.ensure_future(search_namespace(ns_id)) for ns_id in searchable]
+    task_objects = [
+        asyncio.create_task(search_namespace(ns_id), name=f"federation-search-{ns_id}")
+        for ns_id in searchable
+    ]
 
     done, pending = await asyncio.wait(
         task_objects, timeout=fed_config.max_total_timeout
@@ -327,7 +341,7 @@ async def _federated_search_inner(
 
     # 11. Check primary status
     primary_status = namespace_status.get(primary_ns_id, {})
-    primary_status_val = primary_status.get("status") if isinstance(primary_status, dict) else primary_status
+    primary_status_val = primary_status.get("status")
     if primary_status_val != "ok":
         return json.dumps({
             "schema_version": 1,
@@ -345,13 +359,13 @@ async def _federated_search_inner(
         primary_namespace=primary_ns_id,
         namespace_status=namespace_status,
         queried_namespaces=list(resolutions.keys()),
-        query=query,
+        query=log_query,
         total_candidates=total_candidates,
     )
 
     log_action(
         f"federated_search: {len(merged)} results from {len(searchable)} namespaces "
-        f"(query={query[:50]!r})"
+        f"(query={log_query[:50]!r})"
     )
 
     return json.dumps(envelope)

@@ -162,15 +162,13 @@ class TestFederatedSearchHosted:
     @pytest.mark.anyio
     async def test_hosted_mode_error(self, ctx, tmp_path):
         wc_config = _make_federation_config(enabled=True)
-        primary_ctx = _make_primary_ctx(tmp_path)
 
         with (
             patch("watercooler_mcp.tools.federation.config") as mock_config,
-            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
             patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=True),
         ):
             mock_config.full.return_value = wc_config
-            mock_validation._require_context.return_value = (None, primary_ctx)
+            # _require_context should NOT be called — hosted mode check comes first
             result = await _federated_search_impl(ctx, query="test")
 
         data = json.loads(result)
@@ -495,7 +493,7 @@ class TestFederatedSearchSchemaVersion:
 
     @pytest.mark.anyio
     async def test_query_sanitization_strips_control_chars(self, ctx, tmp_path):
-        """Query with control characters is sanitized before processing."""
+        """Control chars sanitized in envelope but original query reaches search_graph."""
         wc_config = _make_federation_config(enabled=True, namespaces={})
         primary_ctx = _make_primary_ctx(tmp_path)
 
@@ -515,10 +513,14 @@ class TestFederatedSearchSchemaVersion:
         # Should succeed (sanitized, not rejected)
         assert data["schema_version"] == 1
         assert "error" not in data
-        # Sanitized query in envelope
+        # Sanitized query in envelope (log-safe)
         assert "\n" not in data["query"]
         assert "\r" not in data["query"]
         assert "\x1b" not in data["query"]
+        # Original query (with control chars) was passed to search_graph
+        call_args = mock_search.call_args
+        sq = call_args[0][1]  # second positional arg is SearchQuery
+        assert "\n" in sq.query  # Original control chars preserved for search
 
 
 class TestFederatedSearchErrorHandling:
