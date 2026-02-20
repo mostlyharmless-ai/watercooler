@@ -235,14 +235,21 @@ async def _federated_search_inner(
         scored: list[ScoredResult] = []
         ns_config = fed_config.namespaces.get(ns_id)
 
+        # Pre-compute denied topics frozenset for O(1) lookup per entry
+        denied_topics = (
+            frozenset(t.lower() for t in ns_config.deny_topics)
+            if ns_config and not is_primary and ns_config.deny_topics
+            else frozenset()
+        )
+
         for sr in search_results.results:
             if sr.entry is None:
                 continue
 
             # Check deny_topics for secondary namespaces
-            if ns_config and not is_primary:
+            if denied_topics:
                 topic = getattr(sr.entry, "thread_topic", "") or ""
-                if topic and is_topic_denied(topic, ns_config):
+                if topic and is_topic_denied(topic, denied_topics):
                     continue
 
             # Parse timestamp for recency decay
@@ -275,6 +282,7 @@ async def _federated_search_inner(
                 ranking_score=ranking,
                 entry_data=entry_data,
                 timestamp=ts_str or now.isoformat(),
+                timestamp_epoch=entry_ts.timestamp(),
             ))
 
         return ns_id, scored, "ok"

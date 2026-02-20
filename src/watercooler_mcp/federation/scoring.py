@@ -6,10 +6,13 @@ Config schema additions use typing.List/Dict for consistency with config_schema.
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timezone
 
 from watercooler.config_schema import FederationScoringConfig
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "KEYWORD_SCORE_MIN",
@@ -78,6 +81,7 @@ def compute_recency_decay(
     """
     # Handle naive datetimes by assuming UTC
     if entry_timestamp.tzinfo is None:
+        logger.debug("Naive datetime assumed UTC: %s", entry_timestamp)
         entry_timestamp = entry_timestamp.replace(tzinfo=timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)

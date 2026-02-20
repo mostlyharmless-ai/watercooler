@@ -5,7 +5,7 @@ Allowlist + deny_topics enforcement per namespace.
 
 from __future__ import annotations
 
-from watercooler.config_schema import FederationAccessConfig, FederationNamespaceConfig
+from watercooler.config_schema import FederationAccessConfig
 
 __all__ = [
     "filter_allowed_namespaces",
@@ -55,19 +55,18 @@ def filter_allowed_namespaces(
 
 def is_topic_denied(
     topic: str,
-    namespace_config: FederationNamespaceConfig,
+    denied_topics: frozenset[str],
 ) -> bool:
     """Check if a topic is denied for a namespace.
 
-    Case-insensitive comparison: normalizes both topic and deny_topics
-    to lowercase before matching.
+    Case-insensitive comparison: caller pre-computes the lowercased
+    frozenset for O(1) lookup per entry.
 
     Args:
         topic: The thread topic to check.
-        namespace_config: Namespace configuration with deny_topics.
+        denied_topics: Pre-computed frozenset of lowercased denied topics.
 
     Returns:
         True if the topic should be excluded.
     """
-    topic_lower = topic.lower()
-    return any(dt.lower() == topic_lower for dt in namespace_config.deny_topics)
+    return topic.lower() in denied_topics

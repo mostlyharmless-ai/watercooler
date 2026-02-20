@@ -7,7 +7,6 @@ with provenance metadata.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 __all__ = [
@@ -29,7 +28,8 @@ class ScoredResult:
     recency_decay: float
     ranking_score: float
     entry_data: dict[str, Any]
-    timestamp: str  # ISO 8601, for tiebreaking
+    timestamp: str  # ISO 8601, for display
+    timestamp_epoch: float  # Pre-computed epoch for sort tiebreaking
 
 
 def merge_results(
@@ -75,21 +75,12 @@ def merge_results(
         return (
             -r.ranking_score,
             0 if r.origin_namespace == primary_namespace else 1,
-            _negate_epoch(r.timestamp),
+            -r.timestamp_epoch,
             r.entry_id,
         )
 
     deduped.sort(key=sort_key)
     return deduped[:limit]
-
-
-def _negate_epoch(ts: str) -> float:
-    """Negate ISO 8601 timestamp as epoch float for descending sort."""
-    try:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return -dt.timestamp()
-    except ValueError:
-        return 0.0  # unparseable → sort last
 
 
 def build_response_envelope(

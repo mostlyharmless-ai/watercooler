@@ -1,6 +1,6 @@
 """Unit tests for federation access control module."""
 
-from watercooler.config_schema import FederationAccessConfig, FederationNamespaceConfig
+from watercooler.config_schema import FederationAccessConfig
 from watercooler_mcp.federation.access import filter_allowed_namespaces, is_topic_denied
 
 
@@ -72,32 +72,23 @@ class TestIsTopicDenied:
     """Tests for is_topic_denied."""
 
     def test_not_denied_when_empty(self):
-        ns = FederationNamespaceConfig(code_path="/tmp/test")
-        assert is_topic_denied("auth-protocol", ns) is False
+        assert is_topic_denied("auth-protocol", frozenset()) is False
 
     def test_denied_exact_match(self):
-        ns = FederationNamespaceConfig(
-            code_path="/tmp/test", deny_topics=["internal-hiring"]
-        )
-        assert is_topic_denied("internal-hiring", ns) is True
+        denied = frozenset(["internal-hiring"])
+        assert is_topic_denied("internal-hiring", denied) is True
 
     def test_denied_case_insensitive(self):
-        ns = FederationNamespaceConfig(
-            code_path="/tmp/test", deny_topics=["internal-hiring"]
-        )
-        assert is_topic_denied("Internal-Hiring", ns) is True
-        assert is_topic_denied("INTERNAL-HIRING", ns) is True
+        denied = frozenset(["internal-hiring"])
+        assert is_topic_denied("Internal-Hiring", denied) is True
+        assert is_topic_denied("INTERNAL-HIRING", denied) is True
 
     def test_not_denied_partial_match(self):
-        ns = FederationNamespaceConfig(
-            code_path="/tmp/test", deny_topics=["internal-hiring"]
-        )
-        assert is_topic_denied("internal", ns) is False
+        denied = frozenset(["internal-hiring"])
+        assert is_topic_denied("internal", denied) is False
 
     def test_multiple_deny_topics(self):
-        ns = FederationNamespaceConfig(
-            code_path="/tmp/test", deny_topics=["salaries", "internal-hiring"]
-        )
-        assert is_topic_denied("salaries", ns) is True
-        assert is_topic_denied("internal-hiring", ns) is True
-        assert is_topic_denied("auth-protocol", ns) is False
+        denied = frozenset(["salaries", "internal-hiring"])
+        assert is_topic_denied("salaries", denied) is True
+        assert is_topic_denied("internal-hiring", denied) is True
+        assert is_topic_denied("auth-protocol", denied) is False
