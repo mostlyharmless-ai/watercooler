@@ -39,8 +39,8 @@ Optional arguments via `$ARGUMENTS`:
 
    <footer — Closes/Fixes #issue if applicable>
 
-   Signed-off-by: Jay Galvin <jay@watercoolerdev.com>
-   Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+   Signed-off-by: <git config user.name> <git config user.email>
+   Co-Authored-By: Claude <noreply@anthropic.com>
    ```
 
    **Type**: feat, fix, refactor, test, docs, style, chore
@@ -58,11 +58,12 @@ Optional arguments via `$ARGUMENTS`:
 
    <body>
 
-   Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+   Co-Authored-By: Claude <noreply@anthropic.com>
    EOF
    )"
    ```
    Note: `-s` adds the Signed-off-by line automatically.
+   If `--amend` was requested, use `git commit --amend -s -m` instead.
 
 7. **Verify** the commit succeeded:
    ```bash

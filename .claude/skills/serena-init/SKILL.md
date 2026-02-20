@@ -3,6 +3,7 @@ name: serena-init
 description: Read Serena initial instructions and activate the current project. Use when starting a session that needs Serena's semantic code tools.
 allowed-tools:
   - Bash(mcp-cli *)
+  - Bash(jq *)
 ---
 
 # Serena Init

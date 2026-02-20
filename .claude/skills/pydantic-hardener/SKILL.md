@@ -1,6 +1,6 @@
 ---
 name: pydantic-hardener
-description: Audit Pydantic models for missing cross-field validators, type-narrowing gaps, empty-value guards, and frozen enforcement. Based on patterns from PR #190 (14-round review).
+description: Audit Pydantic v2 models for missing cross-field validators, type-narrowing gaps, empty-value guards, and frozen enforcement. Based on patterns from PR #190 (14-round review).
 allowed-tools:
   - Read
   - Glob
@@ -14,6 +14,8 @@ allowed-tools:
 # Pydantic Config Hardener
 
 Audit Pydantic v2 models for five bug classes discovered during 14 rounds of code review on PR #190. Each class caused merge-blocking defects that slipped through initial implementation.
+
+**Prerequisites:** Pydantic v2 (`pydantic >= 2.0`). All fix patterns use v2 syntax (`model_validator`, `ConfigDict`, `Field`). If mypy is installed, bug class 2 detection uses `mypy --strict`; otherwise that check is skipped with a warning.
 
 Optional arguments via `$ARGUMENTS`:
 - A file path or glob to scope the audit (e.g., `/pydantic-hardener src/watercooler/config_schema.py`)

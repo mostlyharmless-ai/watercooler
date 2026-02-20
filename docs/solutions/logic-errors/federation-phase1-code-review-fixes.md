@@ -31,7 +31,19 @@ root_cause:
   - "Error-path return dict constructed without namespace_status field"
 date_solved: 2026-02-20
 pr_number: 190
-follow_up_issues: [193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204]
+follow_up_issues:
+  - 193
+  - 194
+  - 195
+  - 196
+  - 197
+  - 198
+  - 199
+  - 200
+  - 201
+  - 202
+  - 203
+  - 204
 review_rounds: 14
 test_count: 111
 ---
@@ -157,14 +169,30 @@ if not sr.node_id:
 
 **File:** `src/watercooler_mcp/tools/federation.py`
 
-The comma-separated namespace override wasn't validated against `max_namespaces`, allowing unbounded fan-out.
+The comma-separated namespace override wasn't validated against `max_namespaces`, allowing unbounded fan-out. A misconfigured or malicious caller could request arbitrarily many namespaces, bypassing the resource safeguard.
 
-**Fix:** Count check before resolving namespaces.
+**Fix:** Count secondary namespaces after resolution and reject if the cap is exceeded.
+
+```python
+# 7. Check max_namespaces cap (primary doesn't count toward limit)
+secondary_count = len(resolutions) - 1  # Exclude primary
+if secondary_count > fed_config.max_namespaces:
+    return json.dumps({
+        "schema_version": 1,
+        "error": "TOO_MANY_NAMESPACES",
+        "message": (
+            f"Query spans {secondary_count} secondary namespaces, "
+            f"exceeding max_namespaces={fed_config.max_namespaces}"
+        ),
+        "results": [],
+    })
+```
 
 ## Key Commits
 
 | Commit | Round | Fixes |
 |--------|-------|-------|
+| `866b2da` | 9 | Namespace override max_namespaces validation |
 | `7e54ade` | 10 | Dedup sort order, PRIMARY_SEARCH_FAILED diagnostics |
 | `b8afb0a` | 12 | mypy type-narrowing asserts |
 | `75a407e` | 13 | Timeout cross-field validator, empty entry_id guard |
