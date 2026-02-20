@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 
 from fastmcp import Context
 
+from typing import Any
+
 from watercooler.baseline_graph.search import SearchQuery, search_graph
 from watercooler.config_facade import config
 
@@ -42,6 +44,19 @@ federated_search_tool = None
 # Validation bounds
 MAX_QUERY_LENGTH = 500
 MAX_LIMIT = 100
+
+
+def _extract_entry_data(entry: Any) -> dict[str, Any]:
+    """Extract display fields from a search result entry."""
+    return {
+        "topic": getattr(entry, "thread_topic", ""),
+        "title": getattr(entry, "title", ""),
+        "entry_id": getattr(entry, "entry_id", ""),
+        "role": getattr(entry, "role", ""),
+        "agent": getattr(entry, "agent", ""),
+        "entry_type": getattr(entry, "entry_type", ""),
+        "summary": getattr(entry, "summary", ""),
+    }
 
 
 async def _federated_search_impl(
@@ -228,18 +243,7 @@ async def _federated_search_impl(
             norm_score = normalize_keyword_score(sr.score)
             ranking = compute_ranking_score(sr.score, nw, recency)
 
-            # Build entry_data dict
-            entry_data: dict = {}
-            if sr.entry:
-                entry_data = {
-                    "topic": getattr(sr.entry, "thread_topic", ""),
-                    "title": getattr(sr.entry, "title", ""),
-                    "entry_id": getattr(sr.entry, "entry_id", ""),
-                    "role": getattr(sr.entry, "role", ""),
-                    "agent": getattr(sr.entry, "agent", ""),
-                    "entry_type": getattr(sr.entry, "entry_type", ""),
-                    "summary": getattr(sr.entry, "summary", ""),
-                }
+            entry_data = _extract_entry_data(sr.entry)
 
             scored.append(ScoredResult(
                 entry_id=sr.node_id,
