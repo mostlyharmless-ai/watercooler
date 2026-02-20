@@ -20,11 +20,9 @@ except ImportError:
 
 
 def _thread_meta_from_graph(threads_dir: Path, topic: str) -> tuple[str, str, str, str]:
-    """Get thread metadata from graph, with .md header read for write ops.
+    """Get thread metadata from graph.
 
-    Write operations (handoff, ack) need current ball/status even when
-    graph is empty. Reads .md header as last resort since the .md file
-    is the write target for these operations.
+    Graph is the sole source of truth. Returns defaults if thread not found.
 
     Returns:
         Tuple of (title, status, ball, last_updated) or defaults if not found.
@@ -36,21 +34,6 @@ def _thread_meta_from_graph(threads_dir: Path, topic: str) -> tuple[str, str, st
             thread.get("status", "OPEN"),
             thread.get("ball", ""),
             thread.get("last_updated", ""),
-        )
-    # Read .md header for write-side state (ball/status) when graph unavailable
-    tp = thread_path(topic, threads_dir)
-    if tp.exists():
-        import re
-        content = tp.read_text(encoding="utf-8")
-        header = content.split("\n\n", 1)[0]
-        status_m = re.search(r"^Status:\s*(.+)$", header, re.IGNORECASE | re.MULTILINE)
-        ball_m = re.search(r"^Ball:\s*(.+)$", header, re.IGNORECASE | re.MULTILINE)
-        title_m = re.search(r"^#\s*(.+)$", header, re.MULTILINE)
-        return (
-            (title_m.group(1).strip() if title_m else topic),
-            (status_m.group(1).strip() if status_m else "OPEN"),
-            (ball_m.group(1).strip() if ball_m else ""),
-            "",
         )
     return (topic, "OPEN", "", "")
 

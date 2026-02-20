@@ -246,18 +246,21 @@ class ThreadAuditorDaemon(BaseDaemon):
                         },
                     ))
 
-        # Check stale threads
+        # Check stale threads (using graph last_updated timestamp)
         if cfg.check_stale_threads and status.strip():
             thread_closed = is_closed(status)
-            if not thread_closed:
+            if not thread_closed and last_ts:
                 stale_threshold = time.time() - (cfg.stale_days * _SECONDS_PER_DAY)
                 try:
-                    file_mtime = thread_path.stat().st_mtime
-                except OSError:
-                    file_mtime = 0.0
+                    from datetime import datetime, timezone
+                    # Parse ISO 8601 timestamp from graph
+                    ts_str = last_ts.replace("Z", "+00:00")
+                    last_epoch = datetime.fromisoformat(ts_str).timestamp()
+                except (ValueError, TypeError):
+                    last_epoch = 0.0
 
-                if file_mtime > 0 and file_mtime < stale_threshold:
-                    days_idle = int((time.time() - file_mtime) / _SECONDS_PER_DAY)
+                if last_epoch > 0 and last_epoch < stale_threshold:
+                    days_idle = int((time.time() - last_epoch) / _SECONDS_PER_DAY)
                     findings.append(Finding(
                         finding_id=_make_finding_id(),
                         daemon_name=self.name,

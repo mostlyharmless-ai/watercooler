@@ -73,6 +73,38 @@ def _scan_for_deprecated_imports() -> list[str]:
     return violations
 
 
+# Write commands that must come from commands_graph, not commands
+_GRAPH_WRITE_COMMANDS = {"init_thread", "append_entry", "say", "ack", "handoff", "set_status", "set_ball"}
+
+# Pattern: "from .commands import <write_command>" (not commands_graph)
+_LEGACY_CMD_RE = re.compile(
+    r"^\s*from\s+\.commands\s+import\s+(.+)"
+)
+
+
+def _scan_cli_for_legacy_commands() -> list[str]:
+    """Check cli.py doesn't import write commands from legacy commands module."""
+    violations = []
+    cli_path = SRC_ROOT / "watercooler" / "cli.py"
+
+    if not cli_path.exists():
+        return violations
+
+    content = cli_path.read_text(encoding="utf-8")
+    for line_no, line in enumerate(content.splitlines(), 1):
+        m = _LEGACY_CMD_RE.match(line)
+        if not m:
+            continue
+        imported = {name.strip() for name in m.group(1).split(",")}
+        for func in imported & _GRAPH_WRITE_COMMANDS:
+            violations.append(
+                f"cli.py:{line_no}: imports '{func}' from .commands "
+                f"instead of .commands_graph"
+            )
+
+    return violations
+
+
 class TestGraphFirstInvariant:
     """Ensure deprecated .md-parsing functions are not used in runtime code."""
 
@@ -93,6 +125,22 @@ class TestGraphFirstInvariant:
                 "Deprecated .md-parsing imports found in runtime code.\n"
                 "Graph is the sole source of truth — use graph reader "
                 "functions instead.\n\n"
+                + "\n".join(f"  {v}" for v in violations)
+            )
+            pytest.fail(msg)
+
+    def test_cli_uses_graph_canonical_commands(self):
+        """CLI must import write commands from commands_graph, not commands.
+
+        The legacy commands module reads/writes .md directly. CLI must use
+        the graph-canonical versions that write graph first, then project.
+        """
+        violations = _scan_cli_for_legacy_commands()
+
+        if violations:
+            msg = (
+                "CLI imports write commands from legacy .commands module.\n"
+                "Use .commands_graph instead (graph-first, then project).\n\n"
                 + "\n".join(f"  {v}" for v in violations)
             )
             pytest.fail(msg)

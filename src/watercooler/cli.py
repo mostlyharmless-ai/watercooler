@@ -220,30 +220,25 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "init-thread":
         from pathlib import Path
-        from .fs import read_body
-        from .path_resolver import resolve_threads_dir, resolve_templates_dir
-        from .commands import init_thread
+        from .path_resolver import resolve_threads_dir
+        from .commands_graph import init_thread
 
-        body = read_body(args.body)
         out = init_thread(
             args.topic,
             threads_dir=resolve_threads_dir(args.threads_dir),
             title=args.title,
             status=args.status,
             ball=args.ball,
-            body=body,
-            owner=args.owner,
-            participants=args.participants,
-            templates_dir=resolve_templates_dir(args.templates_dir) if args.templates_dir else None,
         )
         print(str(out))
         sys.exit(0)
 
     if args.cmd == "append-entry":
         from pathlib import Path
+        from ulid import ULID
         from .fs import read_body
-        from .path_resolver import resolve_threads_dir, resolve_templates_dir
-        from .commands import append_entry
+        from .path_resolver import resolve_threads_dir
+        from .commands_graph import append_entry
         from .agents import _load_agents_registry
 
         body = read_body(args.body)
@@ -258,15 +253,15 @@ def main(argv: list[str] | None = None) -> None:
             body=body,
             status=args.status,
             ball=args.ball,
-            templates_dir=resolve_templates_dir(args.templates_dir) if args.templates_dir else None,
             registry=registry,
+            entry_id=str(ULID()),
         )
         print(str(out))
         sys.exit(0)
 
     if args.cmd == "set-status":
         from pathlib import Path
-        from .commands import set_status
+        from .commands_graph import set_status
         from .path_resolver import resolve_threads_dir
 
         out = set_status(args.topic, threads_dir=resolve_threads_dir(args.threads_dir), status=args.status)
@@ -275,7 +270,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "set-ball":
         from pathlib import Path
-        from .commands import set_ball
+        from .commands_graph import set_ball
         from .path_resolver import resolve_threads_dir
 
         out = set_ball(args.topic, threads_dir=resolve_threads_dir(args.threads_dir), ball=args.ball)
@@ -368,9 +363,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "say":
         from pathlib import Path
+        from ulid import ULID
         from .fs import read_body
-        from .path_resolver import resolve_threads_dir, resolve_templates_dir
-        from .commands import say
+        from .path_resolver import resolve_threads_dir
+        from .commands_graph import say
         from .agents import _load_agents_registry
 
         body = read_body(args.body)
@@ -385,17 +381,18 @@ def main(argv: list[str] | None = None) -> None:
             body=body,
             status=args.status,
             ball=args.ball,
-            templates_dir=resolve_templates_dir(args.templates_dir) if args.templates_dir else None,
             registry=registry,
+            entry_id=str(ULID()),
         )
         print(str(out))
         sys.exit(0)
 
     if args.cmd == "ack":
         from pathlib import Path
+        from ulid import ULID
         from .fs import read_body
-        from .commands import ack
-        from .path_resolver import resolve_threads_dir, resolve_templates_dir
+        from .commands_graph import ack
+        from .path_resolver import resolve_threads_dir
         from .agents import _load_agents_registry
 
         body = read_body(args.body) if args.body else None
@@ -410,16 +407,17 @@ def main(argv: list[str] | None = None) -> None:
             body=body,
             status=args.status,
             ball=args.ball,
-            templates_dir=resolve_templates_dir(args.templates_dir) if args.templates_dir else None,
             registry=registry,
+            entry_id=str(ULID()),
         )
         print(str(out))
         sys.exit(0)
 
     if args.cmd == "handoff":
         from pathlib import Path
-        from .commands import handoff
-        from .path_resolver import resolve_threads_dir, resolve_templates_dir
+        from ulid import ULID
+        from .commands_graph import handoff
+        from .path_resolver import resolve_threads_dir
         from .agents import _load_agents_registry
 
         registry = _load_agents_registry(args.agents_file) if hasattr(args, 'agents_file') and args.agents_file else None
@@ -430,7 +428,7 @@ def main(argv: list[str] | None = None) -> None:
             role=args.role,
             note=args.note,
             registry=registry,
-            templates_dir=resolve_templates_dir(args.templates_dir) if args.templates_dir else None,
+            entry_id=str(ULID()),
         )
         print(str(out))
         sys.exit(0)

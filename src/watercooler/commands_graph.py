@@ -236,6 +236,14 @@ def append_entry(
             # Fallback: full regeneration
             project_and_write_thread(threads_dir, topic)
 
+        # 7. Update .md header if status or ball changed
+        if status or ball:
+            update_header_and_write(
+                threads_dir, topic,
+                status=status.upper() if status else None,
+                ball=ball,
+            )
+
         logger.debug(f"Graph-canonical append_entry complete: {topic}/{entry_id}")
         return tp
 
