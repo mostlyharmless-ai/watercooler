@@ -7,6 +7,7 @@ with provenance metadata.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 __all__ = [
@@ -86,12 +87,11 @@ def merge_results(
             deduped.append(r)
 
     # Sort: RankingScore desc, tiebreak primary first, newest, entry_id
-    def sort_key(r: ScoredResult) -> tuple[float, int, str, str]:
+    def sort_key(r: ScoredResult) -> tuple[float, int, float, str]:
         return (
             -r.ranking_score,
             0 if r.origin_namespace == primary_namespace else 1,
-            # Negate timestamp for newest-first (ISO 8601 sorts lexicographically)
-            _negate_timestamp(r.timestamp),
+            _negate_epoch(r.timestamp),
             r.entry_id,
         )
 
@@ -99,24 +99,13 @@ def merge_results(
     return deduped[:limit]
 
 
-def _negate_timestamp(ts: str) -> str:
-    """Invert ISO 8601 timestamp for descending sort.
-
-    Since ISO 8601 timestamps sort lexicographically in ascending order,
-    we complement each character to reverse the ordering. Characters
-    outside the printable ASCII sort range are left unchanged.
-    """
-    # For descending order on timestamps, prefix with negated chars
-    # Using a simpler approach: prepend a '-' to use reverse string ordering
-    # won't work directly. Instead, since all timestamps share the same format,
-    # we can invert the string by complementing digits.
-    inverted = []
-    for c in ts:
-        if c.isdigit():
-            inverted.append(str(9 - int(c)))
-        else:
-            inverted.append(c)
-    return "".join(inverted)
+def _negate_epoch(ts: str) -> float:
+    """Negate ISO 8601 timestamp as epoch float for descending sort."""
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return -dt.timestamp()
+    except (ValueError, OSError):
+        return 0.0  # unparseable → sort last
 
 
 def build_response_envelope(

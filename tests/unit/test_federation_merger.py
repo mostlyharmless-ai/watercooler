@@ -2,6 +2,7 @@
 
 from watercooler_mcp.federation.merger import (
     ScoredResult,
+    _negate_epoch,
     allocate_candidates,
     build_response_envelope,
     merge_results,
@@ -28,6 +29,24 @@ def _make_result(
         entry_data=kwargs.get("entry_data", {"title": "test"}),
         timestamp=timestamp,
     )
+
+
+class TestNegateEpoch:
+    """Tests for _negate_epoch."""
+
+    def test_newer_is_more_negative(self):
+        older = _negate_epoch("2026-01-01T00:00:00Z")
+        newer = _negate_epoch("2026-02-01T00:00:00Z")
+        assert newer < older  # newer sorts first (more negative)
+
+    def test_unparseable_returns_zero(self):
+        assert _negate_epoch("not-a-date") == 0.0
+        assert _negate_epoch("") == 0.0
+
+    def test_valid_iso_returns_negative_float(self):
+        result = _negate_epoch("2026-02-01T12:00:00Z")
+        assert isinstance(result, float)
+        assert result < 0.0
 
 
 class TestAllocateCandidates:
