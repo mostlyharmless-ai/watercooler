@@ -178,7 +178,7 @@ class TestBuildResponseEnvelope:
         envelope = build_response_envelope(
             results=results,
             primary_namespace="cloud",
-            namespace_status={"cloud": "ok"},
+            namespace_status={"cloud": {"status": "ok"}},
             queried_namespaces=["cloud"],
             query="test query",
             total_candidates=1,
@@ -195,7 +195,7 @@ class TestBuildResponseEnvelope:
         envelope = build_response_envelope(
             results=results,
             primary_namespace="cloud",
-            namespace_status={"cloud": "ok"},
+            namespace_status={"cloud": {"status": "ok"}},
             queried_namespaces=["cloud"],
             query="test",
             total_candidates=1,
@@ -211,7 +211,7 @@ class TestBuildResponseEnvelope:
         envelope = build_response_envelope(
             results=results,
             primary_namespace="cloud",
-            namespace_status={"cloud": "ok"},
+            namespace_status={"cloud": {"status": "ok"}},
             queried_namespaces=["cloud"],
             query="test",
             total_candidates=15,
@@ -223,7 +223,7 @@ class TestBuildResponseEnvelope:
         envelope = build_response_envelope(
             results=[],
             primary_namespace="cloud",
-            namespace_status={"cloud": "ok"},
+            namespace_status={"cloud": {"status": "ok"}},
             queried_namespaces=["cloud"],
             query="test",
             total_candidates=0,
@@ -235,7 +235,7 @@ class TestBuildResponseEnvelope:
         envelope = build_response_envelope(
             results=[],
             primary_namespace="cloud",
-            namespace_status={"cloud": "ok"},
+            namespace_status={"cloud": {"status": "ok"}},
             queried_namespaces=["cloud"],
             query="test",
             total_candidates=0,
@@ -246,10 +246,14 @@ class TestBuildResponseEnvelope:
         envelope = build_response_envelope(
             results=[],
             primary_namespace="cloud",
-            namespace_status={"cloud": "ok", "site": "timeout", "docs": "access_denied"},
+            namespace_status={
+                "cloud": {"status": "ok"},
+                "site": {"status": "timeout"},
+                "docs": {"status": "access_denied"},
+            },
             queried_namespaces=["cloud", "site", "docs"],
             query="test",
             total_candidates=0,
         )
-        assert envelope["namespace_status"]["site"] == "timeout"
-        assert envelope["namespace_status"]["docs"] == "access_denied"
+        assert envelope["namespace_status"]["site"]["status"] == "timeout"
+        assert envelope["namespace_status"]["docs"]["status"] == "access_denied"

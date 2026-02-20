@@ -111,7 +111,7 @@ def _negate_epoch(ts: str) -> float:
 def build_response_envelope(
     results: list[ScoredResult],
     primary_namespace: str,
-    namespace_status: dict[str, str],
+    namespace_status: dict[str, Any],
     queried_namespaces: list[str],
     query: str,
     total_candidates: int,
@@ -122,7 +122,7 @@ def build_response_envelope(
     Args:
         results: Sorted, merged results.
         primary_namespace: The primary namespace ID.
-        namespace_status: Per-namespace status (ok/timeout/error/access_denied).
+        namespace_status: Per-namespace status dicts with optional diagnostics.
         queried_namespaces: All namespaces that were queried.
         query: The original search query.
         total_candidates: Total results before truncation.

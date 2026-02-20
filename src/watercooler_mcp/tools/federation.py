@@ -86,6 +86,27 @@ async def _federated_search_impl(
         JSON response envelope with schema_version, results, and
         per-namespace provenance metadata.
     """
+    try:
+        return await _federated_search_inner(ctx, query, code_path, code_branch, namespaces, limit)
+    except Exception:
+        logger.exception("Federation search failed unexpectedly")
+        return json.dumps({
+            "schema_version": 1,
+            "error": "internal_error",
+            "message": "Federation search encountered an unexpected error",
+            "results": [],
+        })
+
+
+async def _federated_search_inner(
+    ctx: Context,
+    query: str,
+    code_path: str,
+    code_branch: str,
+    namespaces: str,
+    limit: int,
+) -> str:
+    """Inner implementation of federated search (unwrapped)."""
     # 1. Validate inputs
     if not query or not query.strip():
         return json.dumps({"error": "EMPTY_QUERY", "message": "Query cannot be empty"})
@@ -151,13 +172,18 @@ async def _federated_search_impl(
     )
 
     # Initialize namespace_status with denied namespaces
-    namespace_status: dict[str, str] = dict(denied_map)
+    namespace_status: dict[str, Any] = {k: {"status": v} for k, v in denied_map.items()}
 
-    # Add not_initialized status for unresolved namespaces
+    # Add not_initialized status for unresolved namespaces (with diagnostics)
     for ns_id in allowed_ns_ids:
         res = resolutions[ns_id]
         if res.status != "ok":
-            namespace_status[ns_id] = res.status
+            ns_detail: dict[str, Any] = {"status": res.status}
+            if res.error_message:
+                ns_detail["error_message"] = res.error_message
+            if res.action_hint:
+                ns_detail["action_hint"] = res.action_hint
+            namespace_status[ns_id] = ns_detail
 
     # Filter to searchable namespaces (ok status and allowed)
     searchable = [ns_id for ns_id in allowed_ns_ids if resolutions[ns_id].status == "ok"]
@@ -279,17 +305,19 @@ async def _federated_search_impl(
             logger.error("Federation: unexpected error: %s", result)
             continue
         ns_id, scored, status = result
-        namespace_status[ns_id] = status
+        namespace_status[ns_id] = {"status": status}
         if scored is not None:
             namespace_results[ns_id] = scored
             total_candidates += len(scored)
 
     # 11. Check primary status
-    if namespace_status.get(primary_ns_id) != "ok":
+    primary_status = namespace_status.get(primary_ns_id, {})
+    primary_status_val = primary_status.get("status") if isinstance(primary_status, dict) else primary_status
+    if primary_status_val != "ok":
         return json.dumps({
             "error": "PRIMARY_SEARCH_FAILED",
             "message": f"Primary namespace '{primary_ns_id}' search failed: "
-                       f"{namespace_status.get(primary_ns_id, 'unknown')}",
+                       f"{primary_status_val or 'unknown'}",
         })
 
     # 12. Merge results
