@@ -52,6 +52,7 @@ def _extract_entry_data(entry: Any) -> dict[str, Any]:
         "agent": getattr(entry, "agent", ""),
         "entry_type": getattr(entry, "entry_type", ""),
         "summary": getattr(entry, "summary", ""),
+        "timestamp": getattr(entry, "timestamp", ""),
     }
 
 
@@ -318,10 +319,12 @@ async def _federated_search_inner(
     # Execute searches in parallel with total timeout.
     # Use asyncio.wait() so completed results are preserved when the
     # total timeout fires (gather+wait_for discards everything).
-    task_objects = [
-        asyncio.create_task(search_namespace(ns_id), name=f"federation-search-{ns_id}")
-        for ns_id in searchable
-    ]
+    task_to_ns: dict[asyncio.Task[Any], str] = {}
+    task_objects: list[asyncio.Task[Any]] = []
+    for ns_id in searchable:
+        t = asyncio.create_task(search_namespace(ns_id), name=f"federation-search-{ns_id}")
+        task_to_ns[t] = ns_id
+        task_objects.append(t)
 
     done, pending = await asyncio.wait(
         task_objects, timeout=fed_config.max_total_timeout
@@ -344,7 +347,7 @@ async def _federated_search_inner(
     for task_obj in done:
         exc = task_obj.exception()
         if exc is not None:
-            ns_id = task_obj.get_name().removeprefix("federation-search-")
+            ns_id = task_to_ns[task_obj]
             logger.error("Federation: namespace '%s' error: %s", ns_id, exc)
             namespace_status[ns_id] = {"status": "error"}
             continue
@@ -356,7 +359,7 @@ async def _federated_search_inner(
 
     # Mark timed-out namespaces directly from cancelled tasks
     for p in pending:
-        ns_id = p.get_name().removeprefix("federation-search-")
+        ns_id = task_to_ns[p]
         namespace_status[ns_id] = {"status": "timeout"}
 
     # 11. Check primary status

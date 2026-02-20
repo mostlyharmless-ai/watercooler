@@ -299,7 +299,10 @@ across configured watercooler repositories with scored, ranked results.
 **Returns:** JSON envelope with:
 - `schema_version`: Protocol version (currently 1)
 - `results[]`: Scored results with `entry_id`, `origin_namespace`, `ranking_score`, `score_breakdown`, and `entry_data`
-- `namespace_status`: Per-namespace status (`ok`, `timeout`, `not_initialized`, `access_denied`, `security_rejected`)
+- `namespace_status`: Per-namespace status dict. Each value is an object with:
+  - `status` (str): One of `ok`, `timeout`, `error`, `not_initialized`, `access_denied`, `security_rejected`
+  - `error_message` (str, optional): Details when status is `error`
+  - `action_hint` (str, optional): Suggested remediation (e.g., for `not_initialized`)
 - `queried_namespaces`: All namespace IDs that were part of the query
 
 **Prerequisites:** Requires `[federation]` section in config.toml with `enabled = true` and at least one

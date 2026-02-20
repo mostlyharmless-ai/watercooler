@@ -53,7 +53,9 @@ def merge_results(
         min_score: Minimum ranking score threshold. The 0.01 default filters
             out near-zero results from the multiplicative composition (e.g., a
             barely-matching entry in a low-weight namespace with high recency
-            decay). Dedup is handled separately by entry_id.
+            decay). Applies equally to all namespaces including primary —
+            baseline-floor-only matches (ranking_score == 0.0) are intentionally
+            dropped as noise. Dedup is handled separately by entry_id.
 
     Returns:
         Sorted, deduplicated, truncated list of ScoredResults.
