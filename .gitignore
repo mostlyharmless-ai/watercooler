@@ -258,3 +258,8 @@ pipeline_work/
 # Migration checkpoint files (runtime state, not version controlled)
 .migration_checkpoint.json
 .vercel
+
+# Local planning/review artifacts
+todos/
+docs/brainstorms/
+docs/plans/
