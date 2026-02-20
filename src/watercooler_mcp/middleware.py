@@ -193,6 +193,8 @@ _TOOL_TIMEOUTS: dict[str, float] = {
     "watercooler_graphiti_add_episode": 120.0,
     # Smart query T3 escalation can be slow
     "watercooler_smart_query": 120.0,
+    # Federation: fan-out + merge, bounded by max_total_timeout (default 2s)
+    "watercooler_federated_search": 5.0,
 }
 
 

@@ -128,4 +128,5 @@ markers = [
     "benchmark: marks tests as performance benchmarks (run with '-m benchmark')",
     "network: marks tests requiring network access (deselect with '-m \"not network\"')",
     "slow: marks tests as slow running (deselect with '-m \"not slow\"')",
+    "e2e: marks tests as end-to-end tests with fixture data (run with '-m e2e')",
 ]

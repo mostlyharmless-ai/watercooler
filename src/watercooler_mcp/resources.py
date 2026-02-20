@@ -105,6 +105,13 @@ The **ball** indicates whose turn it is:
   - Best for natural language questions about project history
 - `watercooler_find_similar` - Find entries similar to a given entry
 
+### Federation Tools
+- `watercooler_federated_search` - Cross-namespace keyword search
+  - Searches across configured watercooler repositories
+  - Results are scored by keyword relevance, namespace proximity, and recency
+  - Parameters: `query` (required), `code_path`, `namespaces` (comma-separated override), `limit`
+  - Returns JSON envelope with `schema_version`, scored results, and per-namespace status
+
 ### Utility Tools
 - `watercooler_reindex` - Generate summary of all threads
 - `watercooler_health` - Check server status

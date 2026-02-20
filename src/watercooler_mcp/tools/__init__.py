@@ -8,6 +8,7 @@ This package contains tool implementations organized by category:
 - graph: baseline graph tools (stats, build, search, etc.)
 - memory: Graphiti memory tools
 - migration: memory backend migration, orphan branch migration
+- federation: cross-namespace federated search
 
 Each module provides a register_*_tools(mcp) function to register its tools.
 """
@@ -19,6 +20,7 @@ from .sync import register_sync_tools
 from .graph import register_graph_tools
 from .memory import register_memory_tools
 from .migration import register_migration_tools
+from .federation import register_federation_tools
 
 
 def register_all_tools(mcp):
@@ -34,6 +36,7 @@ def register_all_tools(mcp):
     register_graph_tools(mcp)
     register_memory_tools(mcp)
     register_migration_tools(mcp)
+    register_federation_tools(mcp)
 
 
 __all__ = [
@@ -45,4 +48,5 @@ __all__ = [
     "register_graph_tools",
     "register_memory_tools",
     "register_migration_tools",
+    "register_federation_tools",
 ]
