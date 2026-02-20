@@ -289,30 +289,44 @@ async def _federated_search_inner(
 
         return ns_id, scored, "ok"
 
-    # Execute searches in parallel with total timeout
-    tasks = [search_namespace(ns_id) for ns_id in searchable]
-    try:
-        results_list = await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True),
-            timeout=fed_config.max_total_timeout,
+    # Execute searches in parallel with total timeout.
+    # Use asyncio.wait() so completed results are preserved when the
+    # total timeout fires (gather+wait_for discards everything).
+    task_objects = [asyncio.ensure_future(search_namespace(ns_id)) for ns_id in searchable]
+
+    done, pending = await asyncio.wait(
+        task_objects, timeout=fed_config.max_total_timeout
+    )
+    for p in pending:
+        p.cancel()
+    if pending:
+        logger.warning(
+            "Federation: total timeout exceeded (%ss), %d namespace(s) cancelled",
+            fed_config.max_total_timeout, len(pending),
         )
-    except asyncio.TimeoutError:
-        logger.warning("Federation: total timeout exceeded (%ss)", fed_config.max_total_timeout)
-        results_list = []
 
     # Process results
     namespace_results: dict[str, list[ScoredResult]] = {}
     total_candidates = 0
 
-    for result in results_list:
-        if isinstance(result, Exception):
-            logger.error("Federation: unexpected error: %s", result)
+    for task_obj in done:
+        exc = task_obj.exception()
+        if exc is not None:
+            logger.error("Federation: unexpected error: %s", exc)
             continue
-        ns_id, scored, status = result
+        ns_id, scored, status = task_obj.result()
         namespace_status[ns_id] = {"status": status}
         if scored is not None:
             namespace_results[ns_id] = scored
             total_candidates += len(scored)
+
+    # Mark timed-out namespaces
+    completed_ns_ids = {ns_id for ns_id, _, _ in (
+        task_obj.result() for task_obj in done if task_obj.exception() is None
+    )}
+    for ns_id in searchable:
+        if ns_id not in completed_ns_ids and ns_id not in namespace_status:
+            namespace_status[ns_id] = {"status": "timeout"}
 
     # 11. Check primary status
     primary_status = namespace_status.get(primary_ns_id, {})

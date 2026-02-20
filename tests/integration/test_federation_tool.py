@@ -427,6 +427,61 @@ class TestFederatedSearchHappyPath:
         assert "watercooler_health" in site_status["action_hint"]
 
 
+class TestFederatedSearchPartialTimeout:
+    """Tests for asyncio.wait partial result handling."""
+
+    @pytest.mark.anyio
+    async def test_total_timeout_preserves_fast_results(self, ctx, tmp_path):
+        """When total timeout fires, fast namespace results are still returned."""
+        wc_config = WatercoolerConfig(
+            federation=FederationConfig(
+                enabled=True,
+                namespace_timeout=5.0,  # Per-namespace timeout is generous
+                max_total_timeout=0.2,  # Total timeout is short
+                namespaces={"site": FederationNamespaceConfig(code_path="/home/user/site")},
+                access=FederationAccessConfig(allowlists={"watercooler-cloud": ["site"]}),
+            )
+        )
+        primary_ctx = _make_primary_ctx(tmp_path)
+
+        worktree_base = tmp_path / "worktrees"
+        site_worktree = worktree_base / "site"
+        site_worktree.mkdir(parents=True)
+
+        def mock_search_variable(threads_dir, sq):
+            import time
+            if "primary" not in str(threads_dir):
+                time.sleep(2.0)  # Exceed total timeout
+            return MockSearchResults(
+                results=[MockSearchResult(
+                    node_id="01A", score=1.7,
+                    entry=MockGraphEntry(entry_id="01A"),
+                )],
+            )
+
+        with (
+            patch("watercooler_mcp.tools.federation.config") as mock_config,
+            patch("watercooler_mcp.tools.federation.validation") as mock_validation,
+            patch("watercooler_mcp.tools.federation.is_hosted_mode", return_value=False),
+            patch("watercooler_mcp.tools.federation.search_graph", side_effect=mock_search_variable),
+            patch("watercooler_mcp.federation.resolver.WORKTREE_BASE", worktree_base),
+            patch(
+                "watercooler_mcp.federation.resolver._worktree_path_for",
+                return_value=site_worktree,
+            ),
+        ):
+            mock_config.full.return_value = wc_config
+            mock_validation._require_context.return_value = (None, primary_ctx)
+            result = await _federated_search_impl(ctx, query="test")
+
+        data = json.loads(result)
+        # Primary should have completed and returned results
+        assert data["namespace_status"]["watercooler-cloud"]["status"] == "ok"
+        assert data["result_count"] >= 1
+        # Secondary should be marked as timeout
+        assert data["namespace_status"]["site"]["status"] == "timeout"
+
+
 class TestFederatedSearchSchemaVersion:
     """Tests that all error responses include schema_version."""
 
