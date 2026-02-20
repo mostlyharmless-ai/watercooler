@@ -930,3 +930,47 @@ auto_detect_services = true
 #
 # Priority (highest first): CLI args > Env vars > Project config > User config > Defaults
 # =============================================================================
+
+
+# =============================================================================
+# FEDERATION SETTINGS
+# Cross-namespace search across configured watercooler repositories
+# =============================================================================
+[federation]
+
+# Enable federation features
+# Env: WATERCOOLER_FEDERATION_ENABLED
+# enabled = false
+
+# Per-namespace search timeout in seconds
+# namespace_timeout = 0.4
+
+# Hard cap on namespaces per query (1-20)
+# max_namespaces = 5
+
+# Total wall-clock budget for all namespace searches combined
+# max_total_timeout = 2.0
+
+# --- Namespace definitions ---
+# Each [federation.namespaces.<id>] defines a searchable namespace.
+# The namespace <id> is a short name used for identification in results.
+#
+# [federation.namespaces.site]
+# code_path = "/home/user/projects/watercooler-site"
+# deny_topics = ["internal-hiring"]
+
+# --- Access control ---
+# Per-primary allowlists: which secondaries can this primary query?
+# Default: closed (no entry = no remote access)
+#
+# [federation.access]
+# allowlists = { "cloud" = ["site"] }
+
+# --- Scoring parameters ---
+# [federation.scoring]
+# local_weight = 1.0
+# lens_weight = 0.7
+# wide_weight = 0.55
+# referenced_weight = 0.85  # Phase 2, dormant
+# recency_floor = 0.7
+# recency_half_life_days = 60.0
