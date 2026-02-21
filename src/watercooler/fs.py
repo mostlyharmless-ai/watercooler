@@ -342,7 +342,9 @@ def find_thread_path(topic: str, threads_dir: Path) -> Optional[Path]:
             if candidate.exists():
                 return candidate
     else:
-        # Flat layout: search all non-hidden subdirectories
+        # Flat layout: search all non-hidden subdirectories.
+        # WARNING: This is O(subdirs) — unbounded scan.  Structured layouts
+        # use a fixed allowlist (THREAD_CATEGORIES) and are preferred.
         try:
             for sub in threads_dir.iterdir():
                 if (

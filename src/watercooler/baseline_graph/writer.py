@@ -447,7 +447,14 @@ def get_thread_from_graph(
         topic: Thread topic
 
     Returns:
-        Thread node dict or None if not found
+        Thread node dict or None if not found.
+
+    Note:
+        Currently returns None for both "thread missing" and "read error"
+        (underlying storage swallows I/O errors).  Callers that need to
+        distinguish these cases should catch OSError around this call.
+        A future ``ThreadNotFoundError`` / ``GraphReadError`` split is
+        planned but out of scope for this change.
     """
     graph_dir = get_graph_dir(threads_dir)
     return storage.load_thread_meta(graph_dir, topic)
@@ -503,7 +510,13 @@ def get_entries_for_thread(
         topic: Thread topic
 
     Returns:
-        List of entry node dicts sorted by index
+        List of entry node dicts sorted by index (empty list if thread
+        has no entries or graph directory is missing).
+
+    Note:
+        Entry dicts use ``.get()`` for field access with defaults.
+        A typed ``GraphEntry`` dataclass for boundary validation is
+        planned but out of scope for this change.
     """
     graph_dir = get_graph_dir(threads_dir)
     entries = storage.load_thread_entries_dict(graph_dir, topic)
