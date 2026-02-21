@@ -250,9 +250,11 @@ class BaseDaemon(ABC):
 
     def status_summary(self) -> Dict[str, Any]:
         """Return a health summary dict for MCP tools."""
+        with self._status_lock:
+            status_val = self._status.value
         return {
             "name": self.name,
-            "status": self._status.value,
+            "status": status_val,
             "enabled": self.enabled,
             "tick_on_interval": self.tick_on_interval,
             "interval": self.interval,

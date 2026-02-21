@@ -6,6 +6,7 @@ import json
 import shutil
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -207,7 +208,6 @@ class BaselineGraphRunner:
             # Check if thread changed (incremental mode)
             if self.config.incremental and self._state:
                 # Use graph last_updated as change signal instead of .md file mtime
-                from datetime import datetime
                 try:
                     dt = datetime.fromisoformat(thread.last_updated) if thread.last_updated else datetime.min
                     mtime = dt.timestamp()

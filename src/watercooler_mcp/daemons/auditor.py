@@ -37,7 +37,7 @@ from watercooler.baseline_graph.writer import (
 )
 
 from .base import BaseDaemon
-from .state import Finding
+from .state import Finding, load_findings
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,6 @@ class ThreadAuditorDaemon(BaseDaemon):
             return []
 
         # Load existing unacknowledged findings to suppress duplicates
-        from .state import load_findings
         existing = load_findings(self.name, limit=5000, unacknowledged_only=True)
         existing_keys: set[tuple[str, str, str]] = {
             (f.topic, f.category, f.entry_id or "") for f in existing

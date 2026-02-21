@@ -183,12 +183,7 @@ class DaemonCheckpoint:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        d = asdict(self)
-        d["thread_state"] = {
-            k: v.to_dict() if isinstance(v, ThreadCheckpoint) else v
-            for k, v in self.thread_state.items()
-        }
-        return d
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "DaemonCheckpoint":

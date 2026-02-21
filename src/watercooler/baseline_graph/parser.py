@@ -271,7 +271,6 @@ def parse_thread_file(
     Returns:
         ParsedThread or None if parsing fails
     """
-    from watercooler.fs import discover_thread_files
     from watercooler.thread_entries import parse_thread_entries, parse_thread_header
 
     if not thread_path.exists():

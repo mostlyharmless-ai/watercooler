@@ -159,7 +159,7 @@ def _create_orphan_branch(code_root: Path) -> bool:
 
     # Create structured directory layout for new repos.
     # Add .gitkeep files so empty directories are tracked by git.
-    from watercooler.fs import ensure_directory_structure, _DIRECTORY_STRUCTURE
+    from watercooler.fs import ensure_directory_structure
     created = ensure_directory_structure(wt_path)
     for d in created:
         gitkeep = d / ".gitkeep"
