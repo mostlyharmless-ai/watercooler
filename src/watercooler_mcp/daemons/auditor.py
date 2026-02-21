@@ -127,7 +127,8 @@ class ThreadAuditorDaemon(BaseDaemon):
 
         # Bootstrap dedup set from disk on first tick; subsequent ticks
         # reuse the in-memory set (new findings are added as they're created).
-        # No limit — load all unacknowledged findings for complete dedup.
+        # 50K limit is well above the JSONL compaction ceiling (10K lines,
+        # kept at 5K) — ensures complete dedup even if thresholds change.
         if not self._existing_keys:
             existing = load_findings(self.name, limit=50_000, unacknowledged_only=True)
             self._existing_keys = {
@@ -293,7 +294,11 @@ class ThreadAuditorDaemon(BaseDaemon):
                     # Parse ISO 8601 timestamp from graph
                     ts_str = last_ts.replace("Z", "+00:00")
                     last_epoch = datetime.fromisoformat(ts_str).timestamp()
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as exc:
+                    logger.debug(
+                        "DAEMON[thread_auditor]: could not parse last_updated for %s: %s",
+                        topic, exc,
+                    )
                     last_epoch = 0.0
 
                 if last_epoch > 0 and last_epoch < stale_threshold:

@@ -6,7 +6,7 @@ import json
 import shutil
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -212,7 +212,7 @@ class BaselineGraphRunner:
                 # last_updated. Manual graph edits that skip this will be invisible
                 # to incremental runs — an acceptable trade-off for graph-first.
                 try:
-                    dt = datetime.fromisoformat(thread.last_updated) if thread.last_updated else datetime.min
+                    dt = datetime.fromisoformat(thread.last_updated) if thread.last_updated else datetime(1970, 1, 1, tzinfo=timezone.utc)
                     mtime = dt.timestamp()
                 except ValueError:
                     mtime = 0
@@ -582,7 +582,6 @@ class BaselineGraphRunner:
         self._log(f"  Wrote {node_count} nodes, {edge_count} edges, {xref_count} cross-references")
 
         # Write manifest
-        from datetime import datetime, timezone
         total_edges = edge_count + xref_count
         manifest = {
             "version": "2.0",  # Per-thread format

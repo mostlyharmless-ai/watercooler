@@ -238,8 +238,9 @@ class BaseDaemon(ABC):
                 save_checkpoint(self._checkpoint)
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 logger.exception("DAEMON[%s]: tick error: %s", self.name, exc)
-                # Brief sleep to avoid tight loop on persistent errors
-                time.sleep(min(5.0, self.interval / 10))
+                # Brief sleep to avoid tight loop on persistent errors.
+                # Floor of 0.5s prevents >2 retries/sec for low-interval daemons.
+                time.sleep(min(5.0, max(0.5, self.interval / 10)))
 
         with self._status_lock:
             self._status = DaemonStatus.STOPPED

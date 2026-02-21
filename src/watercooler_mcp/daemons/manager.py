@@ -102,16 +102,21 @@ class DaemonManager:
             )
 
         all_findings: List[Finding] = []
-        for d in self._daemons.values():
-            all_findings.extend(
-                d.get_findings(
-                    limit=limit,
-                    severity=severity,
-                    category=category,
-                    topic=topic,
-                    unacknowledged_only=unacknowledged_only,
+        for name, d in self._daemons.items():
+            try:
+                all_findings.extend(
+                    d.get_findings(
+                        limit=limit,
+                        severity=severity,
+                        category=category,
+                        topic=topic,
+                        unacknowledged_only=unacknowledged_only,
+                    )
                 )
-            )
+            except Exception as exc:
+                logger.warning(
+                    "DAEMON_MANAGER: findings error for '%s': %s", name, exc,
+                )
         # Sort newest-first across all daemons
         all_findings.sort(key=lambda f: f.created_at, reverse=True)
         return all_findings[:limit]
