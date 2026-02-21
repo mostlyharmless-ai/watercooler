@@ -70,7 +70,9 @@ def _backup_file(p: Path, keep: int = 3, topic: str | None = None) -> None:
             pass
 
 
-def thread_path(topic: str, threads_dir: Path) -> Path:
+def thread_path(
+    topic: str, threads_dir: Path, *, new_thread: bool = False
+) -> Path:
     """Get the path for a thread file.
 
     In structured layouts (where threads/ subdir exists), new threads are
@@ -79,17 +81,25 @@ def thread_path(topic: str, threads_dir: Path) -> Path:
 
     In flat layouts (no threads/ subdir), falls back to root for backward compat.
 
-    Note: This performs bounded I/O (at most one stat per THREAD_CATEGORIES
-    entry) to locate existing threads. For typical repos the cost is a few
-    stat() calls per invocation.
+    Args:
+        topic: Thread topic slug
+        threads_dir: Root threads directory
+        new_thread: If True, skip the find_thread_path() search and route
+            directly to the default location. Use this when the caller knows
+            the thread does not yet exist (e.g., init_thread) to avoid
+            unnecessary I/O.
+
+    Note: Without new_thread=True, this performs bounded I/O (at most one
+    stat per THREAD_CATEGORIES entry) to locate existing threads.
     """
     safe = _sanitize_component(topic, default="thread")
     filename = f"{safe}.md"
 
-    # Check if the thread already exists somewhere
-    existing = find_thread_path(topic, threads_dir)
-    if existing is not None:
-        return existing
+    if not new_thread:
+        # Check if the thread already exists somewhere
+        existing = find_thread_path(topic, threads_dir)
+        if existing is not None:
+            return existing
 
     # For new threads: route to threads/ subdir if structured layout is present
     threads_subdir = threads_dir / "threads"

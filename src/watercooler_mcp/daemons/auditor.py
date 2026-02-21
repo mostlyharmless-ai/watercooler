@@ -350,6 +350,22 @@ class ThreadAuditorDaemon(BaseDaemon):
                 },
             ))
 
+        # Open/active thread sitting in closed/ directory
+        if not thread_closed and current_cat == "closed":
+            findings.append(Finding(
+                finding_id=_make_finding_id(),
+                daemon_name=self.name,
+                severity="info",
+                category="classification_suggestion",
+                topic=topic,
+                message=f"Thread '{topic}' is {status} but in 'closed/' (suggest moving to threads/)",
+                details={
+                    "current_category": current_cat,
+                    "suggested_category": "threads",
+                    "status": status,
+                },
+            ))
+
         return findings
 
     def _check_missing_summaries(
@@ -392,7 +408,7 @@ class ThreadAuditorDaemon(BaseDaemon):
                         message=f"Entry '{eid}' in '{topic}' has no graph summary",
                     ))
 
-        except (OSError, KeyError, TypeError) as exc:
+        except (KeyError, TypeError) as exc:
             logger.debug("DAEMON[thread_auditor]: graph summary check failed for %s: %s", topic, exc)
 
         return findings

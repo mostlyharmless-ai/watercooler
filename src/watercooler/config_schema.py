@@ -421,8 +421,8 @@ class ThreadAuditorConfig(BaseModel):
     """Configuration for the thread auditor daemon."""
 
     enabled: bool = Field(
-        default=True,
-        description="Enable the thread auditor daemon",
+        default=False,
+        description="Enable the thread auditor daemon (opt-in, requires global daemons.enabled=True)",
     )
     interval: float = Field(
         default=300.0,

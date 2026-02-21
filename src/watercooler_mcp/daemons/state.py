@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -35,14 +36,16 @@ def _daemons_dir() -> Path:
     return d
 
 
+_DAEMON_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def _daemon_dir(daemon_name: str) -> Path:
     """Return the storage directory for a specific daemon.
 
     Raises:
-        ValueError: If daemon_name contains path separators or traversal components.
+        ValueError: If daemon_name is not a safe identifier (alphanumeric, _, -).
     """
-    # Guard against path traversal (e.g., "../../etc/passwd")
-    if "/" in daemon_name or "\\" in daemon_name or daemon_name in (".", ".."):
+    if not _DAEMON_NAME_RE.match(daemon_name):
         raise ValueError(f"Invalid daemon name: {daemon_name!r}")
     d = _daemons_dir() / daemon_name
     d.mkdir(parents=True, exist_ok=True)
@@ -94,6 +97,9 @@ class Finding:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Finding":
+        dropped = set(d.keys()) - set(cls.__dataclass_fields__)
+        if dropped:
+            logger.debug("Finding.from_dict: dropping unknown keys: %s", dropped)
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
@@ -123,6 +129,9 @@ class ThreadCheckpoint:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ThreadCheckpoint":
+        dropped = set(d.keys()) - set(cls.__dataclass_fields__)
+        if dropped:
+            logger.debug("ThreadCheckpoint.from_dict: dropping unknown keys: %s", dropped)
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
