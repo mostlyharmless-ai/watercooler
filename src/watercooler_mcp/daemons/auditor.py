@@ -86,16 +86,28 @@ class ThreadAuditorDaemon(BaseDaemon):
         )
         self._config = config or ThreadAuditorConfig()
         self._threads_dir_override = threads_dir
+        self._resolved_threads_dir: Optional[Path] = None
+        # Cache dedup keys across ticks to avoid re-reading JSONL every cycle
+        self._existing_keys: set[tuple[str, str, str]] = set()
 
     def _resolve_threads_dir(self) -> Optional[Path]:
-        """Resolve the threads directory for scanning."""
+        """Resolve the threads directory for scanning.
+
+        The result is cached after first successful resolution to avoid
+        depending on Path.cwd() in a long-running background thread (CWD
+        could drift after startup).
+        """
         if self._threads_dir_override is not None:
             return self._threads_dir_override
+
+        if self._resolved_threads_dir is not None:
+            return self._resolved_threads_dir
 
         try:
             from watercooler_mcp.config import resolve_thread_context
             ctx = resolve_thread_context(Path.cwd())
-            return ctx.threads_dir
+            self._resolved_threads_dir = ctx.threads_dir
+            return self._resolved_threads_dir
         except Exception as exc:
             logger.debug("DAEMON[thread_auditor]: could not resolve threads_dir: %s", exc)
             return None
@@ -112,11 +124,13 @@ class ThreadAuditorDaemon(BaseDaemon):
         if not topics:
             return []
 
-        # Load existing unacknowledged findings to suppress duplicates
-        existing = load_findings(self.name, limit=5000, unacknowledged_only=True)
-        existing_keys: set[tuple[str, str, str]] = {
-            (f.topic, f.category, f.entry_id or "") for f in existing
-        }
+        # Bootstrap dedup set from disk on first tick; subsequent ticks
+        # reuse the in-memory set (new findings are added as they're created).
+        if not self._existing_keys:
+            existing = load_findings(self.name, limit=5000, unacknowledged_only=True)
+            self._existing_keys = {
+                (f.topic, f.category, f.entry_id or "") for f in existing
+            }
 
         cfg = self._config
         findings: List[Finding] = []
@@ -182,9 +196,9 @@ class ThreadAuditorDaemon(BaseDaemon):
             # Deduplicate: skip findings that already exist unacknowledged
             for f in thread_findings:
                 key = (f.topic, f.category, f.entry_id or "")
-                if key not in existing_keys:
+                if key not in self._existing_keys:
                     findings.append(f)
-                    existing_keys.add(key)
+                    self._existing_keys.add(key)
 
             # Update checkpoint for this thread
             self._checkpoint.update_thread(topic, mtime, entry_count)

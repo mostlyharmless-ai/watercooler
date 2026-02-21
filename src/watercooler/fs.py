@@ -215,8 +215,11 @@ def migrate_to_structured_layout(threads_dir: Path) -> list[tuple[Path, Path]]:
         if dest.exists():
             logger.warning("migrate_to_structured_layout: skipping '%s' — collision with '%s'", p, dest)
             continue
-        shutil.move(str(p), str(dest))
-        moved.append((p, dest))
+        try:
+            shutil.move(str(p), str(dest))
+            moved.append((p, dest))
+        except OSError as exc:
+            logger.error("migrate_to_structured_layout: failed to move '%s' → '%s': %s", p, dest, exc)
 
     return moved
 
