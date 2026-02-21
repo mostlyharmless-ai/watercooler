@@ -1,6 +1,6 @@
 ---
 name: pydantic-hardener
-description: Audit Pydantic v2 models for missing cross-field validators, type-narrowing gaps, empty-value guards, and frozen enforcement. Based on patterns from PR #190 (14-round review).
+description: Audit Pydantic v2 models for missing cross-field validators, type-narrowing gaps, empty-value guards, frozen enforcement, and missing numeric bounds. Based on patterns from PR #190 (14-round review).
 allowed-tools:
   - Read
   - Glob
@@ -69,6 +69,7 @@ assert result is not None  # guaranteed by <function> contract
 
 **Detection:**
 - Find `set()` or `dict` used for dedup (patterns: `if x not in seen: seen.add(x)`)
+- Scope to functions whose parameters or local types involve Pydantic models (ignore unrelated dedup loops)
 - Trace the dedup key back to its source field
 - Check if the source field type allows empty strings or None
 - Flag if there's no guard before the dedup check
@@ -187,6 +188,8 @@ def test_<model>_<field>_boundary_accepted():
     cfg = ModelName(field_a=5.0, field_b=5.0)
     assert cfg.field_a == 5.0
 ```
+
+**Note:** Verify that `match=` values in generated tests match the actual exception text from the validator. The templates above use placeholder field names — substitute the real error message substring.
 
 ### Step 7: Verify
 

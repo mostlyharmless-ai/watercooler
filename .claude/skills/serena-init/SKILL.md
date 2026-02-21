@@ -36,7 +36,9 @@ The tool paths below use `plugin_serena_serena` as the MCP plugin name. If Seren
    PAYLOAD=$(jq -n --arg p "$(pwd)" '{project: $p}') && mcp-cli call plugin_serena_serena/activate_project "$PAYLOAD"
    ```
 
-5. **Confirm** to the user:
+5. **Handle errors**: If either `mcp-cli call` fails, report the error to the user and stop. Do not proceed with partial initialization.
+
+6. **Confirm** to the user:
    - Serena instructions loaded
    - Project activated at the current directory path
    - Ready for semantic code operations

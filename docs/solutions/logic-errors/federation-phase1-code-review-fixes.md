@@ -75,6 +75,8 @@ All six bugs share a common theme: **implicit assumptions not enforced by code**
 
 ## Fixes Applied
 
+Fixes are grouped by type, not chronological order. See the Key Commits table for the actual timeline.
+
 ### Fix 1: Sort before dedup in merger (Round 10)
 
 **File:** `src/watercooler_mcp/federation/merger.py`
@@ -190,6 +192,8 @@ if secondary_count > fed_config.max_namespaces:
         "results": [],
     })
 ```
+
+**Note:** Per Prevention Strategy 5, this error response could include `queried_namespaces` so callers see which namespaces were resolved before hitting the cap. Tracked for Phase 2.
 
 ## Key Commits
 
