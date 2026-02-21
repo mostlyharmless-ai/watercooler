@@ -12,7 +12,29 @@ from watercooler_mcp.daemons.errors import DaemonAlreadyRegisteredError, DaemonN
 from watercooler_mcp.daemons.manager import DaemonManager
 from watercooler_mcp.daemons.state import Finding
 
-from tests.unit.daemon_helpers import StubDaemon
+
+class StubDaemon(BaseDaemon):
+    """Configurable test stub for daemon tests."""
+
+    def __init__(self, *, findings=None, tick_delay=0, raise_on_tick=False, **kwargs):
+        super().__init__(**kwargs)
+        self._findings = findings or []
+        self._tick_delay = tick_delay
+        self._raise_on_tick = raise_on_tick
+        self.tick_count = 0
+        self.events_received: List[tuple] = []
+
+    def tick(self) -> List[Finding]:
+        self.tick_count += 1
+        if self._raise_on_tick:
+            raise RuntimeError("tick error")
+        if self._tick_delay:
+            time.sleep(self._tick_delay)
+        return list(self._findings)
+
+    def on_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        self.events_received.append((event_type, payload))
+        self.wake()
 
 
 class TestDaemonManager:
@@ -82,9 +104,9 @@ class TestDaemonManager:
         mgr.register(d2)
 
         mgr.dispatch_event("thread_updated", {"topic": "t1"})
-        assert len(d1.events) == 1
-        assert d1.events[0] == ("thread_updated", {"topic": "t1"})
-        assert len(d2.events) == 1
+        assert len(d1.events_received) == 1
+        assert d1.events_received[0] == ("thread_updated", {"topic": "t1"})
+        assert len(d2.events_received) == 1
 
     def test_get_all_findings_single_daemon(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
