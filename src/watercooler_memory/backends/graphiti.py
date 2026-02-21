@@ -13,7 +13,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Any, Final, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -2443,6 +2443,144 @@ class GraphitiBackend(MemoryBackend):
             return asyncio.run(search_episodes_async())
         except Exception as e:
             raise BackendError(f"Episode search failed for '{query}': {e}") from e
+
+    # Safety limit for full-corpus enumeration (get_group_episodes).
+    # Prevents unbounded result sets from consuming all memory.
+    EPISODE_SAFETY_LIMIT: Final[int] = 10_000
+
+    def get_group_episodes(
+        self,
+        group_id: str,
+        start_time: str = "",
+        end_time: str = "",
+    ) -> list["EpisodeRecord"]:
+        """Get ALL episodes for a group via Cypher (not semantic search).
+
+        Unlike get_episodes() which performs semantic search and requires a
+        query string, this method enumerates the complete episode set for a
+        group_id. Used by LeanRAG pipeline which needs the full corpus for
+        UMAP/clustering.
+
+        This is NOT a MemoryBackend protocol method — it is only meaningful
+        for Graphiti (FalkorDB-backed storage). LeanRAG does not store episodes
+        directly; it consumes them from Graphiti.
+
+        Args:
+            group_id: Project group ID (e.g., "watercooler_cloud")
+            start_time: ISO 8601 lower bound for created_at (inclusive)
+            end_time: ISO 8601 upper bound for created_at (inclusive)
+
+        Returns:
+            List of EpisodeRecord dataclasses for the group.
+            Results are truncated at ``EPISODE_SAFETY_LIMIT`` (10,000)
+            with a WARNING log.  When a time filter is also active, the
+            safety limit is applied *before* the Python-side time filter,
+            so the returned list may be smaller than the true matching
+            set — a second WARNING is emitted when this happens.  Callers
+            should check logs if completeness is critical.
+
+        Raises:
+            ConfigError: If group_id is empty
+            TransientError: If database connection fails
+            BackendError: If query execution fails
+
+        Warning:
+            This is a **synchronous** method that internally calls
+            ``asyncio.run()``. It must NOT be called directly from
+            an async context — use ``await asyncio.to_thread(...)``
+            instead, which runs in a thread pool with its own event
+            loop.
+        """
+        from . import EpisodeRecord
+
+        if not group_id or not group_id.strip():
+            raise ConfigError("group_id is required for get_group_episodes")
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass  # No running loop — safe to call asyncio.run()
+        else:
+            raise RuntimeError(
+                "get_group_episodes() called from async context. "
+                "Use `await asyncio.to_thread(backend.get_group_episodes, ...)` instead."
+            )
+
+        try:
+            graphiti = self._create_graphiti_client()
+        except Exception as e:
+            raise TransientError(f"Database connection failed: {e}") from e
+
+        sanitized_group_id = self._sanitize_thread_id(group_id)
+
+        async def _fetch_all() -> list[EpisodeRecord]:
+            driver = graphiti.clients.driver
+            # NOTE: Time-range filtering (start_time / end_time) is intentionally
+            # kept in Python (_filter_by_time_range) rather than pushed into this
+            # Cypher WHERE clause.  FalkorDB stores created_at as an opaque string,
+            # so lexicographic comparison in Cypher is fragile across ISO-8601
+            # offset variants.  Deferring to Phase 2 once datetime semantics are
+            # validated end-to-end.  ORDER BY is safe here because FalkorDB sorts
+            # strings lexicographically and our created_at values are ISO-8601 UTC
+            # (constant-width, zero-offset), so chronological order is preserved.
+            cypher = """
+            MATCH (e:Episodic)
+            WHERE e.group_id = $group_id
+            RETURN e.uuid as uuid, e.name as name, e.content as content,
+                   e.source_description as source_description,
+                   e.group_id as group_id, e.created_at as created_at
+            ORDER BY e.created_at
+            LIMIT $safety_limit
+            """
+            result, _, _ = await driver.execute_query(
+                cypher,
+                group_id=sanitized_group_id,
+                safety_limit=self.EPISODE_SAFETY_LIMIT,
+            )
+
+            raw_dicts = [dict(record) for record in result]
+
+            pre_filter_count = len(raw_dicts)
+            if pre_filter_count >= self.EPISODE_SAFETY_LIMIT:
+                logger.warning(
+                    "get_group_episodes: hit safety limit %d for group %s"
+                    " — results may be incomplete",
+                    self.EPISODE_SAFETY_LIMIT,
+                    group_id,
+                )
+
+            # Filter by time range on raw dicts (before dataclass construction)
+            filtered = _filter_by_time_range(raw_dicts, start_time, end_time)
+
+            if pre_filter_count >= self.EPISODE_SAFETY_LIMIT and len(filtered) < pre_filter_count:
+                logger.warning(
+                    "get_group_episodes: time filter reduced %d → %d for group %s"
+                    " (safety limit may have excluded matching episodes)",
+                    pre_filter_count,
+                    len(filtered),
+                    group_id,
+                )
+
+            # Construct typed records with null-safe defaults
+            records = []
+            for r in filtered:
+                safe = {k: v if v is not None else "" for k, v in r.items()}
+                if not safe.get("uuid"):
+                    logger.warning(
+                        "get_group_episodes: episode with empty uuid in group %s"
+                        " (source_description=%s) — downstream will use md5 fallback",
+                        group_id,
+                        safe.get("source_description", "")[:80],
+                    )
+                records.append(EpisodeRecord(**safe))
+            return records
+
+        try:
+            return asyncio.run(_fetch_all())
+        except Exception as e:
+            raise BackendError(
+                f"get_group_episodes failed for group '{group_id}': {e}"
+            ) from e
 
     async def find_episode_by_chunk_id_async(
         self,

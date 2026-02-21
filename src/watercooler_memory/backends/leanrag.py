@@ -846,7 +846,14 @@ class LeanRAGBackend(MemoryBackend):
 
                     from leanrag.core.llm import embedding as embed_fn
                     from leanrag.core.llm import generate_text
-                    from leanrag.pipelines.incremental import incremental_update
+                    try:
+                        from leanrag.pipelines.incremental import incremental_update
+                    except ImportError:
+                        logger.warning(
+                            "leanrag.pipelines.incremental not available; "
+                            "falling back to full rebuild"
+                        )
+                        incremental_update = None  # type: ignore[assignment]
 
                     # Load extracted entities
                     entity_path = work_dir / "entity.jsonl"
@@ -891,6 +898,14 @@ class LeanRAGBackend(MemoryBackend):
                         all_embeddings.append(emb)
 
                     embeddings = np.vstack(all_embeddings)
+
+                    if incremental_update is None:
+                        # Fallback: full rebuild when incremental module unavailable
+                        logger.info(
+                            "Incremental pipeline unavailable; delegating to full index()"
+                        )
+                        os.chdir(original_cwd)  # restore before calling index()
+                        return self.index(chunks, progress_callback=progress_callback)
 
                     # Stage 3: Run incremental update pipeline
                     _report("incremental_update", "assigning", 1, 3)

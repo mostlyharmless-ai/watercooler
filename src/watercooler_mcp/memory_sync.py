@@ -642,7 +642,7 @@ def init_memory_queue_executors() -> None:
             entry_id=task.entry_id,
             timestamp=task.timestamp,
             title=task.title,
-            code_path=task.source_description.split("|")[0].strip() if "|" in task.source_description else "",
+            code_path=task.code_path or "",
         )
         if not result.get("success", False):
             raise RuntimeError(result.get("error", "Graphiti sync failed"))
@@ -662,7 +662,42 @@ def init_memory_queue_executors() -> None:
     logger.info("MEMORY: Registered leanrag_pipeline executor with memory task queue")
 
 
-async def _leanrag_pipeline_executor_fn(task: "MemoryTask") -> Dict[str, Any]:
+def episodes_to_chunk_payload(
+    episodes: list, group_id: str,
+) -> "ChunkPayload":
+    """Convert Graphiti episodes to a ChunkPayload for LeanRAG pipeline.
+
+    Args:
+        episodes: List of EpisodeRecord instances from the Graphiti backend.
+        group_id: Project group identifier for metadata tagging.
+
+    Returns:
+        A ChunkPayload ready for LeanRAG indexing.
+    """
+    import hashlib
+    from watercooler_memory.backends import ChunkPayload
+
+    chunks = []
+    for ep in episodes:
+        content = ep.content
+        if not content:
+            logger.debug("episodes_to_chunk_payload: skipping episode %s with empty content", ep.uuid)
+            continue
+        chunk_id = ep.uuid or hashlib.md5(
+            content.encode(), usedforsecurity=False
+        ).hexdigest()
+        chunks.append({
+            "id": chunk_id,
+            "text": content,
+            "metadata": {
+                "group_id": group_id,
+                "source": "graphiti_episode",
+            },
+        })
+    return ChunkPayload(manifest_version="1.0", chunks=chunks)
+
+
+async def _leanrag_pipeline_executor_fn(task: "MemoryTask") -> dict[str, Any]:
     """Execute a LeanRAG pipeline from a queued task.
 
     Routing logic:
@@ -681,13 +716,24 @@ async def _leanrag_pipeline_executor_fn(task: "MemoryTask") -> Dict[str, Any]:
         # SINGLE tasks store raw text content, not JSON
         params = {}
 
-    # Get LeanRAG backend
+    # Get LeanRAG backend via unified config factory
+    code_path = task.code_path or ""
+    if not code_path:
+        raise RuntimeError(
+            "LeanRAG pipeline requires code_path for project-scoped config. "
+            "Set code_path on the MemoryTask or provide it to the MCP tool. "
+            f"(group_id={task.group_id!r}, task_id={task.task_id!r})"
+        )
     try:
-        from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
-        import os
+        from .memory import load_leanrag_config
+        from watercooler_memory.backends.leanrag import LeanRAGBackend
 
-        leanrag_path = os.getenv("LEANRAG_PATH", "external/LeanRAG")
-        config = LeanRAGConfig(leanrag_path=Path(leanrag_path))
+        config = load_leanrag_config(code_path=code_path)
+        if config is None:
+            raise RuntimeError(
+                "LeanRAG config unavailable (disabled or misconfigured). "
+                f"code_path={code_path!r}, group_id={task.group_id!r}"
+            )
         backend = LeanRAGBackend(config)
     except ImportError as exc:
         raise RuntimeError(
@@ -703,7 +749,7 @@ async def _leanrag_pipeline_executor_fn(task: "MemoryTask") -> Dict[str, Any]:
         from watercooler_memory.backends import ChunkPayload
 
         content = task.content
-        chunk_id = task.entry_id or hashlib.md5(content.encode()).hexdigest()
+        chunk_id = task.entry_id or hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
         chunk_payload = ChunkPayload(
             manifest_version="1.0",
             chunks=[{
@@ -734,8 +780,8 @@ async def _leanrag_pipeline_executor_fn(task: "MemoryTask") -> Dict[str, Any]:
 
         return {
             "episode_uuid": task.entry_id or "",
-            "entities_extracted": result.indexed_count,
-            "facts_extracted": 0,
+            "entities_extracted": [],
+            "facts_extracted": result.indexed_count,
             "message": result.message,
         }
 
@@ -744,16 +790,26 @@ async def _leanrag_pipeline_executor_fn(task: "MemoryTask") -> Dict[str, Any]:
     if not group_id:
         raise RuntimeError("Missing group_id in LeanRAG BULK task")
 
-    # Fetch episodes from Graphiti for this group
+    # Fetch episodes from Graphiti for this group via unified config
     try:
+        from .memory import load_graphiti_config
         from watercooler_memory.backends.graphiti import GraphitiBackend
 
-        graphiti = GraphitiBackend()
-        episodes_result = await graphiti.get_episodes(
-            group_ids=[group_id],
-            limit=params.get("limit", 1000),
+        graphiti_config = load_graphiti_config(code_path=code_path)
+        if graphiti_config is None:
+            raise RuntimeError(
+                "Graphiti config unavailable — required for episode retrieval. "
+                f"code_path={code_path!r}, group_id={group_id!r}"
+            )
+        graphiti = GraphitiBackend(graphiti_config)
+        start_date = params.get("start_date", "")
+        end_date = params.get("end_date", "")
+        episodes = await asyncio.to_thread(
+            graphiti.get_group_episodes,
+            group_id=group_id,
+            start_time=start_date,
+            end_time=end_date,
         )
-        episodes = episodes_result.get("episodes", [])
     except ImportError as exc:
         raise RuntimeError(
             "Graphiti backend required to fetch episodes for LeanRAG pipeline"
@@ -767,40 +823,22 @@ async def _leanrag_pipeline_executor_fn(task: "MemoryTask") -> Dict[str, Any]:
             "message": f"No episodes found for group '{group_id}'",
         }
 
-    # Convert episodes to ChunkPayload
-    import hashlib
-    from watercooler_memory.backends import ChunkPayload
-
-    chunks = []
-    for ep in episodes:
-        content = ep.get("content", "")
-        chunk_id = ep.get("uuid") or hashlib.md5(content.encode()).hexdigest()
-        chunks.append({
-            "id": chunk_id,
-            "text": content,
-            "metadata": {
-                "group_id": group_id,
-                "source": "graphiti_episode",
-            },
-        })
-
-    chunk_payload = ChunkPayload(
-        manifest_version="1.0",
-        chunks=chunks,
-    )
+    chunk_payload = episodes_to_chunk_payload(episodes, group_id)
 
     # BULK always runs full index (full rebuild)
     result = await asyncio.to_thread(backend.index, chunk_payload)
 
     logger.info(
         "MEMORY: LeanRAG pipeline completed for %s: %d chunks -> %d clusters",
-        group_id, len(chunks), result.indexed_count,
+        group_id, len(chunk_payload.chunks), result.indexed_count,
     )
 
+    # BULK pipeline tasks do not produce per-entry episode UUIDs;
+    # the worker defaults missing keys to ""/None/0.
     return {
         "group_id": group_id,
         "clusters_created": result.indexed_count,
-        "chunks_processed": len(chunks),
+        "chunks_processed": len(chunk_payload.chunks),
         "message": result.message,
     }
 

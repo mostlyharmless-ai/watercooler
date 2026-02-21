@@ -218,17 +218,17 @@ class TestLeanRAGRunPipelineTool:
         """Test successful pipeline execution (direct, no queue)."""
         from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
 
-        # Mock Graphiti backend to return episodes
+        # Episodes returned as objects with .uuid and .content attributes
+        ep1 = MagicMock(uuid="ep1", content="Test content")
         mock_graphiti = MagicMock()
-
-        async def mock_get_episodes(*args, **kwargs):
-            return {"episodes": [{"uuid": "ep1", "content": "Test content"}]}
-
-        mock_graphiti.get_episodes = AsyncMock(side_effect=mock_get_episodes)
+        mock_graphiti.get_group_episodes = MagicMock(return_value=[ep1])
 
         with patch(
             "watercooler_mcp.tools.memory._get_leanrag_backend",
             return_value=mock_leanrag_backend,
+        ), patch(
+            "watercooler_mcp.memory.load_graphiti_config",
+            return_value=MagicMock(),
         ), patch(
             "watercooler_memory.backends.graphiti.GraphitiBackend",
             return_value=mock_graphiti,
@@ -238,6 +238,7 @@ class TestLeanRAGRunPipelineTool:
         ):
             result = await _leanrag_run_pipeline_impl(
                 group_id="auth-feature",
+                code_path="/tmp/test-repo",
                 ctx=mock_context,
             )
 
@@ -249,17 +250,17 @@ class TestLeanRAGRunPipelineTool:
         """Test pipeline with filter options (direct, no queue)."""
         from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
 
-        # Mock Graphiti backend to return episodes
+        # Episodes returned as objects with .uuid and .content attributes
+        ep1 = MagicMock(uuid="ep1", content="Test content")
         mock_graphiti = MagicMock()
-
-        async def mock_get_episodes(*args, **kwargs):
-            return {"episodes": [{"uuid": "ep1", "content": "Test content"}]}
-
-        mock_graphiti.get_episodes = AsyncMock(side_effect=mock_get_episodes)
+        mock_graphiti.get_group_episodes = MagicMock(return_value=[ep1])
 
         with patch(
             "watercooler_mcp.tools.memory._get_leanrag_backend",
             return_value=mock_leanrag_backend,
+        ), patch(
+            "watercooler_mcp.memory.load_graphiti_config",
+            return_value=MagicMock(),
         ), patch(
             "watercooler_memory.backends.graphiti.GraphitiBackend",
             return_value=mock_graphiti,
@@ -269,6 +270,7 @@ class TestLeanRAGRunPipelineTool:
         ):
             result = await _leanrag_run_pipeline_impl(
                 group_id="auth-feature",
+                code_path="/tmp/test-repo",
                 start_date="2025-01-01",
                 end_date="2025-01-31",
                 ctx=mock_context,
@@ -287,6 +289,7 @@ class TestLeanRAGRunPipelineTool:
         ):
             result = await _leanrag_run_pipeline_impl(
                 group_id="test-thread",
+                code_path="/tmp/test-repo",
                 ctx=mock_context,
             )
 
@@ -305,6 +308,7 @@ class TestLeanRAGRunPipelineTool:
         ):
             result = await _leanrag_run_pipeline_impl(
                 group_id="auth-feature",
+                code_path="/tmp/test-repo",
                 dry_run=True,
                 ctx=mock_context,
             )

@@ -1288,31 +1288,27 @@ class TestLeanRAGExecutor:
             backend="leanrag_pipeline",
             group_id="test-group",
             content=json.dumps({}),
+            code_path="/tmp/test-repo",
         )
 
-        mock_episodes = {
-            "episodes": [
-                {"uuid": "ep1", "content": "Episode one content"},
-                {"uuid": "ep2", "content": "Episode two content"},
-            ]
-        }
+        # Episodes returned as objects with .uuid and .content attributes
+        ep1 = MagicMock(uuid="ep1", content="Episode one content")
+        ep2 = MagicMock(uuid="ep2", content="Episode two content")
 
         mock_index_result = MagicMock()
         mock_index_result.indexed_count = 1
         mock_index_result.message = "Indexed 2 chunks into 1 cluster"
 
-        async def mock_get_episodes(**kwargs):
-            return mock_episodes
-
         mock_graphiti = MagicMock()
-        mock_graphiti.get_episodes = mock_get_episodes
+        mock_graphiti.get_group_episodes = MagicMock(return_value=[ep1, ep2])
 
         mock_leanrag = MagicMock()
         mock_leanrag.index = MagicMock(return_value=mock_index_result)
 
-        with patch("watercooler_memory.backends.graphiti.GraphitiBackend", return_value=mock_graphiti), \
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=MagicMock()), \
              patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_leanrag), \
-             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"):
+             patch("watercooler_mcp.memory.load_graphiti_config", return_value=MagicMock()), \
+             patch("watercooler_memory.backends.graphiti.GraphitiBackend", return_value=mock_graphiti):
 
             result = asyncio.run(_leanrag_pipeline_executor_fn(task))
 
@@ -1332,6 +1328,7 @@ class TestLeanRAGExecutor:
             entry_id="E1",
             group_id="test-group",
             content="some content",
+            code_path="/tmp/test-repo",
         )
 
         mock_index_result = MagicMock()
@@ -1342,8 +1339,8 @@ class TestLeanRAGExecutor:
         mock_leanrag.has_incremental_state.return_value = False
         mock_leanrag.index = MagicMock(return_value=mock_index_result)
 
-        with patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_leanrag), \
-             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"):
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=MagicMock()), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_leanrag):
             result = asyncio.run(_leanrag_pipeline_executor_fn(task))
 
         assert result["episode_uuid"] == "E1"
@@ -1369,6 +1366,7 @@ class TestLeanRAGExecutor:
 
             result = asyncio.run(_leanrag_run_pipeline_impl(
                 group_id="test-group",
+                code_path="/tmp/test-repo",
                 ctx=mock_ctx,
             ))
 
@@ -1396,6 +1394,7 @@ class TestLeanRAGExecutor:
 
             result = asyncio.run(_leanrag_run_pipeline_impl(
                 group_id="test-group",
+                code_path="/tmp/test-repo",
                 ctx=mock_ctx,
             ))
 

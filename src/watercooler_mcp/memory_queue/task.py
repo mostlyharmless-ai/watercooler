@@ -10,9 +10,8 @@ import json
 import logging
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +93,7 @@ class MemoryTask:
     title: str = ""
     timestamp: str = ""
     source_description: str = ""
+    code_path: str = ""
 
     # Retry tracking
     attempt: int = 0
@@ -103,22 +103,35 @@ class MemoryTask:
 
     # Result data (populated on success)
     episode_uuid: str = ""
-    entities_extracted: List[str] = field(default_factory=list)
+    entities_extracted: list[str] = field(default_factory=list)
     facts_extracted: int = 0
 
     # Bulk job support
-    bulk_manifest: List[Dict[str, Any]] = field(default_factory=list)
+    bulk_manifest: list[dict[str, Any]] = field(default_factory=list)
     bulk_progress: int = 0
 
     # Timestamps
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
+    def __post_init__(self) -> None:
+        """Validate invariants at construction time.
+
+        BULK tasks require non-empty group_id to prevent dedup-key collapse.
+        Auto-derivation from code_path belongs in callers (Step 5), not here —
+        task.py stays stdlib-only (no cross-package imports).
+        """
+        if self.task_type == TaskType.BULK and not self.group_id:
+            raise ValueError(
+                "BULK tasks require non-empty group_id (provide group_id or "
+                "call derive_group_id(code_path) before construction)"
+            )
+
     # ------------------------------------------------------------------ #
     # Serialisation
     # ------------------------------------------------------------------ #
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to JSON-serialisable dictionary."""
         return asdict(self)
 
@@ -127,7 +140,7 @@ class MemoryTask:
         return json.dumps(self.to_dict(), separators=(",", ":"))
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "MemoryTask":
+    def from_dict(cls, data: dict[str, Any]) -> "MemoryTask":
         """Reconstruct from a dictionary (lenient: ignores unknown keys)."""
         known = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known}
@@ -165,7 +178,7 @@ class MemoryTask:
     def mark_completed(
         self,
         episode_uuid: str = "",
-        entities: Optional[List[str]] = None,
+        entities: list[str] | None = None,
         facts: int = 0,
     ) -> None:
         """Transition to COMPLETED with optional result data."""

@@ -230,6 +230,7 @@ async def route_search(
                 ctx=ctx,
                 threads_dir=threads_dir,
                 query=query,
+                code_path=code_path,
                 **kwargs,
             )
         except Exception as e:
@@ -540,6 +541,7 @@ def _search_leanrag_impl(
     ctx: Context,
     threads_dir: Path,
     query: str,
+    code_path: str = "",
     limit: int = 10,
     **kwargs: Any,
 ) -> str:
@@ -552,6 +554,7 @@ def _search_leanrag_impl(
         ctx: MCP context
         threads_dir: Path to threads directory
         query: Search query string
+        code_path: Path to code repository (for config/database derivation)
         limit: Maximum number of results
         **kwargs: Additional search parameters
 
@@ -559,14 +562,13 @@ def _search_leanrag_impl(
         JSON string with search results
     """
     try:
-        from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
+        from watercooler_mcp.memory import load_leanrag_config
+        from watercooler_memory.backends.leanrag import LeanRAGBackend
         from watercooler_memory.backends import QueryPayload
 
-        # Configure backend with threads_dir as work_dir
-        config = LeanRAGConfig(
-            work_dir=threads_dir / "graph" / "leanrag",
-            leanrag_path=Path("external/LeanRAG"),
-        )
+        config = load_leanrag_config(code_path=code_path)
+        if config is None:
+            raise RuntimeError("LeanRAG config unavailable (disabled or misconfigured)")
 
         backend = LeanRAGBackend(config)
 

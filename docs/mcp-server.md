@@ -317,7 +317,45 @@ watercooler_federated_search(
 )
 ```
 
-> Memory query tools are available as an optional add-on. When the memory backend is enabled, additional search and query tools become available for semantic search across project context.
+### Memory & Provenance Tools
+
+> Memory tools require the memory backend to be enabled in `config.toml`.
+
+#### `watercooler_get_entry_provenance`
+Bidirectional lookup between T1 entries and T2 episodes via the entry-episode
+index. Supports both directions: episode UUID to entry ID, and entry ID to
+episode list (chunk-aware).
+
+**Parameters:**
+- `entry_id` (str): Watercooler entry ULID (for entry → episodes lookup)
+- `episode_uuid` (str): Graphiti episode UUID (for episode → entry lookup)
+- `code_path` (str): Path to project directory (for index file resolution)
+
+Provide exactly one of `entry_id` or `episode_uuid`.
+
+**Returns:** JSON with provenance mapping:
+- `provenance_available` (bool): Whether a mapping was found
+- `entry_id`, `thread_id`: Source entry location (on hit)
+- `episodes[]`: List of `{episode_uuid, chunk_index, total_chunks}` (entry → episodes)
+- `stale_direct_mapping` (bool, optional): Present and `true` when the entry→episodes
+  lookup found a direct entry_id mapping but the entry-episode index has no chunk records.
+  Indicates the mapping may be from before chunked indexing was enabled.
+- `action_hints[]`: Suggested remediation (on miss)
+
+**Example (episode → entry):**
+```python
+watercooler_get_entry_provenance(episode_uuid="ep-uuid-123")
+# → {"provenance_available": true, "entry_id": "01AUTH001", "thread_id": "auth-feature", ...}
+```
+
+**Example (entry → episodes):**
+```python
+watercooler_get_entry_provenance(entry_id="01AUTH001")
+# → {"provenance_available": true, "episodes": [{"episode_uuid": "ep-1", "chunk_index": 0, "total_chunks": 1}]}
+```
+
+No LLM API keys required — uses only the local entry-episode index file.
+See `docs/SEMANTIC_BRIDGE.md` for the full T3 → T2 → T1 reverse provenance pattern.
 
 ### Git Sync
 

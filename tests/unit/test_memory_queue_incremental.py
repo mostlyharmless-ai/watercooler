@@ -46,10 +46,11 @@ class TestSingleTaskRouting:
             entry_id="E1",
             group_id="test-group",
             content="OAuth2 enables delegated authorization.",
+            code_path="/tmp/test-repo",
         )
 
-        with patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend), \
-             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"):
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=MagicMock()), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend):
             result = asyncio.run(_leanrag_pipeline_executor_fn(task))
 
         assert result["episode_uuid"] == "E1"
@@ -76,10 +77,11 @@ class TestSingleTaskRouting:
             entry_id="E2",
             group_id="test-group",
             content="JWT tokens carry claims.",
+            code_path="/tmp/test-repo",
         )
 
-        with patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend), \
-             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"):
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=MagicMock()), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend):
             result = asyncio.run(_leanrag_pipeline_executor_fn(task))
 
         assert result["episode_uuid"] == "E2"
@@ -97,12 +99,13 @@ class TestSingleTaskRouting:
             backend="leanrag_pipeline",
             entry_id="E3",
             content="",
+            code_path="/tmp/test-repo",
         )
 
         mock_backend = MagicMock()
 
-        with patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend), \
-             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"):
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=MagicMock()), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend):
             with pytest.raises(RuntimeError, match="Missing content"):
                 asyncio.run(_leanrag_pipeline_executor_fn(task))
 
@@ -127,28 +130,24 @@ class TestBulkTaskRouting:
         mock_backend.has_incremental_state.return_value = True  # State exists but ignored
         mock_backend.index = MagicMock(return_value=mock_result)
 
-        mock_episodes = {
-            "episodes": [
-                {"uuid": "ep-1", "content": "OAuth2 authorization"},
-                {"uuid": "ep-2", "content": "JWT token validation"},
-            ],
-        }
-
-        async def mock_get_episodes(**kwargs):
-            return mock_episodes
+        # Episodes returned as objects with .uuid and .content attributes
+        ep1 = MagicMock(uuid="ep-1", content="OAuth2 authorization")
+        ep2 = MagicMock(uuid="ep-2", content="JWT token validation")
 
         mock_graphiti = MagicMock()
-        mock_graphiti.get_episodes = mock_get_episodes
+        mock_graphiti.get_group_episodes = MagicMock(return_value=[ep1, ep2])
 
         task = MemoryTask(
             task_type=TaskType.BULK,
             backend="leanrag_pipeline",
             group_id="auth-feature",
             content=json.dumps({"start_date": "", "end_date": ""}),
+            code_path="/tmp/test-repo",
         )
 
-        with patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend), \
-             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"), \
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=MagicMock()), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend), \
+             patch("watercooler_mcp.memory.load_graphiti_config", return_value=MagicMock()), \
              patch("watercooler_memory.backends.graphiti.GraphitiBackend", return_value=mock_graphiti):
             result = asyncio.run(_leanrag_pipeline_executor_fn(task))
 
@@ -159,32 +158,22 @@ class TestBulkTaskRouting:
         mock_backend.incremental_index.assert_not_called()
 
     def test_bulk_task_missing_group_id_raises(self):
-        """BULK task with no group_id raises RuntimeError."""
-        from watercooler_mcp.memory_sync import _leanrag_pipeline_executor_fn
-
-        task = MemoryTask(
-            task_type=TaskType.BULK,
-            backend="leanrag_pipeline",
-            group_id="",
-            content=json.dumps({}),
-        )
-
-        mock_backend = MagicMock()
-
-        with patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend), \
-             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"):
-            with pytest.raises(RuntimeError, match="Missing group_id"):
-                asyncio.run(_leanrag_pipeline_executor_fn(task))
+        """BULK task with no group_id raises ValueError at construction."""
+        # __post_init__ guard rejects BULK tasks with empty group_id
+        with pytest.raises(ValueError, match="BULK tasks require non-empty group_id"):
+            MemoryTask(
+                task_type=TaskType.BULK,
+                backend="leanrag_pipeline",
+                group_id="",
+                content=json.dumps({}),
+            )
 
     def test_bulk_task_no_episodes_returns_zero(self):
         """BULK task with no episodes returns zero counts."""
         from watercooler_mcp.memory_sync import _leanrag_pipeline_executor_fn
 
-        async def mock_get_episodes(**kwargs):
-            return {"episodes": []}
-
         mock_graphiti = MagicMock()
-        mock_graphiti.get_episodes = mock_get_episodes
+        mock_graphiti.get_group_episodes = MagicMock(return_value=[])
         mock_backend = MagicMock()
 
         task = MemoryTask(
@@ -192,10 +181,12 @@ class TestBulkTaskRouting:
             backend="leanrag_pipeline",
             group_id="empty-group",
             content=json.dumps({}),
+            code_path="/tmp/test-repo",
         )
 
-        with patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend), \
-             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"), \
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=MagicMock()), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend), \
+             patch("watercooler_mcp.memory.load_graphiti_config", return_value=MagicMock()), \
              patch("watercooler_memory.backends.graphiti.GraphitiBackend", return_value=mock_graphiti):
             result = asyncio.run(_leanrag_pipeline_executor_fn(task))
 
@@ -229,10 +220,11 @@ class TestContentParsing:
             entry_id="E4",
             group_id="test",
             content="This is plain text, not JSON.",
+            code_path="/tmp/test-repo",
         )
 
-        with patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend), \
-             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"):
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=MagicMock()), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend):
             result = asyncio.run(_leanrag_pipeline_executor_fn(task))
 
         # Should succeed (not raise JSON parse error)
@@ -263,10 +255,11 @@ class TestContentParsing:
             entry_id="E5",
             group_id="test",
             content=content_with_flag,
+            code_path="/tmp/test-repo",
         )
 
-        with patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend), \
-             patch("watercooler_memory.backends.leanrag.LeanRAGConfig"):
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=MagicMock()), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", return_value=mock_backend):
             result = asyncio.run(_leanrag_pipeline_executor_fn(task))
 
         # Should use full index (not incremental) even though state exists
@@ -308,6 +301,7 @@ class TestToolIncrementalParam:
              patch("watercooler_mcp.memory_queue.get_worker", return_value=FakeWorker()):
             asyncio.run(_leanrag_run_pipeline_impl(
                 group_id="test-group",
+                code_path="/tmp/test-repo",
                 ctx=mock_ctx,
                 incremental=False,
             ))
@@ -342,6 +336,7 @@ class TestToolIncrementalParam:
              patch("watercooler_mcp.memory_queue.get_worker", return_value=FakeWorker()):
             asyncio.run(_leanrag_run_pipeline_impl(
                 group_id="test-group",
+                code_path="/tmp/test-repo",
                 ctx=mock_ctx,
             ))
 

@@ -177,6 +177,28 @@ class QueryResult:
 
 
 @dataclass
+class EpisodeRecord:
+    """Lightweight episode reference for corpus enumeration.
+
+    All non-key string fields default to "" because FalkorDB Cypher results
+    may return None for optional node properties (e.g., source_description
+    on older episodes). Downstream consumers (LeanRAG pipeline) receive empty
+    strings instead of None, avoiding crashes in embedding generation.
+
+    created_at is kept as str (not datetime) because _filter_by_time_range()
+    operates on raw dicts BEFORE EpisodeRecord construction (see
+    get_group_episodes ordering note).
+    """
+
+    uuid: str
+    name: str = ""
+    content: str = ""
+    source_description: str = ""
+    group_id: str = ""
+    created_at: str = ""
+
+
+@dataclass
 class CorpusPayload:
     """Canonical corpus payload passed to prepare()."""
 
@@ -516,6 +538,7 @@ __all__ = [
     "Capabilities",
     "ChunkPayload",
     "CorpusPayload",
+    "EpisodeRecord",
     "HealthStatus",
     "IndexResult",
     "PrepareResult",

@@ -30,12 +30,6 @@ pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
-def mock_context() -> MagicMock:
-    """Create mock MCP context."""
-    return MagicMock()
-
-
-@pytest.fixture
 def mock_threads_dir(tmp_path: Path) -> Path:
     """Create mock threads directory with baseline graph."""
     threads_dir = tmp_path / "threads"
@@ -631,6 +625,7 @@ class TestLeanRAGPipelineE2E:
             result = await _leanrag_run_pipeline_impl(
                 group_id="test-group",
                 ctx=mock_context,
+                code_path="/tmp/test-repo",
                 dry_run=True,
             )
 
@@ -652,6 +647,7 @@ class TestLeanRAGPipelineE2E:
             result = await _leanrag_run_pipeline_impl(
                 group_id="test-group",
                 ctx=mock_context,
+                code_path="/tmp/test-repo",
             )
 
         result_data = json.loads(result.content[0].text)
@@ -659,21 +655,22 @@ class TestLeanRAGPipelineE2E:
         assert result_data["success"] is False
         assert "unavailable" in result_data["error"].lower()
 
-    async def test_pipeline_empty_group_id(
+    async def test_pipeline_missing_code_path(
         self, mock_context: MagicMock
     ) -> None:
-        """Test error when group_id is empty."""
+        """Test error when code_path is empty (required for BULK runs)."""
         from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
 
         result = await _leanrag_run_pipeline_impl(
-            group_id="",
+            group_id="test-group",
             ctx=mock_context,
+            code_path="",
         )
 
         result_data = json.loads(result.content[0].text)
 
         assert result_data["success"] is False
-        assert "group_id" in result_data["error"].lower()
+        assert "code_path" in result_data["error"].lower()
 
 
 # ============================================================================
