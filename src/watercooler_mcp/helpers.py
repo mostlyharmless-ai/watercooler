@@ -30,7 +30,7 @@ from .config import (
     ThreadContext,
     resolve_thread_context,
 )
-from .observability import log_debug
+from .observability import log_debug, log_warning
 
 
 # ============================================================================
@@ -159,6 +159,7 @@ def _get_thread_metadata(
             log_debug(f"[GRAPH] Failed to get metadata from graph: {e}")
 
     # No graph or thread not in graph — return defaults
+    log_debug(f"[GRAPH] No graph metadata for '{topic}', returning defaults")
     return topic, "open", "unknown", fs.utcnow_iso()
 
 
@@ -228,7 +229,7 @@ def _use_graph_for_reads(threads_dir: Path) -> bool:
     global _use_graph_warned
     if not _use_graph_warned and os.environ.get("WATERCOOLER_USE_GRAPH") == "0":
         _use_graph_warned = True
-        log_debug(
+        log_warning(
             "WATERCOOLER_USE_GRAPH=0 is no longer supported; "
             "graph reads are always used when available."
         )

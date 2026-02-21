@@ -257,7 +257,9 @@ def append_findings(daemon_name: str, findings: List[Finding]) -> None:
         with open(path, "a") as f:
             for finding in findings:
                 f.write(json.dumps(finding.to_dict()) + "\n")
-        # Rotate if file has grown too large
+        # Rotate if file has grown too large.
+        # TODO: _maybe_compact re-reads the file to count lines; tracking
+        # line_count in the checkpoint would make this O(1).
         _maybe_compact(path, daemon_name)
 
 
@@ -308,6 +310,12 @@ def load_findings(
     Note: Reads the entire JSONL file before filtering. The file is
     automatically compacted by append_findings() when it exceeds
     _MAX_FINDINGS_LINES (keeps most recent _COMPACT_KEEP_LINES).
+
+    Reads without holding ``_findings_lock``. This is safe because
+    ``_maybe_compact`` uses ``os.replace()`` (atomic on POSIX), so a
+    concurrent reader sees either the old or new file, never a torn
+    state. A reader that opens the file just before compaction may get
+    a partial result, which is acceptable for a best-effort query.
     """
     path = _daemon_dir(daemon_name) / "findings.jsonl"
     if not path.exists():
