@@ -93,10 +93,11 @@ def search(*, threads_dir: Path, query: str) -> list[tuple[Path, int, str]]:
     Searches entry bodies from the graph. Returns results in the same
     format as the legacy .md file grep for backward compatibility.
 
-    Note:
-        Line numbers are relative to each entry's body (not file-global).
-        This is a behavioral change from the legacy .md grep which returned
-        file-level line numbers.
+    .. warning:: BREAKING CHANGE
+
+        Line numbers are now relative to each entry's body (not file-global).
+        The legacy .md grep returned file-level line numbers. Callers using
+        ``line_no`` for file navigation will get entry-local positions.
     """
     from .baseline_graph import storage
 

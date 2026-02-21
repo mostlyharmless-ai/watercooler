@@ -136,9 +136,16 @@ class ThreadAuditorDaemon(BaseDaemon):
         # Re-syncing evicts keys for acknowledged/compacted findings so
         # recurring issues can be re-flagged.  50K limit is well above the
         # JSONL compaction ceiling (10K lines, kept at 5K).
+        _DEDUP_LIMIT = 50_000
         self._ticks_since_resync += 1
         if not self._existing_keys or self._ticks_since_resync >= _DEDUP_RESYNC_INTERVAL:
-            existing = load_findings(self.name, limit=50_000, unacknowledged_only=True)
+            existing = load_findings(self.name, limit=_DEDUP_LIMIT, unacknowledged_only=True)
+            if len(existing) >= _DEDUP_LIMIT:
+                logger.warning(
+                    "DAEMON[thread_auditor]: dedup cache truncated at %d findings; "
+                    "duplicates may occur — acknowledge old findings to reduce volume",
+                    _DEDUP_LIMIT,
+                )
             self._existing_keys = {
                 (f.topic, f.category, f.entry_id or "") for f in existing
             }
@@ -222,6 +229,13 @@ class ThreadAuditorDaemon(BaseDaemon):
 
         self._checkpoint.threads_processed = processed
         self._checkpoint.threads_skipped = skipped
+
+        # Prune checkpoint entries for topics no longer in the graph.
+        # Keeps thread_state bounded to the current set of active threads.
+        live_topics = set(topics)
+        stale = [t for t in self._checkpoint.thread_state if t not in live_topics]
+        for t in stale:
+            del self._checkpoint.thread_state[t]
 
         logger.debug(
             "DAEMON[thread_auditor]: scanned %d threads (%d skipped), %d new findings",
