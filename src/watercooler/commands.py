@@ -391,7 +391,6 @@ def merge_branch(branch: str, *, code_root: Path | None = None, force: bool = Fa
                 return "\n".join(lines)
 
         # Perform merge
-        warnings = []
         threads_repo.git.checkout("main")
         try:
             from git import Actor
@@ -404,10 +403,7 @@ def merge_branch(branch: str, *, code_root: Path | None = None, force: bool = Fa
                 'GIT_COMMITTER_EMAIL': author.email,
             }
             threads_repo.git.merge(branch, '--no-ff', '-m', f"Merge {branch} into main", env=env)
-            result_msg = f"✅ Merged '{branch}' into 'main' in threads repo."
-            if warnings:
-                result_msg += "\n" + "\n".join(warnings)
-            return result_msg
+            return f"✅ Merged '{branch}' into 'main' in threads repo."
         except GitCommandError as e:
             error_str = str(e)
             # Check if this is a merge conflict

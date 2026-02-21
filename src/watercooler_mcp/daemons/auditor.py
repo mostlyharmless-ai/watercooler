@@ -36,6 +36,8 @@ from watercooler.baseline_graph.writer import (
     get_entries_for_thread,
 )
 
+from ulid import ULID
+
 from .base import BaseDaemon
 from .state import Finding, load_findings
 
@@ -47,7 +49,6 @@ _SECONDS_PER_DAY = 86400
 
 def _make_finding_id() -> str:
     """Generate a unique, time-sortable finding ID (ULID)."""
-    from ulid import ULID
     return str(ULID())
 
 
@@ -126,8 +127,9 @@ class ThreadAuditorDaemon(BaseDaemon):
 
         # Bootstrap dedup set from disk on first tick; subsequent ticks
         # reuse the in-memory set (new findings are added as they're created).
+        # No limit — load all unacknowledged findings for complete dedup.
         if not self._existing_keys:
-            existing = load_findings(self.name, limit=5000, unacknowledged_only=True)
+            existing = load_findings(self.name, limit=50_000, unacknowledged_only=True)
             self._existing_keys = {
                 (f.topic, f.category, f.entry_id or "") for f in existing
             }
@@ -144,9 +146,12 @@ class ThreadAuditorDaemon(BaseDaemon):
 
             tp = thread_path(topic, threads_dir)
 
-            # Get graph metadata
+            # Get graph metadata — skip thread if meta is unavailable
             try:
                 thread_node = get_thread_from_graph(threads_dir, topic)
+                if thread_node is None:
+                    logger.debug("DAEMON[thread_auditor]: no graph meta for %s, skipping", topic)
+                    continue
                 graph_entries = get_entries_for_thread(threads_dir, topic)
                 entry_count = len(graph_entries)
             except (OSError, KeyError, ValueError) as exc:

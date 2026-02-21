@@ -234,11 +234,22 @@ def load_checkpoint(daemon_name: str) -> DaemonCheckpoint:
         return DaemonCheckpoint(daemon_name=daemon_name)
 
 
+# Module-global lock for JSONL writes. A single lock guards all daemons;
+# this is intentional — with the current single-daemon setup there's no
+# contention. Switch to per-file locking if multiple daemons write concurrently.
 _findings_lock = threading.Lock()
+
+# Rotation threshold: compact the JSONL file when it exceeds this many lines.
+_MAX_FINDINGS_LINES = 10_000
+_COMPACT_KEEP_LINES = 5_000
 
 
 def append_findings(daemon_name: str, findings: List[Finding]) -> None:
-    """Append findings to the JSONL log file (thread-safe)."""
+    """Append findings to the JSONL log file (thread-safe).
+
+    Triggers rotation when the file exceeds _MAX_FINDINGS_LINES,
+    keeping only the most recent _COMPACT_KEEP_LINES entries.
+    """
     if not findings:
         return
     path = _daemon_dir(daemon_name) / "findings.jsonl"
@@ -246,6 +257,39 @@ def append_findings(daemon_name: str, findings: List[Finding]) -> None:
         with open(path, "a") as f:
             for finding in findings:
                 f.write(json.dumps(finding.to_dict()) + "\n")
+        # Rotate if file has grown too large
+        _maybe_compact(path, daemon_name)
+
+
+def _maybe_compact(path: Path, daemon_name: str) -> None:
+    """Compact findings JSONL if it exceeds the rotation threshold.
+
+    Keeps the most recent _COMPACT_KEEP_LINES lines (newest entries are
+    at the end of the file). Called under _findings_lock.
+    """
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+        if len(lines) <= _MAX_FINDINGS_LINES:
+            return
+        keep = lines[-_COMPACT_KEEP_LINES:]
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                f.writelines(keep)
+            os.replace(tmp_path, str(path))
+            logger.info(
+                "DAEMON[%s]: compacted findings.jsonl from %d to %d lines",
+                daemon_name, len(lines), len(keep),
+            )
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        logger.warning("DAEMON[%s]: findings compaction failed: %s", daemon_name, e)
 
 
 def load_findings(
@@ -261,9 +305,9 @@ def load_findings(
 
     Returns findings in reverse chronological order (newest first).
 
-    Note: Reads the entire JSONL file before filtering. On long-running
-    instances with no rotation, this can grow large. A compaction/rotation
-    mechanism should be added before production use.
+    Note: Reads the entire JSONL file before filtering. The file is
+    automatically compacted by append_findings() when it exceeds
+    _MAX_FINDINGS_LINES (keeps most recent _COMPACT_KEEP_LINES).
     """
     path = _daemon_dir(daemon_name) / "findings.jsonl"
     if not path.exists():

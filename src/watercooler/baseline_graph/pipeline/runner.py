@@ -207,7 +207,10 @@ class BaselineGraphRunner:
         ):
             # Check if thread changed (incremental mode)
             if self.config.incremental and self._state:
-                # Use graph last_updated as change signal instead of .md file mtime
+                # Use graph last_updated as change signal instead of .md file mtime.
+                # Assumption: all writes go through commands_graph.py which updates
+                # last_updated. Manual graph edits that skip this will be invisible
+                # to incremental runs — an acceptable trade-off for graph-first.
                 try:
                     dt = datetime.fromisoformat(thread.last_updated) if thread.last_updated else datetime.min
                     mtime = dt.timestamp()

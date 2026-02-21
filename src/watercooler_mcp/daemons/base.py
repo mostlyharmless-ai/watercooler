@@ -48,7 +48,8 @@ class BaseDaemon(ABC):
     and findings logging.
 
     Args:
-        name: Unique daemon identifier (used for storage and logging)
+        name: Unique daemon identifier (used for storage and logging).
+            Must match ``^[A-Za-z0-9_-]+$`` (validated by state._daemon_dir).
         interval: Seconds between periodic ticks
         enabled: Whether this daemon is active
         tick_on_interval: If True, tick() runs periodically. If False,
@@ -249,7 +250,14 @@ class BaseDaemon(ABC):
     # ------------------------------------------------------------------ #
 
     def status_summary(self) -> Dict[str, Any]:
-        """Return a health summary dict for MCP tools."""
+        """Return a health summary dict for MCP tools.
+
+        Note: Fields other than ``status`` (e.g., _total_ticks, _last_error,
+        _checkpoint.*) are read without _status_lock. These are simple
+        assignments in CPython (GIL-protected), so reads see a consistent
+        value — never a torn write. This is an intentional trade-off to
+        avoid holding the lock across the entire dict construction.
+        """
         with self._status_lock:
             status_val = self._status.value
         return {
