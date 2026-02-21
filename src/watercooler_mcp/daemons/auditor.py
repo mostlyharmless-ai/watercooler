@@ -16,8 +16,8 @@ Checks performed:
 from __future__ import annotations
 
 import logging
-import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -49,6 +49,13 @@ def _make_finding_id() -> str:
     """Generate a unique, time-sortable finding ID (ULID)."""
     from ulid import ULID
     return str(ULID())
+
+
+def _get_entry_field(entry: Any, field: str, default: Any = "") -> Any:
+    """Get a field from an entry that may be a dict or object."""
+    if isinstance(entry, dict):
+        return entry.get(field, default)
+    return getattr(entry, field, default)
 
 
 class ThreadAuditorDaemon(BaseDaemon):
@@ -129,7 +136,7 @@ class ThreadAuditorDaemon(BaseDaemon):
                 thread_node = get_thread_from_graph(threads_dir, topic)
                 graph_entries = get_entries_for_thread(threads_dir, topic)
                 entry_count = len(graph_entries)
-            except Exception as exc:
+            except (OSError, KeyError, ValueError) as exc:
                 logger.debug("DAEMON[thread_auditor]: error reading graph for %s: %s", topic, exc)
                 continue
 
@@ -239,10 +246,10 @@ class ThreadAuditorDaemon(BaseDaemon):
         # Check missing entry IDs
         if cfg.check_missing_entry_ids:
             for entry in entries:
-                eid = entry.get("entry_id", "") if isinstance(entry, dict) else getattr(entry, "entry_id", "")
-                idx = entry.get("index", 0) if isinstance(entry, dict) else getattr(entry, "index", 0)
-                agent = entry.get("agent", "") if isinstance(entry, dict) else getattr(entry, "agent", "")
-                ts = entry.get("timestamp", "") if isinstance(entry, dict) else getattr(entry, "timestamp", "")
+                eid = _get_entry_field(entry, "entry_id")
+                idx = _get_entry_field(entry, "index", 0)
+                agent = _get_entry_field(entry, "agent")
+                ts = _get_entry_field(entry, "timestamp")
                 if not eid:
                     findings.append(Finding(
                         finding_id=_make_finding_id(),
@@ -265,7 +272,6 @@ class ThreadAuditorDaemon(BaseDaemon):
             if not thread_closed and last_ts:
                 stale_threshold = time.time() - (cfg.stale_days * _SECONDS_PER_DAY)
                 try:
-                    from datetime import datetime, timezone
                     # Parse ISO 8601 timestamp from graph
                     ts_str = last_ts.replace("Z", "+00:00")
                     last_epoch = datetime.fromisoformat(ts_str).timestamp()
@@ -374,8 +380,8 @@ class ThreadAuditorDaemon(BaseDaemon):
                     ))
 
             for entry in entries:
-                eid = entry.get("entry_id", "") if isinstance(entry, dict) else getattr(entry, "entry_id", "")
-                if eid and not entry.get("summary", ""):
+                eid = _get_entry_field(entry, "entry_id")
+                if eid and not _get_entry_field(entry, "summary"):
                     findings.append(Finding(
                         finding_id=_make_finding_id(),
                         daemon_name=self.name,
@@ -386,7 +392,7 @@ class ThreadAuditorDaemon(BaseDaemon):
                         message=f"Entry '{eid}' in '{topic}' has no graph summary",
                     ))
 
-        except Exception as exc:
+        except (OSError, KeyError, TypeError) as exc:
             logger.debug("DAEMON[thread_auditor]: graph summary check failed for %s: %s", topic, exc)
 
         return findings

@@ -36,7 +36,14 @@ def _daemons_dir() -> Path:
 
 
 def _daemon_dir(daemon_name: str) -> Path:
-    """Return the storage directory for a specific daemon."""
+    """Return the storage directory for a specific daemon.
+
+    Raises:
+        ValueError: If daemon_name contains path separators or traversal components.
+    """
+    # Guard against path traversal (e.g., "../../etc/passwd")
+    if "/" in daemon_name or "\\" in daemon_name or daemon_name in (".", ".."):
+        raise ValueError(f"Invalid daemon name: {daemon_name!r}")
     d = _daemons_dir() / daemon_name
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -278,7 +285,8 @@ def load_findings(
                     if unacknowledged_only and finding.acknowledged:
                         continue
                     all_findings.append(finding)
-                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning("DAEMON[%s]: skipping malformed JSONL line: %s", daemon_name, e)
                     continue
     except Exception as e:
         logger.warning("DAEMON[%s]: failed to load findings: %s", daemon_name, e)

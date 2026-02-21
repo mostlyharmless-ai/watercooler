@@ -81,6 +81,10 @@ class DaemonManager:
         """Aggregate findings across all (or one) daemon.
 
         Results are sorted newest-first across all daemons, then capped at limit.
+
+        Note: When ``daemon`` is None, reads JSONL files for every registered
+        daemon (O(N×daemons) I/O). With the current single-daemon setup this
+        is negligible; reassess if many daemons are added.
         """
         if daemon:
             d = self._daemons.get(daemon)
@@ -119,8 +123,9 @@ class DaemonManager:
     def dispatch_event(self, event_type: str, payload: Dict[str, Any]) -> None:
         """Fan out an event to all registered daemons.
 
-        Called from MCP write path when noteworthy events occur:
-        thread status change, new entry, PR merge, etc.
+        Reserved for future MCP write-path integration (not currently wired).
+        Will be called when noteworthy events occur: thread status change,
+        new entry, PR merge, etc.
 
         Each daemon's on_event() method decides whether to act.
         """

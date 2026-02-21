@@ -69,6 +69,7 @@ class BaseDaemon(ABC):
         self.tick_on_interval = tick_on_interval
 
         self._status = DaemonStatus.DISABLED if not enabled else DaemonStatus.STOPPED
+        self._status_lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -86,14 +87,15 @@ class BaseDaemon(ABC):
     def start(self) -> None:
         """Start the background daemon thread."""
         if not self.enabled:
-            self._status = DaemonStatus.DISABLED
+            with self._status_lock:
+                self._status = DaemonStatus.DISABLED
             logger.info("DAEMON[%s]: disabled, not starting", self.name)
             return
 
-        if self._status == DaemonStatus.RUNNING:
-            return
-
-        self._status = DaemonStatus.STARTING
+        with self._status_lock:
+            if self._status == DaemonStatus.RUNNING:
+                return
+            self._status = DaemonStatus.STARTING
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._loop,
@@ -109,8 +111,9 @@ class BaseDaemon(ABC):
         Returns:
             True if the daemon stopped within timeout, False otherwise.
         """
-        if self._status in (DaemonStatus.STOPPED, DaemonStatus.DISABLED):
-            return True
+        with self._status_lock:
+            if self._status in (DaemonStatus.STOPPED, DaemonStatus.DISABLED):
+                return True
 
         self._stop.set()
         self._wake.set()
@@ -122,7 +125,8 @@ class BaseDaemon(ABC):
                 logger.warning("DAEMON[%s]: did not stop within timeout", self.name)
                 return False
 
-        self._status = DaemonStatus.STOPPED
+        with self._status_lock:
+            self._status = DaemonStatus.STOPPED
         self._thread = None
         logger.info("DAEMON[%s]: stopped", self.name)
         return True
@@ -134,23 +138,27 @@ class BaseDaemon(ABC):
     def pause(self) -> None:
         """Pause the daemon (next tick will block until resumed)."""
         self._paused.clear()
-        self._status = DaemonStatus.PAUSED
+        with self._status_lock:
+            self._status = DaemonStatus.PAUSED
         logger.info("DAEMON[%s]: paused", self.name)
 
     def resume(self) -> None:
         """Resume a paused daemon."""
         self._paused.set()
-        if self._status == DaemonStatus.PAUSED:
-            self._status = DaemonStatus.RUNNING
+        with self._status_lock:
+            if self._status == DaemonStatus.PAUSED:
+                self._status = DaemonStatus.RUNNING
         logger.info("DAEMON[%s]: resumed", self.name)
 
     @property
     def status(self) -> DaemonStatus:
-        return self._status
+        with self._status_lock:
+            return self._status
 
     @property
     def is_running(self) -> bool:
-        return self._status == DaemonStatus.RUNNING
+        with self._status_lock:
+            return self._status == DaemonStatus.RUNNING
 
     # ------------------------------------------------------------------ #
     # Abstract interface
@@ -178,7 +186,8 @@ class BaseDaemon(ABC):
 
     def _loop(self) -> None:
         """Main daemon loop (runs in background thread)."""
-        self._status = DaemonStatus.RUNNING
+        with self._status_lock:
+            self._status = DaemonStatus.RUNNING
         logger.debug("DAEMON[%s]: loop entered", self.name)
 
         while not self._stop.is_set():
@@ -231,7 +240,8 @@ class BaseDaemon(ABC):
                 # Brief sleep to avoid tight loop on persistent errors
                 time.sleep(min(5.0, self.interval / 10))
 
-        self._status = DaemonStatus.STOPPED
+        with self._status_lock:
+            self._status = DaemonStatus.STOPPED
         logger.debug("DAEMON[%s]: loop exited", self.name)
 
     # ------------------------------------------------------------------ #

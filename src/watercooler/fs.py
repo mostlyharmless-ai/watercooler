@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime, timezone
 import shutil
 import os
 import re
+
+logger = logging.getLogger(__name__)
 
 
 _SANITIZE_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
@@ -200,7 +203,8 @@ def migrate_to_structured_layout(threads_dir: Path) -> list[tuple[Path, Path]]:
             continue
         dest = target / p.name
         if dest.exists():
-            continue  # skip collisions
+            logger.warning("migrate_to_structured_layout: skipping '%s' — collision with '%s'", p, dest)
+            continue
         shutil.move(str(p), str(dest))
         moved.append((p, dest))
 
