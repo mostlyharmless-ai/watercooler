@@ -8,8 +8,6 @@ Tools:
 from __future__ import annotations
 
 import json
-from typing import Optional
-
 from fastmcp import Context
 
 # Module-level references to registered tools (populated by register_daemon_tools)

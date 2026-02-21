@@ -105,15 +105,9 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
             _manager.register(auditor)
 
     except Exception as exc:
-        logger.warning("DAEMONS: config load error, registering defaults: %s", exc)
-        # Register thread auditor with defaults if config fails
-        try:
-            from .auditor import ThreadAuditorDaemon
-
-            auditor = ThreadAuditorDaemon()
-            _manager.register(auditor)
-        except Exception as inner_exc:
-            logger.warning("DAEMONS: failed to register default auditor: %s", inner_exc)
+        logger.warning("DAEMONS: config load error, no daemons registered: %s", exc)
+        # Don't register defaults — daemons are opt-in, and without config
+        # we can't confirm the user opted in.
 
     if start:
         _manager.start_all()

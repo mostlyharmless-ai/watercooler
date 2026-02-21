@@ -75,6 +75,10 @@ def thread_path(topic: str, threads_dir: Path) -> Path:
     live (root or any category subdir) via find_thread_path().
 
     In flat layouts (no threads/ subdir), falls back to root for backward compat.
+
+    Note: This performs bounded I/O (at most one stat per THREAD_CATEGORIES
+    entry) to locate existing threads. For typical repos the cost is a few
+    stat() calls per invocation.
     """
     safe = _sanitize_component(topic, default="thread")
     filename = f"{safe}.md"
@@ -150,7 +154,7 @@ _DIRECTORY_STRUCTURE: tuple[str, ...] = (
     "compound/suggestions",
     "logs/agent",
     "logs/mcp",
-    ".watercooler",
+    ".watercooler",  # Local config/state; NOT in .gitignore (tracked on orphan branch)
 )
 
 

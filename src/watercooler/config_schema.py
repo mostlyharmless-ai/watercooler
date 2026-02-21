@@ -495,8 +495,8 @@ class DaemonsConfig(BaseModel):
     """Daemon management configuration."""
 
     enabled: bool = Field(
-        default=True,
-        description="Enable daemon management system globally",
+        default=False,
+        description="Enable daemon management system globally (opt-in per project)",
     )
     compound: CompoundConfig = Field(
         default_factory=CompoundConfig,

@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 import re
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -47,8 +46,9 @@ _SECONDS_PER_DAY = 86400
 
 
 def _make_finding_id() -> str:
-    """Generate a unique finding ID."""
-    return uuid.uuid4().hex[:16]
+    """Generate a unique, time-sortable finding ID (ULID)."""
+    from ulid import ULID
+    return str(ULID())
 
 
 class ThreadAuditorDaemon(BaseDaemon):
