@@ -182,7 +182,7 @@ T = TypeVar("T")
 _DEFAULT_TOOL_TIMEOUT: float = 50.0  # Under MCP SDK's 60s hard limit
 
 _TOOL_TIMEOUTS: dict[str, float] = {
-    # Heavy graph operations (file parsing, verify_parity)
+    # Graph health check
     "watercooler_graph_health": 180.0,
     "watercooler_graph_enrich": 300.0,
     "watercooler_graph_recover": 300.0,

@@ -26,9 +26,7 @@ def test_init_thread_creates_file(tmp_path: Path):
     assert "team" in s.lower() and "sync" in s.lower()
 
 
-def test_init_thread_respects_overrides_and_body(tmp_path: Path):
-    body_file = tmp_path / "body.txt"
-    body_file.write_text("Initial body", encoding="utf-8")
+def test_init_thread_respects_overrides(tmp_path: Path):
     out = run_cli(
         "init-thread",
         "topic-x",
@@ -40,16 +38,12 @@ def test_init_thread_respects_overrides_and_body(tmp_path: Path):
         "in-progress",
         "--ball",
         "claude",
-        "--body",
-        str(body_file),
     )
     assert out.returncode == 0
     s = (tmp_path / "topic-x.md").read_text(encoding="utf-8")
-    # Phase 2: Template format - title param is not used in heading, fallback format might use it
-    # Just check that status, ball, and body are present (case-insensitive)
+    # Graph-canonical init_thread creates header with status/ball overrides
     assert "in-progress" in s.lower()  # Status should be overridden
-    assert "claude" in s.lower()  # May be "Claude" with capitalization
-    assert "Initial body" in s
+    assert "claude" in s.lower()  # Ball should be set
 
 
 def test_init_thread_idempotent(tmp_path: Path):

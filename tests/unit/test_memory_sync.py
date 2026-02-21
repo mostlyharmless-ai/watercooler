@@ -1268,13 +1268,13 @@ class TestLeanRAGExecutor:
         with patch("watercooler_mcp.memory_queue.get_worker", return_value=mock_worker):
             init_memory_queue_executors()
 
-        # Should register graphiti, graph_recover, AND leanrag_pipeline
+        # Should register graphiti AND leanrag_pipeline (graph_recover removed — script-only)
         registered_backends = [
             call.args[0] for call in mock_worker.register_executor.call_args_list
         ]
         assert "leanrag_pipeline" in registered_backends
         assert "graphiti" in registered_backends
-        assert "graph_recover" in registered_backends
+        assert "graph_recover" not in registered_backends
 
     def test_leanrag_executor_bulk_pipeline(self):
         """LeanRAG executor processes BULK tasks via Graphiti episodes."""

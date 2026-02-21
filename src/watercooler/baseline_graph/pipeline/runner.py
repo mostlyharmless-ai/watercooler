@@ -6,9 +6,11 @@ import json
 import shutil
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from watercooler import fs as _fs
 from .config import PipelineConfig
 from .state import PipelineState
 from .. import storage
@@ -151,8 +153,8 @@ class BaselineGraphRunner:
             current_topics.add(topic)
 
             # Get thread file mtime
-            thread_path = self.config.threads_dir / f"{topic}.md"
-            mtime = thread_path.stat().st_mtime if thread_path.exists() else 0
+            tp = _fs.find_thread_path(topic, self.config.threads_dir)
+            mtime = tp.stat().st_mtime if tp else 0
 
             # Collect entry summaries and embeddings
             entry_summaries = {}
@@ -205,8 +207,15 @@ class BaselineGraphRunner:
         ):
             # Check if thread changed (incremental mode)
             if self.config.incremental and self._state:
-                thread_path = self.config.threads_dir / f"{thread.topic}.md"
-                mtime = thread_path.stat().st_mtime if thread_path.exists() else 0
+                # Use graph last_updated as change signal instead of .md file mtime.
+                # Assumption: all writes go through commands_graph.py which updates
+                # last_updated. Manual graph edits that skip this will be invisible
+                # to incremental runs — an acceptable trade-off for graph-first.
+                try:
+                    dt = datetime.fromisoformat(thread.last_updated) if thread.last_updated else datetime(1970, 1, 1, tzinfo=timezone.utc)
+                    mtime = dt.timestamp()
+                except ValueError:
+                    mtime = 0
 
                 if self._state.is_thread_changed(thread.topic, mtime, len(thread.entries)):
                     # Thread changed, mark for reprocessing
@@ -573,7 +582,6 @@ class BaselineGraphRunner:
         self._log(f"  Wrote {node_count} nodes, {edge_count} edges, {xref_count} cross-references")
 
         # Write manifest
-        from datetime import datetime, timezone
         total_edges = edge_count + xref_count
         manifest = {
             "version": "2.0",  # Per-thread format

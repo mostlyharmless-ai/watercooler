@@ -39,8 +39,6 @@ from .baseline_graph.writer import (
 )
 from .baseline_graph.projector import (
     project_and_write_thread,
-    append_entry_and_project,
-    update_header_and_write,
     create_thread_file,
 )
 from .lock import AdvisoryLock
@@ -225,16 +223,8 @@ def append_entry(
                 ball=ball,
             )
 
-        # 6. Project to markdown
-        # Get the entry node we just created for projection
-        from .baseline_graph.writer import get_entry_node_from_graph
-        entry_node = get_entry_node_from_graph(threads_dir, entry_id)
-
-        if entry_node:
-            append_entry_and_project(threads_dir, topic, entry_node)
-        else:
-            # Fallback: full regeneration
-            project_and_write_thread(threads_dir, topic)
+        # 6. Reconstruct .md from graph (single source of truth)
+        project_and_write_thread(threads_dir, topic)
 
         logger.debug(f"Graph-canonical append_entry complete: {topic}/{entry_id}")
         return tp
@@ -445,7 +435,12 @@ def set_status(
 
     Flow:
     1. Update status in graph node
-    2. Update Status: line in markdown
+    2. Regenerate full .md projection via project_and_write_thread()
+
+    Note:
+        The .md projection is regenerated in full (O(entries)) rather than
+        patched in-place, to keep the projector stateless.  This is acceptable
+        for current thread sizes.
 
     Args:
         topic: Thread topic
@@ -474,8 +469,8 @@ def set_status(
         if not success:
             raise RuntimeError(f"Failed to update status in graph for {topic}")
 
-        # 3. Update markdown header (efficient: just modify Status line)
-        update_header_and_write(threads_dir, topic, status=status.upper())
+        # 3. Reconstruct .md from graph
+        project_and_write_thread(threads_dir, topic)
 
         logger.debug(f"Graph-canonical set_status complete: {topic} -> {status}")
         return tp
@@ -491,7 +486,12 @@ def set_ball(
 
     Flow:
     1. Update ball in graph node
-    2. Update Ball: line in markdown
+    2. Regenerate full .md projection via project_and_write_thread()
+
+    Note:
+        The .md projection is regenerated in full (O(entries)) rather than
+        patched in-place, to keep the projector stateless.  This is acceptable
+        for current thread sizes.
 
     Args:
         topic: Thread topic
@@ -522,8 +522,8 @@ def set_ball(
         if not success:
             raise RuntimeError(f"Failed to update ball in graph for {topic}")
 
-        # 3. Update markdown header (efficient: just modify Ball line)
-        update_header_and_write(threads_dir, topic, ball=ball)
+        # 3. Reconstruct .md from graph
+        project_and_write_thread(threads_dir, topic)
 
         logger.debug(f"Graph-canonical set_ball complete: {topic} -> {ball}")
         return tp

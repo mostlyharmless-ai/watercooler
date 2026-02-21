@@ -417,6 +417,101 @@ class HostedConfig(BaseModel):
     # Note: API keys and secrets should remain env-only for security
 
 
+class ThreadAuditorConfig(BaseModel):
+    """Configuration for the thread auditor daemon."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable the thread auditor daemon (opt-in, requires global daemons.enabled=True)",
+    )
+    interval: float = Field(
+        default=300.0,
+        ge=10.0,
+        description="Seconds between audit scans",
+    )
+    check_missing_status: bool = Field(
+        default=True,
+        description="Flag threads with no Status: header",
+    )
+    check_missing_ball: bool = Field(
+        default=True,
+        description="Flag threads with no Ball: header",
+    )
+    check_missing_entry_ids: bool = Field(
+        default=True,
+        description="Flag entries with no Entry-ID comment",
+    )
+    check_missing_summaries: bool = Field(
+        default=True,
+        description="Flag entries/threads missing graph summaries",
+    )
+    check_stale_threads: bool = Field(
+        default=True,
+        description="Flag threads with no recent activity",
+    )
+    stale_days: int = Field(
+        default=14,
+        ge=1,
+        description="Days of inactivity before a thread is considered stale",
+    )
+    check_classification: bool = Field(
+        default=True,
+        description="Suggest directory reclassification for misplaced threads",
+    )
+    max_findings_per_run: int = Field(
+        default=200,
+        ge=1,
+        description="Cap findings per tick to prevent runaway",
+    )
+
+
+class CompoundConfig(BaseModel):
+    """Per-project opt-in for compound artifact generation.
+
+    **Reserved for future use.** These fields define the schema for compound
+    artifact generation (reports, learnings, suggestions) but are not yet
+    wired to any runtime code path. Setting ``enabled = true`` currently
+    has no effect. Implementation is tracked as a follow-up milestone.
+
+    Compound artifacts are visible workflow artifacts that imply a process
+    step was completed. They require explicit opt-in per project.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable compound artifact generation (must be explicitly opted in)",
+    )
+    auto_report_on_closure: bool = Field(
+        default=True,
+        description="Generate report when thread closes (if enabled)",
+    )
+    auto_learnings: bool = Field(
+        default=True,
+        description="Extract learnings from threads (if enabled)",
+    )
+    auto_suggestions: bool = Field(
+        default=True,
+        description="Generate suggestions from threads (if enabled)",
+    )
+
+
+class DaemonsConfig(BaseModel):
+    """Daemon management configuration."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable daemon management system globally (opt-in per project)",
+    )
+    compound: CompoundConfig = Field(
+        default_factory=CompoundConfig,
+        description="Compound artifact generation settings (off by default)",
+    )
+    thread_auditor: ThreadAuditorConfig = Field(
+        default_factory=ThreadAuditorConfig,
+        description="Thread auditor daemon settings",
+    )
+
+
 class McpConfig(BaseModel):
     """MCP server configuration."""
 
@@ -487,6 +582,10 @@ class McpConfig(BaseModel):
     hosted: HostedConfig = Field(
         default_factory=HostedConfig,
         description="Hosted service (watercooler.dev) settings",
+    )
+    daemons: DaemonsConfig = Field(
+        default_factory=DaemonsConfig,
+        description="Daemon management system settings",
     )
 
     # Agent-specific overrides (keyed by platform slug)

@@ -26,7 +26,6 @@ from watercooler.baseline_graph.projector import (
     project_entry_to_markdown,
     project_thread_to_markdown,
     project_and_write_thread,
-    update_header_and_write,
     create_thread_file,
 )
 from watercooler.commands_graph import (
@@ -252,16 +251,22 @@ class TestProjectorModule:
         assert "Status: OPEN" in content
         assert "Ball: User" in content
 
-    def test_update_header_and_write(self, tmp_path):
-        """Test updating header fields in existing file."""
+    def test_reconstruct_after_metadata_update(self, tmp_path):
+        """Test that project_and_write_thread reflects graph metadata changes."""
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
 
-        # Create initial file
+        # Create thread in graph
+        init_thread_in_graph(threads_dir, "test-thread", title="Test", status="OPEN", ball="User")
+
+        # Create initial .md
         create_thread_file(threads_dir, "test-thread", status="OPEN", ball="User")
 
-        # Update status
-        update_header_and_write(threads_dir, "test-thread", status="CLOSED")
+        # Update graph metadata
+        update_thread_metadata(threads_dir, "test-thread", status="CLOSED")
+
+        # Reconstruct .md from graph
+        project_and_write_thread(threads_dir, "test-thread")
 
         content = (threads_dir / "test-thread.md").read_text()
         assert "Status: CLOSED" in content

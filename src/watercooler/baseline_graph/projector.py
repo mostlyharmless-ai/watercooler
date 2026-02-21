@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from watercooler import fs as _fs
+
 logger = logging.getLogger(__name__)
 
 
@@ -181,10 +183,10 @@ def write_thread_markdown(
     Returns:
         Path to written file
     """
-    thread_path = threads_dir / f"{topic}.md"
-    _atomic_write_text(thread_path, content)
-    logger.debug(f"Wrote thread markdown: {thread_path}")
-    return thread_path
+    tp = _fs.thread_path(topic, threads_dir)
+    _atomic_write_text(tp, content)
+    logger.debug(f"Wrote thread markdown: {tp}")
+    return tp
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -224,6 +226,13 @@ def project_and_write_thread(
     Reads thread and entries from graph, projects to markdown,
     and writes to {topic}.md file.
 
+    Performance note: This regenerates the entire .md file from graph on
+    every call (O(entries) I/O). This is intentional — it keeps the
+    projector stateless and eliminates incremental-update bugs. For the
+    typical thread (< 100 entries) the cost is negligible. If profiling
+    shows this is a bottleneck for very large threads, consider an
+    append-only fast path in a future iteration.
+
     Args:
         threads_dir: Threads directory
         topic: Thread topic
@@ -244,105 +253,9 @@ def project_and_write_thread(
     return write_thread_markdown(threads_dir, topic, content)
 
 
-def append_entry_and_project(
-    threads_dir: Path,
-    topic: str,
-    entry: Dict[str, Any],
-) -> Optional[Path]:
-    """Append entry block to existing markdown file.
-
-    This is an optimization for the common case of adding a single entry.
-    Instead of regenerating the entire file, we just append the new entry.
-
-    Note: This reads the existing file and appends, rather than regenerating
-    from graph. Use project_and_write_thread for full regeneration.
-
-    Args:
-        threads_dir: Threads directory
-        topic: Thread topic
-        entry: Entry node dict to append
-
-    Returns:
-        Path to updated file, or None on error
-    """
-    thread_path = threads_dir / f"{topic}.md"
-
-    if not thread_path.exists():
-        # Need to create from scratch
-        return project_and_write_thread(threads_dir, topic)
-
-    try:
-        existing = thread_path.read_text(encoding="utf-8")
-        entry_block = project_entry_to_markdown(entry)
-
-        # Append entry (ensure single newline separation)
-        new_content = existing.rstrip() + "\n\n" + entry_block
-
-        write_thread_markdown(threads_dir, topic, new_content)
-        return thread_path
-
-    except Exception as e:
-        logger.error(f"Failed to append entry to {topic}: {e}")
-        return None
-
-
-def update_header_and_write(
-    threads_dir: Path,
-    topic: str,
-    status: Optional[str] = None,
-    ball: Optional[str] = None,
-) -> Optional[Path]:
-    """Update header fields in existing markdown file.
-
-    This modifies the Status/Ball lines in the header without
-    regenerating entries. More efficient for metadata-only updates.
-
-    Args:
-        threads_dir: Threads directory
-        topic: Thread topic
-        status: New status (or None to keep existing)
-        ball: New ball (or None to keep existing)
-
-    Returns:
-        Path to updated file, or None on error
-    """
-    thread_path = threads_dir / f"{topic}.md"
-
-    if not thread_path.exists():
-        logger.warning(f"Thread file not found for header update: {topic}")
-        return None
-
-    try:
-        content = thread_path.read_text(encoding="utf-8")
-
-        if status is not None:
-            # Replace Status: line
-            import re
-            content = re.sub(
-                r"^Status:\s*.+$",
-                f"Status: {status.upper()}",
-                content,
-                count=1,
-                flags=re.MULTILINE,
-            )
-
-        if ball is not None:
-            # Replace Ball: line
-            import re
-            content = re.sub(
-                r"^Ball:\s*.+$",
-                f"Ball: {ball}",
-                content,
-                count=1,
-                flags=re.MULTILINE,
-            )
-
-        write_thread_markdown(threads_dir, topic, content)
-        return thread_path
-
-    except Exception as e:
-        logger.error(f"Failed to update header for {topic}: {e}")
-        return None
+    # NOTE: append_entry_and_project() and update_header_and_write() were removed.
+    # All callers now use project_and_write_thread() which reconstructs .md
+    # entirely from graph data (the single source of truth).
 
 
 # ============================================================================
@@ -376,7 +289,7 @@ def create_thread_file(
     from datetime import datetime, timezone
 
     threads_dir.mkdir(parents=True, exist_ok=True)
-    thread_path = threads_dir / f"{topic}.md"
+    tp = _fs.thread_path(topic, threads_dir)
 
     if created is None:
         created = datetime.now(timezone.utc).isoformat()
@@ -389,7 +302,7 @@ def create_thread_file(
     )
 
     write_thread_markdown(threads_dir, topic, content)
-    return thread_path
+    return tp
 
 
 # ============================================================================
@@ -491,8 +404,7 @@ def project_graph(
     # Process each topic
     for topic in target_topics:
         try:
-            thread_path = threads_dir / f"{topic}.md"
-            file_exists = thread_path.exists()
+            file_exists = _fs.find_thread_path(topic, threads_dir) is not None
 
             # Check if we should process this topic
             if mode == "missing" and file_exists:

@@ -174,26 +174,6 @@ def test_roles(tmp_path: Path):
         assert role in content.lower()
 
 
-def test_init_thread_with_owner_and_participants(tmp_path: Path):
-    """Test init-thread with owner and participants metadata."""
-    cp = run_cli(
-        "init-thread",
-        "team-thread",
-        "--threads-dir",
-        str(tmp_path),
-        "--owner",
-        "agent",
-        "--participants",
-        "agent, Claude, Codex",
-    )
-    assert cp.returncode == 0
-
-    content = (tmp_path / "team-thread.md").read_text(encoding="utf-8")
-    # Owner and participants might be in template or fallback format
-    # Just check thread was created successfully
-    assert "team-thread" in content.lower() or "team" in content.lower()
-
-
 def test_agent_canonicalization(tmp_path: Path):
     """Test that agent names are canonicalized (codex → Codex)."""
     run_cli("init-thread", "canon-test", "--threads-dir", str(tmp_path))

@@ -38,7 +38,6 @@ from .helpers import (
     _ALLOWED_FORMATS,
     _MAX_LIMIT,
     _MAX_OFFSET,
-    _CLOSED_STATES,
     # Startup warnings
     _add_startup_warning,
     _get_startup_warnings,
@@ -49,7 +48,6 @@ from .helpers import (
     _normalize_status,
     _resolve_format,
     # Entry loading
-    _load_entries_from_md,
     _entry_header_payload,
     _entry_full_payload,
     # Graph helpers
@@ -90,6 +88,7 @@ from .tools import thread_write as _thread_write_tools
 from .tools import sync as _sync_tools
 from .tools import graph as _graph_tools
 from .tools import memory as _memory_tools
+from .tools import daemon as _daemon_tools
 from .tools import federation as _federation_tools
 
 
@@ -145,6 +144,8 @@ register_graph_tools(mcp)
 register_memory_tools(mcp)
 from .tools.migration import register_migration_tools
 register_migration_tools(mcp)
+from .tools.daemon import register_daemon_tools
+register_daemon_tools(mcp)
 register_federation_tools(mcp)
 
 # Initialize memory sync callbacks (Issue #83 - callback registry pattern)
@@ -162,6 +163,16 @@ except Exception as _mq_err:
     import logging as _mq_logging
     _mq_logging.getLogger(__name__).warning(
         "Could not initialise memory task queue: %s", _mq_err,
+    )
+
+# Initialize daemon management system (periodic thread scanning, hygiene)
+try:
+    from .daemons import init_daemons
+    init_daemons()
+except Exception as _dm_err:
+    import logging as _dm_logging
+    _dm_logging.getLogger(__name__).warning(
+        "Could not initialise daemon manager: %s", _dm_err,
     )
 
 # Re-export registered tools for test compatibility (must be after registration)
@@ -188,6 +199,9 @@ graph_project_tool = _graph_tools.graph_project_tool
 # Memory tools (some tools removed - see replacement mappings in tools/memory.py)
 get_entity_edge = _memory_tools.get_entity_edge
 diagnose_memory = _memory_tools.diagnose_memory
+# Daemon tools
+daemon_status_tool = _daemon_tools.daemon_status
+daemon_findings_tool = _daemon_tools.daemon_findings
 # Federation tools (registered via register_federation_tools)
 
 

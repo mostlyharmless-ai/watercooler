@@ -381,7 +381,7 @@ def read_thread_hosted(topic: str) -> tuple[str | None, str]:
 
 
 def load_thread_entries_hosted(topic: str) -> tuple[str | None, list[ThreadEntry]]:
-    """Load thread entries from GitHub repository.
+    """Load thread entries from GitHub repository (reads entries.jsonl directly).
 
     Args:
         topic: Thread topic identifier
@@ -390,20 +390,98 @@ def load_thread_entries_hosted(topic: str) -> tuple[str | None, list[ThreadEntry
         Tuple of (error_message, entries). If error_message is not None,
         entries will be empty.
     """
-    error, content = read_thread_hosted(topic)
-    if error:
-        return (error, [])
+    try:
+        _validate_topic(topic)
+    except ValueError as e:
+        return (str(e), [])
+
+    error, client = _get_github_client()
+    if error or not client:
+        return (error or "Failed to create GitHub client", [])
+
+    _, entries_path, _ = _get_per_thread_paths(topic)
 
     try:
-        entries = parse_thread_entries(content)
+        entries_content = client.get_file(entries_path)
+        raw_entries: list[dict] = []
+        for line in entries_content.content.strip().split("\n"):
+            if line.strip():
+                raw_entries.append(json.loads(line))
+
+        # Convert graph entry dicts to ThreadEntry objects
+        entries: list[ThreadEntry] = []
+        for i, e in enumerate(raw_entries):
+            entries.append(ThreadEntry(
+                index=e.get("index", i),
+                header="",  # Not available from graph format
+                body=e.get("body", ""),
+                agent=e.get("agent"),
+                timestamp=e.get("timestamp"),
+                role=e.get("role"),
+                entry_type=e.get("entry_type"),
+                title=e.get("title"),
+                entry_id=e.get("entry_id"),
+                start_line=0,
+                end_line=0,
+                start_offset=0,
+                end_offset=0,
+            ))
+
         log_debug(
             f"load_thread_entries_hosted: parsed {len(entries)} entries from {topic}"
         )
         return (None, entries)
 
+    except GitHubNotFoundError:
+        return (f"Thread '{topic}' not found", [])
+
     except Exception as e:
         log_error(f"load_thread_entries_hosted failed: {e}")
-        return (f"Error parsing thread entries: {e}", [])
+        return (f"Error loading thread entries: {e}", [])
+
+
+def load_thread_metadata_hosted(topic: str) -> tuple[str | None, dict]:
+    """Load thread metadata from GitHub repository (reads meta.json directly).
+
+    Args:
+        topic: Thread topic identifier
+
+    Returns:
+        Tuple of (error_message, metadata_dict). If error_message is not None,
+        metadata will be empty. metadata_dict has keys:
+        title, status, ball, last_updated, entry_count.
+    """
+    try:
+        _validate_topic(topic)
+    except ValueError as e:
+        return (str(e), {})
+
+    error, client = _get_github_client()
+    if error or not client:
+        return (error or "Failed to create GitHub client", {})
+
+    meta_path, _, _ = _get_per_thread_paths(topic)
+
+    try:
+        meta_content = client.get_file(meta_path)
+        meta = json.loads(meta_content.content)
+
+        return (None, {
+            "title": meta.get("title", topic),
+            "status": meta.get("status", "OPEN"),
+            "ball": meta.get("ball", ""),
+            "last_updated": meta.get("last_updated", meta.get("created", "")),
+            "entry_count": meta.get("entry_count", 0),
+            "summary": meta.get("summary", ""),
+        })
+
+    except GitHubNotFoundError:
+        return (f"Thread '{topic}' metadata not found", {})
+    except json.JSONDecodeError as e:
+        return (f"Invalid meta.json for thread '{topic}': {e}", {})
+    except Exception as e:
+        log_error(f"load_thread_metadata_hosted failed: {e}")
+        return (f"Error loading thread metadata: {e}", {})
 
 
 def thread_exists_hosted(topic: str) -> bool:

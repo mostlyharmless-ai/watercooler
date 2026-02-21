@@ -281,14 +281,15 @@ def _find_last_content_line(lines: List[str], start_idx: int, end_idx: int) -> i
 def parse_thread_entries(text: str) -> List[ThreadEntry]:
     """Parse thread entries from a markdown thread file.
 
+    .. deprecated::
+        This function parses raw markdown. In graph-first architecture, use
+        ``watercooler.baseline_graph.writer.get_entries_for_thread()`` instead.
+        This function is retained only for graph reconciliation/rebuild paths
+        (sync_thread_to_graph, reconcile_thread_hosted) where markdown is the
+        recovery source.
+
     This parser uses Entry: header lines as the primary boundary detection.
     Each entry starts with a line matching: "Entry: <agent> <timestamp>"
-
-    This approach is robust because:
-    - Entry: lines have a specific format with timestamp
-    - No reliance on '---' separators (which conflict with horizontal rules)
-    - Code blocks are properly handled (Entry: inside them are skipped)
-    - Entry-IDs provide unique identification for deduplication
 
     Args:
         text: Full thread markdown content.
@@ -397,9 +398,10 @@ def parse_thread_entries(text: str) -> List[ThreadEntry]:
 def parse_thread_header(thread_path: Path) -> tuple[str, str, str, str]:
     """Parse thread header metadata from markdown file.
 
-    This function extracts Status, Ball, Title, and last entry timestamp
-    from a thread markdown file. Used by graph parsers for migration
-    and reconciliation utilities.
+    .. deprecated::
+        This function reads raw markdown. In graph-first architecture, use
+        ``watercooler.baseline_graph.writer.get_thread_from_graph()`` instead.
+        Retained only for graph rebuild/reconciliation paths.
 
     Args:
         thread_path: Path to the thread markdown file
