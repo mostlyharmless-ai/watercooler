@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 # Seconds per day for stale thread calculation
 _SECONDS_PER_DAY = 86400
 
+# Re-sync dedup cache from disk every N ticks to evict acknowledged/compacted keys
+_DEDUP_RESYNC_INTERVAL = 12
+
 
 def _make_finding_id() -> str:
     """Generate a unique, time-sortable finding ID (ULID)."""
@@ -88,8 +91,11 @@ class ThreadAuditorDaemon(BaseDaemon):
         self._config = config or ThreadAuditorConfig()
         self._threads_dir_override = threads_dir
         self._resolved_threads_dir: Optional[Path] = None
-        # Cache dedup keys across ticks to avoid re-reading JSONL every cycle
+        # Cache dedup keys across ticks to avoid re-reading JSONL every cycle.
+        # Re-synced from disk every _DEDUP_RESYNC_INTERVAL ticks to evict
+        # keys for acknowledged/compacted findings so issues can be re-flagged.
         self._existing_keys: set[tuple[str, str, str]] = set()
+        self._ticks_since_resync: int = 0
 
     def _resolve_threads_dir(self) -> Optional[Path]:
         """Resolve the threads directory for scanning.
@@ -125,15 +131,17 @@ class ThreadAuditorDaemon(BaseDaemon):
         if not topics:
             return []
 
-        # Bootstrap dedup set from disk on first tick; subsequent ticks
-        # reuse the in-memory set (new findings are added as they're created).
-        # 50K limit is well above the JSONL compaction ceiling (10K lines,
-        # kept at 5K) — ensures complete dedup even if thresholds change.
-        if not self._existing_keys:
+        # Bootstrap or periodically re-sync dedup set from disk.
+        # Re-syncing evicts keys for acknowledged/compacted findings so
+        # recurring issues can be re-flagged.  50K limit is well above the
+        # JSONL compaction ceiling (10K lines, kept at 5K).
+        self._ticks_since_resync += 1
+        if not self._existing_keys or self._ticks_since_resync >= _DEDUP_RESYNC_INTERVAL:
             existing = load_findings(self.name, limit=50_000, unacknowledged_only=True)
             self._existing_keys = {
                 (f.topic, f.category, f.entry_id or "") for f in existing
             }
+            self._ticks_since_resync = 0
 
         cfg = self._config
         findings: List[Finding] = []
@@ -270,13 +278,16 @@ class ThreadAuditorDaemon(BaseDaemon):
                 agent = _get_entry_field(entry, "agent")
                 ts = _get_entry_field(entry, "timestamp")
                 if not eid:
+                    # Use index as surrogate key so each missing-ID entry
+                    # gets its own dedup slot (avoids collapsing to one key).
+                    surrogate_id = f"{topic}:{idx}"
                     findings.append(Finding(
                         finding_id=_make_finding_id(),
                         daemon_name=self.name,
                         severity="warning",
                         category="missing_entry_id",
                         topic=topic,
-                        entry_id="",
+                        entry_id=surrogate_id,
                         message=f"Entry #{idx} in '{topic}' has no Entry-ID",
                         details={
                             "entry_index": idx,

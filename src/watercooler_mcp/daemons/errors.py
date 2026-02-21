@@ -45,26 +45,32 @@ class DaemonError(Exception):
 class DaemonNotFoundError(DaemonError):
     """Requested daemon does not exist in the manager."""
 
-    is_retryable: bool = False
+    pass
 
 
 @dataclass
 class DaemonAlreadyRegisteredError(DaemonError):
     """A daemon with the same name is already registered."""
 
-    is_retryable: bool = False
+    pass
 
 
 @dataclass
 class DaemonLifecycleError(DaemonError):
-    """Daemon is in a state that prevents the requested operation."""
+    """Daemon is in a state that prevents the requested operation.
+
+    Note: is_retryable overridden to True — lifecycle errors are often transient.
+    """
 
     is_retryable: bool = True
 
 
 @dataclass
 class DaemonCheckpointError(DaemonError):
-    """Error saving or loading daemon checkpoint."""
+    """Error saving or loading daemon checkpoint.
+
+    Note: is_retryable overridden to True — checkpoint I/O errors are often transient.
+    """
 
     checkpoint_path: Optional[str] = None
     is_retryable: bool = True

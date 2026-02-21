@@ -92,11 +92,24 @@ def search(*, threads_dir: Path, query: str) -> list[tuple[Path, int, str]]:
 
     Searches entry bodies from the graph. Returns results in the same
     format as the legacy .md file grep for backward compatibility.
+
+    Note:
+        Line numbers are relative to each entry's body (not file-global).
+        This is a behavioral change from the legacy .md grep which returned
+        file-level line numbers.
     """
     from .baseline_graph import storage
 
     q = query.lower()
     hits: list[tuple[Path, int, str]] = []
+
+    if not is_graph_available(threads_dir):
+        import sys
+        print(
+            "watercooler: graph not yet built — run 'wc reindex' to initialise.",
+            file=sys.stderr,
+        )
+        return hits
 
     graph_dir = storage.get_graph_dir(threads_dir)
     topics = storage.list_thread_topics(graph_dir)

@@ -435,7 +435,12 @@ def set_status(
 
     Flow:
     1. Update status in graph node
-    2. Update Status: line in markdown
+    2. Regenerate full .md projection via project_and_write_thread()
+
+    Note:
+        The .md projection is regenerated in full (O(entries)) rather than
+        patched in-place, to keep the projector stateless.  This is acceptable
+        for current thread sizes.
 
     Args:
         topic: Thread topic
@@ -481,7 +486,12 @@ def set_ball(
 
     Flow:
     1. Update ball in graph node
-    2. Update Ball: line in markdown
+    2. Regenerate full .md projection via project_and_write_thread()
+
+    Note:
+        The .md projection is regenerated in full (O(entries)) rather than
+        patched in-place, to keep the projector stateless.  This is acceptable
+        for current thread sizes.
 
     Args:
         topic: Thread topic
