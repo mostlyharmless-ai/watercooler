@@ -50,6 +50,10 @@ def _scan_for_deprecated_imports() -> list[str]:
     scanning the full file content for deprecated names within import
     blocks. Uses word-boundary matching to avoid false positives on
     names that are substrings of longer identifiers.
+
+    Known gap: does not catch module-attribute usage like
+    ``_fs.discover_thread_files(...)`` where only the module is imported.
+    This is acceptable since the codebase uses explicit function imports.
     """
     violations = []
 

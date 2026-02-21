@@ -25,6 +25,7 @@ from watercooler.config_schema import ThreadAuditorConfig
 from watercooler.fs import (
     CLOSED_STATES,
     THREAD_CATEGORIES,
+    find_thread_path,
     has_structured_layout,
     is_closed,
     thread_path,
@@ -153,7 +154,9 @@ class ThreadAuditorDaemon(BaseDaemon):
             if len(findings) >= cfg.max_findings_per_run:
                 break
 
-            tp = thread_path(topic, threads_dir)
+            # Use find_thread_path directly — returns None if file
+            # doesn't exist instead of falling through to I/O cascade.
+            tp = find_thread_path(topic, threads_dir)
 
             # Get graph metadata — skip thread if meta is unavailable
             try:
@@ -230,7 +233,7 @@ class ThreadAuditorDaemon(BaseDaemon):
         self,
         *,
         topic: str,
-        thread_file: Path,
+        thread_file: Optional[Path],
         threads_dir: Path,
         title: str,
         status: str,
@@ -255,7 +258,7 @@ class ThreadAuditorDaemon(BaseDaemon):
                 category="missing_status",
                 topic=topic,
                 message=f"Thread '{topic}' has no Status: header",
-                details={"thread_path": str(thread_file)},
+                details={"thread_path": str(thread_file) if thread_file else topic},
             ))
 
         # Check missing ball (uses raw regex match, not parsed default)
@@ -267,7 +270,7 @@ class ThreadAuditorDaemon(BaseDaemon):
                 category="missing_ball",
                 topic=topic,
                 message=f"Thread '{topic}' has no Ball: header",
-                details={"thread_path": str(thread_file)},
+                details={"thread_path": str(thread_file) if thread_file else topic},
             ))
 
         # Check missing entry IDs
@@ -328,8 +331,8 @@ class ThreadAuditorDaemon(BaseDaemon):
                         },
                     ))
 
-        # Check classification (structured layout only)
-        if cfg.check_classification and structured:
+        # Check classification (structured layout only, requires file path)
+        if cfg.check_classification and structured and thread_file is not None:
             findings.extend(self._check_classification(
                 topic=topic,
                 thread_file=thread_file,

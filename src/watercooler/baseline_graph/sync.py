@@ -2318,7 +2318,7 @@ def resolve_recovery_targets(
         return [], errors
 
     graph_dir = storage.get_graph_dir(threads_dir)
-    available_topics = storage.list_thread_topics(graph_dir)
+    graph_topics = storage.list_thread_topics(graph_dir)
 
     if mode == "stale":
         health = check_graph_health(threads_dir)
@@ -2327,12 +2327,22 @@ def resolve_recovery_targets(
             logger.info("No stale or error threads found, nothing to recover")
             return [], errors
     elif mode == "selective":
-        target_topics = [t for t in topics if t in available_topics]
+        target_topics = [t for t in topics if t in graph_topics]
         if not target_topics:
             errors.append("No matching topics found in graph")
             return [], errors
     else:  # mode == "all"
-        target_topics = available_topics
+        # Cold-start recovery: when graph is empty, fall back to .md
+        # discovery so we can bootstrap the graph from existing threads.
+        if graph_topics:
+            target_topics = graph_topics
+        else:
+            from watercooler.fs import discover_thread_files
+            md_files = discover_thread_files(threads_dir)
+            target_topics = [f.stem for f in md_files]
+            if not target_topics:
+                errors.append("No threads found in graph or on disk")
+                return [], errors
 
     return target_topics, errors
 
