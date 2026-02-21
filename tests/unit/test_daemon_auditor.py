@@ -23,11 +23,12 @@ def _write_graph_thread(
     title: str = "Test Thread",
     entries: list | None = None,
     subdir: str = "",
+    last_updated: str = "2025-01-01T00:00:00Z",
 ) -> Path:
     """Helper: write graph data for a thread."""
     threads_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write .md file for mtime/stale checks
+    # Write .md file (projection; stale checks use graph last_updated, not mtime)
     if subdir:
         d = threads_dir / subdir
         d.mkdir(parents=True, exist_ok=True)
@@ -47,7 +48,7 @@ def _write_graph_thread(
         "title": title,
         "status": status,
         "ball": ball,
-        "last_updated": "2025-01-01T00:00:00Z",
+        "last_updated": last_updated,
     }
     storage.atomic_write_json(thread_dir / "meta.json", meta)
 
@@ -190,12 +191,11 @@ class TestThreadAuditorDaemon:
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
         )
         threads_dir = tmp_path / "threads_root"
-        p = _write_graph_thread(threads_dir, "stale", entries=[_ENTRY_COMPLETE])
-
-        # Set mtime to 30 days ago
-        import os
-        old_time = time.time() - (30 * 86400)
-        os.utime(str(p), (old_time, old_time))
+        # Stale detection uses graph last_updated, not file mtime
+        _write_graph_thread(
+            threads_dir, "stale", entries=[_ENTRY_COMPLETE],
+            last_updated="2025-01-01T00:00:00Z",
+        )
 
         config = ThreadAuditorConfig(
             check_missing_status=False,
@@ -210,6 +210,31 @@ class TestThreadAuditorDaemon:
         assert len(findings) == 1
         assert findings[0].category == "stale_thread"
         assert findings[0].details["days_idle"] >= 28
+
+    def test_recent_thread_not_stale(self, tmp_path, monkeypatch):
+        """A thread with a recent last_updated should not produce a stale finding."""
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads_root"
+        from datetime import datetime, timezone
+        recent = datetime.now(timezone.utc).isoformat()
+        _write_graph_thread(
+            threads_dir, "recent", entries=[_ENTRY_COMPLETE],
+            last_updated=recent,
+        )
+
+        config = ThreadAuditorConfig(
+            check_missing_status=False,
+            check_missing_ball=False,
+            check_missing_entry_ids=False,
+            check_missing_summaries=False,
+            check_classification=False,
+            stale_days=14,
+        )
+        daemon = ThreadAuditorDaemon(threads_dir=threads_dir, config=config)
+        findings = daemon.tick()
+        assert len(findings) == 0
 
     def test_classification_closed_in_wrong_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(

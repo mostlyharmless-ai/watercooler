@@ -215,12 +215,23 @@ def _entry_full_payload(entry: ThreadEntry, summary: str = "") -> Dict[str, obje
 # ============================================================================
 
 
+_use_graph_warned = False
+
+
 def _use_graph_for_reads(threads_dir: Path) -> bool:
     """Check if graph should be used for read operations.
 
     Graph is always the source of truth when available. Returns False only
     when no graph directory exists (e.g. a brand-new repo without a graph).
     """
+    import os
+    global _use_graph_warned
+    if not _use_graph_warned and os.environ.get("WATERCOOLER_USE_GRAPH") == "0":
+        _use_graph_warned = True
+        log_debug(
+            "WATERCOOLER_USE_GRAPH=0 is no longer supported; "
+            "graph reads are always used when available."
+        )
     return is_graph_available(threads_dir)
 
 
@@ -308,8 +319,7 @@ def _load_entries(
 
     if not _use_graph_for_reads(threads_dir):
         return (
-            f"Error: Graph data not available for '{topic}'. "
-            "Graph data not available. Restore from git history or run `watercooler reindex`.",
+            f"Error: Graph data not found for '{topic}'. Run `watercooler reindex` to rebuild the graph.",
             [],
             {},
         )

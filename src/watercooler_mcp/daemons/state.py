@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -222,14 +223,18 @@ def load_checkpoint(daemon_name: str) -> DaemonCheckpoint:
         return DaemonCheckpoint(daemon_name=daemon_name)
 
 
+_findings_lock = threading.Lock()
+
+
 def append_findings(daemon_name: str, findings: List[Finding]) -> None:
-    """Append findings to the JSONL log file."""
+    """Append findings to the JSONL log file (thread-safe)."""
     if not findings:
         return
     path = _daemon_dir(daemon_name) / "findings.jsonl"
-    with open(path, "a") as f:
-        for finding in findings:
-            f.write(json.dumps(finding.to_dict()) + "\n")
+    with _findings_lock:
+        with open(path, "a") as f:
+            for finding in findings:
+                f.write(json.dumps(finding.to_dict()) + "\n")
 
 
 def load_findings(
@@ -244,6 +249,10 @@ def load_findings(
     """Load findings from JSONL log with optional filters.
 
     Returns findings in reverse chronological order (newest first).
+
+    Note: Reads the entire JSONL file before filtering. On long-running
+    instances with no rotation, this can grow large. A compaction/rotation
+    mechanism should be added before production use.
     """
     path = _daemon_dir(daemon_name) / "findings.jsonl"
     if not path.exists():

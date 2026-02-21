@@ -12,21 +12,7 @@ from watercooler_mcp.daemons.errors import DaemonAlreadyRegisteredError, DaemonN
 from watercooler_mcp.daemons.manager import DaemonManager
 from watercooler_mcp.daemons.state import Finding
 
-
-class StubDaemon(BaseDaemon):
-    """Minimal daemon for manager tests."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.tick_count = 0
-        self.events: List[tuple] = []
-
-    def tick(self) -> List[Finding]:
-        self.tick_count += 1
-        return []
-
-    def on_event(self, event_type: str, payload: Dict[str, Any]) -> None:
-        self.events.append((event_type, payload))
+from tests.unit.daemon_helpers import StubDaemon
 
 
 class TestDaemonManager:

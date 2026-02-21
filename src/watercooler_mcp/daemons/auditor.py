@@ -108,8 +108,8 @@ class ThreadAuditorDaemon(BaseDaemon):
         # Load existing unacknowledged findings to suppress duplicates
         from .state import load_findings
         existing = load_findings(self.name, limit=5000, unacknowledged_only=True)
-        existing_keys: set[tuple[str, str]] = {
-            (f.topic, f.category) for f in existing
+        existing_keys: set[tuple[str, str, str]] = {
+            (f.topic, f.category, f.entry_id or "") for f in existing
         }
 
         cfg = self._config
@@ -160,7 +160,7 @@ class ThreadAuditorDaemon(BaseDaemon):
             # Run configured checks
             thread_findings = self._audit_thread(
                 topic=topic,
-                thread_path=tp,
+                thread_file=tp,
                 threads_dir=threads_dir,
                 title=title,
                 status=status,
@@ -170,13 +170,15 @@ class ThreadAuditorDaemon(BaseDaemon):
                 structured=structured,
                 has_status_line=has_status_line,
                 has_ball_line=has_ball_line,
+                thread_node=thread_node,
             )
 
             # Deduplicate: skip findings that already exist unacknowledged
             for f in thread_findings:
-                if (f.topic, f.category) not in existing_keys:
+                key = (f.topic, f.category, f.entry_id or "")
+                if key not in existing_keys:
                     findings.append(f)
-                    existing_keys.add((f.topic, f.category))
+                    existing_keys.add(key)
 
             # Update checkpoint for this thread
             self._checkpoint.update_thread(topic, mtime, entry_count)
@@ -194,7 +196,7 @@ class ThreadAuditorDaemon(BaseDaemon):
         self,
         *,
         topic: str,
-        thread_path: Path,
+        thread_file: Path,
         threads_dir: Path,
         title: str,
         status: str,
@@ -204,6 +206,7 @@ class ThreadAuditorDaemon(BaseDaemon):
         structured: bool,
         has_status_line: bool = False,
         has_ball_line: bool = False,
+        thread_node: Optional[Dict[str, Any]] = None,
     ) -> List[Finding]:
         """Run all configured checks on a single thread."""
         cfg = self._config
@@ -218,7 +221,7 @@ class ThreadAuditorDaemon(BaseDaemon):
                 category="missing_status",
                 topic=topic,
                 message=f"Thread '{topic}' has no Status: header",
-                details={"thread_path": str(thread_path)},
+                details={"thread_path": str(thread_file)},
             ))
 
         # Check missing ball (uses raw regex match, not parsed default)
@@ -230,7 +233,7 @@ class ThreadAuditorDaemon(BaseDaemon):
                 category="missing_ball",
                 topic=topic,
                 message=f"Thread '{topic}' has no Ball: header",
-                details={"thread_path": str(thread_path)},
+                details={"thread_path": str(thread_file)},
             ))
 
         # Check missing entry IDs
@@ -289,7 +292,7 @@ class ThreadAuditorDaemon(BaseDaemon):
         if cfg.check_classification and structured:
             findings.extend(self._check_classification(
                 topic=topic,
-                thread_path=thread_path,
+                thread_file=thread_file,
                 threads_dir=threads_dir,
                 status=status,
             ))
@@ -298,7 +301,7 @@ class ThreadAuditorDaemon(BaseDaemon):
         if cfg.check_missing_summaries:
             findings.extend(self._check_missing_summaries(
                 topic=topic,
-                threads_dir=threads_dir,
+                thread_node=thread_node,
                 entries=entries,
             ))
 
@@ -308,7 +311,7 @@ class ThreadAuditorDaemon(BaseDaemon):
         self,
         *,
         topic: str,
-        thread_path: Path,
+        thread_file: Path,
         threads_dir: Path,
         status: str,
     ) -> List[Finding]:
@@ -317,7 +320,7 @@ class ThreadAuditorDaemon(BaseDaemon):
 
         # Determine current category from path
         try:
-            relative = thread_path.relative_to(threads_dir)
+            relative = thread_file.relative_to(threads_dir)
             parts = relative.parts
             current_cat = parts[0] if len(parts) > 1 else "root"
         except ValueError:
@@ -347,17 +350,17 @@ class ThreadAuditorDaemon(BaseDaemon):
         self,
         *,
         topic: str,
-        threads_dir: Path,
+        thread_node: Optional[Dict[str, Any]],
         entries: list,
     ) -> List[Finding]:
         """Check for missing graph summaries (best-effort).
 
         Args:
+            thread_node: Thread dict from get_thread_from_graph() (already fetched by tick)
             entries: List of graph entry dicts from get_entries_for_thread()
         """
         findings: List[Finding] = []
         try:
-            thread_node = get_thread_from_graph(threads_dir, topic)
             if thread_node is not None:
                 summary = thread_node.get("summary", "")
                 if not summary:

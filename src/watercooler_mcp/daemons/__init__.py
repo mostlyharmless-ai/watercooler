@@ -83,6 +83,7 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
             return _manager
 
         _manager = DaemonManager()
+        atexit.register(_shutdown_daemons)
 
     # Load config to decide which daemons to register
     try:
@@ -111,8 +112,6 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
 
     if start:
         _manager.start_all()
-
-    atexit.register(_shutdown_daemons)
 
     logger.info(
         "DAEMONS: initialised (%d daemons registered)",
