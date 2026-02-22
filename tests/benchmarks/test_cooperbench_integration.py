@@ -1,4 +1,4 @@
-"""Integration tests that run CooperBench tasks with watercooler messaging.
+"""Integration tests that run full CooperBench tasks with watercooler messaging.
 
 These tests are expensive (minutes per task, require API keys, Docker) and
 are NOT run in CI.  Use ``-m integration_cooperbench`` to opt-in::
@@ -49,8 +49,8 @@ def _has_cooperbench_module() -> bool:
     not _has_cooperbench_module(),
     reason="CooperBench not installed or not found at expected path",
 )
-class TestCooperBenchWatercoolerChannel:
-    """Run CooperBench tasks with watercooler messaging instead of Redis.
+class TestCooperBenchFullTask:
+    """Run full CooperBench tasks with watercooler messaging.
 
     Prerequisites:
     - CooperBench cloned at COOPERBENCH_DIR
@@ -67,7 +67,7 @@ class TestCooperBenchWatercoolerChannel:
         3. Each agent produces a non-empty patch
         4. Communication entries exist in the watercooler thread
 
-        This is a smoke test — full evaluation (applying patches, running
+        This is a smoke test -- full evaluation (applying patches, running
         test suites in Docker) is handled by the experiment runner script.
         """
         pytest.skip(
@@ -75,57 +75,3 @@ class TestCooperBenchWatercoolerChannel:
             "Use tests/benchmarks/scripts/run_cooperbench_experiment.py "
             "for end-to-end experiments."
         )
-
-    def test_message_ordering_matches_redis(self, tmp_path):
-        """Verify message ordering semantics.
-
-        In Redis, messages are strictly FIFO per-inbox.  In watercooler,
-        messages are ordered by graph entry index.  This test verifies
-        that the watercooler connector preserves causal ordering.
-        """
-        from .adapters.cooperbench_adapter import WatercoolerMessagingConnector
-
-        agents = ["alice", "bob"]
-        alice = WatercoolerMessagingConnector("alice", agents, tmp_path)
-        bob = WatercoolerMessagingConnector("bob", agents, tmp_path)
-
-        # Interleaved sends
-        alice.send("bob", "step1")
-        bob.send("alice", "step2")
-        alice.send("bob", "step3")
-
-        # Bob sees alice's messages in order
-        bob_msgs = bob.receive()
-        assert [m["content"] for m in bob_msgs] == ["step1", "step3"]
-
-        # Alice sees bob's message
-        alice_msgs = alice.receive()
-        assert [m["content"] for m in alice_msgs] == ["step2"]
-
-    def test_watercooler_shared_context_advantage(self, tmp_path):
-        """Demonstrate watercooler's shared visibility advantage.
-
-        In Redis, if agent A sends to agent B, agent C never sees it.
-        In watercooler, agent C sees all messages — this test quantifies
-        the information asymmetry difference.
-        """
-        from .adapters.cooperbench_adapter import WatercoolerMessagingConnector
-
-        agents = ["a", "b", "c"]
-        conn_a = WatercoolerMessagingConnector("a", agents, tmp_path)
-        conn_b = WatercoolerMessagingConnector("b", agents, tmp_path)
-        conn_c = WatercoolerMessagingConnector("c", agents, tmp_path)
-
-        # A sends to B (point-to-point in Redis, shared in watercooler)
-        conn_a.send("b", "secret plan for feature X")
-
-        # In watercooler, C sees A's message too
-        c_msgs = conn_c.receive()
-        assert len(c_msgs) == 1, (
-            "Watercooler shared visibility: C should see A→B message"
-        )
-        assert c_msgs[0]["content"] == "secret plan for feature X"
-
-        # B also sees it
-        b_msgs = conn_b.receive()
-        assert len(b_msgs) == 1

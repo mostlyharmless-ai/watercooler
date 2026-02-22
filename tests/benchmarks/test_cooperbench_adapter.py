@@ -193,3 +193,53 @@ class TestWatercoolerMessagingConnector:
             assert len(msgs) == 10, (
                 f"{agent_id} got {len(msgs)} messages, expected 10"
             )
+
+    def test_message_ordering_preserves_causality(self, tmp_path):
+        """Interleaved sends preserve causal ordering by entry index.
+
+        In Redis, messages are strictly FIFO per-inbox.  In watercooler,
+        messages are ordered by graph entry index.  This test verifies
+        that the watercooler connector preserves causal ordering.
+        """
+        agents = ["alice", "bob"]
+        alice = WatercoolerMessagingConnector("alice", agents, tmp_path)
+        bob = WatercoolerMessagingConnector("bob", agents, tmp_path)
+
+        # Interleaved sends
+        alice.send("bob", "step1")
+        bob.send("alice", "step2")
+        alice.send("bob", "step3")
+
+        # Bob sees alice's messages in order
+        bob_msgs = bob.receive()
+        assert [m["content"] for m in bob_msgs] == ["step1", "step3"]
+
+        # Alice sees bob's message
+        alice_msgs = alice.receive()
+        assert [m["content"] for m in alice_msgs] == ["step2"]
+
+    def test_shared_context_three_agents(self, tmp_path):
+        """Third agent sees point-to-point messages — watercooler advantage.
+
+        In Redis, if agent A sends to agent B, agent C never sees it.
+        In watercooler, agent C sees all messages — this quantifies
+        the information asymmetry difference.
+        """
+        agents = ["a", "b", "c"]
+        conn_a = WatercoolerMessagingConnector("a", agents, tmp_path)
+        conn_b = WatercoolerMessagingConnector("b", agents, tmp_path)
+        conn_c = WatercoolerMessagingConnector("c", agents, tmp_path)
+
+        # A sends to B (point-to-point in Redis, shared in watercooler)
+        conn_a.send("b", "secret plan for feature X")
+
+        # In watercooler, C sees A's message too
+        c_msgs = conn_c.receive()
+        assert len(c_msgs) == 1, (
+            "Watercooler shared visibility: C should see A->B message"
+        )
+        assert c_msgs[0]["content"] == "secret plan for feature X"
+
+        # B also sees it
+        b_msgs = conn_b.receive()
+        assert len(b_msgs) == 1
