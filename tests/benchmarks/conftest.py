@@ -13,9 +13,12 @@ Builds a rich benchmark graph with 6 threads and 32 entries covering:
 from __future__ import annotations
 
 import json
+import logging
 import socket
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import pytest
 
@@ -133,6 +136,55 @@ def _make_thread_meta(
     }
 
 
+def _embedding_server_available() -> bool:
+    """Check if the embedding server is reachable on :8080."""
+    try:
+        with socket.create_connection(("localhost", 8080), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+def _generate_search_index(
+    graph_dir: Path,
+    threads: list[dict[str, Any]],
+) -> None:
+    """Generate embeddings for all entries and write search-index.jsonl.
+
+    Requires the embedding server on :8080.  Skips silently if unavailable.
+    """
+    if not _embedding_server_available():
+        logger.info("Embedding server not available, skipping search index")
+        return
+
+    try:
+        from watercooler.baseline_graph.sync import generate_embedding
+    except ImportError:
+        logger.info("httpx not installed, skipping search index generation")
+        return
+
+    index_entries: list[dict[str, Any]] = []
+    for thread_data in threads:
+        for entry in thread_data["entries"]:
+            # Prefer summary for embedding (shorter, more focused)
+            text = entry.get("summary") or entry["body"][:200]
+            embedding = generate_embedding(text)
+            if embedding:
+                index_entries.append({
+                    "entry_id": entry["entry_id"],
+                    "thread_topic": entry["thread_topic"],
+                    "embedding": embedding,
+                })
+
+    if index_entries:
+        with open(graph_dir / "search-index.jsonl", "w") as f:
+            for ie in index_entries:
+                f.write(json.dumps(ie) + "\n")
+        logger.info(
+            f"Generated search index: {len(index_entries)} embeddings"
+        )
+
+
 def _write_graph(base_dir: Path, threads: list[dict[str, Any]]) -> Path:
     """Write benchmark graph to disk in per-thread format."""
     graph_dir = base_dir / "graph" / "baseline"
@@ -151,6 +203,9 @@ def _write_graph(base_dir: Path, threads: list[dict[str, Any]]) -> Path:
             with open(thread_dir / "entries.jsonl", "w") as f:
                 for entry in thread_data["entries"]:
                     f.write(json.dumps(entry) + "\n")
+
+    # Generate search index for semantic search tests
+    _generate_search_index(graph_dir, threads)
 
     return base_dir
 
