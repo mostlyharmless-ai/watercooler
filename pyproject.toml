@@ -126,6 +126,8 @@ markers = [
     "integration_leanrag_llm: marks tests requiring LeanRAG with LLM APIs (DeepSeek, GLM embeddings)",
     "integration_graphiti: marks tests requiring Graphiti backend with API key (run with '-m integration_graphiti')",
     "benchmark: marks tests as performance benchmarks (run with '-m benchmark')",
+    "integration_cooperbench: marks tests requiring CooperBench + Docker + API key (run with '-m integration_cooperbench')",
+    "needs_embedding: marks tests requiring live embedding service (llama-server:8080)",
     "network: marks tests requiring network access (deselect with '-m \"not network\"')",
     "slow: marks tests as slow running (deselect with '-m \"not slow\"')",
     "e2e: marks tests as end-to-end tests with fixture data (run with '-m e2e')",
