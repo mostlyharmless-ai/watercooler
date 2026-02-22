@@ -4,7 +4,7 @@ Tools:
 - watercooler_baseline_graph_stats: Graph statistics
 - watercooler_search: Search threads and entries (tier-aware routing)
 - watercooler_find_similar: Find similar entries
-- watercooler_graph_health: Graph sync health
+- watercooler_baseline_sync_status: Baseline graph sync health
 - watercooler_access_stats: Access statistics
 
 New Tool Suite (Fresh Suite Design):
@@ -323,6 +323,7 @@ def _search_baseline_impl(
     output: Dict[str, Any] = {
         "count": results.count,
         "total_scanned": results.total_scanned,
+        "scanned_by_source": results.scanned_by_source,
         "backend": "baseline",
         "results": [],
     }
@@ -332,6 +333,7 @@ def _search_baseline_impl(
             "type": result.node_type,
             "id": result.node_id,
             "score": result.score,
+            "score_type": result.score_type,
             "matched_fields": result.matched_fields,
         }
 
@@ -611,7 +613,7 @@ def _search_leanrag_impl(
 baseline_graph_stats = None
 search_graph_tool = None
 find_similar_entries_tool = None
-graph_health_tool = None
+baseline_sync_status_tool = None
 access_stats_tool = None
 
 
@@ -858,19 +860,23 @@ def _find_similar_entries_impl(
         return f"Error finding similar entries: {str(e)}"
 
 
-async def _graph_health_impl(
+async def _baseline_sync_status_impl(
     ctx: Context,
     code_path: str = "",
 ) -> str:
-    """Check graph synchronization health and report any issues.
+    """Check baseline graph sync status for all threads.
 
-    Reports the status of all threads in the graph:
-    - Synced threads (up to date)
-    - Stale threads (need sync)
-    - Error threads (sync failed)
-    - Pending threads (sync in progress)
+    Reports whether each thread's baseline graph (JSON) is up to date
+    with the thread data. This does NOT check FalkorDB or memory tier
+    health — use watercooler_diagnose_memory for that.
 
-    Use this to diagnose graph sync issues before running reconcile.
+    Status categories:
+    - Synced: baseline graph matches thread data
+    - Stale: thread has changed since last graph sync
+    - Error: last sync attempt failed
+    - Pending: sync in progress
+
+    Use this to diagnose baseline graph issues before running reconcile.
 
     Args:
         code_path: Path to code repository (for resolving threads dir).
@@ -1249,14 +1255,14 @@ def register_graph_tools(mcp):
         mcp: The FastMCP server instance
     """
     global baseline_graph_stats, search_graph_tool
-    global find_similar_entries_tool, graph_health_tool, access_stats_tool
+    global find_similar_entries_tool, baseline_sync_status_tool, access_stats_tool
     global graph_enrich_tool, graph_recover_tool, graph_project_tool
 
     # Register tools and store references for testing
     baseline_graph_stats = mcp.tool(name="watercooler_baseline_graph_stats")(_baseline_graph_stats_impl)
     search_graph_tool = mcp.tool(name="watercooler_search")(_search_graph_impl)
     find_similar_entries_tool = mcp.tool(name="watercooler_find_similar")(_find_similar_entries_impl)
-    graph_health_tool = mcp.tool(name="watercooler_graph_health")(_graph_health_impl)
+    baseline_sync_status_tool = mcp.tool(name="watercooler_baseline_sync_status")(_baseline_sync_status_impl)
     access_stats_tool = mcp.tool(name="watercooler_access_stats")(_access_stats_impl)
 
     # New tool suite (Fresh Suite Design)

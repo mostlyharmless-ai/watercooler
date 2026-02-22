@@ -1343,7 +1343,7 @@ async def _bulk_index_impl(
 
         # Discover entries via watercooler library
         from watercooler.commands import list_entries
-        from watercooler.path_resolver import resolve_threads_dir
+        from watercooler.path_resolver import resolve_threads_dir, derive_group_id
 
         threads_dir = resolve_threads_dir(code_root=Path(code_path)) if code_path else None
         if threads_dir is None:
@@ -1364,13 +1364,8 @@ async def _bulk_index_impl(
             selected = [t.strip() for t in threads.split(",")]
             all_topics = [t for t in all_topics if t in selected]
 
-        # Derive group_id from code_path
-        threads_dir_str = str(threads_dir)
-        group_id = (
-            threads_dir_str.removesuffix("-threads")
-            if threads_dir_str.endswith("-threads")
-            else threads_dir_str
-        )
+        # Derive group_id using canonical function (consistent with search tools)
+        group_id = derive_group_id(threads_dir=threads_dir)
 
         queued = 0
         skipped = 0
@@ -1402,6 +1397,7 @@ async def _bulk_index_impl(
                     title=entry.get("title", ""),
                     timestamp=entry.get("timestamp", ""),
                     source_description=f"{group_id} | thread:{topic} | bulk_index",
+                    code_path=code_path,
                 )
                 if task_id:
                     queued += 1

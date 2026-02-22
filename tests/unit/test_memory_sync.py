@@ -1344,7 +1344,8 @@ class TestLeanRAGExecutor:
             result = asyncio.run(_leanrag_pipeline_executor_fn(task))
 
         assert result["episode_uuid"] == "E1"
-        assert result["entities_extracted"] == 1
+        assert result["entities_extracted"] == []  # LeanRAG doesn't extract entities
+        assert result["facts_extracted"] == 1
 
     def test_leanrag_run_pipeline_queued(self):
         """_leanrag_run_pipeline_impl enqueues BULK task when queue available."""

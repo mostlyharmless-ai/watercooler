@@ -34,6 +34,7 @@ def _make_result(
         entry_data=kwargs.get("entry_data", {"title": "test"}),
         timestamp=timestamp,
         timestamp_epoch=_parse_epoch(timestamp),
+        group_id=kwargs.get("group_id", ""),
     )
 
 
@@ -212,3 +213,33 @@ class TestBuildResponseEnvelope:
         )
         assert envelope["namespace_status"]["site"]["status"] == "timeout"
         assert envelope["namespace_status"]["docs"]["status"] == "access_denied"
+
+    def test_group_id_in_envelope_results(self):
+        """group_id appears in each result dict."""
+        results = [
+            _make_result("a1", "cloud", ranking_score=0.8, group_id="cloud_db"),
+            _make_result("b1", "my-site", ranking_score=0.6, group_id="my_site"),
+        ]
+        envelope = build_response_envelope(
+            results=results,
+            primary_namespace="cloud",
+            namespace_status={"cloud": {"status": "ok"}, "my-site": {"status": "ok"}},
+            queried_namespaces=["cloud", "my-site"],
+            query="test",
+            total_candidates=2,
+        )
+        assert envelope["results"][0]["group_id"] == "cloud_db"
+        assert envelope["results"][1]["group_id"] == "my_site"
+
+    def test_group_id_default_empty_string(self):
+        """group_id defaults to empty string when not set."""
+        results = [_make_result("a1", "cloud", ranking_score=0.8)]
+        envelope = build_response_envelope(
+            results=results,
+            primary_namespace="cloud",
+            namespace_status={"cloud": {"status": "ok"}},
+            queried_namespaces=["cloud"],
+            query="test",
+            total_candidates=1,
+        )
+        assert envelope["results"][0]["group_id"] == ""

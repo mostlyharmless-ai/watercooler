@@ -21,14 +21,14 @@ Check memory system health and configuration.
    mcp-cli call watercooler-cloud/watercooler_diagnose_memory '{}'
    ```
 
-3. **Check graph health schema**:
+3. **Check baseline sync status schema**:
    ```bash
-   mcp-cli info watercooler-cloud/watercooler_graph_health
+   mcp-cli info watercooler-cloud/watercooler_baseline_sync_status
    ```
 
-4. **Run graph health check**:
+4. **Run baseline sync status check**:
    ```bash
-   mcp-cli call watercooler-cloud/watercooler_graph_health '{}'
+   mcp-cli call watercooler-cloud/watercooler_baseline_sync_status '{}'
    ```
 
 5. **Report status**:

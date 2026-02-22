@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -128,11 +129,12 @@ def _get_leanrag_level_mode(intent: QueryIntent) -> int:
         return LEANRAG_LEVEL_MODE_CLUSTERS
 
 
-# Tier cost ordering (lower is cheaper)
+# Relative cost weights for tier budget estimation (not billing).
+# Actual per-query cost is tracked via elapsed_ms and tier_timings.
 TIER_COSTS = {
-    Tier.T1: 1,   # Just embeddings, JSONL scan
-    Tier.T2: 10,  # FalkorDB + some LLM for extraction
-    Tier.T3: 100, # Full LLM reasoning + clustering
+    Tier.T1: 1,   # ~50ms typical, no LLM calls
+    Tier.T2: 10,  # ~200-500ms typical, FalkorDB + optional LLM
+    Tier.T3: 100, # ~2-5s typical, LLM reasoning + clustering
 }
 
 # Default thresholds for sufficiency checks
@@ -296,6 +298,8 @@ class TierResult:
     total_cost: int = 0
     sufficient: bool = False
     message: str = ""
+    elapsed_ms: int = 0  # Total wall-clock time across all tiers
+    tier_timings: dict[str, int] = field(default_factory=dict)  # Per-tier ms {"T1": 45, "T2": 230}
 
     @property
     def result_count(self) -> int:
@@ -321,6 +325,8 @@ class TierResult:
             "escalation_reason": self.escalation_reason,
             "synthesis": self.synthesis,
             "total_cost": self.total_cost,
+            "elapsed_ms": self.elapsed_ms,
+            "tier_timings": dict(self.tier_timings),
             "sufficient": self.sufficient,
             "message": self.message,
             "evidence": [
@@ -929,9 +935,15 @@ class TierOrchestrator:
             result.tiers_queried.append(tier)
             result.total_cost += TIER_COSTS[tier]
 
-            # Query the tier
+            # Query the tier with timing
             before_count = result.result_count
+            t0 = time.monotonic()
             tier_evidence = self._query_tier(tier, query, group_ids, intent)
+            elapsed = round((time.monotonic() - t0) * 1000)
+            result.tier_timings[tier.value] = elapsed
+            # elapsed_ms is exact (not approximate): both fields are set from
+            # the same `elapsed` variable in the same loop iteration.
+            result.elapsed_ms += elapsed
             result.evidence.extend(tier_evidence)
             new_count = result.result_count - before_count
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from watercooler.baseline_graph.search import (
+    KEYWORD_SCORE_MAX,
     SearchQuery,
     SearchResult,
     SearchResults,
@@ -240,6 +241,34 @@ class TestSearchResults:
         assert len(results.entries()) == 1
         assert results.threads()[0].topic == "test"
         assert results.entries()[0].entry_id == "e1"
+
+    def test_score_type_default(self):
+        """SearchResult defaults to keyword score_type."""
+        result = SearchResult(node_type="entry", node_id="e1")
+        assert result.score_type == "keyword"
+
+    def test_keyword_score_max_covers_all_boosts(self):
+        """KEYWORD_SCORE_MAX exceeds the max natural keyword score.
+
+        Max natural: base 1.0 + title 0.5 + body 0.3 + 4 fields * 0.1 = 2.2.
+        The constant must be > 2.2 so min(score/MAX, 1.0) never clamps.
+        """
+        max_natural = 1.0 + 0.5 + 0.3 + 4 * 0.1  # 2.2
+        assert KEYWORD_SCORE_MAX > max_natural
+
+    def test_keyword_normalization_preserves_ranking(self):
+        """Normalized keyword scores preserve relative ordering."""
+        # title+body+summary+topic hit (max natural)
+        strong = 1.0 + 0.5 + 0.3 + 4 * 0.1  # 2.2
+        # body-only hit
+        weak = 1.0 + 0.3 + 1 * 0.1  # 1.4
+
+        norm_strong = min(strong / KEYWORD_SCORE_MAX, 1.0)
+        norm_weak = min(weak / KEYWORD_SCORE_MAX, 1.0)
+
+        assert norm_strong > norm_weak
+        # Strong hit should not be clamped — that would compress ranking
+        assert norm_strong < 1.0
 
 
 # ============================================================================

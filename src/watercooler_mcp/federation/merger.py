@@ -30,6 +30,7 @@ class ScoredResult:
     entry_data: dict[str, Any]  # Treat as immutable — never mutate in-place
     timestamp: str  # ISO 8601, for display
     timestamp_epoch: float  # Pre-computed epoch for sort tiebreaking
+    group_id: str = ""  # FalkorDB database name for T2/T3 queries
 
 
 def merge_results(
@@ -123,6 +124,7 @@ def build_response_envelope(
         result_dicts.append({
             "entry_id": r.entry_id,
             "origin_namespace": r.origin_namespace,
+            "group_id": r.group_id,
             "ranking_score": round(r.ranking_score, 4),
             "score_breakdown": {
                 "raw_score": round(r.raw_score, 4),

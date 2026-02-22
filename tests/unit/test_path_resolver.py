@@ -16,6 +16,7 @@ from watercooler.path_resolver import (
     derive_threads_repo_name,
     discover_git_info,
     get_threads_suffix,
+    namespace_to_group_id,
     resolve_templates_dir,
     resolve_threads_dir,
 )
@@ -429,6 +430,35 @@ class TestDeriveGroupId:
 
         # All should be identical
         assert result1 == result2 == result3 == "watercooler_cloud"
+
+
+class TestNamespaceToGroupId:
+    """Tests for namespace_to_group_id function."""
+
+    def test_hyphens_to_underscores(self):
+        """Test standard namespace ID conversion."""
+        assert namespace_to_group_id("watercooler-cloud") == "watercooler_cloud"
+
+    def test_lowercase(self):
+        """Test mixed-case is lowercased."""
+        assert namespace_to_group_id("My.Project") == "my.project"
+
+    def test_already_underscore(self):
+        """Test IDs that already use underscores."""
+        assert namespace_to_group_id("watercooler_cloud") == "watercooler_cloud"
+
+    def test_empty_string_fallback(self):
+        """Test empty string returns default fallback."""
+        assert namespace_to_group_id("") == "watercooler"
+
+    def test_matches_derive_group_id(self):
+        """Test namespace_to_group_id matches derive_group_id for same input."""
+        for name in ["watercooler-cloud", "My-App.v2", "simple", "A-B-C"]:
+            assert namespace_to_group_id(name) == derive_group_id(code_repo_name=name)
+
+    def test_mixed_case_hyphens(self):
+        """Test mixed case and multiple hyphens."""
+        assert namespace_to_group_id("My-Cool-App") == "my_cool_app"
 
 
 class TestRoundTripDerivation:

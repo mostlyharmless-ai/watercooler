@@ -313,6 +313,10 @@ def derive_group_id(
     This is the canonical function for deriving FalkorDB database names
     and other identifiers that need consistent sanitization.
 
+    For federation, use ``namespace_to_group_id()`` to convert namespace IDs
+    to group_ids. Both functions apply identical sanitization:
+    ``name.replace("-", "_").lower()``.
+
     Source priority:
     1. code_repo_name (if provided directly)
     2. Derived from code_path (if provided)
@@ -351,6 +355,24 @@ def derive_group_id(
     # Sanitization: hyphens to underscores, lowercase
     # Preserves established behavior - does NOT strip dots/special chars
     return name.replace("-", "_").lower() or "watercooler"
+
+
+def namespace_to_group_id(namespace_id: str) -> str:
+    """Convert a federation namespace ID to a FalkorDB group_id.
+
+    Namespace IDs are human-friendly (hyphens allowed, e.g., 'watercooler-cloud').
+    Group IDs are FalkorDB-safe (underscores, lowercase, e.g., 'watercooler_cloud').
+
+    Delegates to derive_group_id() to guarantee identical sanitization:
+    namespace_to_group_id(ns_id) == derive_group_id(code_repo_name=ns_id).
+
+    Args:
+        namespace_id: Federation namespace identifier (e.g., 'watercooler-cloud')
+
+    Returns:
+        Sanitized group_id suitable for FalkorDB database name
+    """
+    return derive_group_id(code_repo_name=namespace_id)
 
 
 def _compose_threads_slug(code_repo: Optional[str], repo_root: Optional[Path]) -> Optional[str]:

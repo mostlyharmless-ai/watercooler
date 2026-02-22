@@ -278,7 +278,7 @@ Watercooler implements the Model Context Protocol (MCP) for AI agent integration
 **Graph Tools** (`tools/graph.py`):
 - `watercooler_graph_enrich` - Generate summaries and embeddings
 - `watercooler_graph_recover` - Repair corrupted graph state
-- `watercooler_graph_health` - Diagnostic health check
+- `watercooler_baseline_sync_status` - Baseline graph sync status
 
 **Sync Tools** (`tools/sync.py`):
 - `watercooler_health` - Git and system health check

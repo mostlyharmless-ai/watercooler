@@ -190,7 +190,7 @@ reindex = _sync_tools.reindex
 baseline_graph_stats = _graph_tools.baseline_graph_stats
 search_graph_tool = _graph_tools.search_graph_tool
 find_similar_entries_tool = _graph_tools.find_similar_entries_tool
-graph_health_tool = _graph_tools.graph_health_tool
+baseline_sync_status_tool = _graph_tools.baseline_sync_status_tool
 access_stats_tool = _graph_tools.access_stats_tool
 # New graph tooling suite
 graph_enrich_tool = _graph_tools.graph_enrich_tool

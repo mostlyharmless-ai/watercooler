@@ -321,6 +321,7 @@ async def _federated_search_inner(
                 entry_data=entry_data,
                 timestamp=ts_str or now.isoformat(),
                 timestamp_epoch=entry_ts.timestamp(),
+                group_id=res.group_id,
             ))
 
         return ns_id, scored, "ok"

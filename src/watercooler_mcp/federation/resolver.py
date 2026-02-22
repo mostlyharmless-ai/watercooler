@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from watercooler.config_schema import FederationConfig, FederationNamespaceConfig
+from watercooler.path_resolver import namespace_to_group_id
 from watercooler_mcp.config import WORKTREE_BASE, ThreadContext, _worktree_path_for
 
 __all__ = [
@@ -43,6 +44,11 @@ class NamespaceResolution:
     is_primary: bool = False
     error_message: str = ""
     action_hint: str = ""
+    # FalkorDB database name for T2/T3 queries.
+    # namespace_to_group_id() always returns a non-empty string (falls back
+    # to "watercooler" for blank input).  Default is "" only to satisfy
+    # dataclass construction; callers that bypass the resolver get empty.
+    group_id: str = ""
 
 
 def discover_namespace_worktree(
@@ -143,6 +149,7 @@ def resolve_all_namespaces(
         code_path=primary_context.code_root or Path("."),
         status="ok",
         is_primary=True,
+        group_id=namespace_to_group_id(primary_ns_id),
     )
 
     # Determine which secondary namespaces to resolve
@@ -153,6 +160,8 @@ def resolve_all_namespaces(
 
     for ns_id in ns_ids:
         ns_config = federation_config.namespaces.get(ns_id)
+        ns_group_id = namespace_to_group_id(ns_id)
+
         if ns_config is None:
             results[ns_id] = NamespaceResolution(
                 namespace_id=ns_id,
@@ -160,6 +169,7 @@ def resolve_all_namespaces(
                 code_path=Path("."),
                 status="error",
                 error_message=f"Namespace '{ns_id}' not found in federation config",
+                group_id=ns_group_id,
             )
             continue
 
@@ -170,6 +180,7 @@ def resolve_all_namespaces(
                 threads_dir=worktree,
                 code_path=Path(ns_config.code_path),
                 status="ok",
+                group_id=ns_group_id,
             )
         elif worktree is WorktreeStatus.SECURITY_REJECTED:
             results[ns_id] = NamespaceResolution(
@@ -181,6 +192,7 @@ def resolve_all_namespaces(
                     f"Worktree path for namespace '{ns_id}' failed security checks "
                     f"(symlink or path escape)"
                 ),
+                group_id=ns_group_id,
             )
         elif worktree is WorktreeStatus.NOT_INITIALIZED:
             results[ns_id] = NamespaceResolution(
@@ -192,6 +204,7 @@ def resolve_all_namespaces(
                     f"Run watercooler_health(code_path='{ns_config.code_path}') "
                     f"to bootstrap the worktree for namespace '{ns_id}'"
                 ),
+                group_id=ns_group_id,
             )
 
     return results

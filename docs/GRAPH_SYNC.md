@@ -144,12 +144,17 @@ This ensures projection issues never corrupt or block the canonical record.
 Check graph sync health using the MCP tool or CLI:
 
 ```bash
-# MCP tool
-watercooler_graph_health
+# MCP tool (renamed from watercooler_graph_health in v0.x)
+watercooler_baseline_sync_status
 
-# CLI
+# CLI (retains legacy name for backward compatibility)
 watercooler graph-health
 ```
+
+> **Breaking change**: The MCP tool was renamed from `watercooler_graph_health`
+> to `watercooler_baseline_sync_status` to clarify that it reports baseline
+> graph sync state, not FalkorDB/LeanRAG health. Agent configs or automation
+> referencing the old tool name must be updated.
 
 Health report includes:
 - Total threads in directory

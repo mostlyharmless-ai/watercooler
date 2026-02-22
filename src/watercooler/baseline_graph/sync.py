@@ -2769,23 +2769,19 @@ def sync_to_memory_backend(
                 and worker.is_running
                 and worker.has_executor(backend)
             ):
-                threads_dir_str = str(threads_dir)
-                code_path = (
-                    threads_dir_str.removesuffix("-threads")
-                    if threads_dir_str.endswith("-threads")
-                    else threads_dir_str
-                )
+                group_id = derive_group_id(threads_dir=threads_dir)
                 content = entry_summary if entry_summary else entry_body
 
                 task_id = enqueue_memory_task(
                     entry_id=entry_id,
                     topic=topic,
-                    group_id=code_path,
+                    group_id=group_id,
                     content=content,
                     backend=backend,
                     title=entry_title or "",
                     timestamp=timestamp or "",
-                    source_description=f"{code_path} | thread:{topic}",
+                    source_description=f"{group_id} | thread:{topic}",
+                    code_path=str(threads_dir),
                 )
                 if task_id is not None:
                     logger.debug(

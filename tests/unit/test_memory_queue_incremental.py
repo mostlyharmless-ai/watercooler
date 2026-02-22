@@ -54,7 +54,8 @@ class TestSingleTaskRouting:
             result = asyncio.run(_leanrag_pipeline_executor_fn(task))
 
         assert result["episode_uuid"] == "E1"
-        assert result["entities_extracted"] == 1
+        assert result["entities_extracted"] == []  # LeanRAG doesn't extract entities
+        assert result["facts_extracted"] == 1
         # incremental_index was called (not index)
         mock_backend.incremental_index.assert_called_once()
         mock_backend.index.assert_not_called()
@@ -85,7 +86,8 @@ class TestSingleTaskRouting:
             result = asyncio.run(_leanrag_pipeline_executor_fn(task))
 
         assert result["episode_uuid"] == "E2"
-        assert result["entities_extracted"] == 5
+        assert result["entities_extracted"] == []  # LeanRAG doesn't extract entities
+        assert result["facts_extracted"] == 5
         # Full index was called (not incremental)
         mock_backend.index.assert_called_once()
         mock_backend.incremental_index.assert_not_called()

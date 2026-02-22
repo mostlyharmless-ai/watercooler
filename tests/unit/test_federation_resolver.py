@@ -128,6 +128,42 @@ class TestResolveAllNamespaces:
         assert r.status == "ok"
         assert r.threads_dir is not None
 
+    def test_primary_has_group_id(self, primary_context):
+        """Primary namespace resolution includes derived group_id."""
+        fed_config = FederationConfig()
+        results = resolve_all_namespaces(primary_context, fed_config)
+        r = results["watercooler-cloud"]
+        assert r.group_id == "watercooler_cloud"
+
+    def test_secondary_has_group_id(self, primary_context, tmp_path):
+        """Secondary namespace resolutions include derived group_id."""
+        worktree_base = tmp_path / "worktrees"
+        worktree = worktree_base / "watercooler-site"
+        worktree.mkdir(parents=True)
+
+        fed_config = FederationConfig(
+            namespaces={
+                "my-site": FederationNamespaceConfig(code_path="/home/user/watercooler-site"),
+            }
+        )
+
+        with patch("watercooler_mcp.federation.resolver.WORKTREE_BASE", worktree_base):
+            with patch(
+                "watercooler_mcp.federation.resolver._worktree_path_for",
+                return_value=worktree,
+            ):
+                results = resolve_all_namespaces(primary_context, fed_config)
+
+        assert results["my-site"].group_id == "my_site"
+
+    def test_error_namespace_has_group_id(self, primary_context):
+        """Even error resolutions include derived group_id."""
+        fed_config = FederationConfig()
+        results = resolve_all_namespaces(
+            primary_context, fed_config, namespace_override=["nonexistent"]
+        )
+        assert results["nonexistent"].group_id == "nonexistent"
+
     def test_secondary_not_initialized(self, primary_context, tmp_path):
         worktree_base = tmp_path / "worktrees"
         worktree_base.mkdir()

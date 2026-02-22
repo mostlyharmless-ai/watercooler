@@ -29,6 +29,12 @@ from watercooler.path_resolver import derive_group_id
 logger = logging.getLogger(__name__)
 
 
+# Max raw keyword score: base 1.0 + title 0.5 + body 0.3 + 4 fields * 0.1 = 2.2.
+# Bumped above true max so no natural result hits the min() cap and compresses ranking signal.
+# Used to normalize keyword scores to [0, 1] when merging with cosine similarity.
+KEYWORD_SCORE_MAX = 2.3
+
+
 # ============================================================================
 # Search Configuration
 # ============================================================================
@@ -87,6 +93,7 @@ class SearchResult:
     node_type: Literal["thread", "entry"]
     node_id: str
     score: float = 1.0
+    score_type: Literal["keyword", "semantic"] = "keyword"
     matched_fields: List[str] = field(default_factory=list)
     thread: Optional[GraphThread] = None
     entry: Optional[GraphEntry] = None
@@ -98,11 +105,19 @@ class SearchResults:
 
     Attributes:
         results: List of SearchResult objects
-        total_scanned: Total nodes scanned
+        total_scanned: Total nodes visited in the file-based loop (includes skipped
+            nodes). Retained for backward compatibility — may exceed
+            sum(scanned_by_source.values()) when FalkorDB handles entries and the
+            file loop only evaluates threads. Prefer scanned_by_source for accurate
+            per-source counts.
+        scanned_by_source: Per-source scan counts (e.g., {"graph_file": 5, "falkordb": 10}).
+            Only counts nodes actually evaluated per source. T1 threads are not
+            equivalent to FalkorDB entries, so this dict replaces the single total.
         query: The original search query
     """
     results: List[SearchResult] = field(default_factory=list)
-    total_scanned: int = 0
+    total_scanned: int = 0  # TODO: deprecate in favor of scanned_by_source
+    scanned_by_source: dict[str, int] = field(default_factory=dict)
     query: Optional[SearchQuery] = None
 
     @property
@@ -247,6 +262,7 @@ def _search_falkordb_semantic(
                     node_type="entry",
                     node_id=entry_result.entry_id,
                     score=entry_result.score,
+                    score_type="semantic",
                     matched_fields=["embedding"],
                     entry=_node_to_entry(entry_node),
                 )
@@ -500,34 +516,38 @@ def search_graph(
         if not query_embedding:
             logger.warning("Semantic search requested but failed to generate query embedding, falling back to keyword")
 
-    # Try FalkorDB vector search first for pure semantic entry search
+    # Try FalkorDB vector search for semantic entry search.
+    # FalkorDB only indexes entries (not threads), so when include_threads
+    # is set we supplement with keyword matches for thread nodes below.
+    falkordb_entry_results: Optional[List[SearchResult]] = None
     if (
         search_query.semantic
         and query_embedding
         and search_query.include_entries
-        and not search_query.include_threads
         and not search_query.start_time
         and not search_query.end_time
         and not search_query.role
         and not search_query.entry_type
         and not search_query.agent
     ):
-        # Pure semantic entry search - use FalkorDB
-        falkordb_results = _search_falkordb_semantic(
+        falkordb_entry_results = _search_falkordb_semantic(
             threads_dir,
             query_embedding,
             limit=search_query.limit,
             threshold=search_query.semantic_threshold,
             thread_topic=search_query.thread_topic,
         )
-        if falkordb_results is not None:
-            # FalkorDB search succeeded
-            results.results = falkordb_results
-            results.total_scanned = len(falkordb_results)  # Only return what matched
-            logger.debug(f"FalkorDB semantic search returned {len(falkordb_results)} results")
-            return results
-        # FalkorDB unavailable, fall through to file-based search
-        logger.debug("FalkorDB unavailable, falling back to file-based semantic search")
+        if falkordb_entry_results is not None:
+            logger.debug(f"FalkorDB semantic search returned {len(falkordb_entry_results)} results")
+            if not search_query.include_threads:
+                # Pure entry search — return FalkorDB results directly
+                results.results = falkordb_entry_results
+                results.total_scanned = len(falkordb_entry_results)
+                results.scanned_by_source = {"falkordb": len(falkordb_entry_results)}
+                return results
+            # include_threads=True: supplement with thread keyword matches below
+        else:
+            logger.debug("FalkorDB unavailable, falling back to file-based semantic search")
 
     # Load search index for file-based semantic search (embeddings stored separately)
     # Convert iterator to dict for efficient lookup
@@ -540,6 +560,11 @@ def search_graph(
 
     matching_results: List[SearchResult] = []
 
+    # If FalkorDB already handled entry semantic search, skip entries in
+    # the main loop to avoid duplicates and pointless file-based lookups.
+    skip_entries_in_loop = falkordb_entry_results is not None
+    file_evaluated = 0  # nodes actually evaluated (not skipped)
+
     for node in _load_nodes(graph_dir):
         results.total_scanned += 1
         node_type = node.get("type")
@@ -547,10 +572,11 @@ def search_graph(
         # Filter by node type
         if node_type == "thread" and not search_query.include_threads:
             continue
-        if node_type == "entry" and not search_query.include_entries:
+        if node_type == "entry" and (not search_query.include_entries or skip_entries_in_loop):
             continue
         if node_type not in ("thread", "entry"):
             continue
+        file_evaluated += 1
 
         # Collect filter results
         filter_results = []
@@ -632,6 +658,7 @@ def search_graph(
             node_type=node_type,
             node_id=node_id,
             score=score,
+            score_type="semantic" if semantic_score is not None else "keyword",
             matched_fields=matched_fields,
         )
 
@@ -642,6 +669,25 @@ def search_graph(
             result.entry = _node_to_entry(node)
 
         matching_results.append(result)
+
+    # Merge FalkorDB entry results with thread keyword results from the loop
+    if falkordb_entry_results is not None:
+        matching_results.extend(falkordb_entry_results)
+        results.scanned_by_source = {
+            "graph_file": file_evaluated,
+            "falkordb": len(falkordb_entry_results),
+        }
+    else:
+        results.scanned_by_source = {"graph_file": file_evaluated}
+
+    # Normalize keyword scores to [0, 1] so they sort meaningfully alongside
+    # cosine similarity scores from FalkorDB.  Raw keyword scores are in
+    # [1.0, ~2.0] (base + field boosts) which would always outrank semantic
+    # results capped at 1.0.
+    if falkordb_entry_results is not None:
+        for r in matching_results:
+            if r.score_type == "keyword":
+                r.score = min(r.score / KEYWORD_SCORE_MAX, 1.0)
 
     # Sort by score descending
     matching_results.sort(key=lambda r: r.score, reverse=True)

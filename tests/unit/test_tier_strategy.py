@@ -497,6 +497,30 @@ class TestTierResult:
         assert d["primary_tier"] == "T1"
         assert len(d["evidence"]) == 3
 
+    def test_timing_fields_default(self) -> None:
+        """Test timing fields default to zero/empty."""
+        result = TierResult(query="test")
+        assert result.elapsed_ms == 0
+        assert result.tier_timings == {}
+
+    def test_timing_fields_in_to_dict(self) -> None:
+        """Test timing fields are included in to_dict serialization."""
+        result = TierResult(
+            query="test",
+            elapsed_ms=275,
+            tier_timings={"T1": 45, "T2": 230},
+        )
+        d = result.to_dict()
+        assert d["elapsed_ms"] == 275
+        assert d["tier_timings"] == {"T1": 45, "T2": 230}
+
+    def test_total_cost_backward_compat(self) -> None:
+        """Test total_cost field still appears in to_dict for backward compatibility."""
+        result = TierResult(query="test", total_cost=11)
+        d = result.to_dict()
+        assert "total_cost" in d
+        assert d["total_cost"] == 11
+
 
 # ============================================================================
 # Test TierOrchestrator
@@ -541,6 +565,16 @@ class TestTierOrchestrator:
         # Query should work (even if no results match)
         result = orchestrator.query("authentication")
         assert Tier.T1 in result.tiers_queried
+
+    def test_query_populates_timing(self, basic_config) -> None:
+        """Test that query populates elapsed_ms and tier_timings."""
+        orchestrator = TierOrchestrator(basic_config)
+        result = orchestrator.query("authentication")
+        assert Tier.T1 in result.tiers_queried
+        assert "T1" in result.tier_timings
+        assert result.tier_timings["T1"] >= 0
+        assert result.elapsed_ms >= 0
+        assert result.elapsed_ms == sum(result.tier_timings.values())
 
     def test_force_tier(self, basic_config) -> None:
         """Test forcing a specific tier."""

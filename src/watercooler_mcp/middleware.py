@@ -182,8 +182,8 @@ T = TypeVar("T")
 _DEFAULT_TOOL_TIMEOUT: float = 50.0  # Under MCP SDK's 60s hard limit
 
 _TOOL_TIMEOUTS: dict[str, float] = {
-    # Graph health check
-    "watercooler_graph_health": 180.0,
+    # Baseline graph sync status check
+    "watercooler_baseline_sync_status": 180.0,
     "watercooler_graph_enrich": 300.0,
     "watercooler_graph_recover": 300.0,
     # Memory pipeline operations (clustering, embedding generation)
