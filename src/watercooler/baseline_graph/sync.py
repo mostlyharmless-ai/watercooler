@@ -1729,7 +1729,8 @@ class GraphHealthReport:
     Attributes:
         healthy: True if no errors, pending, or stale threads
         total_threads: Total number of threads in graph
-        synced_threads: Threads with 'ok' sync status
+        synced_threads: Threads with 'ok' sync status, or all graph-present
+            threads when no sync state file exists (graph-first default)
         error_threads: Threads with sync errors
         pending_threads: Threads with pending sync
         stale_threads: Threads not in sync state
@@ -1763,12 +1764,16 @@ def check_graph_health(
     topics = storage.list_thread_topics(graph_dir)
     report.total_threads = len(topics)
 
-    # Load sync state
+    # Load sync state (optional tracking layer).
+    # In graph-first architecture, the graph IS the source of truth.
+    # list_thread_topics only returns dirs with valid meta.json, so
+    # presence in the topic list means graph data exists.
     state_file = _get_state_file(threads_dir)
     if not state_file.exists():
-        # No sync state = all threads need sync
-        report.stale_threads = list(topics)
-        report.healthy = False
+        # No sync state file — graph data is authoritative.
+        # All topics with valid graph dirs are considered synced.
+        report.synced_threads = len(topics)
+        report.healthy = True
         return report
 
     try:
@@ -1814,6 +1819,12 @@ def reconcile_graph(
     """Reconcile graph with markdown files.
 
     Rebuilds graph nodes/edges for specified topics or all stale/error topics.
+
+    When ``topics`` is None, auto-discovery relies on ``check_graph_health()``
+    to find stale/error topics.  If no ``sync_state.json`` exists, health
+    reports all graph-present threads as synced, so auto-discovery will find
+    nothing to reconcile.  Pass explicit topic names to force reconciliation
+    in that case.
 
     Args:
         threads_dir: Threads directory

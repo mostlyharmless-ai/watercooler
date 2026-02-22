@@ -927,11 +927,13 @@ async def _baseline_sync_status_impl(
             )
         if health.stale_threads:
             output["recommendations"].append(
-                f"{len(health.stale_threads)} threads need sync. Run watercooler_reconcile_graph."
+                f"{len(health.stale_threads)} threads lack sync state. "
+                "Run watercooler_graph_enrich(mode='missing') to backfill summaries/embeddings."
             )
         if health.error_threads:
             output["recommendations"].append(
-                f"{health.error_threads} threads have sync errors. Check error_details and run reconcile."
+                f"{health.error_threads} threads have sync errors. "
+                "Check error_details and run watercooler_graph_enrich on affected topics."
             )
 
         return json.dumps(output, indent=2)

@@ -343,12 +343,13 @@ def test_sync_thread_to_graph_full_sync(threads_dir: Path, sample_thread: Path):
 
 
 def test_check_graph_health_no_state(threads_dir: Path, sample_thread: Path):
-    """Test check_graph_health reports stale threads when no state."""
+    """Test check_graph_health treats graph-present threads as synced when no state file."""
     report = check_graph_health(threads_dir)
 
-    assert not report.healthy
+    assert report.healthy
     assert report.total_threads == 1
-    assert "test-topic" in report.stale_threads
+    assert report.synced_threads == 1
+    assert len(report.stale_threads) == 0
 
 
 def test_check_graph_health_after_sync(threads_dir: Path, sample_thread: Path):
@@ -384,20 +385,29 @@ def test_check_graph_health_with_errors(threads_dir: Path, sample_thread: Path):
 # ============================================================================
 
 
-def test_reconcile_graph_fixes_stale(threads_dir: Path, sample_thread: Path):
-    """Test reconcile_graph fixes stale threads."""
-    # Check health shows stale
+def test_reconcile_graph_explicit_topic_succeeds(threads_dir: Path, sample_thread: Path):
+    """Test reconcile_graph with explicit topic succeeds and health stays healthy."""
+    # Graph data exists — health is already good in graph-first model
     report_before = check_graph_health(threads_dir)
-    assert not report_before.healthy
+    assert report_before.healthy
 
-    # Reconcile
-    results = reconcile_graph(threads_dir)
+    # Reconcile explicit topic (creates sync_state.json tracking layer)
+    results = reconcile_graph(threads_dir, topics=["test-topic"])
 
     assert results.get("test-topic") is True
 
-    # Check health shows healthy
+    # Health still healthy (now with explicit sync state)
     report_after = check_graph_health(threads_dir)
     assert report_after.healthy
+
+
+def test_reconcile_graph_no_state_no_topics(threads_dir: Path, sample_thread: Path):
+    """reconcile_graph with no state file and no explicit topics processes nothing."""
+    state_file = threads_dir / "graph" / "baseline" / "sync_state.json"
+    assert not state_file.exists()
+
+    results = reconcile_graph(threads_dir)
+    assert results == {}
 
 
 def test_reconcile_graph_specific_topics(threads_dir: Path, sample_thread: Path):
