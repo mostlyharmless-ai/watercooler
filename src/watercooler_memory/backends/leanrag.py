@@ -244,6 +244,12 @@ class LeanRAGConfig:
     # Max workers for graph building
     max_workers: int = 8
 
+    # Max concurrent LLM calls during triple extraction.
+    # Controls asyncio.Semaphore for generate_text_async calls.
+    # Lower values reduce API rate-limit pressure (use 2-4 for cloud APIs).
+    # Higher values improve throughput for local models (use 8-16).
+    max_concurrent_llm_calls: int = 4
+
     @classmethod
     def from_unified(cls) -> "LeanRAGConfig":
         """Create LeanRAGConfig from unified watercooler configuration.
@@ -337,7 +343,7 @@ class LeanRAGBackend(MemoryBackend):
             ("LLM_MODEL", "DEEPSEEK_MODEL"),
             ("LLM_API_BASE", "DEEPSEEK_BASE_URL"),
             ("LLM_TIMEOUT", "DEEPSEEK_TIMEOUT"),
-            ("LLM_MAX_RETRIES", "DEEPSEEK_MAX_RETRIES"),
+            ("LLM_MAX_RETRIES", "DEEPSEEK_MAX_ATTEMPTS"),
             ("EMBEDDING_MODEL", "GLM_MODEL"),
             ("EMBEDDING_API_BASE", "GLM_BASE_URL"),
         ]
@@ -364,12 +370,14 @@ class LeanRAGBackend(MemoryBackend):
 
         # Set from resolved config (only if not already set)
         env_mappings = [
+            # LeanRAG path (needed by _ensure_leanrag_available() / _get_leanrag_path())
+            ("LEANRAG_PATH", str(self.config.leanrag_path) if self.config.leanrag_path else None),
             # LLM config (used by generate_text via OpenAI client)
             ("DEEPSEEK_API_KEY", self.config.llm_api_key),
             ("DEEPSEEK_MODEL", self.config.llm_model),
             ("DEEPSEEK_BASE_URL", self.config.llm_api_base),
             ("DEEPSEEK_TIMEOUT", deepseek_timeout),
-            ("DEEPSEEK_MAX_RETRIES", "3"),
+            ("DEEPSEEK_MAX_ATTEMPTS", "3"),  # config.yaml reads DEEPSEEK_MAX_ATTEMPTS (not MAX_RETRIES)
             # Embedding config (used by embedding() via raw HTTP POST - no auth)
             ("GLM_BASE_URL", self.config.embedding_api_base),
             ("GLM_MODEL", self.config.embedding_model),
@@ -389,11 +397,14 @@ class LeanRAGBackend(MemoryBackend):
         _ensure_leanrag_available()
 
         # Log provenance to help debug "patched submodule but running different package"
+        # FileNotFoundError: installed leanrag's config.yaml lookup fails if CWD != LeanRAG dir.
+        # This is expected when calling from the project root; the real import (with correct CWD)
+        # happens inside index() / incremental_index() under the _chdir_lock.
         try:
             import leanrag as _lr
             logger.debug("LeanRAG loaded from: %s", getattr(_lr, '__file__', 'unknown'))
-        except ImportError:
-            logger.debug("LeanRAG not importable for provenance check")
+        except (ImportError, FileNotFoundError):
+            logger.debug("LeanRAG not importable for provenance check (config.yaml not in CWD)")
 
     def _normalize_entity_name(self, name: str | None) -> str | None:
         """Normalize entity name by stripping quotes and whitespace.
@@ -653,8 +664,11 @@ class LeanRAGBackend(MemoryBackend):
                     last_report_time = [time.perf_counter()]
                     report_interval = 10.0  # Report every 10 seconds
 
+                    _llm_sem = asyncio.Semaphore(self.config.max_concurrent_llm_calls)
+
                     async def _tracked_llm(prompt: str, **kwargs) -> str:
-                        result = await generate_text_async(prompt, **kwargs)
+                        async with _llm_sem:
+                            result = await generate_text_async(prompt, **kwargs)
                         llm_call_count[0] += 1
                         # Report progress periodically
                         now = time.perf_counter()
@@ -847,8 +861,11 @@ class LeanRAGBackend(MemoryBackend):
                     from leanrag.extraction.chunk import triple_extraction
                     from leanrag.core.llm import generate_text_async, embedding
 
+                    _llm_sem = asyncio.Semaphore(self.config.max_concurrent_llm_calls)
+
                     async def _tracked_llm(prompt: str, **kwargs) -> str:
-                        return await generate_text_async(prompt, **kwargs)
+                        async with _llm_sem:
+                            return await generate_text_async(prompt, **kwargs)
 
                     asyncio.run(
                         triple_extraction(
