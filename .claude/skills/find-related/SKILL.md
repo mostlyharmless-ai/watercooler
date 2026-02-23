@@ -2,54 +2,39 @@
 name: find-related
 description: Find discussions and entries related to a specific topic or entry. Use to discover connected context across threads.
 allowed-tools:
-  - Bash(mcp-cli *)
+  - ToolSearch
+  - mcp__watercooler-cloud__watercooler_find_similar
+  - mcp__watercooler-cloud__watercooler_search
 ---
 
 # Find Related Content
 
 Find content related to: $ARGUMENTS
 
-## Argument Safety
-
-When constructing JSON for `mcp-cli call`, **never** interpolate `$ARGUMENTS` directly into a JSON string.
-Use `jq` for safe construction:
-
-```bash
-# For entry IDs
-mcp-cli call watercooler-cloud/watercooler_find_similar "$(jq -n --arg id "$ARGUMENTS" '{entry_id: $id}')"
-
-# For descriptions
-mcp-cli call watercooler-cloud/watercooler_search "$(jq -n --arg q "$ARGUMENTS" '{query: $q, mode: "entries", semantic: true}')"
-```
-
 ## Steps
 
 1. **Determine argument type**:
-   - **Entry ID**: ULID format — exactly 26 characters matching `^[0-9A-HJKMNP-TV-Z]{26}$` (Crockford base32, e.g., `01HQXYZ123ABC456DEF789GHJ`)
-   - **Description**: Any other text (does not match ULID pattern)
+   - **Entry ID**: ULID format (e.g., `01HQXYZ123ABC456DEF789GHJ`) — exactly 26 characters matching `^[0-9A-HJKMNP-TV-Z]{26}$` (Crockford base32)
+   - **Description**: Any other text
 
-2. **For Entry ID** - Use similarity search:
+2. **For Entry ID** — use similarity search:
 
-   Check schema:
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_find_similar
+   ```
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_find_similar
+   ```
+   Then call:
+   ```
+   mcp__watercooler-cloud__watercooler_find_similar(entry_id="<ulid>")
    ```
 
-   Execute (use `jq` for safe JSON):
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_find_similar "$(jq -n --arg id "<ulid>" '{entry_id: $id}')"
+3. **For Description** — use semantic search:
+
    ```
-
-3. **For Description** - Use semantic search:
-
-   Check schema:
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_search
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_search
    ```
-
-   Execute (use `jq` for safe JSON):
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_search "$(jq -n --arg q "<description>" '{query: $q, mode: "entries", semantic: true}')"
+   Then call:
+   ```
+   mcp__watercooler-cloud__watercooler_search(query="<description>", mode="entries", semantic=true, code_path="<repo root>")
    ```
 
 4. **Present results**:

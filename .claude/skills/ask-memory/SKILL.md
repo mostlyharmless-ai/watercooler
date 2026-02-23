@@ -2,39 +2,29 @@
 name: ask-memory
 description: Ask a question about project history, decisions, or context. Use for questions like "What was decided about X?" or "Why did we choose Y?"
 allowed-tools:
-  - Bash(mcp-cli *)
+  - ToolSearch
+  - mcp__watercooler-cloud__watercooler_smart_query
 ---
 
 # Ask Memory
 
 Question: $ARGUMENTS
 
-## Argument Safety
-
-When constructing JSON for `mcp-cli call`, **never** interpolate `$ARGUMENTS` directly into a JSON string.
-Instead, use `jq` for safe construction:
-
-```bash
-mcp-cli call watercooler-cloud/watercooler_smart_query "$(jq -n --arg q "$ARGUMENTS" '{query: $q}')"
-```
-
-This prevents JSON injection from user input containing quotes, backslashes, or control characters.
-
 ## Steps
 
-1. **Check schema first** (mandatory):
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_smart_query
+1. **Load MCP tool** (deferred tools must be loaded before use):
+   ```
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_smart_query
    ```
 
-2. **Execute query** (sanitize user input — do not interpolate `$ARGUMENTS` directly into JSON):
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_smart_query "$(jq -n --arg q "<natural language question>" '{query: $q}')"
+2. **Execute query** — call the tool with the user's question, scoped to the current repo:
+   ```
+   mcp__watercooler-cloud__watercooler_smart_query(query="<question from $ARGUMENTS>", code_path="<repo root>")
    ```
 
 3. **Present answer** with:
    - **Direct answer** to the question
-   - **Evidence** - cite specific entries with entry_id
+   - **Evidence** — cite specific entries with entry_id
    - **Confidence level** and tier used
    - **Escalation path** if T1 wasn't sufficient
 

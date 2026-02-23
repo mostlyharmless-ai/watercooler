@@ -2,7 +2,8 @@
 name: search-threads
 description: Search threads with filters. Supports filters like role:planner, type:Decision, after:2024-01, thread:topic-name, status:OPEN
 allowed-tools:
-  - Bash(mcp-cli *)
+  - ToolSearch
+  - mcp__watercooler-cloud__watercooler_search
 ---
 
 # Search Threads with Filters
@@ -20,9 +21,7 @@ Parse these filters from arguments:
 - `agent:X` - Filter by agent name
 - Remaining text becomes the search query
 
-## Argument Safety & Parsing Rules
-
-### Tokenization
+## Parsing Rules
 
 1. Split `$ARGUMENTS` on whitespace into tokens
 2. A token is a **filter** if it matches `^(role|type|after|before|thread|status|agent):[^\s]+$`
@@ -36,49 +35,31 @@ Parse these filters from arguments:
 - Empty value (`role:`) → ignore, treat entire token as query text
 - No query text → search with filters only (empty query string)
 
-### Safe JSON Construction
-
-**Never** interpolate filter values or query text directly into JSON strings.
-Use `jq` for safe construction:
-
-```bash
-jq -n \
-  --arg q "<query text>" \
-  --arg role "<role or empty>" \
-  --arg type "<type or empty>" \
-  --arg topic "<thread or empty>" \
-  --arg after "<after or empty>" \
-  --arg before "<before or empty>" \
-  --arg status "<status or empty>" \
-  --arg agent "<agent or empty>" \
-  '{query: $q, mode: "entries"} +
-   (if $role != "" then {filters: {role: $role}} else {} end) +
-   (if $type != "" then {filters: {type: $type}} else {} end) +
-   (if $topic != "" then {filters: {topic: $topic}} else {} end) +
-   (if $after != "" then {filters: {after: $after}} else {} end) +
-   (if $before != "" then {filters: {before: $before}} else {} end) +
-   (if $status != "" then {filters: {status: $status}} else {} end) +
-   (if $agent != "" then {filters: {agent: $agent}} else {} end)'
-```
-
 ## Steps
 
-1. **Parse arguments** into filters and query text
+1. **Parse arguments** into filters and query text using rules above.
 
-   Apply the tokenization rules above. Extract filter tokens (key:value pairs) and
-   collect remaining text as the query. Only include filter keys that were explicitly
-   provided — omit keys with no value.
-
-2. **Check schema**:
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_search
+2. **Load MCP tool**:
+   ```
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_search
    ```
 
-3. **Build and execute search** (use `jq` for safe JSON — see Argument Safety above):
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_search "$(jq -n \
-     --arg q "<search text>" \
-     '{query: $q, mode: "entries", filters: {<only include specified filters>}}')"
+3. **Execute search** with parsed query and filters. Only include filter keys
+   that were explicitly parsed from the arguments — omit `filters` entirely
+   if none were parsed:
+   ```
+   # Example: only role was given
+   mcp__watercooler-cloud__watercooler_search(
+     query="config", mode="entries", filters={"role": "planner"}
+   )
+   # Example: multiple filters
+   mcp__watercooler-cloud__watercooler_search(
+     query="", mode="entries", filters={"role": "planner", "type": "Decision"}
+   )
+   # Example: no filters, just query text
+   mcp__watercooler-cloud__watercooler_search(
+     query="config migration", mode="entries"
+   )
    ```
 
 4. **Present results**:

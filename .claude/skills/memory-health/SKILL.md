@@ -2,7 +2,9 @@
 name: memory-health
 description: Check watercooler memory system health and configuration. Use when memory queries fail or return unexpected results.
 allowed-tools:
-  - Bash(mcp-cli *)
+  - ToolSearch
+  - mcp__watercooler-cloud__watercooler_diagnose_memory
+  - mcp__watercooler-cloud__watercooler_baseline_sync_status
 ---
 
 # Memory System Health Check
@@ -11,27 +13,24 @@ Check memory system health and configuration.
 
 ## Steps
 
-1. **Check diagnose schema**:
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_diagnose_memory
+1. **Load diagnostic tools**:
    ```
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_diagnose_memory
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_baseline_sync_status
+   ```
+   Load both in parallel.
 
 2. **Run memory diagnostics**:
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_diagnose_memory '{}'
+   ```
+   mcp__watercooler-cloud__watercooler_diagnose_memory()
    ```
 
-3. **Check baseline sync status schema**:
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_baseline_sync_status
+3. **Run baseline sync status check**:
+   ```
+   mcp__watercooler-cloud__watercooler_baseline_sync_status()
    ```
 
-4. **Run baseline sync status check**:
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_baseline_sync_status '{}'
-   ```
-
-5. **Report status**:
+4. **Report status**:
 
    **Tier Status**:
    - T1 (Baseline Graph): enabled/disabled, connection status
@@ -53,7 +52,7 @@ Check memory system health and configuration.
    - Active group_id
    - Any missing required config
 
-6. **Suggest fixes** for common issues:
+5. **Suggest fixes** for common issues:
    - Missing environment variables
    - Connection problems
    - Sync issues

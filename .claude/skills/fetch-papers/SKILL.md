@@ -2,7 +2,9 @@
 name: fetch-papers
 description: Download papers referenced in a watercooler thread to docs/
 allowed-tools:
-  - Bash(mcp-cli *)
+  - ToolSearch
+  - mcp__watercooler-cloud__watercooler_read_thread
+  - mcp__watercooler-cloud__watercooler_search
   - Bash(curl *)
   - Bash(mkdir *)
   - Bash(ls *)
@@ -47,16 +49,13 @@ This skill goes beyond literal citation extraction — it identifies **conceptua
 
 ## Phase 1: Read Thread Content
 
-### 1.1 Check MCP Schema
-
-```bash
-mcp-cli info watercooler-cloud/watercooler_read_thread
+Load and fetch the thread:
 ```
-
-### 1.2 Fetch Thread
-
-```bash
-mcp-cli call watercooler-cloud/watercooler_read_thread '{"topic": "<thread-topic>"}'
+ToolSearch: select:mcp__watercooler-cloud__watercooler_read_thread
+```
+Then call:
+```
+mcp__watercooler-cloud__watercooler_read_thread(topic="<thread-topic>")
 ```
 
 ---
@@ -159,7 +158,6 @@ Cross-domain queries (combine terms from different fields):
 ### 4.1 Check REFERENCES.md
 
 ```bash
-# Read project references if they exist
 ls docs/REFERENCES.md 2>/dev/null || ls REFERENCES.md 2>/dev/null
 ```
 
@@ -167,20 +165,18 @@ Match author citations from the thread against known papers with URLs.
 
 ### 4.2 Query Related Watercooler Threads
 
-Check schema first:
-```bash
-mcp-cli info watercooler-cloud/watercooler_search
+Load and search for related discussions that might contain additional references:
+```
+ToolSearch: select:mcp__watercooler-cloud__watercooler_search
+```
+Then call:
+```
+mcp__watercooler-cloud__watercooler_search(query="<key-topic>", mode="entries", semantic=true, code_path="<repo root>")
 ```
 
-Search for related discussions that might contain additional references:
-```bash
-mcp-cli call watercooler-cloud/watercooler_search '{"query": "<key-topic>", "limit": 5}'
+To broaden the search, try additional queries with different topic angles:
 ```
-
-Or use find_similar to discover related threads:
-```bash
-mcp-cli info watercooler-cloud/watercooler_find_similar
-mcp-cli call watercooler-cloud/watercooler_find_similar '{"topic": "<thread-topic>", "limit": 5}'
+mcp__watercooler-cloud__watercooler_search(query="<related-concept>", mode="entries", semantic=true, code_path="<repo root>")
 ```
 
 ### 4.3 Check Existing docs/ Directory
@@ -281,7 +277,7 @@ curl -L --max-filesize 50000000 --max-redirs 3 -o "docs/<author>-<year>-<short-t
 - **Always** use `--max-redirs 3` to prevent redirect loops
 - **Only download from trusted domains**: arxiv.org, openreview.net, aclanthology.org, proceedings.mlr.press
 - **Validate filenames**: Reject paths containing `..` or absolute paths
-- **Never** interpolate user input directly into shell commands — use variables or `jq` for JSON construction
+- **Never interpolate user input directly into shell commands** — sanitize thread topic names and URLs before passing to `curl`
 
 ### 6.5 Note Paywalled Sources
 

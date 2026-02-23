@@ -2,7 +2,9 @@
 name: threads
 description: List and navigate watercooler threads. Use to see active discussions, find specific threads, or get an overview of project threads.
 allowed-tools:
-  - Bash(mcp-cli *)
+  - ToolSearch
+  - mcp__watercooler-cloud__watercooler_list_threads
+  - mcp__watercooler-cloud__watercooler_read_thread
 ---
 
 # List and Navigate Threads
@@ -20,14 +22,14 @@ Arguments: $ARGUMENTS
 
 ### Mode 1: List All Threads (no arguments or status filter)
 
-1. **Check schema**:
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_list_threads
+1. **Load tool**:
+   ```
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_list_threads
    ```
 
 2. **Execute**:
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_list_threads '{}'
+   ```
+   mcp__watercooler-cloud__watercooler_list_threads()
    ```
 
 3. **Present results**:
@@ -37,21 +39,21 @@ Arguments: $ARGUMENTS
 
 ### Mode 2: Show Specific Thread (topic provided)
 
-1. **Check schema**:
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_read_thread
+1. **Load tool**:
+   ```
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_read_thread
    ```
 
-2. **Execute**:
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_read_thread '{"topic": "<topic>"}'
+2. **Execute** (use `summary_only=true` to keep response under ~500 tokens):
+   ```
+   mcp__watercooler-cloud__watercooler_read_thread(topic="<topic>", summary_only=true)
    ```
 
 3. **Present**:
    - Thread metadata
    - Recent entries summary
    - Current ball holder
-   - Link to full thread if needed
+   - Offer to fetch full entries if the user needs more detail
 
 ### Mode 3: Filter by Status
 

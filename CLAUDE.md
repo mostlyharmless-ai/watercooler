@@ -581,32 +581,29 @@ When Claude uses Watercooler MCP tools:
 6. **Manage ball appropriately**: Use `say` for normal back-and-forth, `ack` to keep ball, `handoff` for explicit coordination
 7. **Recall context proactively**: Before starting significant work, use `watercooler_smart_query` or `watercooler_search` to recall relevant prior decisions and context
 
-### mcp-cli Invocation Safety
+### MCP Tool Invocation
 
-When invoking watercooler tools via `mcp-cli` in Bash, follow these rules:
+Skills call watercooler MCP tools via **native tool calls**, not shell commands.
+Deferred MCP tools must be loaded with `ToolSearch` before first use:
 
-**Safe input patterns:**
-- `jq` command substitution (PREFERRED): `mcp-cli call tool "$(jq -n --arg k 'v' '{key: $k}')"`
-- Pipe from file: `cat /tmp/payload.json | mcp-cli call tool -`
-- Inline JSON (small payloads): `mcp-cli call tool '{"key": "value"}'`
-
-**Broken input pattern (NEVER USE):**
-- File redirection: `mcp-cli call tool - < /tmp/payload.json` — causes `JSON Parse error: Unexpected EOF`
-
-**Pipes don't work in Claude Code's Bash tool** (known bug, see
-[#774](https://github.com/anthropics/claude-code/issues/774),
-[#14595](https://github.com/anthropics/claude-code/issues/14595)):
-- `mcp-cli call tool '{}' | jq .` → **0 bytes**
-- `echo "$var" | python3 -c "..."` → **0 bytes**
-- ANY `cmd | cmd` pattern → **0 bytes**
-
-This affects ALL shell pipes, not just `mcp-cli`. The Claude Code Bash tool
-executes commands in a mode where pipe output is lost.
-
-**Safe output patterns (file redirect then parse):**
-```bash
-mcp-cli call tool '{}' > /tmp/out.json && python3 -c "import json; ..."
+```
+ToolSearch: select:mcp__watercooler-cloud__watercooler_smart_query
 ```
 
-This is a Claude Code Bash tool limitation, not an `mcp-cli` issue. The `jq`
-command substitution pattern is the convention across all skills in this repository.
+Then call directly with named parameters:
+
+```
+mcp__watercooler-cloud__watercooler_smart_query(query="...")
+```
+
+Tool names follow the pattern `mcp__watercooler-cloud__watercooler_<tool_name>`.
+For Serena tools: `mcp__plugin_serena_serena__<tool_name>`.
+
+### Known Bash Tool Limitation
+
+Shell pipes (`cmd | cmd`) may produce 0 bytes in Claude Code's Bash tool
+([#774](https://github.com/anthropics/claude-code/issues/774),
+[#14595](https://github.com/anthropics/claude-code/issues/14595)).
+This affects ALL `cmd | cmd` patterns, not just specific tools. Workarounds:
+redirect to a temp file (`cmd > /tmp/out.json && python3 ...`), or use
+`jq -n --arg data "$(cmd)" '$data'` to safely capture output without pipes.
