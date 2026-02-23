@@ -336,6 +336,8 @@ class LeanRAGBackend(MemoryBackend):
             ("LLM_API_KEY", "DEEPSEEK_API_KEY"),
             ("LLM_MODEL", "DEEPSEEK_MODEL"),
             ("LLM_API_BASE", "DEEPSEEK_BASE_URL"),
+            ("LLM_TIMEOUT", "DEEPSEEK_TIMEOUT"),
+            ("LLM_MAX_RETRIES", "DEEPSEEK_MAX_RETRIES"),
             ("EMBEDDING_MODEL", "GLM_MODEL"),
             ("EMBEDDING_API_BASE", "GLM_BASE_URL"),
         ]
@@ -344,12 +346,30 @@ class LeanRAGBackend(MemoryBackend):
                 os.environ[leanrag_var] = os.environ[standard_var]
                 logger.debug(f"Bridged {standard_var} → {leanrag_var}")
 
+        # Resolve LLM timeout/retry from unified config for LeanRAG backend.
+        # Only set DEEPSEEK_TIMEOUT if TOML has an explicit override;
+        # otherwise let config.yaml's ${DEEPSEEK_TIMEOUT:-120} default apply.
+        # Lazy import: resolve_llm_config imports config_schema which imports
+        # pydantic — keep it out of module-level to avoid circular imports
+        # when watercooler_memory is imported before watercooler is fully loaded.
+        from watercooler.config_schema import LLM_TIMEOUT_DEFAULT
+        from watercooler.memory_config import resolve_llm_config
+        llm = resolve_llm_config("leanrag")
+        deepseek_timeout = None
+        # Note: float equality is stable here (literal constant comparison).
+        # If someone explicitly sets timeout=60.0 in TOML, it reads as "no
+        # override" and config.yaml's ${DEEPSEEK_TIMEOUT:-120} default applies.
+        if llm.timeout != LLM_TIMEOUT_DEFAULT:
+            deepseek_timeout = str(llm.timeout)
+
         # Set from resolved config (only if not already set)
         env_mappings = [
             # LLM config (used by generate_text via OpenAI client)
             ("DEEPSEEK_API_KEY", self.config.llm_api_key),
             ("DEEPSEEK_MODEL", self.config.llm_model),
             ("DEEPSEEK_BASE_URL", self.config.llm_api_base),
+            ("DEEPSEEK_TIMEOUT", deepseek_timeout),
+            ("DEEPSEEK_MAX_RETRIES", "3"),
             # Embedding config (used by embedding() via raw HTTP POST - no auth)
             ("GLM_BASE_URL", self.config.embedding_api_base),
             ("GLM_MODEL", self.config.embedding_model),
@@ -367,6 +387,13 @@ class LeanRAGBackend(MemoryBackend):
         """Validate configuration and LeanRAG availability."""
         # Ensure leanrag is importable (installed package or submodule)
         _ensure_leanrag_available()
+
+        # Log provenance to help debug "patched submodule but running different package"
+        try:
+            import leanrag as _lr
+            logger.debug("LeanRAG loaded from: %s", getattr(_lr, '__file__', 'unknown'))
+        except ImportError:
+            logger.debug("LeanRAG not importable for provenance check")
 
     def _normalize_entity_name(self, name: str | None) -> str | None:
         """Normalize entity name by stripping quotes and whitespace.

@@ -716,6 +716,10 @@ class ValidationConfig(BaseModel):
 # =============================================================================
 
 
+# Exported so consumers can detect "no explicit TOML override" without magic numbers.
+LLM_TIMEOUT_DEFAULT = 60.0
+
+
 class LLMServiceConfig(BaseModel):
     """LLM service configuration for memory backends.
 
@@ -735,7 +739,7 @@ class LLMServiceConfig(BaseModel):
         description="LLM model name. Empty means use context-specific default.",
     )
     timeout: float = Field(
-        default=60.0,
+        default=LLM_TIMEOUT_DEFAULT,
         ge=1.0,
         description="Request timeout in seconds",
     )
