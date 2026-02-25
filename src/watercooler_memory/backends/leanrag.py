@@ -246,9 +246,10 @@ class LeanRAGConfig:
 
     # Max concurrent LLM calls during triple extraction.
     # Controls asyncio.Semaphore for generate_text_async calls.
-    # Lower values reduce API rate-limit pressure (use 2-4 for cloud APIs).
-    # Higher values improve throughput for local models (use 8-16).
-    max_concurrent_llm_calls: int = 4
+    # Default of 20 is well within DeepSeek's rate limits (~500 RPM) while
+    # providing ~5x throughput improvement over the previous default of 4.
+    # Lower values (2-4) can be used if hitting rate limits on restricted plans.
+    max_concurrent_llm_calls: int = 20
 
     @classmethod
     def from_unified(cls) -> "LeanRAGConfig":
@@ -577,10 +578,11 @@ class LeanRAGBackend(MemoryBackend):
         return chunks
 
     def _ensure_chunk_file(self, work_dir: Path, chunks: ChunkPayload) -> Path:
-        """Ensure threads_chunk.json exists in the working directory."""
+        """Write chunks to threads_chunk.json in the working directory.
+
+        Always overwrites any existing file to ensure fresh data is used.
+        """
         chunk_file = work_dir / "threads_chunk.json"
-        if chunk_file.exists():
-            return chunk_file
 
         serialized = []
         for item in chunks.chunks:
