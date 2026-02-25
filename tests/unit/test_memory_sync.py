@@ -7,6 +7,7 @@ introduced in Issue #83.
 from __future__ import annotations
 
 import logging
+import logging.handlers
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -407,6 +408,67 @@ class TestCallGraphitiAddEpisode:
         assert result["success"] is False
         assert "error" in result
 
+    def test_skips_when_already_indexed(self):
+        """Guard 1: has_any_mapping=True → add_episode_direct NOT called, returns skipped=True."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from watercooler_mcp.memory_sync import _call_graphiti_add_episode
+
+        mock_index = MagicMock()
+        mock_index.has_any_mapping.return_value = True
+
+        mock_backend = MagicMock()
+        mock_backend.entry_episode_index = mock_index
+        mock_backend.add_episode_direct = AsyncMock()
+
+        mock_config = MagicMock()
+        mock_config.database = "test_db"
+
+        async def run_test():
+            with patch("watercooler_mcp.memory.load_graphiti_config", return_value=mock_config), \
+                 patch("watercooler_mcp.memory.get_graphiti_backend", return_value=mock_backend):
+                return await _call_graphiti_add_episode(
+                    content="already indexed content",
+                    topic="test-topic",
+                    entry_id="entry-already-done",
+                )
+
+        result = asyncio.run(run_test())
+
+        assert result["success"] is True
+        assert result.get("skipped") is True
+        mock_backend.add_episode_direct.assert_not_called()
+
+    def test_no_op_when_index_is_none(self):
+        """Guard 1: entry_episode_index is None → add_episode_direct still called (guard is no-op)."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from watercooler_mcp.memory_sync import _call_graphiti_add_episode
+
+        mock_backend = MagicMock()
+        mock_backend.entry_episode_index = None
+        mock_backend.add_episode_direct = AsyncMock(return_value={"episode_uuid": "ep-uuid-new"})
+        mock_backend.index_entry_as_episode = MagicMock()
+
+        mock_config = MagicMock()
+        mock_config.database = "test_db"
+
+        async def run_test():
+            with patch("watercooler_mcp.memory.load_graphiti_config", return_value=mock_config), \
+                 patch("watercooler_mcp.memory.get_graphiti_backend", return_value=mock_backend):
+                return await _call_graphiti_add_episode(
+                    content="new content",
+                    topic="test-topic",
+                    entry_id="entry-not-indexed",
+                )
+
+        result = asyncio.run(run_test())
+
+        assert result["success"] is True
+        mock_backend.add_episode_direct.assert_called_once()
+
 
 class TestLeanRAGQueue:
     """Tests for LeanRAG queue functionality."""
@@ -745,6 +807,141 @@ class TestCallGraphitiAddEpisodeChunked:
         result = asyncio.run(run_test())
         assert result["success"] is False
         assert "error" in result
+
+    def test_skips_when_already_indexed(self):
+        """Guard 2a: has_any_mapping=True → chunk loop NOT entered, returns skipped=True."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from watercooler_mcp.memory_sync import _call_graphiti_add_episode_chunked
+
+        mock_index = MagicMock()
+        mock_index.has_any_mapping.return_value = True
+
+        mock_backend = MagicMock()
+        mock_backend.entry_episode_index = mock_index
+        mock_backend.add_episode_direct = AsyncMock()
+
+        mock_config = MagicMock()
+        mock_config.database = "test_db"
+
+        # Mock chunk_text to return multiple chunks so the multi-chunk path is entered
+        fake_chunks = [("chunk one content", 10), ("chunk two content", 10)]
+
+        async def run_test():
+            with patch("watercooler_mcp.memory.load_graphiti_config", return_value=mock_config), \
+                 patch("watercooler_mcp.memory.get_graphiti_backend", return_value=mock_backend), \
+                 patch("watercooler_memory.chunker.chunk_text", return_value=fake_chunks):
+                return await _call_graphiti_add_episode_chunked(
+                    content="some content",
+                    topic="test-topic",
+                    entry_id="entry-already-done",
+                    max_tokens=50,
+                    overlap=5,
+                )
+
+        result = asyncio.run(run_test())
+
+        assert result["success"] is True
+        assert result.get("skipped") is True
+        assert result.get("skip_reason") == "already_indexed"
+        assert result.get("chunk_count") == 0
+        mock_backend.add_episode_direct.assert_not_called()
+
+    def test_guard_fires_before_chunk_text(self):
+        """Guard 2a fires before chunk_text() — no tokenization wasted on re-runs."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from watercooler_mcp.memory_sync import _call_graphiti_add_episode_chunked
+
+        mock_index = MagicMock()
+        mock_index.has_any_mapping.return_value = True
+        mock_index.has_entry.return_value = True  # fully indexed → DEBUG, not WARNING
+
+        mock_backend = MagicMock()
+        mock_backend.entry_episode_index = mock_index
+        mock_backend.add_episode_direct = AsyncMock()
+
+        mock_config = MagicMock()
+        mock_config.database = "test_db"
+
+        mock_chunk_text = MagicMock()
+
+        async def run_test():
+            with patch("watercooler_mcp.memory.load_graphiti_config", return_value=mock_config), \
+                 patch("watercooler_mcp.memory.get_graphiti_backend", return_value=mock_backend), \
+                 patch("watercooler_memory.chunker.chunk_text", mock_chunk_text):
+                return await _call_graphiti_add_episode_chunked(
+                    content="some content that would be chunked",
+                    topic="test-topic",
+                    entry_id="entry-already-indexed",
+                )
+
+        result = asyncio.run(run_test())
+
+        assert result.get("skipped") is True
+        # chunk_text must NOT be called — guard fires before tokenization
+        mock_chunk_text.assert_not_called()
+
+    def test_partial_indexing_logs_warning(self):
+        """Guard 2a logs WARNING when chunks exist but full-entry mapping is absent (crash path)."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from watercooler_mcp.memory_sync import _call_graphiti_add_episode_chunked
+
+        mock_index = MagicMock()
+        mock_index.has_any_mapping.return_value = True
+        mock_index.has_entry.return_value = False  # partial: chunks only, no full-entry map
+
+        mock_backend = MagicMock()
+        mock_backend.entry_episode_index = mock_index
+        mock_backend.add_episode_direct = AsyncMock()
+
+        mock_config = MagicMock()
+        mock_config.database = "test_db"
+
+        async def run_test():
+            with patch("watercooler_mcp.memory.load_graphiti_config", return_value=mock_config), \
+                 patch("watercooler_mcp.memory.get_graphiti_backend", return_value=mock_backend):
+                return await _call_graphiti_add_episode_chunked(
+                    content="large content",
+                    topic="test-topic",
+                    entry_id="entry-partial",
+                )
+
+        import logging
+        with self._capture_logs("watercooler_mcp.memory_sync", logging.WARNING) as log_records:
+            result = asyncio.run(run_test())
+
+        assert result.get("skipped") is True
+        assert result.get("skip_reason") == "already_indexed"
+        assert any("partial chunk mapping" in r.getMessage() for r in log_records), \
+            "Expected WARNING about partial chunk mapping"
+
+    @staticmethod
+    def _capture_logs(logger_name, level):
+        """Context manager that captures log records from a named logger."""
+        import logging
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            handler = logging.handlers.MemoryHandler(capacity=1000, flushLevel=logging.CRITICAL)
+            log = logging.getLogger(logger_name)
+            log.addHandler(handler)
+            original_level = log.level
+            log.setLevel(level)
+            records = []
+            handler.buffer = records
+            try:
+                yield records
+            finally:
+                log.removeHandler(handler)
+                log.setLevel(original_level)
+
+        return _ctx()
 
 
 class TestGraphitiSyncCallbackChunking:

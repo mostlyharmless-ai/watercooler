@@ -15,6 +15,7 @@ Issue #83: This module extracts Graphiti-specific code from baseline_graph/sync.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import threading
@@ -75,6 +76,12 @@ async def _call_graphiti_add_episode(
 
         # Use unified project group_id (derived from code_path via config)
         unified_group_id = config.database
+
+        # Pre-flight dedup: skip if already indexed
+        if entry_id and backend.entry_episode_index is not None:
+            if backend.entry_episode_index.has_any_mapping(entry_id):
+                logger.debug("MEMORY: Skipping already-indexed entry %s", entry_id)
+                return {"success": True, "skipped": True, "skip_reason": "already_indexed"}
 
         # Parse timestamp
         if timestamp:
@@ -163,6 +170,27 @@ async def _call_graphiti_add_episode_chunked(
                 error_msg = backend.get("message", error_msg)
             return {"success": False, "error": error_msg}
 
+        # Pre-flight dedup: skip entire entry if any chunk already indexed.
+        # All-or-nothing semantics: if a crash left partial chunks (e.g. only
+        # chunk 0 committed), remaining chunks are NOT retried on the next call.
+        # Clear the entry from entry_episode_index manually to force re-indexing.
+        if entry_id and backend.entry_episode_index is not None:
+            if backend.entry_episode_index.has_any_mapping(entry_id):
+                if not backend.entry_episode_index.has_entry(entry_id):
+                    # Chunk mapping exists but no full-entry mapping — possible
+                    # partial indexing from a prior crash.
+                    logger.warning(
+                        "MEMORY: Entry %s has partial chunk mapping (crash recovery path). "
+                        "Remaining chunks will NOT be re-indexed. Clear index to retry.",
+                        entry_id,
+                    )
+                else:
+                    logger.debug("MEMORY: Skipping already-indexed entry %s (chunked)", entry_id)
+                return {
+                    "success": True, "chunk_count": 0, "total_chunks": 0,
+                    "episode_uuids": [], "skipped": True, "skip_reason": "already_indexed",
+                }
+
         # Configure chunking
         chunker_config = ChunkerConfig(
             max_tokens=max_tokens,
@@ -229,8 +257,7 @@ async def _call_graphiti_add_episode_chunked(
 
                     # Track chunk mapping if entry_id provided and index available
                     if entry_id and backend.entry_episode_index is not None:
-                        # Generate a simple chunk_id based on entry_id and index
-                        import hashlib
+                        # Generate a chunk_id based on entry_id and chunk content
                         chunk_id = hashlib.sha256(
                             f"{entry_id}:{i}:{chunk_text_content[:100]}".encode()
                         ).hexdigest()[:16]

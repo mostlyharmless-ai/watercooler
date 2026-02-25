@@ -754,7 +754,7 @@ class TestApplyConfigToEnv:
         backend = LeanRAGBackend(config)
 
         assert os.environ["DEEPSEEK_TIMEOUT"] == str(custom_timeout)
-        assert os.environ["DEEPSEEK_MAX_RETRIES"] == "3"
+        assert os.environ["DEEPSEEK_MAX_ATTEMPTS"] == "3"
 
     def test_deepseek_timeout_not_set_when_toml_uses_default(self, tmp_path, monkeypatch):
         """Test that DEEPSEEK_TIMEOUT is not set when TOML uses the schema default.

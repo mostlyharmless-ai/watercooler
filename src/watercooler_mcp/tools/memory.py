@@ -478,6 +478,22 @@ async def _graphiti_add_episode_impl(
         episode_title = title if title else content[:50] + ("..." if len(content) > 50 else "")
         source_desc = source_description if source_description else "Direct episode via MCP tool"
 
+        # Pre-flight dedup: skip if this entry is already indexed.
+        # Protects against agent retries creating duplicate episodes.
+        if entry_id and backend.entry_episode_index is not None:
+            if backend.entry_episode_index.has_any_mapping(entry_id):
+                logger.debug("MEMORY: Skipping already-indexed entry %s (direct tool)", entry_id)
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "status": "skipped",
+                        "skip_reason": "already_indexed",
+                        "entry_id": entry_id,
+                        "message": "Entry already indexed; skipping to prevent duplicate episodes.",
+                    }, indent=2)
+                )])
+
         # Fire-and-forget: spawn background task for the slow LLM+graph work.
         # The graphiti pipeline (DeepSeek LLM calls + FalkorDB writes) takes
         # 60-120s, which exceeds the middleware's default 50s tool timeout.
@@ -1318,7 +1334,18 @@ async def _bulk_index_impl(
         max_entries: Max entries to queue (0 = unlimited, for testing).
 
     Returns:
-        JSON with task count and monitoring info.
+        JSON with indexing summary containing:
+        - action: "bulk_index"
+        - topics_scanned: number of thread topics discovered
+        - entries_queued: entries newly enqueued for background indexing
+        - entries_skipped: entries skipped due to missing body content
+        - already_indexed: entries skipped because they are already committed
+          to the entry-episode index (Graphiti backend only). A second run
+          returning entries_queued=0 and already_indexed>0 is the expected
+          idempotent outcome — not an error. Calling bulk_index again on an
+          already-indexed project is safe and has no side effects.
+        - errors: per-topic errors (capped at 10)
+        - queue: queue status summary
     """
     try:
         from ..memory_queue import get_queue, MemoryTask, enqueue_memory_task, VALID_BACKENDS
@@ -1367,8 +1394,33 @@ async def _bulk_index_impl(
         # Derive group_id using canonical function (consistent with search tools)
         group_id = derive_group_id(threads_dir=threads_dir)
 
+        # Load index once for pre-flight dedup (Graphiti only — LeanRAG has no entry-episode index;
+        # the LeanRAG queue file is its dedup mechanism).
+        # NOTE: _dedup_index is a READ-ONLY disk snapshot, separate from backend.entry_episode_index
+        # (the live in-memory object used by Guards 1/2 at execution time). Guard 3 is a best-effort
+        # pre-flight filter; Guards 1/2 remain authoritative. Requires auto_save_index=True (default).
+        _dedup_index = None
+        if backend == "graphiti":
+            try:
+                from ..memory import load_graphiti_config
+                from watercooler_memory.entry_episode_index import IndexConfig
+                graphiti_config = load_graphiti_config(code_path=code_path)
+                if graphiti_config and graphiti_config.entry_episode_index_path:
+                    _dedup_index = _get_cached_provenance_index(graphiti_config.entry_episode_index_path)
+                elif graphiti_config:
+                    # Config exists but no explicit index path — use default location
+                    _dedup_index = _get_cached_provenance_index(IndexConfig(backend="graphiti").index_path)
+                # else: graphiti_config is None → Graphiti not configured → _dedup_index stays None
+            except FileNotFoundError:
+                logger.debug("MEMORY: No entry index found for dedup guard (first run)")
+            except Exception as exc:
+                logger.warning(
+                    "MEMORY: Could not load entry index for dedup guard — dedup skipped: %s", exc
+                )
+
         queued = 0
         skipped = 0
+        already_indexed = 0
         errors = []
 
         for topic in all_topics:
@@ -1386,6 +1438,12 @@ async def _bulk_index_impl(
                 content = entry.get("body", "")
                 if not content:
                     skipped += 1
+                    continue
+
+                # Skip entries already committed to Graphiti
+                if _dedup_index is not None and entry_id and _dedup_index.has_any_mapping(entry_id):
+                    logger.debug("MEMORY: Skipping already-indexed entry %s", entry_id)
+                    already_indexed += 1
                     continue
 
                 task_id = enqueue_memory_task(
@@ -1415,6 +1473,7 @@ async def _bulk_index_impl(
                 "topics_scanned": len(all_topics),
                 "entries_queued": queued,
                 "entries_skipped": skipped,
+                "already_indexed": already_indexed,
                 "errors": errors[:10],
                 "queue": summary,
             }, indent=2),

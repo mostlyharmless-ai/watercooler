@@ -110,6 +110,7 @@ def mock_graphiti_backend() -> MagicMock:
         }
 
     mock.add_episode_direct = AsyncMock(side_effect=mock_add_episode)
+    mock.entry_episode_index = None  # Guard 4 is transparent by default
     mock.index_entry_as_episode = MagicMock()
     mock.clear_group_episodes = MagicMock(
         return_value={"removed": 5, "group_id": "test", "message": "Cleared"}

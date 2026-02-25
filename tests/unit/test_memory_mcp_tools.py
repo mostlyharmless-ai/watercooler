@@ -32,6 +32,8 @@ class TestGraphitiAddEpisodeTool:
 
         mock_backend = MagicMock()
         mock_backend.index_entry_as_episode = MagicMock()
+        # Default: no index (guard transparent). Tests that need dedup set this explicitly.
+        mock_backend.entry_episode_index = None
 
         # Mock the async add_episode_direct method
         async def mock_add_direct(*args, **kwargs):
@@ -191,6 +193,64 @@ class TestGraphitiAddEpisodeTool:
         result_data = json.loads(result.content[0].text)
         assert result_data["success"] is False
         assert "group_id" in result_data["error"].lower()
+
+    async def test_add_episode_skips_when_already_indexed(
+        self, mock_graphiti_backend, mock_context
+    ):
+        """Dedup guard: add_episode_direct NOT called when entry is already in index."""
+        from watercooler_mcp.tools.memory import _graphiti_add_episode_impl
+
+        mock_index = MagicMock()
+        mock_index.has_any_mapping.return_value = True
+        mock_graphiti_backend.entry_episode_index = mock_index
+
+        with patch(
+            "watercooler_mcp.memory.load_graphiti_config",
+            return_value=MagicMock(),
+        ), patch(
+            "watercooler_mcp.memory.get_graphiti_backend",
+            return_value=mock_graphiti_backend,
+        ):
+            result = await _graphiti_add_episode_impl(
+                content="Test episode content",
+                group_id="test-thread",
+                entry_id="ALREADY-INDEXED-01",
+                ctx=mock_context,
+            )
+
+        result_data = json.loads(result.content[0].text)
+        assert result_data["success"] is True
+        assert result_data["status"] == "skipped"
+        assert result_data["skip_reason"] == "already_indexed"
+        # Background task must not be spawned — no duplicate episode created
+        mock_graphiti_backend.add_episode_direct.assert_not_called()
+
+    async def test_add_episode_no_guard_when_index_absent(
+        self, mock_graphiti_backend, mock_context
+    ):
+        """Dedup guard is skipped when entry_episode_index is None (first run)."""
+        from watercooler_mcp.tools.memory import _graphiti_add_episode_impl
+
+        # No index — guard must be transparent
+        mock_graphiti_backend.entry_episode_index = None
+
+        with patch(
+            "watercooler_mcp.memory.load_graphiti_config",
+            return_value=MagicMock(),
+        ), patch(
+            "watercooler_mcp.memory.get_graphiti_backend",
+            return_value=mock_graphiti_backend,
+        ):
+            result = await _graphiti_add_episode_impl(
+                content="Test episode content",
+                group_id="test-thread",
+                entry_id="NEW-ENTRY-01",
+                ctx=mock_context,
+            )
+
+        result_data = json.loads(result.content[0].text)
+        assert result_data["success"] is True
+        assert result_data["status"] == "submitted"
 
 
 class TestLeanRAGRunPipelineTool:
@@ -471,3 +531,127 @@ class TestBulkIndexImpl:
 
         data = json.loads(result.content[0].text)
         assert "error" in data
+
+    async def test_bulk_index_skips_already_indexed_entries(
+        self, mock_context, threads_dir, mock_queue
+    ):
+        """Guard 3: entries in the index are not re-enqueued; already_indexed count is correct."""
+        from unittest.mock import MagicMock
+        from watercooler_mcp.tools.memory import _bulk_index_impl
+
+        # Two entries: one already indexed, one new
+        entries = [
+            {"entry_id": "OLD-ENTRY-1", "body": "already indexed body"},
+            {"entry_id": "NEW-ENTRY-2", "body": "new content to index"},
+        ]
+
+        mock_index = MagicMock()
+        mock_index.has_any_mapping.side_effect = lambda eid: eid == "OLD-ENTRY-1"
+
+        with patch("watercooler_mcp.memory_queue.get_queue", return_value=mock_queue), \
+             patch("watercooler.commands.list_entries", return_value=entries), \
+             patch("watercooler.path_resolver.resolve_threads_dir", return_value=threads_dir), \
+             patch("watercooler.path_resolver.derive_group_id", return_value="test-group"), \
+             patch("watercooler_mcp.memory_queue.enqueue_memory_task", return_value="task-id"), \
+             patch("watercooler_mcp.tools.memory._get_cached_provenance_index", return_value=mock_index), \
+             patch("watercooler_mcp.memory.load_graphiti_config", return_value=MagicMock(
+                 entry_episode_index_path="/tmp/fake-index.json"
+             )), \
+             patch("watercooler.baseline_graph.storage.list_thread_topics", return_value=["topic-a"]):
+            result = await _bulk_index_impl(
+                ctx=mock_context, code_path="/repo", backend="graphiti",
+            )
+
+        data = json.loads(result.content[0].text)
+        assert data["already_indexed"] == 1
+        assert data["entries_queued"] == 1
+
+    async def test_bulk_index_all_entries_when_index_absent(
+        self, mock_context, threads_dir, mock_queue
+    ):
+        """Guard 3: when index load fails, all entries are enqueued normally."""
+        from watercooler_mcp.tools.memory import _bulk_index_impl
+
+        entries = [
+            {"entry_id": "ENTRY-1", "body": "content one"},
+            {"entry_id": "ENTRY-2", "body": "content two"},
+        ]
+
+        with patch("watercooler_mcp.memory_queue.get_queue", return_value=mock_queue), \
+             patch("watercooler.commands.list_entries", return_value=entries), \
+             patch("watercooler.path_resolver.resolve_threads_dir", return_value=threads_dir), \
+             patch("watercooler.path_resolver.derive_group_id", return_value="test-group"), \
+             patch("watercooler_mcp.memory_queue.enqueue_memory_task", return_value="task-id"), \
+             patch("watercooler_mcp.memory.load_graphiti_config", side_effect=Exception("config error")), \
+             patch("watercooler.baseline_graph.storage.list_thread_topics", return_value=["topic-a"]):
+            result = await _bulk_index_impl(
+                ctx=mock_context, code_path="/repo", backend="graphiti",
+            )
+
+        data = json.loads(result.content[0].text)
+        # Both entries enqueued; no already_indexed skips
+        assert data["entries_queued"] == 2
+        assert data["already_indexed"] == 0
+
+    async def test_bulk_index_leanrag_skips_dedup_guard(
+        self, mock_context, threads_dir, mock_queue
+    ):
+        """Guard 3: LeanRAG backend never loads the Graphiti index — dedup guard is skipped."""
+        from unittest.mock import MagicMock
+        from watercooler_mcp.tools.memory import _bulk_index_impl
+
+        entries = [
+            {"entry_id": "ENTRY-1", "body": "content one"},
+            {"entry_id": "ENTRY-2", "body": "content two"},
+        ]
+
+        mock_load_graphiti = MagicMock()
+        mock_get_cached = MagicMock()
+
+        with patch("watercooler_mcp.memory_queue.get_queue", return_value=mock_queue), \
+             patch("watercooler.commands.list_entries", return_value=entries), \
+             patch("watercooler.path_resolver.resolve_threads_dir", return_value=threads_dir), \
+             patch("watercooler.path_resolver.derive_group_id", return_value="test-group"), \
+             patch("watercooler_mcp.memory_queue.enqueue_memory_task", return_value="task-id"), \
+             patch("watercooler_mcp.memory.load_graphiti_config", mock_load_graphiti), \
+             patch("watercooler_mcp.tools.memory._get_cached_provenance_index", mock_get_cached), \
+             patch("watercooler.baseline_graph.storage.list_thread_topics", return_value=["topic-a"]):
+            result = await _bulk_index_impl(
+                ctx=mock_context, code_path="/repo", backend="leanrag",
+            )
+
+        # Guard 3 must NOT load the Graphiti index for LeanRAG
+        mock_load_graphiti.assert_not_called()
+        mock_get_cached.assert_not_called()
+
+        data = json.loads(result.content[0].text)
+        # All entries are enqueued (no dedup guard applied)
+        assert data["entries_queued"] == 2
+        assert data["already_indexed"] == 0
+
+    async def test_bulk_index_graphiti_not_configured_skips_dedup_guard(
+        self, mock_context, threads_dir, mock_queue
+    ):
+        """Guard 3: when graphiti_config is None (not configured), _dedup_index stays None."""
+        from watercooler_mcp.tools.memory import _bulk_index_impl
+
+        entries = [
+            {"entry_id": "ENTRY-1", "body": "content one"},
+            {"entry_id": "ENTRY-2", "body": "content two"},
+        ]
+
+        with patch("watercooler_mcp.memory_queue.get_queue", return_value=mock_queue), \
+             patch("watercooler.commands.list_entries", return_value=entries), \
+             patch("watercooler.path_resolver.resolve_threads_dir", return_value=threads_dir), \
+             patch("watercooler.path_resolver.derive_group_id", return_value="test-group"), \
+             patch("watercooler_mcp.memory_queue.enqueue_memory_task", return_value="task-id"), \
+             patch("watercooler_mcp.memory.load_graphiti_config", return_value=None), \
+             patch("watercooler.baseline_graph.storage.list_thread_topics", return_value=["topic-a"]):
+            result = await _bulk_index_impl(
+                ctx=mock_context, code_path="/repo", backend="graphiti",
+            )
+
+        data = json.loads(result.content[0].text)
+        # Graphiti not configured → no dedup guard → all entries enqueued
+        assert data["entries_queued"] == 2
+        assert data["already_indexed"] == 0
