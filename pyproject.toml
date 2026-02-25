@@ -100,7 +100,7 @@ local = [
     "httpx>=0.25",
 ]
 # Interactive graph visualization for baseline graphs (scripts/visualize_graph.py)
-# See docs/visualization.md for usage
+# See dev_docs/visualization.md for usage
 visualization = [
     "pyvis>=0.3.0",
     "networkx>=3.0",

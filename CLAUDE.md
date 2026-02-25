@@ -9,7 +9,8 @@ watercooler-cloud is a graph-first collaboration protocol for agentic coding pro
 - **Core library**: `src/watercooler/` - Main Python package with CLI and core functionality
 - **MCP server**: `src/watercooler_mcp/` - Model Context Protocol server integration
 - **Tests**: `tests/` - Test suite mirroring source structure (e.g., `src/watercooler/cli.py` → `tests/test_cli.py`)
-- **Documentation**: `docs/` - User and developer documentation
+- **User documentation**: `docs/` - User-facing setup and reference docs
+- **Developer documentation**: `dev_docs/` - Architecture, brainstorms, plans, and internal guides
 - **Templates**: `src/watercooler/templates/` - Bundled thread and entry templates
 - **Configuration**: Root-level config files (`pyproject.toml`, etc.)
 

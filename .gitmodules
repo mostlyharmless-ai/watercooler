@@ -5,5 +5,5 @@
 	path = external/graphiti
 	url = https://github.com/mostlyharmless-ai/graphiti
 [submodule "docs/watercooler-planning"]
-	path = docs/watercooler-planning
+	path = dev_docs/watercooler-planning
 	url = git@github.com:mostlyharmless-ai/watercooler-planning.git

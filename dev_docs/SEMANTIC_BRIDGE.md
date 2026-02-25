@@ -116,16 +116,33 @@ watercooler_get_thread_entry(
 )
 ```
 
-## Why Semantic Bridging (Not Structural Links)
+## Semantic Discovery + Structural Citation Resolution
 
-The bridge uses **semantic similarity** between tiers rather than hard-coded
-cross-tier indexes:
+Provenance uses two complementary mechanisms, not one:
 
-- **Self-maintaining**: No separate index to keep in sync across T2 and T3
+**Semantic discovery** (query → relevant entities): Vector search against T3
+finds entities relevant to the query. This step is probabilistic — the right
+entity surfaces because its description semantically overlaps with the query.
+
+**Structural citation resolution** (entity → source entries): Once an entity
+is found, `CoreResult.source` contains the episode UUIDs that contributed to
+it (set by `_handle_single_entity_extraction` as `source_id = chunk_key`).
+Resolving UUID → `entry_id` via `EntryEpisodeIndex` is deterministic — no
+semantic matching required.
+
+**Fallback path** (when structural resolution fails): When episode UUIDs are
+missing (MD5 fallback in `episodes_to_chunk_payload`) or absent from
+`EntryEpisodeIndex` (legacy episodes), a semantic query against T2 using the
+entity description recovers approximate provenance. Less precise but still
+useful.
+
+The original framing of "semantic bridging (not structural links)" was
+incomplete — citation resolution is structural. The benefits of the approach:
+
+- **Self-maintaining**: No separate cross-tier index to keep in sync
 - **No cross-tier coupling**: T3 clusters can be rebuilt independently of T2
-- **Graceful degradation**: If T3 is unavailable, T2 search still works
-  directly; if provenance index is empty, agents see the raw entity name
-  and cluster summary rather than failing
+- **Graceful degradation**: Fallback to semantic bridge when structural
+  resolution fails; `provenance_available: false` when both fail
 
 ## When Provenance Is Unavailable
 
