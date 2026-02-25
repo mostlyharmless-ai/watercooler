@@ -21,6 +21,7 @@ Removed (use replacements):
 import asyncio
 import json
 import logging
+import os
 import threading as _threading
 from pathlib import Path
 from typing import Any
@@ -240,10 +241,11 @@ async def _get_entity_edge_impl(
 
 
 def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
-    """Diagnose Graphiti memory backend installation and configuration.
+    """Diagnose memory backend installation and configuration across all tiers.
 
-    Returns diagnostic information about package paths, imports, and configuration.
-    Useful for debugging backend initialization issues.
+    Returns diagnostic information about package paths, imports, and configuration
+    for T2 (Graphiti) and T3 (LeanRAG). Useful for debugging backend initialization
+    issues and misconfiguration.
 
     Args:
         ctx: MCP context
@@ -251,11 +253,12 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
 
     Returns:
         JSON with diagnostic information including:
-        - Python version
-        - watercooler_memory package path
-        - GraphitiBackend import status
-        - Configuration status
-        - Backend initialization status
+        - Python version and executable path
+        - watercooler_memory package path and version
+        - T2 (Graphiti): GraphitiBackend import status, config, backend_init
+        - T3 (LeanRAG): nested under ``t3_leanrag`` — LeanRAGBackend import,
+          env vars, path resolution, FalkorDB/LLM/embedding config, backend_init,
+          has_incremental_state
 
     Example:
         diagnose_memory(code_path="/path/to/project")
@@ -337,6 +340,64 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
                 diagnostics["backend_init"] = "✗ Failed: Returned None"
             else:
                 diagnostics["backend_init"] = "✓ Success"
+
+        # Check T3 (LeanRAG) configuration and availability
+        t3: dict[str, Any] = {}
+
+        # Import LeanRAGBackend once and cache the class so we can instantiate
+        # it directly below without a redundant load_leanrag_config() call.
+        _LeanRAGBackend_cls = None
+        try:
+            from watercooler_memory.backends.leanrag import LeanRAGBackend as _LeanRAGBackend_cls
+            t3["leanrag_backend_import"] = "✓ Success"
+        except ImportError as _e:
+            t3["leanrag_backend_import"] = f"✗ Failed: {_e}"
+
+        t3["leanrag_path_env"] = os.getenv("LEANRAG_PATH") or "(not set)"
+        t3["leanrag_enabled_env"] = os.getenv("WATERCOOLER_LEANRAG_ENABLED") or "(not set)"
+        t3["leanrag_database_env"] = os.getenv("WATERCOOLER_LEANRAG_DATABASE") or "(not set)"
+
+        try:
+            leanrag_cfg = mem.load_leanrag_config(code_path=code_path if code_path else None)
+            if leanrag_cfg is None:
+                t3["leanrag_enabled"] = False
+                t3["config_issue"] = (
+                    "LeanRAG not enabled. Set WATERCOOLER_LEANRAG_ENABLED=1 and LEANRAG_PATH, "
+                    "or configure [memory.tiers] t3_enabled = true in config.toml."
+                )
+            else:
+                t3["leanrag_enabled"] = True
+                t3["leanrag_path"] = str(leanrag_cfg.leanrag_path) if leanrag_cfg.leanrag_path else "(none)"
+                t3["leanrag_path_exists"] = (
+                    Path(leanrag_cfg.leanrag_path).exists() if leanrag_cfg.leanrag_path else False
+                )
+                t3["work_dir"] = str(leanrag_cfg.work_dir) if leanrag_cfg.work_dir else "(none)"
+                t3["falkordb_host"] = leanrag_cfg.falkordb_host or "(not set)"
+                t3["falkordb_port"] = (
+                    leanrag_cfg.falkordb_port if leanrag_cfg.falkordb_port is not None else "(not set)"
+                )
+                t3["llm_api_key_set"] = bool(leanrag_cfg.llm_api_key)
+                t3["llm_api_base"] = leanrag_cfg.llm_api_base or "(not set)"
+                t3["llm_model"] = leanrag_cfg.llm_model or "(not set)"
+                t3["embedding_api_base"] = leanrag_cfg.embedding_api_base or "(not set)"
+                t3["embedding_model"] = leanrag_cfg.embedding_model or "(not set)"
+
+                if _LeanRAGBackend_cls is not None:
+                    try:
+                        leanrag_backend = _LeanRAGBackend_cls(leanrag_cfg)
+                        t3["backend_init"] = "✓ Success"
+                        try:
+                            t3["has_incremental_state"] = leanrag_backend.has_incremental_state()
+                        except Exception as _he:
+                            t3["has_incremental_state"] = f"✗ Failed: {_he}"
+                    except Exception as _be:
+                        t3["backend_init"] = f"✗ Failed: {_be}"
+                else:
+                    t3["backend_init"] = "✗ Skipped: LeanRAGBackend import failed"
+        except Exception as _e:
+            t3["config_error"] = f"load_leanrag_config: {_e}"
+
+        diagnostics["t3_leanrag"] = t3
 
         return ToolResult(content=[TextContent(
             type="text",

@@ -20,42 +20,44 @@ Check memory system health and configuration.
    ```
    Load both in parallel.
 
-2. **Run memory diagnostics**:
+2. **Run memory diagnostics and baseline sync** in parallel:
    ```
-   mcp__watercooler-cloud__watercooler_diagnose_memory()
-   ```
-
-3. **Run baseline sync status check**:
-   ```
-   mcp__watercooler-cloud__watercooler_baseline_sync_status()
+   mcp__watercooler-cloud__watercooler_diagnose_memory(code_path="<repo root>")
+   mcp__watercooler-cloud__watercooler_baseline_sync_status(code_path="<repo root>")
    ```
 
-4. **Report status**:
+3. **Report status**:
 
-   **Tier Status**:
-   - T1 (Baseline Graph): enabled/disabled, connection status
-   - T2 (Graphiti): enabled/disabled, connection status
-   - T3 (LeanRAG): enabled/disabled, connection status
+   **T1 — Baseline Graph** (from `baseline_sync_status`):
+   - Total / synced / stale / error threads
+   - Recommendations (if any)
 
-   **Backend Connections**:
-   - Neo4j: connected/disconnected
-   - Embedding service: available/unavailable
-   - LLM service: available/unavailable
+   **T2 — Graphiti** (from top-level fields in `diagnose_memory`):
+   - `graphiti_enabled`: true/false
+   - `graphiti_backend_import`: ✓/✗
+   - `llm_api_key_set`, `llm_api_base`, `llm_model`
+   - `backend_init`: ✓/✗ (connection to FalkorDB/Neo4j)
+   - `openai_key_set`: warn if true (deprecated field)
 
-   **Graph Sync Status**:
-   - Synced threads count
-   - Stale threads count
-   - Error threads (if any)
+   **T3 — LeanRAG** (from `t3_leanrag` key in `diagnose_memory`):
+   - `leanrag_backend_import`: ✓/✗
+   - `leanrag_enabled`: true/false — if false, show `config_issue`
+   - `leanrag_path` + `leanrag_path_exists`: path to submodule and whether it exists on disk
+   - `work_dir`: derived FalkorDB graph directory
+   - `falkordb_host` / `falkordb_port`: connection target
+   - `llm_api_key_set`, `llm_api_base`, `llm_model`
+   - `embedding_api_base`, `embedding_model`
+   - `backend_init`: ✓/✗
+   - `has_incremental_state`: whether a saved cluster state exists (only present on success)
+   - Env vars: `leanrag_path_env`, `leanrag_enabled_env`, `leanrag_database_env`
 
-   **Configuration**:
-   - Current code_path
-   - Active group_id
-   - Any missing required config
-
-5. **Suggest fixes** for common issues:
-   - Missing environment variables
-   - Connection problems
-   - Sync issues
+4. **Suggest fixes** for common issues:
+   - T3 not enabled: set `WATERCOOLER_LEANRAG_ENABLED=1` + `LEANRAG_PATH`, or add `[memory.tiers] t3_enabled = true` in config.toml
+   - `leanrag_path_exists: false`: clone/update the LeanRAG submodule at the configured path
+   - `leanrag_backend_import` failed: install with `pip install watercooler-cloud[memory]`
+   - Missing embedding service: set `WATERCOOLER_EMBEDDING_API_BASE` or configure `[memory.embedding]`
+   - T2 not enabled: set `WATERCOOLER_GRAPHITI_ENABLED=1` or `[memory] backend = "graphiti"` in config.toml
+   - T1 stale threads: run `watercooler_baseline_sync_status` and reconcile stale entries
 
 ## Example Invocations
 
