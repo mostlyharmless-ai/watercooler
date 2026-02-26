@@ -1,0 +1,53 @@
+[
+  {
+    "task_id": "t2-active-only-supersession",
+    "thread_id": "memory-qa",
+    "t2_ingest": true,
+    "t3_index": false,
+    "seed_entries": [
+      {
+        "entry_id": "01KJBP9HTND3Y0CW0FP8F91TKJ",
+        "title": "Dana role v1",
+        "timestamp": "2026-02-24T00:00:00Z",
+        "body": "Fact: Dana's role is Engineer."
+      },
+      {
+        "entry_id": "01KJBP9HTND3Y0CW0FP8F91TKK",
+        "title": "Dana role v2 (supersedes)",
+        "timestamp": "2026-02-24T00:10:00Z",
+        "body": "Fact: Dana's role is Manager. This supersedes the earlier statement that Dana's role is Engineer."
+      }
+    ],
+    "assertions": {
+      "t2_query": "Dana role",
+      "expect_current_contains": "Manager",
+      "expect_stale_contains": "Engineer",
+      "require_stale_fact": true
+    }
+  },
+  {
+    "task_id": "t3-reverse-provenance",
+    "thread_id": "memory-qa",
+    "t2_ingest": true,
+    "t3_index": true,
+    "seed_entries": [
+      {
+        "entry_id": "01KJBP9HTND3Y0CW0FP8F91TKM",
+        "title": "Retention policy",
+        "timestamp": "2026-02-24T01:00:00Z",
+        "body": "Fact: In the EU region, retain data for 30 days. In the US region, retain data for 7 days."
+      },
+      {
+        "entry_id": "01KJBP9HTND3Y0CW0FP8F91TKN",
+        "title": "Retention policy rationale",
+        "timestamp": "2026-02-24T01:05:00Z",
+        "body": "The EU retention period is longer due to customer contracts; the US retention period is shorter due to cost."
+      }
+    ],
+    "assertions": {
+      "t3_query": "What is the EU retention period?",
+      "expect_resolves_to_entry_ids": ["01KJBP9HTND3Y0CW0FP8F91TKM", "01KJBP9HTND3Y0CW0FP8F91TKN"]
+    }
+  }
+]
+
