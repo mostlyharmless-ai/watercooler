@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -389,6 +390,31 @@ class _JsonObjectOnlyClient:
                 return raw
 
         return _Inner(**kwargs)
+
+
+@functools.lru_cache(maxsize=1)
+def _build_noop_cross_encoder() -> Any:
+    """Build a type-compatible no-op cross encoder (cached singleton).
+
+    Graphiti initializes a default OpenAI reranker when ``cross_encoder`` is
+    omitted. That implicit default requires ``OPENAI_API_KEY`` even for
+    non-cross-encoder reranker modes, which breaks provider-agnostic setups.
+
+    Graphiti validates ``cross_encoder`` as a ``CrossEncoderClient`` instance,
+    so this helper creates a small subclass at runtime to satisfy that contract.
+    The subclass is defined inside the function (rather than at module level)
+    because ``CrossEncoderClient`` is a lazy import; the cache freezes it to
+    whichever import was live at first call, which is correct for a long-running
+    process where ``graphiti_core`` is never reloaded.
+    """
+    from graphiti_core.cross_encoder.client import CrossEncoderClient
+
+    class _NoopCrossEncoderClient(CrossEncoderClient):
+        async def rank(self, query: str, passages: list[str]) -> list[tuple[str, float]]:
+            del query  # Unused in the no-op path
+            return [(passage, 0.0) for passage in passages]
+
+    return _NoopCrossEncoderClient()
 
 
 @dataclass
@@ -1146,6 +1172,14 @@ class GraphitiBackend(MemoryBackend):
         llm_api_base = self.config.llm_api_base or ""
         is_anthropic = is_anthropic_url(llm_api_base)
 
+        # Hoisted above the is_anthropic branch so the cross_encoder setup
+        # below can reference it regardless of which LLM client path is taken.
+        llm_config = LLMConfig(
+            api_key=self.config.llm_api_key,
+            model=self.config.llm_model,
+            base_url=self.config.llm_api_base,
+        )
+
         if is_anthropic:
             # Use native Anthropic client for Anthropic API
             from graphiti_core.llm_client.anthropic_client import AnthropicClient
@@ -1155,11 +1189,6 @@ class GraphitiBackend(MemoryBackend):
             )
         else:
             # Use OpenAI-compatible client for OpenAI, DeepSeek, Groq, local servers
-            llm_config = LLMConfig(
-                api_key=self.config.llm_api_key,
-                model=self.config.llm_model,
-                base_url=self.config.llm_api_base,
-            )
             if _needs_json_object_only(llm_api_base):
                 # DeepSeek (and similar) don't support json_schema structured
                 # outputs. Use a thin wrapper that forces json_object mode.
@@ -1174,6 +1203,29 @@ class GraphitiBackend(MemoryBackend):
                 )
             else:
                 llm_client = OpenAIGenericClient(config=llm_config)
+
+        # Always provide an explicit cross_encoder to avoid Graphiti's default
+        # OpenAIRerankerClient() initialization (which assumes OPENAI_API_KEY).
+        reranker = self.config.reranker.lower()
+        if reranker == "cross_encoder":
+            if is_anthropic:
+                raise ConfigError(
+                    "Graphiti reranker 'cross_encoder' requires an OpenAI-compatible "
+                    "LLM endpoint. Anthropic URLs are not supported for reranking."
+                )
+            from graphiti_core.cross_encoder.openai_reranker_client import (
+                OpenAIRerankerClient,
+            )
+            # Both OpenAIGenericClient and _JsonObjectOnlyClient (DeepSeek)
+            # expose a .client attribute (AsyncOpenAI).  The getattr fallback
+            # to None is a safety net; OpenAIRerankerClient handles None by
+            # constructing its own AsyncOpenAI from config, so either way is safe.
+            cross_encoder = OpenAIRerankerClient(
+                config=llm_config,
+                client=getattr(llm_client, "client", None),
+            )
+        else:
+            cross_encoder = _build_noop_cross_encoder()
 
         # Configure embedder (supports OpenAI, local llama.cpp, etc.)
         # Check if embedding service needs auto-start
@@ -1191,6 +1243,7 @@ class GraphitiBackend(MemoryBackend):
             graph_driver=falkor_driver,
             llm_client=llm_client,
             embedder=embedder,
+            cross_encoder=cross_encoder,
         )
 
         # Cache the client for reuse
