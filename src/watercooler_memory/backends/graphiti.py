@@ -584,6 +584,23 @@ def _filter_by_time_range(
     return filtered
 
 
+def _filter_active_only(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Filter results to only include currently-valid (non-superseded) facts.
+
+    Removes entries where ``invalid_at`` is set to a non-None value, keeping
+    only facts that have not been invalidated by a later contradicting episode.
+
+    Args:
+        results: List of result dicts, each optionally containing ``invalid_at``.
+
+    Returns:
+        Filtered list containing only entries where ``invalid_at`` is None.
+    """
+    # Graphiti serializes invalid_at as edge.invalid_at.isoformat() or None —
+    # never an empty string — so `is None` is the correct strict check here.
+    return [r for r in results if r.get("invalid_at") is None]
+
+
 class GraphitiBackend(MemoryBackend):
     """
     Graphiti adapter implementing MemoryBackend contract.
@@ -624,8 +641,12 @@ class GraphitiBackend(MemoryBackend):
     DEFAULT_MAX_FACTS = 10
     DEFAULT_MAX_EPISODES = 10
     # Search result validation limits
-    MIN_SEARCH_RESULTS = 1  # Minimum valid max_results parameter
+    MIN_SEARCH_RESULTS = 1   # Minimum valid max_results parameter
     MAX_SEARCH_RESULTS = 50  # Maximum valid max_results parameter
+    # Over-fetch multiplier for post-filter queries (active_only, time-range).
+    # Assumes at most ~66% of returned edges are filtered out; callers may receive
+    # fewer than `limit` results if the actual supersession rate exceeds this.
+    OVERFETCH_MULTIPLIER = 3
     
     # Community limits (top-5 to prevent payload bloat per Codex feedback)
     MAX_COMMUNITIES_RETURNED = 5
@@ -1910,16 +1931,14 @@ class GraphitiBackend(MemoryBackend):
         """
         # Validate query is not empty
         if not query or not query.strip():
-            from . import ConfigError
             raise ConfigError("query cannot be empty")
-        
+
         # Validate max_results to prevent resource exhaustion
         if max_results < self.MIN_SEARCH_RESULTS or max_results > self.MAX_SEARCH_RESULTS:
-            from . import ConfigError
             raise ConfigError(
                 f"max_results must be between {self.MIN_SEARCH_RESULTS} and {self.MAX_SEARCH_RESULTS}, got {max_results}"
             )
-        
+
         try:
             graphiti = self._create_graphiti_client()
         except Exception as e:
@@ -2056,6 +2075,7 @@ class GraphitiBackend(MemoryBackend):
         center_node_id: str | None = None,
         start_time: str = "",
         end_time: str = "",
+        active_only: bool = False,
     ) -> list[dict[str, Any]]:
         """Search for facts (edges) using semantic search.
 
@@ -2068,6 +2088,7 @@ class GraphitiBackend(MemoryBackend):
             center_node_id: Optional node UUID to center search around
             start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
             end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
+            active_only: If True, exclude superseded facts (those with invalid_at set).
 
         Returns:
             List of fact dicts with edge data
@@ -2097,6 +2118,7 @@ class GraphitiBackend(MemoryBackend):
             center_node_uuid=center_node_id,
             start_time=start_time,
             end_time=end_time,
+            active_only=active_only,
         )
         
         # Add CoreResult-compliant fields to each result
@@ -2273,6 +2295,7 @@ class GraphitiBackend(MemoryBackend):
         center_node_uuid: str | None = None,
         start_time: str = "",
         end_time: str = "",
+        active_only: bool = False,
     ) -> list[dict[str, Any]]:
         """Search for facts (edges) with optional center-node traversal.
 
@@ -2288,6 +2311,8 @@ class GraphitiBackend(MemoryBackend):
             center_node_uuid: Optional node UUID to center search around
             start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
             end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
+            active_only: If True, exclude superseded facts (those with invalid_at set).
+                Over-fetches by 3x before filtering to preserve result count.
 
         Returns:
             List of fact dicts with edge data
@@ -2308,8 +2333,19 @@ class GraphitiBackend(MemoryBackend):
                 sanitized_group_ids = [self._sanitize_thread_id(gid) for gid in group_ids]
 
             # Use search_() API for facts with reranker scores (match query_memory pattern)
-            limit = min(max_facts, self.MAX_SEARCH_RESULTS)
-            search_config = self._get_search_config()
+            # Over-fetch when post-filters are active to preserve result count after filtering.
+            # The multiplied limit is injected into a copy of the SearchConfig so Graphiti
+            # actually returns more edges before Python-side post-filters reduce the count.
+            # Note: if the combined supersession/time-filter rate exceeds
+            # (1 - 1/OVERFETCH_MULTIPLIER) ≈ 66%, the caller will receive fewer
+            # than `max_facts` results with no explicit truncation signal.
+            base_limit = min(max_facts, self.MAX_SEARCH_RESULTS)
+            has_post_filters = bool(start_time or end_time or active_only)
+            limit = min(base_limit * self.OVERFETCH_MULTIPLIER, self.MAX_SEARCH_RESULTS) if has_post_filters else base_limit
+            # model_copy(update=...) is the Pydantic v2 idiom for a modified shallow copy.
+            # SearchConfig is unfrozen and we only update the scalar `limit` field, so
+            # nested sub-configs (EdgeSearchConfig etc.) are safely shared by reference.
+            search_config = self._get_search_config().model_copy(update={"limit": limit})
 
             # Unified database: no driver cloning needed
             # group_ids filters by property within the single project database
@@ -2320,17 +2356,20 @@ class GraphitiBackend(MemoryBackend):
                 center_node_uuid=center_node_uuid,
             )
 
-            # Extract edges with scores
-            edges = search_results.edges[:limit] if search_results.edges else []
-            
+            # Extract edges with scores (already limited by search_config.limit above).
+            # When no post-filters are active, cap at base_limit before the formatting
+            # loop so we don't do unnecessary dict construction for discarded edges.
+            edges = search_results.edges if search_results.edges else []
+            edges_to_format = edges if has_post_filters else edges[:base_limit]
+
             # Format results with reranker scores
             results = []
-            for idx, edge in enumerate(edges):
+            for idx, edge in enumerate(edges_to_format):
                 # Extract score with defensive indexing (match query_memory pattern)
                 score = 0.0
                 if idx < len(search_results.edge_reranker_scores):
                     score = search_results.edge_reranker_scores[idx]
-                
+
                 results.append({
                     "uuid": edge.uuid,
                     "name": edge.name,  # Relation name (e.g. "IMPLEMENTS")
@@ -2345,8 +2384,16 @@ class GraphitiBackend(MemoryBackend):
                     "score": score,  # Hybrid search reranker score
                 })
 
-            # Post-filter by time range (Graphiti search_ ignores time filters)
-            return _filter_by_time_range(results, start_time, end_time)
+            # Post-filter by time range (Graphiti search_ ignores time filters).
+            # Uses time_key="created_at" (default) — filters by when the fact was
+            # first recorded, NOT by when it was superseded. Combining end_time with
+            # active_only is therefore valid: "facts created before T that are still
+            # active". (time_key="invalid_at" exists but is not wired here; see #258.)
+            results = _filter_by_time_range(results, start_time, end_time)
+            # Post-filter to active (non-superseded) facts only
+            if active_only:
+                results = _filter_active_only(results)
+            return results[:base_limit]
 
         try:
             return asyncio.run(search_facts_async())

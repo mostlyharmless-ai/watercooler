@@ -127,19 +127,19 @@ def get_search_backend(backend: str) -> str:
     return "baseline"
 
 
-def infer_search_mode(mode: str, query: str, semantic: bool) -> str:
+def infer_search_mode(mode: str, _query: str, _semantic: bool) -> str:
     """Infer the search mode based on the query and parameters.
 
     Args:
-        mode: Requested mode - "auto", "entries", "entities", or "episodes"
-        query: The search query
-        semantic: Whether semantic search is enabled
+        mode: Requested mode - "auto", "entries", "entities", "episodes", or "facts"
+        _query: Reserved for future NL heuristics (e.g. entity-like query detection)
+        _semantic: Reserved for future mode inference based on search type
 
     Returns:
-        Resolved mode: "entries", "entities", or "episodes"
+        Resolved mode: "entries", "entities", "episodes", or "facts"
     """
     # Explicit modes are respected
-    if mode in ("entries", "entities", "episodes"):
+    if mode in ("entries", "entities", "episodes", "facts"):
         return mode
 
     # Auto mode: infer from query characteristics
@@ -155,6 +155,7 @@ async def route_search(
     backend: str,
     mode: str,
     code_path: str = "",
+    active_only: bool = False,
     **kwargs: Any,
 ) -> str:
     """Route search to the appropriate backend based on tier and mode.
@@ -165,7 +166,8 @@ async def route_search(
         query: Search query
         backend: Resolved backend ("baseline", "graphiti", "leanrag")
         code_path: Path to code repository (for database name derivation)
-        mode: Resolved mode ("entries", "entities", "episodes")
+        mode: Resolved mode ("entries", "entities", "episodes", "facts")
+        active_only: If True (Graphiti only), exclude superseded facts from results
         **kwargs: Additional search parameters
 
     Returns:
@@ -174,14 +176,44 @@ async def route_search(
     fallback_used = False
     fallback_reason = None
 
+    # Facts mode — Graphiti temporal fact edges; hard-fails if Graphiti unavailable.
+    # Broad except: intentional — MCP callers must always receive structured JSON,
+    # not the bare error string returned by the outer handler. Any exception
+    # (connection error, missing config, etc.) is logged server-side and surfaced
+    # as a parseable error envelope to the agent.
+    # The error message is intentionally static (not derived from the exception)
+    # so that internal details (host names, paths, stack traces) are never leaked
+    # to MCP callers. The full exception is available in server-side logs.
+    if mode == "facts":
+        try:
+            return await _search_graphiti_impl(
+                ctx=ctx,
+                threads_dir=threads_dir,
+                query=query,
+                code_path=code_path,
+                mode=mode,
+                active_only=active_only,
+                **kwargs,
+            )
+        except Exception as e:
+            logger.warning("facts mode: Graphiti unavailable: %s", e)
+            return json.dumps({
+                "error": "facts_mode_requires_graphiti",
+                "message": "Graphiti backend is not available.",
+                "hint": "Set WATERCOOLER_GRAPHITI_ENABLED=1 and configure WATERCOOLER_LLM_API_KEY.",
+                "results": [],
+                "count": 0,
+            })
+
     # Entities/episodes modes require Graphiti
     if mode in ("entities", "episodes"):
         if backend == "baseline":
             # Can't do entities/episodes on baseline - fall back to entries
+            original_mode = mode
             logger.info(f"Mode {mode} requires Graphiti, but backend is baseline. Falling back to entries mode.")
             mode = "entries"
             fallback_used = True
-            fallback_reason = f"{mode} requires memory backend"
+            fallback_reason = f"{original_mode} requires memory backend"
         else:
             # Route to Graphiti entity/episode search
             try:
@@ -216,6 +248,8 @@ async def route_search(
                 threads_dir=threads_dir,
                 query=query,
                 code_path=code_path,
+                mode=mode,
+                active_only=active_only,
                 **kwargs,
             )
         except Exception as e:
@@ -372,11 +406,19 @@ async def _search_graphiti_impl(
     query: str,
     code_path: str = "",
     limit: int = 10,
+    mode: str = "entries",
+    active_only: bool = False,
     **kwargs: Any,
 ) -> str:
-    """Search Graphiti memory backend for facts/episodes.
+    """Search Graphiti memory backend for temporal facts (entity edges).
 
-    Routes to watercooler_search_memory_facts for entries search in Graphiti.
+    Routes to backend.search_facts(), which queries Graphiti entity edges with
+    optional active_only / time-range post-filters.
+
+    Note: ``mode`` is metadata-only here — routing already happened in
+    route_search(). Both facts and entries modes follow the same code path
+    through this function; ``mode`` is forwarded to the output envelope so
+    callers can identify which search type produced the results.
     """
     from .. import memory as mem
 
@@ -388,30 +430,27 @@ async def _search_graphiti_impl(
     if not backend:
         raise RuntimeError("Graphiti backend unavailable")
 
-    # Extract time filters from kwargs (passed through from route_search)
+    # Extract time filters from kwargs; active_only is an explicit parameter
     start_time = kwargs.get("start_time", "")
     end_time = kwargs.get("end_time", "")
     has_time_filters = bool(start_time or end_time)
 
-    # Over-fetch when time filters are active (post-filter reduces result count)
-    fetch_limit = min(limit * 3, 50) if has_time_filters else limit
-
+    # Over-fetching is handled by search_memory_facts when post-filters are active.
     # Use Graphiti's search_memory_facts for entry-level search
     # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
     results = await asyncio.to_thread(
         backend.search_facts,
         query=query,
-        max_results=fetch_limit,
+        max_results=limit,
         start_time=start_time,
         end_time=end_time,
+        active_only=active_only,
     )
-
-    # Trim to requested limit after post-filtering
-    results = results[:limit]
 
     output: Dict[str, Any] = {
         "count": len(results),
         "backend": "graphiti",
+        "mode": mode,
         "results": [
             {
                 "type": "fact",
@@ -422,15 +461,20 @@ async def _search_graphiti_impl(
                 "name": r.get("name", ""),
                 "source_node": r.get("source_node_uuid", ""),
                 "target_node": r.get("target_node_uuid", ""),
+                "valid_at": r.get("valid_at"),
+                "invalid_at": r.get("invalid_at"),
             }
             for r in results
         ],
     }
+    applied_filters: Dict[str, Any] = {}
     if has_time_filters:
-        output["filters_applied"] = {
-            "start_time": start_time or None,
-            "end_time": end_time or None,
-        }
+        applied_filters["start_time"] = start_time or None
+        applied_filters["end_time"] = end_time or None
+    if active_only:
+        applied_filters["active_only"] = True
+    if applied_filters:
+        output["filters_applied"] = applied_filters
 
     return json.dumps(output, indent=2)
 
@@ -500,8 +544,9 @@ async def _search_graphiti_episodes_impl(
     end_time = kwargs.get("end_time", "")
     has_time_filters = bool(start_time or end_time)
 
-    # Over-fetch when time filters are active (post-filter reduces result count)
-    fetch_limit = min(limit * 3, 50) if has_time_filters else limit
+    # Over-fetch when time filters are active (post-filter reduces result count).
+    # Cap matches GraphitiBackend.MAX_SEARCH_RESULTS so the two stay in sync.
+    fetch_limit = min(limit * 3, backend.MAX_SEARCH_RESULTS) if has_time_filters else limit
 
     # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
     results = await asyncio.to_thread(
@@ -672,6 +717,7 @@ async def _search_graph_impl(
     include_entries: bool = True,
     mode: str = "auto",
     backend: str = "auto",
+    active_only: bool = False,
 ) -> str:
     """Unified search across threads and entries with tier-aware routing.
 
@@ -686,6 +732,9 @@ async def _search_graph_impl(
           the removed watercooler_search_nodes tool.
         - mode="episodes": Search episodic content from Graphiti. Replaces the
           removed watercooler_get_episodes tool.
+        - mode="facts": Search Graphiti temporal fact edges (bi-temporal edges with
+          valid_at/invalid_at). Use active_only=True to return only currently-valid
+          facts. Hard-fails (structured error) if Graphiti backend is unavailable.
 
     Args:
         code_path: Path to code repository (for resolving threads dir).
@@ -705,18 +754,28 @@ async def _search_graph_impl(
         combine: How to combine filters - "AND" or "OR" (default: AND).
         include_threads: Include thread nodes in results (default: True).
         include_entries: Include entry nodes in results (default: True).
-        mode: Search mode - "auto", "entries", "entities", or "episodes".
+        mode: Search mode - "auto", "entries", "entities", "episodes", or "facts".
             - auto: Infer from query (default is entries)
             - entries: Search thread entries (baseline graph or Graphiti facts)
             - entities: Search entity nodes (requires Graphiti backend). Use this
               mode instead of the removed watercooler_search_nodes tool.
             - episodes: Search episodes (requires Graphiti backend). Use this
               mode instead of the removed watercooler_get_episodes tool.
+            - facts: Search Graphiti temporal fact edges. Returns uuid, fact text,
+              valid_at, invalid_at, score. Both timestamp fields are ISO 8601 strings
+              or null. invalid_at=null means the fact is currently active (not
+              superseded); valid_at=null means no known start time. Use active_only=True
+              to return only currently-active facts instead of filtering manually.
+              Unlike entries mode, facts mode does not fall back to the baseline graph
+              — returns a structured error if Graphiti is unavailable.
         backend: Search backend - "auto", "baseline", "graphiti", or "leanrag".
             - auto: Use WATERCOOLER_MEMORY_BACKEND env var, fallback to baseline
             - baseline: Free tier - baseline graph only
             - graphiti: Paid tier - Graphiti memory backend
             - leanrag: Paid tier - LeanRAG hierarchical clusters
+        active_only: If True (Graphiti facts and entries modes), exclude superseded facts —
+            facts whose ``invalid_at`` field is set because a later episode contradicted
+            them. Has no effect on baseline or leanrag backends.
 
     Returns:
         JSON with search results including matched nodes and metadata.
@@ -730,6 +789,9 @@ async def _search_graph_impl(
 
         # Search episodes (replaces watercooler_get_episodes)
         watercooler_search(query="implementation decisions", mode="episodes", limit=10)
+
+        # Search temporal fact edges — currently-active facts only
+        watercooler_search(query="API key rotation", mode="facts", active_only=True)
     """
     try:
         error, context = validation._require_context(code_path)
@@ -750,7 +812,19 @@ async def _search_graph_impl(
         resolved_backend = get_search_backend(backend)
         resolved_mode = infer_search_mode(mode, query, semantic)
 
-        # Route to appropriate search implementation
+        # mode="facts" always routes through _search_graphiti_impl regardless of
+        # resolved_backend, so active_only is honoured there even for baseline backend.
+        if active_only and resolved_backend != "graphiti" and resolved_mode != "facts":
+            logger.warning(
+                "active_only=True has no effect on %s backend (no bi-temporal supersession); "
+                "use backend='graphiti' or omit active_only",
+                resolved_backend,
+            )
+
+        # Route to appropriate search implementation.
+        # active_only is an explicit parameter on route_search and _search_graphiti_impl.
+        # It is applied as a post-filter on entity edges (Graphiti only). It is a
+        # no-op on baseline and leanrag backends, which have no bi-temporal supersession.
         return await route_search(
             ctx=ctx,
             threads_dir=threads_dir,
@@ -771,6 +845,7 @@ async def _search_graph_impl(
             combine=combine,
             include_threads=include_threads,
             include_entries=include_entries,
+            active_only=active_only,
         )
 
     except Exception as e:

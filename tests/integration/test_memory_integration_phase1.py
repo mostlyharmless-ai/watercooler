@@ -73,7 +73,7 @@ class TestSearchRoutingIntegration:
         """Mode inference defaults to entries for most queries."""
         from watercooler_mcp.tools.graph import infer_search_mode
 
-        mode = infer_search_mode("auto", "find authentication code", semantic=False)
+        mode = infer_search_mode("auto", "find authentication code", False)
         assert mode == "entries"
 
     def test_explicit_backend_override(self):
@@ -343,7 +343,7 @@ End-to-end test content about authentication implementation.
             assert backend == "graphiti"
 
             # Mode inference still works
-            mode = infer_search_mode("auto", "authentication", semantic=False)
+            mode = infer_search_mode("auto", "authentication", False)
             assert mode == "entries"
 
 

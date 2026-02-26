@@ -317,9 +317,45 @@ watercooler_federated_search(
 )
 ```
 
-### Memory & Provenance Tools
+### Memory & Search Tools
 
 > Memory tools require the memory backend to be enabled in `config.toml`.
+
+#### `watercooler_search`
+Unified search across threads, entities, episodes, and temporal facts. Routes to the
+appropriate backend (baseline graph, Graphiti T2, or LeanRAG T3) based on configuration
+and the requested mode.
+
+**Parameters:**
+- `query` (str): Search query
+- `code_path` (str): Path to project repository root
+- `mode` (str): Search mode — one of:
+  - `"entries"` (default): Thread entries from the baseline graph
+  - `"entities"`: Entity nodes extracted by Graphiti
+  - `"episodes"`: Episodic memory content
+  - `"facts"`: Temporal fact edges (entity relationships with `valid_at`/`invalid_at`). Hard-fails with a structured error if Graphiti is unavailable — no silent fallback.
+  - `"auto"`: Resolved to `"entries"` (NL heuristics reserved for future use)
+- `active_only` (bool): When `True`, exclude superseded facts (`invalid_at` is set). Graphiti only — no effect on baseline or LeanRAG backends. Emits a server-side warning if used with a non-Graphiti backend.
+- `backend` (str): Force a specific backend (`"baseline"`, `"graphiti"`, `"leanrag"`, `"auto"`)
+- `limit` (int): Max results (default 10)
+- `semantic` (bool): Use semantic/embedding search (default False)
+- `start_time` / `end_time` (str): ISO 8601 timestamps to filter by creation time
+- `thread_status`, `thread_topic`, `role`, `entry_type`, `agent` (str): Metadata filters (entries mode)
+
+**Returns:** JSON envelope with `results[]`, `count`, `mode`, `backend`, and `filters_applied`.
+For `mode="facts"` errors: `{"error": "facts_mode_requires_graphiti", "hint": "...", "results": [], "count": 0}`.
+
+**Examples:**
+```python
+# Search thread entries
+watercooler_search(query="authentication", code_path=".", mode="entries")
+
+# Search temporal facts, active only
+watercooler_search(query="Dana role", code_path=".", mode="facts", active_only=True)
+
+# Search entities extracted by Graphiti
+watercooler_search(query="infrastructure team", code_path=".", mode="entities")
+```
 
 #### `watercooler_get_entry_provenance`
 Bidirectional lookup between T1 entries and T2 episodes via the entry-episode

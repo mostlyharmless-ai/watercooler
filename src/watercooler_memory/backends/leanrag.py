@@ -1195,6 +1195,7 @@ class LeanRAGBackend(MemoryBackend):
         group_ids: Sequence[str] | None = None,
         max_results: int = 10,
         center_node_id: str | None = None,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Search for facts/relationships via entity search + hierarchical edge traversal.
 
@@ -1208,6 +1209,8 @@ class LeanRAGBackend(MemoryBackend):
             group_ids: Optional list of group IDs to filter by (ignored - LeanRAG uses separate databases)
             max_results: Maximum number of results to return
             center_node_id: Optional entity name to center search around (not yet implemented)
+            **kwargs: Absorbs Graphiti-specific params (active_only, start_time, end_time)
+                that have no effect on LeanRAG — LeanRAG has no bi-temporal supersession.
 
         Returns:
             List of normalized CoreResult dictionaries with fact/edge data

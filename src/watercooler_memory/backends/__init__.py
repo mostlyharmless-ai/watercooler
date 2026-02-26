@@ -423,6 +423,9 @@ class MemoryBackend(Protocol):
         group_ids: Sequence[str] | None = None,
         max_results: int = 10,
         center_node_id: str | None = None,
+        start_time: str = "",
+        end_time: str = "",
+        active_only: bool = False,
     ) -> list[dict[str, Any]]:
         """Search for facts/relationships using semantic search.
 
@@ -431,6 +434,9 @@ class MemoryBackend(Protocol):
             group_ids: Optional list of group IDs to filter by (backend-specific)
             max_results: Maximum number of results to return
             center_node_id: Optional node ID to center search around
+            start_time: ISO 8601 timestamp; exclude facts invalidated before this time
+            end_time: ISO 8601 timestamp; exclude facts invalidated after this time
+            active_only: If True, return only non-superseded facts (invalid_at=None)
 
         Returns:
             Sequence of normalized CoreResult dictionaries
