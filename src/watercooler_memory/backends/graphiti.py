@@ -39,7 +39,13 @@ from watercooler.path_resolver import derive_group_id
 
 # Providers whose OpenAI-compatible APIs do NOT support json_schema
 # structured outputs (response_format type). These need json_object fallback.
-_NO_STRUCTURED_OUTPUTS_DOMAINS = ("deepseek.com",)
+_NO_STRUCTURED_OUTPUTS_DOMAINS = (
+    "deepseek.com",
+    # Local OpenAI-compatible servers (llama.cpp, etc.) generally do not support
+    # json_schema structured outputs; force json_object mode.
+    "localhost",
+    "127.0.0.1",
+)
 # DeepSeek max output tokens is 8192; graphiti_core defaults to 16384
 _DEEPSEEK_MAX_TOKENS = 8192
 
@@ -281,12 +287,92 @@ def _normalize_json_response(
             )
             remapped[m_field] = remapped.pop(e_field)
 
+    # --- fill required fields with safe defaults ---
+    # Some OpenAI-compatible servers return `{}` or omit required keys even when
+    # the prompt asks for structured JSON. Prefer an empty-but-valid payload
+    # over hard failure so the episode can still be ingested.
+    try:
+        from pydantic_core import PydanticUndefined
+    except Exception:  # pragma: no cover
+        PydanticUndefined = object()  # type: ignore[assignment]
+
+    def _default_for(annotation: Any) -> Any:
+        origin = getattr(annotation, "__origin__", None)
+        if origin is list:
+            return []
+        if origin is dict:
+            return {}
+        if annotation in (list, tuple, set):
+            return []
+        if annotation is dict:
+            return {}
+        if annotation is str:
+            return ""
+        if annotation is bool:
+            return False
+        if annotation in (int, float):
+            return 0
+        return []
+
+    for field_name, field_info in response_model.model_fields.items():
+        if field_name in remapped:
+            continue
+        if not field_info.is_required():
+            continue
+        if getattr(field_info, "default", PydanticUndefined) is not PydanticUndefined:
+            remapped[field_name] = field_info.default
+            continue
+        default_factory = getattr(field_info, "default_factory", None)
+        if default_factory is not None:
+            try:
+                remapped[field_name] = default_factory()
+                continue
+            except Exception:
+                pass
+        remapped[field_name] = _default_for(field_info.annotation)
+
     # --- recurse into nested Pydantic models ---
     for field_name, field_info in response_model.model_fields.items():
         value = remapped.get(field_name)
         if value is None:
             continue
+        # --- scalar coercions for weak local models ---
+        # Graphiti schemas often use integer indices (e.g. edge endpoints) but
+        # smaller models sometimes emit ULID-like strings. Coerce to 0 to avoid
+        # Pydantic hard failures; downstream graphiti_core validation will
+        # drop invalid indices.
+        if field_info.annotation is int:
+            v = value
+            if isinstance(v, list):
+                v = v[0] if v else 0
+            if isinstance(v, bool):
+                remapped[field_name] = int(v)
+            elif isinstance(v, int):
+                remapped[field_name] = v
+            elif isinstance(v, str):
+                try:
+                    remapped[field_name] = int(v)
+                except Exception:
+                    remapped[field_name] = 0
+            else:
+                remapped[field_name] = 0
+            value = remapped[field_name]
+        elif field_info.annotation is str:
+            v = value
+            if isinstance(v, list):
+                v = v[0] if v else ""
+            remapped[field_name] = v if isinstance(v, str) else ""
+            value = remapped[field_name]
         inner_model = _get_list_item_model(field_info.annotation)
+        if inner_model is not None and not isinstance(value, (list, dict)):
+            # Some local models return a scalar where a list-of-objects is expected.
+            # Prefer dropping the field to an empty list rather than failing validation.
+            logger.warning(
+                "json_object list coercion: expected list[%s] for '%s' in %s, got %s; coercing to []",
+                inner_model.__name__, field_name, response_model.__name__, type(value).__name__,
+            )
+            remapped[field_name] = []
+            continue
         if inner_model is not None and isinstance(value, list):
             remapped[field_name] = [
                 _normalize_json_response(item, inner_model, _depth=_depth + 1)
@@ -322,6 +408,7 @@ def _normalize_json_response(
                     inner_model.__name__, model_fields, field_name,
                     response_model.__name__,
                 )
+                remapped[field_name] = []
             else:
                 logger.info(
                     "json_object list coercion: wrapping single dict in list "

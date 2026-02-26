@@ -346,6 +346,8 @@ class LeanRAGBackend(MemoryBackend):
             ("LLM_TIMEOUT", "DEEPSEEK_TIMEOUT"),
             ("LLM_MAX_RETRIES", "DEEPSEEK_MAX_ATTEMPTS"),
             ("EMBEDDING_MODEL", "GLM_MODEL"),
+            # LeanRAG config.yaml may use a distinct var name for embeddings.
+            ("EMBEDDING_MODEL", "GLM_EMBEDDING_MODEL"),
             ("EMBEDDING_API_BASE", "GLM_BASE_URL"),
         ]
         for standard_var, leanrag_var in standard_to_leanrag:
@@ -382,6 +384,7 @@ class LeanRAGBackend(MemoryBackend):
             # Embedding config (used by embedding() via raw HTTP POST - no auth)
             ("GLM_BASE_URL", self.config.embedding_api_base),
             ("GLM_MODEL", self.config.embedding_model),
+            ("GLM_EMBEDDING_MODEL", self.config.embedding_model),
             # Database config
             ("FALKORDB_HOST", self.config.falkordb_host),
             ("FALKORDB_PORT", str(self.config.falkordb_port) if self.config.falkordb_port else None),
@@ -391,6 +394,18 @@ class LeanRAGBackend(MemoryBackend):
             if value and env_name not in os.environ:
                 os.environ[env_name] = value
                 logger.debug(f"Set {env_name} from unified config")
+
+        # LeanRAG's config.yaml env substitution requires the variable to be
+        # present even when unset (e.g., no password for local FalkorDB).
+        os.environ.setdefault("FALKORDB_PASSWORD", "")
+
+        # LeanRAG's config.yaml currently includes legacy MySQL placeholders
+        # even when `database.backend='falkordb'`. Provide safe defaults so
+        # config loading doesn't fail in FalkorDB-only deployments.
+        os.environ.setdefault("MYSQL_HOST", "localhost")
+        os.environ.setdefault("MYSQL_PORT", "3306")
+        os.environ.setdefault("MYSQL_USER", "root")
+        os.environ.setdefault("MYSQL_PASSWORD", "")
 
     def _validate_config(self) -> None:
         """Validate configuration and LeanRAG availability."""
@@ -583,6 +598,7 @@ class LeanRAGBackend(MemoryBackend):
         Always overwrites any existing file to ensure fresh data is used.
         """
         chunk_file = work_dir / "threads_chunk.json"
+
 
         serialized = []
         for item in chunks.chunks:

@@ -48,6 +48,13 @@ dev = [
     "jsonschema>=4.0",
     "tqdm>=4.0",
 ]
+bench = [
+    # Benchmark runners (SWE-bench + custom harnesses)
+    "litellm>=1.0",
+    "docker>=7.0",
+    "datasets>=2.0",
+    "swebench>=1.0",
+]
 mcp = [
     # All MCP deps (fastmcp, python-ulid) are already in [project].dependencies.
     # This extras group is kept as a valid install target (pip install .[mcp])
@@ -71,6 +78,9 @@ memory = [
     "openai>=1.0",
     "graphiti-core[falkordb] @ git+https://github.com/mostlyharmless-ai/graphiti.git@main",
     "leanrag @ git+https://github.com/mostlyharmless-ai/LeanRAG.git@feature/falkordb-vector-backend",
+    "jieba>=0.42.1",
+    "rapidfuzz>=3.10.1",
+    "umap-learn>=0.5.6",
     # Model downloads from HuggingFace (llama-server binary is downloaded separately)
     "huggingface_hub>=0.20",
 ]
@@ -90,6 +100,9 @@ leanrag = [
     "httpx>=0.25",
     "openai>=1.0",
     "leanrag @ git+https://github.com/mostlyharmless-ai/LeanRAG.git@feature/falkordb-vector-backend",
+    "jieba>=0.42.1",
+    "rapidfuzz>=3.10.1",
+    "umap-learn>=0.5.6",
     # Model downloads from HuggingFace (llama-server binary is downloaded separately)
     "huggingface_hub>=0.20",
 ]
