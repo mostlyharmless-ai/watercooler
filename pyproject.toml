@@ -132,6 +132,9 @@ watercooler = "watercooler.cli:main"
 watercooler-mcp = "watercooler_mcp.server:main"
 
 [tool.pytest.ini_options]
+norecursedirs = [
+    "tests/benchmarks/custom/repo",
+]
 markers = [
     "http: marks tests as requiring HTTP facade dependencies (deselect with '-m \"not http\"')",
     "integration: marks tests as integration tests requiring real git repositories (run with '-m integration')",
