@@ -662,7 +662,9 @@ class TestApplyConfigToEnv:
         assert os.environ.get("DEEPSEEK_BASE_URL") is None
         assert os.environ.get("GLM_MODEL") is None
         assert os.environ.get("GLM_BASE_URL") is None
-        assert os.environ.get("FALKORDB_PASSWORD") is None
+        # FALKORDB_PASSWORD is set to "" by setdefault (safe default for
+        # LeanRAG config.yaml env substitution even when no password is needed)
+        assert os.environ.get("FALKORDB_PASSWORD") == ""
 
     def test_bridges_standard_env_vars_to_leanrag(self, tmp_path, monkeypatch):
         """Test that standard watercooler env vars are bridged to LeanRAG equivalents.

@@ -191,7 +191,7 @@ class TestGraphitiClientConstruction:
                 self.base_url = base_url
 
         class FakeOpenAIGenericClient:
-            def __init__(self, config=None):
+            def __init__(self, config=None, **kwargs):
                 self.config = config
                 self.client = object()
 
@@ -867,8 +867,13 @@ class TestNormalizeDepthLimit:
 class TestDictToListCoercionValidation:
     """Tests for validation before wrapping a single dict in a list."""
 
-    def test_coercion_skipped_when_no_matching_keys(self):
-        """Dict with no keys matching target model fields is NOT coerced."""
+    def test_coercion_to_empty_list_when_no_matching_keys(self):
+        """Dict with no keys matching target model fields is coerced to empty list.
+
+        When a scalar/dict value appears where list[Model] is expected and the
+        keys don't match the inner model, the normalizer coerces to [] to
+        avoid Pydantic validation failures from local LLM responses.
+        """
         from pydantic import BaseModel
 
         class Inner(BaseModel):
@@ -881,8 +886,9 @@ class TestDictToListCoercionValidation:
         # Dict has keys that don't match Inner's fields at all
         data = {"items": {"totally_unrelated": "garbage", "xyz": 99}}
         result = _normalize_json_response(data, Outer)
-        # Should NOT be wrapped in a list — left as original dict
-        assert isinstance(result["items"], dict)
+        # Coerced to empty list (safe default for unrecognizable data)
+        assert isinstance(result["items"], list)
+        assert result["items"] == []
 
     def test_coercion_applied_when_keys_overlap(self):
         """Dict with at least one matching key IS coerced to list."""
