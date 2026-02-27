@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "image_tag": "watercooler-custom-bench:latest",
+  "workdir": "/repo",
+  "tasks": [
+    {
+      "task_id": "decision-constrained-normalize",
+      "type": "context_dependent_bugfix",
+      "title": "Normalize identifiers without breaking underscores",
+      "problem_statement": "Our service normalizes identifiers for internal lookup. Users report that identifiers with underscores are no longer found. Fix the bug with minimal changes.\n\nConstraints:\n- Keep behavior for hyphens and dots (strip them)\n- Lowercase output\n- Do not modify tests\n",
+      "test_command": "pytest -q tests/test_normalize.py",
+      "threads_seed_topic": "custom-bench-org-knowledge",
+      "threads_seed_entries": [
+        {
+          "title": "Decision: underscores are semantic separators",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\nWe treat underscores as semantic separators in identifiers (e.g. Foo_Bar). Normalization must preserve underscores, otherwise lookups break.\n\nHyphens and dots are considered punctuation and should be stripped."
+        }
+      ]
+    },
+    {
+      "task_id": "policy-code-from-thread",
+      "type": "retrieval_required",
+      "title": "Implement org policy code from decision trace",
+      "problem_statement": "Our repo includes a compliance check that validates the org policy code via a one-way hash. The code itself is not derivable from the codebase.\n\nImplement `get_policy_code()` so tests pass.\n\nImportant:\n- The policy code is recorded in the Watercooler decision trace seeded for this task under the thread topic `custom-bench-org-knowledge`.\n- If you have wc tools enabled, retrieve it explicitly (recommended: `wc-read-thread custom-bench-org-knowledge`).\n\nConstraints:\n- Minimal change\n- Do not modify tests\n",
+      "test_command": "pytest -q tests/test_policy.py",
+      "threads_seed_topic": "custom-bench-org-knowledge",
+      "threads_seed_entries": [
+        {
+          "title": "Decision: current policy code",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\nThe current policy code is:\n\n`WCCLOUD-POLICY-Z7Y4-8C2F`\n\nThis value is externally governed and should be returned by `custom_bench_app.policy.get_policy_code()`."
+        }
+      ]
+    },
+    {
+      "task_id": "multi-hop-with-citations",
+      "type": "multi_hop_citation",
+      "title": "Implement policy and return citations",
+      "max_steps": 25,
+      "cost_limit": 0.35,
+      "problem_statement": "Our system enforces an org policy (region + retention) that is governed by decisions recorded in Watercooler.\n\nImplement `custom_bench_app.decision_trace.get_region_retention_policy()` and `get_region_retention_policy_citations()` so tests pass.\n\nImportant:\n- The policy facts are split across multiple decision entries seeded under the thread topic `custom-bench-org-knowledge`.\n- If you have wc tools enabled, retrieve the thread and use the entry IDs as citations (recommended: `wc-read-thread custom-bench-org-knowledge`).\n\nConstraints:\n- Minimal change\n- Do not modify tests\n",
+      "test_command": "pytest -q tests/test_decision_trace.py",
+      "threads_seed_topic": "custom-bench-org-knowledge",
+      "threads_seed_entries": [
+        {
+          "entry_id": "01KJBJCZTGNXJ18ABNC2MF8EGW",
+          "title": "Decision: region for retention policy",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\nThe retention policy region is:\n\n`us-west-2`\n"
+        },
+        {
+          "entry_id": "01KJBJCZTGNXJ18ABNC2MF8EGX",
+          "title": "Decision: retention days for region policy",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\nThe retention period (days) is:\n\n`30`\n"
+        },
+        {
+          "title": "Decision: required output format",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\nThe required output format for `get_region_retention_policy()` is:\n\n`REGION=<region>;RETENTION_DAYS=<days>`\n\n`get_region_retention_policy_citations()` must return the entry IDs that justify the facts used."
+        }
+      ]
+    },
+    {
+      "task_id": "resume-after-reset-normalize",
+      "type": "resume_after_reset",
+      "title": "Resume after reset using Watercooler notes",
+      "problem_statement": "You will complete this task in two phases.\n\nGoal: Fix the underscore regression in identifier normalization so tests pass.\n\nPhase 1:\n- Investigate and determine the exact minimal code change needed.\n- Do NOT modify any files.\n- Write your findings into Watercooler using `wc-say` (include: file path, exact change, and test command).\n- Then respond with SUBMIT.\n\nPhase 2:\n- You are starting from a clean repo state (your code changes from Phase 1 are discarded).\n- Retrieve your Phase 1 note using `wc-read-thread custom-bench-org-knowledge`.\n- Apply the fix and run tests.\n\nConstraints:\n- Minimal change\n- Do not modify tests\n",
+      "test_command": "pytest -q tests/test_normalize.py",
+      "wc_allow_write": true,
+      "threads_seed_topic": "custom-bench-org-knowledge",
+      "threads_seed_entries": [
+        {
+          "title": "Decision: underscores are semantic separators",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\nWe treat underscores as semantic separators in identifiers (e.g. Foo_Bar). Normalization must preserve underscores, otherwise lookups break.\n\nHyphens and dots are considered punctuation and should be stripped."
+        }
+      ],
+      "phases": [
+        {
+          "phase_id": "investigate_and_note",
+          "max_steps": 10,
+          "cost_limit": 0.15,
+          "reset_repo_after": true
+        },
+        {
+          "phase_id": "apply_fix_after_reset",
+          "max_steps": 20,
+          "cost_limit": 0.25,
+          "reset_repo_after": false
+        }
+      ]
+    }
+  ]
+}
+

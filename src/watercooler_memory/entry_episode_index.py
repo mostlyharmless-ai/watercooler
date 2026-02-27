@@ -315,6 +315,23 @@ class EntryEpisodeIndex:
         with self._lock:
             return entry_id in self._by_entry
 
+    def has_any_mapping(self, entry_id: str) -> bool:
+        """Check if an entry has any index mapping (non-chunked or chunked).
+
+        Unlike has_entry(), this also checks the chunked-entries index
+        (_chunks_by_entry), so it correctly returns True for entries indexed
+        via add_chunk_mapping() rather than add(). Use this for dedup guards
+        — has_entry() alone is insufficient for chunked entries.
+
+        Args:
+            entry_id: The watercooler entry ID to check.
+
+        Returns:
+            True if the entry exists in either _by_entry or _chunks_by_entry.
+        """
+        with self._lock:
+            return entry_id in self._by_entry or entry_id in self._chunks_by_entry
+
     def has_episode(self, episode_uuid: str) -> bool:
         """Check if an episode UUID exists in the index."""
         with self._lock:
@@ -366,6 +383,9 @@ class EntryEpisodeIndex:
             )
 
             self._by_chunk[chunk_id] = mapping
+            # Allow reverse provenance lookup for chunked episodes.
+            # `wc-provenance` resolves episode_uuid -> entry_id.
+            self._by_episode[episode_uuid] = entry_id
 
             # Maintain ordered list of chunks per entry
             if entry_id not in self._chunks_by_entry:

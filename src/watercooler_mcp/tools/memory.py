@@ -9,6 +9,7 @@ Tools:
 - watercooler_smart_query: Multi-tier intelligent query with auto-escalation
 - watercooler_memory_task_status: Check queue health, poll task status, recover
 - watercooler_bulk_index: Queue bulk thread indexing into memory backend
+- watercooler_get_entry_provenance: Bidirectional entry↔episode provenance lookup
 
 Removed (use replacements):
 - watercooler_query_memory → watercooler_smart_query
@@ -19,17 +20,21 @@ Removed (use replacements):
 
 import asyncio
 import json
+import logging
+import os
+import threading as _threading
 from pathlib import Path
-from typing import Optional, List
+from typing import Any
 
 from fastmcp import Context
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
-from watercooler.fs import discover_thread_files
 
 from ..observability import log_action, log_error, log_warning
 from .. import validation  # Import module for runtime access (enables test patching)
+
+logger = logging.getLogger(__name__)
 
 
 # Module-level references to registered tools (populated by register_memory_tools)
@@ -50,12 +55,63 @@ smart_query = None
 memory_task_status = None
 bulk_index = None
 
+# Provenance tools
+get_entry_provenance = None
+
+# Provenance index cache (mtime-based invalidation, thread-safe)
+_provenance_cache_lock = _threading.Lock()
+_cached_provenance_index: "EntryEpisodeIndex | None" = None
+_cached_provenance_mtime: float = 0.0
+_cached_provenance_path: str = ""
+
+
+def _clear_provenance_cache() -> None:
+    """Reset the provenance index cache (useful in tests)."""
+    global _cached_provenance_index, _cached_provenance_mtime, _cached_provenance_path
+    with _provenance_cache_lock:
+        _cached_provenance_index = None
+        _cached_provenance_mtime = 0.0
+        _cached_provenance_path = ""
+
+
+def _get_cached_provenance_index(index_path: Path) -> "EntryEpisodeIndex":
+    """Return cached EntryEpisodeIndex, reloading only when file changes.
+
+    Thread-safe: uses a lock to prevent concurrent cache invalidation races.
+    """
+    global _cached_provenance_index, _cached_provenance_mtime, _cached_provenance_path
+    from watercooler_memory.entry_episode_index import EntryEpisodeIndex, IndexConfig
+
+    with _provenance_cache_lock:
+        path_str = str(index_path)
+        file_exists = index_path.exists()
+        current_mtime = index_path.stat().st_mtime if file_exists else 0.0
+        if (
+            _cached_provenance_index is None
+            or not file_exists  # never serve stale cache for missing files
+            or current_mtime > _cached_provenance_mtime
+            or path_str != _cached_provenance_path
+        ):
+            idx = EntryEpisodeIndex(
+                IndexConfig(backend="graphiti", index_path=index_path)
+            )
+            if file_exists:
+                idx.load()
+                _cached_provenance_index = idx
+                _cached_provenance_mtime = current_mtime
+                _cached_provenance_path = path_str
+            # else: return fresh empty index; callers handle empty results
+            # gracefully.  Not cached so a future file appearance is picked up.
+            return idx
+        assert _cached_provenance_index is not None  # guarded by cache-miss branch above
+        return _cached_provenance_index
+
 
 async def _get_entity_edge_impl(
     uuid: str,
     ctx: Context,
     code_path: str = "",
-    group_id: Optional[str] = None,
+    group_id: str | None = None,
 ) -> ToolResult:
     """Get a specific entity edge (relationship) by UUID.
 
@@ -185,10 +241,11 @@ async def _get_entity_edge_impl(
 
 
 def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
-    """Diagnose Graphiti memory backend installation and configuration.
+    """Diagnose memory backend installation and configuration across all tiers.
 
-    Returns diagnostic information about package paths, imports, and configuration.
-    Useful for debugging backend initialization issues.
+    Returns diagnostic information about package paths, imports, and configuration
+    for T2 (Graphiti) and T3 (LeanRAG). Useful for debugging backend initialization
+    issues and misconfiguration.
 
     Args:
         ctx: MCP context
@@ -196,11 +253,12 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
 
     Returns:
         JSON with diagnostic information including:
-        - Python version
-        - watercooler_memory package path
-        - GraphitiBackend import status
-        - Configuration status
-        - Backend initialization status
+        - Python version and executable path
+        - watercooler_memory package path and version
+        - T2 (Graphiti): GraphitiBackend import status, config, backend_init
+        - T3 (LeanRAG): nested under ``t3_leanrag`` — LeanRAGBackend import,
+          env vars, path resolution, FalkorDB/LLM/embedding config, backend_init,
+          has_incremental_state
 
     Example:
         diagnose_memory(code_path="/path/to/project")
@@ -282,6 +340,64 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
                 diagnostics["backend_init"] = "✗ Failed: Returned None"
             else:
                 diagnostics["backend_init"] = "✓ Success"
+
+        # Check T3 (LeanRAG) configuration and availability
+        t3: dict[str, Any] = {}
+
+        # Import LeanRAGBackend once and cache the class so we can instantiate
+        # it directly below without a redundant load_leanrag_config() call.
+        _LeanRAGBackend_cls = None
+        try:
+            from watercooler_memory.backends.leanrag import LeanRAGBackend as _LeanRAGBackend_cls
+            t3["leanrag_backend_import"] = "✓ Success"
+        except ImportError as _e:
+            t3["leanrag_backend_import"] = f"✗ Failed: {_e}"
+
+        t3["leanrag_path_env"] = os.getenv("LEANRAG_PATH") or "(not set)"
+        t3["leanrag_enabled_env"] = os.getenv("WATERCOOLER_LEANRAG_ENABLED") or "(not set)"
+        t3["leanrag_database_env"] = os.getenv("WATERCOOLER_LEANRAG_DATABASE") or "(not set)"
+
+        try:
+            leanrag_cfg = mem.load_leanrag_config(code_path=code_path if code_path else None)
+            if leanrag_cfg is None:
+                t3["leanrag_enabled"] = False
+                t3["config_issue"] = (
+                    "LeanRAG not enabled. Set WATERCOOLER_LEANRAG_ENABLED=1 and LEANRAG_PATH, "
+                    "or configure [memory.tiers] t3_enabled = true in config.toml."
+                )
+            else:
+                t3["leanrag_enabled"] = True
+                t3["leanrag_path"] = str(leanrag_cfg.leanrag_path) if leanrag_cfg.leanrag_path else "(none)"
+                t3["leanrag_path_exists"] = (
+                    Path(leanrag_cfg.leanrag_path).exists() if leanrag_cfg.leanrag_path else False
+                )
+                t3["work_dir"] = str(leanrag_cfg.work_dir) if leanrag_cfg.work_dir else "(none)"
+                t3["falkordb_host"] = leanrag_cfg.falkordb_host or "(not set)"
+                t3["falkordb_port"] = (
+                    leanrag_cfg.falkordb_port if leanrag_cfg.falkordb_port is not None else "(not set)"
+                )
+                t3["llm_api_key_set"] = bool(leanrag_cfg.llm_api_key)
+                t3["llm_api_base"] = leanrag_cfg.llm_api_base or "(not set)"
+                t3["llm_model"] = leanrag_cfg.llm_model or "(not set)"
+                t3["embedding_api_base"] = leanrag_cfg.embedding_api_base or "(not set)"
+                t3["embedding_model"] = leanrag_cfg.embedding_model or "(not set)"
+
+                if _LeanRAGBackend_cls is not None:
+                    try:
+                        leanrag_backend = _LeanRAGBackend_cls(leanrag_cfg)
+                        t3["backend_init"] = "✓ Success"
+                        try:
+                            t3["has_incremental_state"] = leanrag_backend.has_incremental_state()
+                        except Exception as _he:
+                            t3["has_incremental_state"] = f"✗ Failed: {_he}"
+                    except Exception as _be:
+                        t3["backend_init"] = f"✗ Failed: {_be}"
+                else:
+                    t3["backend_init"] = "✗ Skipped: LeanRAGBackend import failed"
+        except Exception as _e:
+            t3["config_error"] = f"load_leanrag_config: {_e}"
+
+        diagnostics["t3_leanrag"] = t3
 
         return ToolResult(content=[TextContent(
             type="text",
@@ -422,6 +538,22 @@ async def _graphiti_add_episode_impl(
 
         episode_title = title if title else content[:50] + ("..." if len(content) > 50 else "")
         source_desc = source_description if source_description else "Direct episode via MCP tool"
+
+        # Pre-flight dedup: skip if this entry is already indexed.
+        # Protects against agent retries creating duplicate episodes.
+        if entry_id and backend.entry_episode_index is not None:
+            if backend.entry_episode_index.has_any_mapping(entry_id):
+                logger.debug("MEMORY: Skipping already-indexed entry %s (direct tool)", entry_id)
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "status": "skipped",
+                        "skip_reason": "already_indexed",
+                        "entry_id": entry_id,
+                        "message": "Entry already indexed; skipping to prevent duplicate episodes.",
+                    }, indent=2)
+                )])
 
         # Fire-and-forget: spawn background task for the slow LLM+graph work.
         # The graphiti pipeline (DeepSeek LLM calls + FalkorDB writes) takes
@@ -636,25 +768,23 @@ async def _clear_graph_group_impl(
         )])
 
 
-def _get_leanrag_backend(config=None):
-    """Get LeanRAG backend instance if available.
+def _get_leanrag_backend(code_path: str = "") -> Any:
+    """Get LeanRAG backend instance via unified config factory.
+
+    Args:
+        code_path: Path to the project directory (for database name derivation).
 
     Returns:
-        LeanRAGBackend instance or None if unavailable
+        LeanRAGBackend instance or None if unavailable/disabled.
     """
     try:
-        from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
-        from pathlib import Path
+        from ..memory import load_leanrag_config
+        from watercooler_memory.backends.leanrag import LeanRAGBackend
 
-        # Use provided config or defaults
+        config = load_leanrag_config(code_path=code_path)
         if config is None:
-            import os
-            leanrag_path = os.getenv("LEANRAG_PATH", "external/LeanRAG")
-            config = LeanRAGConfig(
-                leanrag_path=Path(leanrag_path),
-            )
-        elif isinstance(config, dict):
-            config = LeanRAGConfig(**config)
+            log_warning("MEMORY: LeanRAG config unavailable (disabled or misconfigured)")
+            return None
 
         return LeanRAGBackend(config)
     except ImportError as e:
@@ -666,11 +796,13 @@ def _get_leanrag_backend(config=None):
 
 
 async def _leanrag_run_pipeline_impl(
-    group_id: str,
-    ctx: Context,
+    group_id: str = "",
+    ctx: Context | None = None,  # noqa: ARG001 — reserved for FastMCP context injection
+    code_path: str = "",
     start_date: str = "",
     end_date: str = "",
     dry_run: bool = False,
+    incremental: bool = True,
 ) -> ToolResult:
     """Run LeanRAG clustering pipeline on Graphiti episodes.
 
@@ -681,17 +813,23 @@ async def _leanrag_run_pipeline_impl(
     4. Store cluster summaries back to graph
 
     Args:
-        group_id: Thread/topic identifier to process (required)
+        group_id: Thread/topic identifier to process. Optional if code_path
+            is provided (group_id will be derived from code_path).
+        ctx: MCP context
+        code_path: Path to the project directory (required for BULK runs).
+            Used to derive group_id and project-scoped LeanRAG/Graphiti config.
         start_date: Optional start date filter (ISO 8601)
         end_date: Optional end date filter (ISO 8601)
         dry_run: If True, only report what would be done
+        incremental: If True (default), use incremental update when saved
+            cluster state exists. If False, force a full rebuild.
 
     Returns:
         JSON with clusters_created, chunks_processed, and execution stats
 
     Example:
         leanrag_run_pipeline(
-            group_id="auth-feature",
+            code_path="/home/user/my-project",
             start_date="2025-01-01",
             dry_run=True
         )
@@ -702,19 +840,31 @@ async def _leanrag_run_pipeline_impl(
     start_time = time.time()
 
     try:
-        # Validate required fields
-        if not group_id or not group_id.strip():
+        # Require code_path for all LeanRAG BULK runs (direct + queued).
+        # group_id is optional — derived from code_path if absent.
+        if not code_path or not code_path.strip():
             return ToolResult(content=[TextContent(
                 type="text",
                 text=json.dumps({
                     "success": False,
-                    "error": "group_id is required",
+                    "error": "code_path is required for LeanRAG pipeline. "
+                             "Provide the path to the project directory.",
                     "clusters_created": 0,
                 }, indent=2)
             )])
 
+        if not group_id or not group_id.strip():
+            from watercooler.path_resolver import derive_group_id
+            group_id = derive_group_id(code_path=code_path)
+            if group_id == "watercooler" and code_path:
+                logger.warning(
+                    "group_id defaulted to 'watercooler' from code_path=%s; "
+                    "verify code_path is in a git repo",
+                    code_path,
+                )
+
         # Get backend instance
-        backend = _get_leanrag_backend()
+        backend = _get_leanrag_backend(code_path=code_path)
         if backend is None:
             return ToolResult(content=[TextContent(
                 type="text",
@@ -740,16 +890,77 @@ async def _leanrag_run_pipeline_impl(
                 }, indent=2)
             )])
 
-        # Fetch episodes from Graphiti for this group
+        # Try queue-first: enqueue BULK task for async processing
         try:
+            from ..memory_queue import get_queue, get_worker, MemoryTask, TaskType, DuplicateTaskError
+
+            queue = get_queue()
+            worker = get_worker()
+            if queue is not None and worker is not None and worker.has_executor("leanrag_pipeline"):
+                content_payload = json.dumps({
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "incremental": incremental,
+                })
+                task = MemoryTask(
+                    task_type=TaskType.BULK,
+                    backend="leanrag_pipeline",
+                    group_id=group_id,
+                    topic=group_id,
+                    content=content_payload,
+                    title=f"leanrag_pipeline:{group_id}",
+                    source_description=f"leanrag_run_pipeline|{group_id}",
+                    code_path=code_path,
+                )
+                try:
+                    task_id = queue.enqueue(task)
+                except DuplicateTaskError:
+                    return ToolResult(content=[TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "group_id": group_id,
+                            "queued": True,
+                            "message": f"Pipeline already queued for group '{group_id}'",
+                        }, indent=2)
+                    )])
+                worker.wake()
+                log_action(f"MEMORY: LeanRAG pipeline queued for {group_id} (task_id={task_id})")
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "group_id": group_id,
+                        "queued": True,
+                        "task_id": task_id,
+                        "message": f"Pipeline queued for async processing. Poll with watercooler_memory_task_status.",
+                    }, indent=2)
+                )])
+        except ImportError:
+            pass  # Fall through to direct execution
+
+        # Fallback: direct execution (queue unavailable)
+        try:
+            from ..memory import load_graphiti_config
             from watercooler_memory.backends.graphiti import GraphitiBackend
 
-            graphiti = GraphitiBackend()
-            episodes_result = await graphiti.get_episodes(
-                group_ids=[group_id],
-                limit=1000,  # Reasonable limit
+            graphiti_config = load_graphiti_config(code_path=code_path)
+            if graphiti_config is None:
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": False,
+                        "error": "Graphiti config unavailable — required for episode retrieval",
+                        "clusters_created": 0,
+                    }, indent=2)
+                )])
+            graphiti = GraphitiBackend(graphiti_config)
+            episodes = await asyncio.to_thread(
+                graphiti.get_group_episodes,
+                group_id=group_id,
+                start_time=start_date,
+                end_time=end_date,
             )
-            episodes = episodes_result.get("episodes", [])
         except ImportError:
             return ToolResult(content=[TextContent(
                 type="text",
@@ -784,33 +995,19 @@ async def _leanrag_run_pipeline_impl(
             )])
 
         # Convert episodes to ChunkPayload format
-        from watercooler_memory.backends import ChunkPayload
-        import hashlib
+        from ..memory_sync import episodes_to_chunk_payload
 
-        chunks = []
-        for ep in episodes:
-            content = ep.get("content", "")
-            chunk_id = ep.get("uuid") or hashlib.md5(content.encode()).hexdigest()
-            chunks.append({
-                "id": chunk_id,
-                "text": content,
-                "metadata": {
-                    "group_id": group_id,
-                    "source": "graphiti_episode",
-                },
-            })
-
-        chunk_payload = ChunkPayload(
-            manifest_version="1.0",
-            chunks=chunks,
-        )
+        chunk_payload = episodes_to_chunk_payload(episodes, group_id)
 
         # Run LeanRAG index via thread (ADR 0001 Sync Facade pattern)
         try:
-            result = await asyncio.to_thread(backend.index, chunk_payload)
+            if incremental and backend.has_incremental_state():
+                result = await asyncio.to_thread(backend.incremental_index, chunk_payload)
+            else:
+                result = await asyncio.to_thread(backend.index, chunk_payload)
 
             execution_time_ms = int((time.time() - start_time) * 1000)
-            log_action(f"MEMORY: LeanRAG pipeline completed for {group_id}: {len(chunks)} chunks")
+            log_action(f"MEMORY: LeanRAG pipeline completed for {group_id}: {len(chunk_payload.chunks)} chunks")
 
             return ToolResult(content=[TextContent(
                 type="text",
@@ -819,7 +1016,7 @@ async def _leanrag_run_pipeline_impl(
                     "group_id": group_id,
                     "dry_run": False,
                     "clusters_created": result.indexed_count,
-                    "chunks_processed": len(chunks),
+                    "chunks_processed": len(chunk_payload.chunks),
                     "execution_time_ms": execution_time_ms,
                     "message": result.message,
                 }, indent=2)
@@ -854,8 +1051,8 @@ async def _smart_query_impl(
     code_path: str = "",
     threads_dir: str = "",
     max_tiers: int = 2,
-    force_tier: Optional[str] = None,
-    group_ids: Optional[List[str]] = None,
+    force_tier: str | None = None,
+    group_ids: list[str] | None = None,
 ) -> ToolResult:
     """Execute intelligent multi-tier memory query with automatic escalation.
 
@@ -1198,7 +1395,18 @@ async def _bulk_index_impl(
         max_entries: Max entries to queue (0 = unlimited, for testing).
 
     Returns:
-        JSON with task count and monitoring info.
+        JSON with indexing summary containing:
+        - action: "bulk_index"
+        - topics_scanned: number of thread topics discovered
+        - entries_queued: entries newly enqueued for background indexing
+        - entries_skipped: entries skipped due to missing body content
+        - already_indexed: entries skipped because they are already committed
+          to the entry-episode index (Graphiti backend only). A second run
+          returning entries_queued=0 and already_indexed>0 is the expected
+          idempotent outcome — not an error. Calling bulk_index again on an
+          already-indexed project is safe and has no side effects.
+        - errors: per-topic errors (capped at 10)
+        - queue: queue status summary
     """
     try:
         from ..memory_queue import get_queue, MemoryTask, enqueue_memory_task, VALID_BACKENDS
@@ -1223,7 +1431,7 @@ async def _bulk_index_impl(
 
         # Discover entries via watercooler library
         from watercooler.commands import list_entries
-        from watercooler.path_resolver import resolve_threads_dir
+        from watercooler.path_resolver import resolve_threads_dir, derive_group_id
 
         threads_dir = resolve_threads_dir(code_root=Path(code_path)) if code_path else None
         if threads_dir is None:
@@ -1235,23 +1443,45 @@ async def _bulk_index_impl(
                 }),
             )])
 
-        # Get list of thread topics
-        all_topics = [p.stem for p in discover_thread_files(threads_dir)]
+        # Get list of thread topics from graph
+        from watercooler.baseline_graph import storage as _graph_storage
+        from watercooler.baseline_graph.storage import get_graph_dir as _get_graph_dir
+        all_topics = _graph_storage.list_thread_topics(_get_graph_dir(threads_dir))
 
         if threads:
             selected = [t.strip() for t in threads.split(",")]
             all_topics = [t for t in all_topics if t in selected]
 
-        # Derive group_id from code_path
-        threads_dir_str = str(threads_dir)
-        group_id = (
-            threads_dir_str.removesuffix("-threads")
-            if threads_dir_str.endswith("-threads")
-            else threads_dir_str
-        )
+        # Derive group_id using canonical function (consistent with search tools)
+        group_id = derive_group_id(threads_dir=threads_dir)
+
+        # Load index once for pre-flight dedup (Graphiti only — LeanRAG has no entry-episode index;
+        # the LeanRAG queue file is its dedup mechanism).
+        # NOTE: _dedup_index is a READ-ONLY disk snapshot, separate from backend.entry_episode_index
+        # (the live in-memory object used by Guards 1/2 at execution time). Guard 3 is a best-effort
+        # pre-flight filter; Guards 1/2 remain authoritative. Requires auto_save_index=True (default).
+        _dedup_index = None
+        if backend == "graphiti":
+            try:
+                from ..memory import load_graphiti_config
+                from watercooler_memory.entry_episode_index import IndexConfig
+                graphiti_config = load_graphiti_config(code_path=code_path)
+                if graphiti_config and graphiti_config.entry_episode_index_path:
+                    _dedup_index = _get_cached_provenance_index(graphiti_config.entry_episode_index_path)
+                elif graphiti_config:
+                    # Config exists but no explicit index path — use default location
+                    _dedup_index = _get_cached_provenance_index(IndexConfig(backend="graphiti").index_path)
+                # else: graphiti_config is None → Graphiti not configured → _dedup_index stays None
+            except FileNotFoundError:
+                logger.debug("MEMORY: No entry index found for dedup guard (first run)")
+            except Exception as exc:
+                logger.warning(
+                    "MEMORY: Could not load entry index for dedup guard — dedup skipped: %s", exc
+                )
 
         queued = 0
         skipped = 0
+        already_indexed = 0
         errors = []
 
         for topic in all_topics:
@@ -1271,6 +1501,12 @@ async def _bulk_index_impl(
                     skipped += 1
                     continue
 
+                # Skip entries already committed to Graphiti
+                if _dedup_index is not None and entry_id and _dedup_index.has_any_mapping(entry_id):
+                    logger.debug("MEMORY: Skipping already-indexed entry %s", entry_id)
+                    already_indexed += 1
+                    continue
+
                 task_id = enqueue_memory_task(
                     entry_id=entry_id,
                     topic=topic,
@@ -1280,6 +1516,7 @@ async def _bulk_index_impl(
                     title=entry.get("title", ""),
                     timestamp=entry.get("timestamp", ""),
                     source_description=f"{group_id} | thread:{topic} | bulk_index",
+                    code_path=code_path,
                 )
                 if task_id:
                     queued += 1
@@ -1297,6 +1534,7 @@ async def _bulk_index_impl(
                 "topics_scanned": len(all_topics),
                 "entries_queued": queued,
                 "entries_skipped": skipped,
+                "already_indexed": already_indexed,
                 "errors": errors[:10],
                 "queue": summary,
             }, indent=2),
@@ -1317,6 +1555,189 @@ async def _bulk_index_impl(
         )])
 
 
+async def _get_entry_provenance_impl(
+    ctx: Context,
+    entry_id: str = "",
+    episode_uuid: str = "",
+    code_path: str = "",
+) -> ToolResult:
+    """Look up reverse provenance between T1 entries and T2 episodes.
+
+    Supports bidirectional lookup:
+    - episode_uuid → entry_id (trace T2 results back to T1 source)
+    - entry_id → episode list (find episodes for a T1 entry, chunk-aware)
+
+    Provide exactly one of entry_id or episode_uuid.
+
+    Args:
+        ctx: MCP context
+        entry_id: Watercooler entry ULID (for entry→episodes lookup)
+        episode_uuid: Graphiti episode UUID (for episode→entry lookup)
+        code_path: Path to project directory (for index file resolution)
+
+    Returns:
+        JSON with provenance mapping or {provenance_available: false}
+    """
+    # Input validation
+    entry_id = entry_id.strip()
+    episode_uuid = episode_uuid.strip()
+
+    if entry_id and episode_uuid:
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps({
+                "error": "Provide exactly one of entry_id or episode_uuid, not both",
+                "operation": "get_entry_provenance",
+            }, indent=2)
+        )])
+
+    if not entry_id and not episode_uuid:
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps({
+                "error": "Provide either entry_id or episode_uuid",
+                "operation": "get_entry_provenance",
+            }, indent=2)
+        )])
+
+    try:
+        from watercooler_memory.entry_episode_index import IndexConfig
+
+        # Resolve index file path
+        # 1. Try unified config if code_path provided
+        # 2. Fall back to default IndexConfig path
+        index_path = None
+        try:
+            from ..memory import load_graphiti_config
+            graphiti_config = load_graphiti_config(code_path=code_path)
+            if graphiti_config and graphiti_config.entry_episode_index_path:
+                index_path = graphiti_config.entry_episode_index_path
+        except Exception as exc:
+            logger.debug("load_graphiti_config unavailable, using default index path: %s", exc)
+
+        if index_path is None:
+            logger.debug("Graphiti config unavailable; using default index path")
+            config = IndexConfig(backend="graphiti")
+            index_path = config.index_path
+
+        # Load index via mtime-aware cache (avoids disk I/O on repeated calls)
+        index = _get_cached_provenance_index(index_path)
+
+        # episode_uuid → entry lookup
+        if episode_uuid:
+            found_entry_id = index.get_entry(episode_uuid)
+            if found_entry_id:
+                index_entry = index.get_index_entry(found_entry_id)
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "provenance_available": True,
+                        "entry_id": found_entry_id,
+                        "thread_id": index_entry.thread_id if index_entry else "",
+                        "episode_uuid": episode_uuid,
+                        "indexed_at": index_entry.indexed_at if index_entry else "",
+                    }, indent=2)
+                )])
+            else:
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "provenance_available": False,
+                        "lookup_key": episode_uuid,
+                        "message": "No mapping found for this episode UUID",
+                        "action_hints": [
+                            "Run watercooler_bulk_index to populate the index",
+                            "Check watercooler_diagnose_memory for backend status",
+                        ],
+                    }, indent=2)
+                )])
+
+        # entry_id → episodes lookup (chunk-aware)
+        if entry_id:
+            # Check for chunked mappings first
+            chunks = index.get_chunks_for_entry(entry_id)
+            if chunks:
+                # Informational: detect pre-chunk-era direct mapping (no consumer acts on this flag;
+                # useful for debugging migration state)
+                direct_uuid = index.get_episode(entry_id)
+                episodes_list = [
+                    {
+                        "episode_uuid": c.episode_uuid,
+                        "chunk_index": c.chunk_index,
+                        "total_chunks": c.total_chunks,
+                    }
+                    for c in chunks
+                ]
+                result: dict[str, Any] = {
+                    "provenance_available": True,
+                    "entry_id": entry_id,
+                    "thread_id": chunks[0].thread_id,
+                    "episodes": episodes_list,
+                }
+                if direct_uuid:
+                    result["stale_direct_mapping"] = True
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps(result, indent=2)
+                )])
+
+            # Fallback to non-chunked 1:1 mapping
+            ep_uuid = index.get_episode(entry_id)
+            if ep_uuid:
+                index_entry = index.get_index_entry(entry_id)
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "provenance_available": True,
+                        "entry_id": entry_id,
+                        "thread_id": index_entry.thread_id if index_entry else "",
+                        "episodes": [{
+                            "episode_uuid": ep_uuid,
+                            "chunk_index": 0,
+                            "total_chunks": 1,
+                        }],
+                    }, indent=2)
+                )])
+            else:
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "provenance_available": False,
+                        "lookup_key": entry_id,
+                        "message": "No mapping found for this entry ID",
+                        "action_hints": [
+                            "Run watercooler_bulk_index to populate the index",
+                            "Check watercooler_diagnose_memory for backend status",
+                        ],
+                    }, indent=2)
+                )])
+
+    except ImportError as e:
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps({
+                "error": f"EntryEpisodeIndex not available: {e}",
+                "operation": "get_entry_provenance",
+                "action_hints": [
+                    "Install watercooler-cloud[memory] for provenance support",
+                    "Check watercooler_diagnose_memory for backend status",
+                ],
+            }, indent=2)
+        )])
+    except Exception as e:
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps({
+                "error": f"Provenance lookup failed: {e}",
+                "operation": "get_entry_provenance",
+                "action_hints": [
+                    "Install watercooler-cloud[memory] for provenance support",
+                    "Check watercooler_diagnose_memory for backend status",
+                ],
+            }, indent=2)
+        )])
+
+
 def register_memory_tools(mcp):
     """Register memory tools with the MCP server.
 
@@ -1334,6 +1755,7 @@ def register_memory_tools(mcp):
     global graphiti_add_episode, leanrag_run_pipeline, clear_graph_group
     global smart_query
     global memory_task_status, bulk_index
+    global get_entry_provenance
 
     # Register tools and store references for testing
     get_entity_edge = mcp.tool(name="watercooler_get_entity_edge")(_get_entity_edge_impl)
@@ -1352,3 +1774,6 @@ def register_memory_tools(mcp):
     # Memory task queue tools
     memory_task_status = mcp.tool(name="watercooler_memory_task_status")(_memory_task_status_impl)
     bulk_index = mcp.tool(name="watercooler_bulk_index")(_bulk_index_impl)
+
+    # Provenance tools
+    get_entry_provenance = mcp.tool(name="watercooler_get_entry_provenance")(_get_entry_provenance_impl)

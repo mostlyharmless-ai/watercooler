@@ -38,28 +38,42 @@ def threads_dir(tmp_path):
 
 @pytest.fixture
 def sample_thread(threads_dir):
-    """Create a sample thread file for testing."""
-    content = dedent("""\
-        # test-topic — Test Thread
-        Status: OPEN
-        Ball: Claude (user)
-        Topic: test-topic
-        Created: 2025-01-01T12:00:00Z
+    """Create a sample thread with graph data and projected .md."""
+    from watercooler.baseline_graph.writer import (
+        init_thread_in_graph,
+        upsert_entry_node,
+        EntryData,
+    )
+    from watercooler.baseline_graph.projector import project_and_write_thread
 
-        ---
-        Entry: Claude (user) 2025-01-01T12:00:00Z
-        Role: planner
-        Type: Plan
-        Title: Initial planning
+    # 1. Create thread in graph
+    init_thread_in_graph(
+        threads_dir,
+        "test-topic",
+        title="Test Thread",
+        status="OPEN",
+        ball="Claude (user)",
+    )
 
-        Spec: planner
-        This is the initial planning entry.
-        <!-- Entry-ID: 01TEST00000000000000000001 -->
+    # 2. Create initial entry in graph
+    entry_data = EntryData(
+        entry_id="01TEST00000000000000000001",
+        thread_topic="test-topic",
+        index=0,
+        agent="Claude (user)",
+        role="planner",
+        entry_type="Plan",
+        title="Initial planning",
+        body="Spec: planner\nThis is the initial planning entry.\n",
+        timestamp="2025-01-01T12:00:00Z",
+        summary="",
+    )
+    upsert_entry_node(threads_dir, entry_data)
 
-        ---
-    """)
+    # 3. Project .md from graph
+    project_and_write_thread(threads_dir, "test-topic")
+
     thread_file = threads_dir / "test-topic.md"
-    thread_file.write_text(content, encoding="utf-8")
     return thread_file
 
 
@@ -132,11 +146,11 @@ def patched_set_status_context(mock_context, monkeypatch):
     # Mock is_hosted_context to return False (local mode)
     monkeypatch.setattr("watercooler_mcp.tools.thread_write.is_hosted_context", lambda ctx: False)
 
-    # Mock commands_graph.set_status to use non-graph set_status
-    from watercooler.commands import set_status as commands_set_status
+    # Mock commands_graph.set_status as a no-op (returns thread path)
+    from watercooler.fs import thread_path as _tp
 
     def mock_set_status(topic, *, threads_dir, status):
-        return commands_set_status(topic, threads_dir=threads_dir, status=status)
+        return _tp(topic, threads_dir)
 
     monkeypatch.setattr(
         "watercooler.commands_graph.set_status",

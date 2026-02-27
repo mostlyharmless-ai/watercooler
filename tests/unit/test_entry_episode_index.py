@@ -440,3 +440,125 @@ class TestEntryEpisodeIndexMetadata:
         index.clear()
         assert len(index) == 0
         assert index.get_episode("entry1") is None
+
+
+class TestHasAnyMapping:
+    """Test has_any_mapping — the dedup guard helper."""
+
+    @pytest.fixture
+    def index(self, tmp_path: Path) -> EntryEpisodeIndex:
+        """Create a fresh index for testing."""
+        config = IndexConfig(index_path=tmp_path / "test_index.json")
+        return EntryEpisodeIndex(config)
+
+    def test_returns_false_for_unknown_entry(self, index: EntryEpisodeIndex):
+        """has_any_mapping returns False when entry is not in either dict."""
+        assert index.has_any_mapping("unknown-entry") is False
+
+    def test_returns_true_after_add(self, index: EntryEpisodeIndex):
+        """has_any_mapping returns True after add() (non-chunked path populates _by_entry)."""
+        index.add("entry-1", "ep-uuid-1", "thread-a")
+        assert index.has_any_mapping("entry-1") is True
+
+    def test_returns_true_after_add_chunk_mapping(self, index: EntryEpisodeIndex):
+        """has_any_mapping returns True after add_chunk_mapping() (chunked path populates _chunks_by_entry).
+
+        This is the critical correctness case: has_entry() alone returns False for chunked entries
+        because add_chunk_mapping does NOT write to _by_entry. has_any_mapping must check
+        _chunks_by_entry to catch these.
+        """
+        index.add_chunk_mapping(
+            chunk_id="chunk-abc123",
+            episode_uuid="ep-uuid-2",
+            entry_id="entry-2",
+            thread_id="thread-b",
+            chunk_index=0,
+            total_chunks=2,
+        )
+        # has_entry() would return False here (different dict)
+        assert index.has_entry("entry-2") is False
+        # has_any_mapping() must return True
+        assert index.has_any_mapping("entry-2") is True
+
+
+class TestEntryEpisodeIndexChunkMethods:
+    """Tests for chunk mapping methods on EntryEpisodeIndex (Phase 3 coverage)."""
+
+    @pytest.fixture
+    def index(self, tmp_path: Path) -> EntryEpisodeIndex:
+        """Create a fresh index for testing."""
+        config = IndexConfig(index_path=tmp_path / "test_index.json")
+        return EntryEpisodeIndex(config)
+
+    def test_add_chunk_mapping_returns_mapping(self, index: EntryEpisodeIndex):
+        """add_chunk_mapping returns a ChunkEpisodeMapping with correct fields."""
+        from watercooler_memory.entry_episode_index import ChunkEpisodeMapping
+
+        mapping = index.add_chunk_mapping(
+            chunk_id="chunk-001",
+            episode_uuid="ep-001",
+            entry_id="entry-1",
+            thread_id="thread-a",
+            chunk_index=0,
+            total_chunks=3,
+        )
+        assert isinstance(mapping, ChunkEpisodeMapping)
+        assert mapping.chunk_id == "chunk-001"
+        assert mapping.episode_uuid == "ep-001"
+        assert mapping.entry_id == "entry-1"
+        assert mapping.chunk_index == 0
+        assert mapping.total_chunks == 3
+
+    def test_has_chunk_returns_true_for_indexed_chunk(self, index: EntryEpisodeIndex):
+        """has_chunk returns True after add_chunk_mapping."""
+        index.add_chunk_mapping("chunk-001", "ep-001", "entry-1", "thread-a", 0, 1)
+        assert index.has_chunk("chunk-001") is True
+
+    def test_has_chunk_returns_false_for_unknown(self, index: EntryEpisodeIndex):
+        """has_chunk returns False for unknown chunk_id."""
+        assert index.has_chunk("nonexistent-chunk") is False
+
+    def test_get_episode_for_chunk(self, index: EntryEpisodeIndex):
+        """get_episode_for_chunk returns the episode_uuid for a chunk."""
+        index.add_chunk_mapping("chunk-001", "ep-001", "entry-1", "thread-a", 0, 1)
+        assert index.get_episode_for_chunk("chunk-001") == "ep-001"
+        assert index.get_episode_for_chunk("nonexistent") is None
+
+    def test_get_chunks_for_entry(self, index: EntryEpisodeIndex):
+        """get_chunks_for_entry returns ChunkEpisodeMappings in chunk_index order."""
+        index.add_chunk_mapping("chunk-b", "ep-002", "entry-1", "thread-a", 1, 2)
+        index.add_chunk_mapping("chunk-a", "ep-001", "entry-1", "thread-a", 0, 2)
+        chunks = index.get_chunks_for_entry("entry-1")
+        assert len(chunks) == 2
+        assert chunks[0].chunk_id == "chunk-a"  # chunk_index=0 comes first
+        assert chunks[1].chunk_id == "chunk-b"
+
+    def test_get_episode_uuids_for_entry(self, index: EntryEpisodeIndex):
+        """get_episode_uuids_for_entry returns UUIDs in chunk_index order."""
+        index.add_chunk_mapping("chunk-a", "ep-001", "entry-1", "thread-a", 0, 2)
+        index.add_chunk_mapping("chunk-b", "ep-002", "entry-1", "thread-a", 1, 2)
+        uuids = index.get_episode_uuids_for_entry("entry-1")
+        assert uuids == ["ep-001", "ep-002"]
+
+    def test_get_episode_uuids_for_entry_returns_empty_for_unknown(self, index: EntryEpisodeIndex):
+        """get_episode_uuids_for_entry returns [] for unknown entry_id."""
+        assert index.get_episode_uuids_for_entry("unknown") == []
+
+    def test_remove_chunks_for_entry(self, index: EntryEpisodeIndex):
+        """remove_chunks_for_entry removes all chunk mappings for an entry."""
+        index.add_chunk_mapping("chunk-a", "ep-001", "entry-1", "thread-a", 0, 2)
+        index.add_chunk_mapping("chunk-b", "ep-002", "entry-1", "thread-a", 1, 2)
+        index.add_chunk_mapping("chunk-c", "ep-003", "entry-2", "thread-a", 0, 1)
+
+        index.remove_chunks_for_entry("entry-1")
+
+        assert index.has_chunk("chunk-a") is False
+        assert index.has_chunk("chunk-b") is False
+        assert index.has_chunk("chunk-c") is True  # entry-2 untouched
+
+    def test_chunk_count_property(self, index: EntryEpisodeIndex):
+        """chunk_count reflects total number of chunk mappings."""
+        assert index.chunk_count == 0
+        index.add_chunk_mapping("chunk-a", "ep-001", "entry-1", "thread-a", 0, 2)
+        index.add_chunk_mapping("chunk-b", "ep-002", "entry-1", "thread-a", 1, 2)
+        assert index.chunk_count == 2

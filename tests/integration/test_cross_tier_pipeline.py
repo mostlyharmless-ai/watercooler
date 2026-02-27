@@ -21,6 +21,7 @@ This test uses the cross_tier_test.md fixture which has:
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -54,15 +55,63 @@ except ImportError:
 CROSS_TIER_FIXTURE = Path(__file__).parent.parent / "fixtures" / "threads" / "cross_tier_test.md"
 
 
+def _bootstrap_graph_from_md(threads_dir: Path, md_path: Path) -> None:
+    """Bootstrap graph data from a .md fixture (test infrastructure only).
+
+    Uses parse_thread_header/parse_thread_entries to seed baseline graph data
+    so that the graph-only parser can read it.
+    """
+    from watercooler.thread_entries import parse_thread_entries, parse_thread_header
+    from watercooler.baseline_graph import storage
+
+    topic = md_path.stem
+    title, status, ball, last_update = parse_thread_header(md_path)
+    content = md_path.read_text(encoding="utf-8")
+    entries = parse_thread_entries(content)
+
+    graph_dir = storage.ensure_graph_dir(threads_dir)
+    thread_dir = storage.ensure_thread_graph_dir(graph_dir, topic)
+
+    meta = {
+        "id": f"thread:{topic}",
+        "topic": topic,
+        "title": title,
+        "status": status,
+        "ball": ball,
+        "last_updated": last_update,
+    }
+    storage.atomic_write_json(thread_dir / "meta.json", meta)
+
+    entry_dicts = []
+    for i, e in enumerate(entries):
+        entry_dicts.append({
+            "id": f"entry:{e.entry_id or f'{topic}:{i}'}",
+            "entry_id": e.entry_id or f"{topic}:{i}",
+            "agent": e.agent,
+            "role": e.role,
+            "entry_type": e.entry_type,
+            "title": e.title,
+            "timestamp": e.timestamp,
+            "body": e.body,
+            "index": e.index,
+        })
+    storage.atomic_write_jsonl(thread_dir / "entries.jsonl", entry_dicts)
+
+
 @pytest.fixture
-def cross_tier_fixture_path() -> Path:
-    """Path to the cross-tier test fixture."""
+def cross_tier_fixture_dir(tmp_path) -> Path:
+    """Copy cross-tier fixture to tmp_path and bootstrap graph data."""
     assert CROSS_TIER_FIXTURE.exists(), f"Fixture not found: {CROSS_TIER_FIXTURE}"
-    return CROSS_TIER_FIXTURE
+    threads_dir = tmp_path / "threads"
+    threads_dir.mkdir()
+    dest = threads_dir / CROSS_TIER_FIXTURE.name
+    shutil.copy2(CROSS_TIER_FIXTURE, dest)
+    _bootstrap_graph_from_md(threads_dir, dest)
+    return threads_dir
 
 
 @pytest.fixture
-def memory_graph(cross_tier_fixture_path: Path) -> MemoryGraph:
+def memory_graph(cross_tier_fixture_dir: Path) -> MemoryGraph:
     """Build MemoryGraph from cross-tier fixture."""
     config = GraphConfig(
         generate_summaries=False,
@@ -70,7 +119,7 @@ def memory_graph(cross_tier_fixture_path: Path) -> MemoryGraph:
         chunker=ChunkerConfig.watercooler_preset(),
     )
     graph = MemoryGraph(config=config)
-    graph.add_thread(cross_tier_fixture_path)
+    graph.add_thread(cross_tier_fixture_dir, "cross_tier_test")
     graph.chunk_all_entries()
     return graph
 
@@ -78,9 +127,9 @@ def memory_graph(cross_tier_fixture_path: Path) -> MemoryGraph:
 class TestTier1MemoryGraph:
     """Test Tier 1: MemoryGraph (raw chunks with provenance)."""
 
-    def test_parse_cross_tier_fixture(self, cross_tier_fixture_path: Path):
+    def test_parse_cross_tier_fixture(self, cross_tier_fixture_dir: Path):
         """Validate fixture parses correctly."""
-        thread, entries, edges = parse_thread_to_nodes(cross_tier_fixture_path)
+        thread, entries, edges = parse_thread_to_nodes(cross_tier_fixture_dir, "cross_tier_test")
 
         # Validate thread metadata (thread_id derived from filename)
         assert thread.thread_id == "cross_tier_test"

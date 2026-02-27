@@ -40,12 +40,63 @@ _THREAD_TEXT = dedent(
 )
 
 
+def _create_graph_data(threads_dir):
+    """Create per-thread graph data matching _THREAD_TEXT content."""
+    topic = "entry-access-tools"
+    graph_dir = threads_dir / "graph" / "baseline" / "threads" / topic
+    graph_dir.mkdir(parents=True, exist_ok=True)
+
+    meta = {
+        "type": "thread",
+        "topic": topic,
+        "title": "entry-access-tools",
+        "status": "OPEN",
+        "ball": "Codex (caleb)",
+        "last_updated": "2025-11-14T08:15:55Z",
+        "summary": "",
+        "entry_count": 2,
+    }
+    (graph_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+    entries = [
+        {
+            "entry_id": "01KA0PK97G9Q6AB0B17896Y1EB",
+            "thread_topic": topic,
+            "index": 0,
+            "agent": "Codex (caleb)",
+            "role": "planner",
+            "entry_type": "Plan",
+            "title": "Plan: entry-level MCP tooling",
+            "timestamp": "2025-11-14T08:09:39Z",
+            "summary": "Plan for entry-level MCP tooling",
+            "body": "Spec: planner-architecture\nLine A\n",
+        },
+        {
+            "entry_id": "01KA0PYSR7X43QQ61H1BCR3S2S",
+            "thread_topic": topic,
+            "index": 1,
+            "agent": "Codex (caleb)",
+            "role": "planner",
+            "entry_type": "Note",
+            "title": "Closing: wrong repo context",
+            "timestamp": "2025-11-14T08:15:55Z",
+            "summary": "Closing: wrong repo context",
+            "body": "Spec: planner-architecture\nAnother body line\n",
+        },
+    ]
+    lines = [json.dumps(e) for e in entries]
+    (graph_dir / "entries.jsonl").write_text("\n".join(lines) + "\n")
+
+
 @pytest.fixture
 def patched_context(tmp_path, monkeypatch):
     threads_dir = tmp_path / "threads"
     threads_dir.mkdir()
     thread_path = threads_dir / "entry-access-tools.md"
     thread_path.write_text(_THREAD_TEXT, encoding="utf-8")
+
+    # Create graph data (source of truth for reads)
+    _create_graph_data(threads_dir)
 
     context = ThreadContext(
         code_root=tmp_path,

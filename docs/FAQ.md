@@ -25,8 +25,8 @@ A file-based collaboration protocol for agentic coding projects. It provides:
 - **Threaded discussions** that live alongside your code in git
 - **Ball ownership** tracking - always clear who has the next action
 - **Structured entries** with roles (planner, critic, implementer) and types (Plan, Decision, Note)
-- **Memory system** for recalling past decisions and context
-- **Branch pairing** - threads branch mirrors code branch automatically
+- **Search** for recalling past decisions and context
+- **Branch scoping** - entries auto-tagged with code branch for context
 
 Think of it as "git-native project memory" - every decision, discussion, and handoff is versioned and searchable.
 
@@ -61,7 +61,8 @@ The protocol doesn't care who's writing entries - it just tracks who has the bal
 **For enhanced features**:
 - **Entry/thread summaries**: Requires LLM (local or API)
 - **Semantic search**: Requires embedding model (local or API)
-- **Memory tiers T2/T3**: Requires FalkorDB and/or LLM
+
+> Memory integration is available as an optional add-on for advanced search and recall features.
 
 A typical local setup uses:
 - `llama-server` with `qwen2.5:1.5b` for summaries
@@ -78,7 +79,7 @@ See [INSTALLATION.md](INSTALLATION.md) for setup options.
 1. Configure your MCP client with the watercooler-cloud server
 2. Start writing via MCP tools
 
-That's it. The MCP server handles installation automatically via `uvx`, and threads directories and branch pairing are created on first write.
+That's it. The MCP server handles installation automatically via `uvx`, and the orphan branch and worktree are created on first write.
 
 ### How do I configure my MCP client?
 
@@ -123,38 +124,36 @@ The `uvx` command (from `uv`) automatically downloads and runs watercooler-mcp i
 
 **For CLI usage or development**: Yes, use `pip install -e .[mcp]` from a clone of the repository.
 
-### How does the agent know where my threads repo is?
+### Where do threads live?
 
-The MCP server automatically derives the threads repo from your code repo using a naming convention:
+Threads live on an **orphan branch** (`watercooler/threads`) inside your code
+repository. The MCP server accesses this branch via a git worktree at
+`~/.watercooler/worktrees/<repo>/` (where `<repo>` is your repository's
+directory name, e.g., `myproject` for `~/projects/myproject`).
 
-- Code repo: `github.com/myorg/myproject`
-- Threads repo: `github.com/myorg/myproject-threads` (default pattern)
+There is no separate `-threads` repository. Everything stays in the same repo.
+
+**Note:** The worktree path is derived from the directory name only. If you have
+two repos with the same name (e.g., `~/org1/myapp` and `~/org2/myapp`), set
+`WATERCOOLER_DIR` to give one of them a custom threads location.
 
 On first write, the server:
 1. Detects your code repo from `code_path`
-2. Derives the threads repo URL (appends `-threads` suffix)
-3. Clones it as a sibling directory (e.g., `../myproject-threads`)
-4. Creates matching branches automatically
+2. Creates the `watercooler/threads` orphan branch (if it doesn't exist)
+3. Sets up a worktree at `~/.watercooler/worktrees/<repo>/`
 
-To customize the pattern (e.g., for GitLab or self-hosted), set `WATERCOOLER_THREADS_PATTERN` in your MCP config's `env` block.
-
-### Where do threads live?
-
-In a paired repository: `<your-repo>-threads`
+Every write tags entries with `code_branch` metadata so reads are automatically
+scoped to the active branch.
 
 ```
-myproject/              # Your code
-myproject-threads/      # Your threads (auto-created)
-  ├── my-feature.md     # Human-readable markdown
-  └── graph/
-      └── baseline/
-          ├── manifest.json       # Global manifest
-          ├── search-index.jsonl  # Embeddings for cross-thread search
-          └── threads/            # Per-thread data (source of truth)
-              └── my-feature/
-                  ├── meta.json       # Thread metadata (status, ball, summary)
-                  ├── entries.jsonl   # Entry nodes
-                  └── edges.jsonl     # Thread-local edges
+~/.watercooler/worktrees/myproject/    # Worktree (orphan branch)
+  ├── my-feature.md                    # Human-readable markdown
+  └── .watercooler/
+      ├── nodes.jsonl                  # Thread and entry nodes
+      ├── edges.jsonl                  # Relationships
+      ├── search-index.jsonl           # Embeddings for semantic search
+      ├── manifest.jsonl               # Metadata manifest
+      └── locks/                       # Topic locks
 ```
 
 ### How do I set my agent identity?
@@ -191,24 +190,31 @@ The JSONL graph is the source of truth; markdown is a projection for human reada
 
 You can always read the `.md` files directly - they're real markdown. But writes go through the graph layer.
 
-### What's the relationship between my code repo and threads repo?
+### How are threads scoped to my code branch?
 
-**1:1 branch pairing**:
+Entries are tagged with **`code_branch` metadata** (auto-populated from the
+current code branch). When you read a thread, only entries for the active
+branch are shown by default:
 
 ```
-Code: main              ↔  Threads: main
-Code: feature/auth      ↔  Threads: feature/auth
-Code: fix/bug-123       ↔  Threads: fix/bug-123
+Working on feature/auth  →  see entries tagged code_branch=feature/auth
+Switch to main           →  see entries tagged code_branch=main
+Pass code_branch="*"     →  see all entries across branches
 ```
 
-When you create a code branch, the matching threads branch is created automatically on first write. This keeps discussions scoped to the work they describe.
+Most read tools (`watercooler_read_thread`, `watercooler_list_thread_entries`,
+`watercooler_get_thread_entry_range`, etc.) accept a `code_branch` parameter.
+See the [MCP Server Reference](mcp-server.md) for full parameter details.
 
-### Why separate repos instead of a folder in my code repo?
+No branch switching happens in the threads worktree — all branches share the
+same orphan branch. Scoping is purely metadata-based.
 
-- **Clean git history**: Code commits separate from discussion commits
-- **Different access patterns**: Threads sync frequently, code syncs on push
-- **Size management**: Thread history doesn't bloat code repo
-- **Permissions**: Can have different access controls if needed
+### Why an orphan branch instead of a folder in my code repo?
+
+- **Clean git history**: Thread commits never appear in code `git log` or trigger CI
+- **Single repo**: No companion `-threads` repository to create, manage, or sync
+- **Automatic setup**: Worktree and branch created on first write — zero config
+- **No branch mirroring**: Entries tagged with `code_branch` instead of separate git branches
 
 ---
 
@@ -274,7 +280,7 @@ Closed threads remain in listings by default. Use `open_only=True` to filter to 
 watercooler_search(query="authentication decision", code_path=".")
 ```
 
-**Smart query (multi-tier with context):**
+**Smart query (with context):**
 ```python
 watercooler_smart_query(
     query="What was decided about the caching strategy?",
@@ -282,40 +288,14 @@ watercooler_smart_query(
 )
 ```
 
-Smart query automatically escalates through memory tiers if initial results are insufficient.
-
-### What are the memory tiers?
-
-| Tier | Backend | Cost | Best for |
-|------|---------|------|----------|
-| **T1** | JSONL + embeddings | 1 | Keyword search, simple lookups |
-| **T2** | FalkorDB (Graphiti) | 10 | Entity search, temporal queries, relationships |
-| **T3** | LeanRAG | 100 | Multi-hop reasoning, synthesis |
-
-Most queries are satisfied by T1/T2. T3 is opt-in for complex analysis.
+Smart query automatically searches across available memory tiers if initial results are insufficient.
 
 ### When do thread summaries get regenerated?
 
 Thread summaries update automatically when:
-1. **Entry count threshold**: First few entries (≤3), or every 5th entry
-2. **Arc change detection**: When entry types shift (e.g., Plan → Decision → Closure)
+1. **Entry count threshold**: First few entries (<=3), or every 5th entry
+2. **Arc change detection**: When entry types shift (e.g., Plan -> Decision -> Closure)
 3. **Embedding divergence**: When new entry's embedding diverges significantly from previous entry
-
-The embedding divergence threshold is configurable:
-```bash
-# Environment variable (default: 0.6, range: 0.0-1.0)
-WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD=0.5
-```
-
-**Tuning guide:**
-| Threshold | Sensitivity | Use case |
-|-----------|-------------|----------|
-| 0.3-0.4 | Very high | Regenerate on small topic shifts (higher LLM cost) |
-| 0.5-0.6 | Balanced | Detect moderate divergence (recommended) |
-| 0.7-0.8 | Conservative | Only regenerate on major shifts (lower cost) |
-| 0.9+ | Minimal | Mostly rely on entry count triggers |
-
-**Rule of thumb**: Start with default (0.6). Lower to 0.5 if summaries feel stale. Raise to 0.7 if LLM costs are high.
 
 To force-regenerate thread summaries:
 ```python
@@ -373,22 +353,19 @@ Since each entry has a unique ULID, Git can merge both entries automatically.
 **Advisory locking** prevents corruption:
 
 1. Agent A acquires lock on `feature-auth`
-2. Agent B tries to write → waits (or fails after timeout)
-3. Agent A completes → releases lock
-4. Agent B acquires lock → writes
+2. Agent B tries to write -> waits (or fails after timeout)
+3. Agent A completes -> releases lock
+4. Agent B acquires lock -> writes
 
-Locks are topic-specific and have TTL (default 30 seconds, configurable via `WCOOLER_LOCK_TTL`) to prevent deadlocks from crashed processes.
+Locks are topic-specific and have a 120-second TTL to prevent deadlocks from crashed processes.
 
 ### Can I work offline?
 
-Yes. Threads are local files until you push:
+Yes. Threads are local files in the worktree until you push:
 
-1. Write entries offline
-2. Commits queue locally
-3. Push when back online
-4. Conflicts auto-resolve via content-aware merging
-
-The async coordinator batches commits, so even rapid offline work results in clean history.
+1. Write entries offline (commits to orphan branch locally)
+2. Push when back online (rebase+retry handles divergence)
+3. JSONL append-only format makes conflicts rare — each entry is a separate line, so concurrent appends auto-merge
 
 ---
 
@@ -400,7 +377,6 @@ The async coordinator batches commits, so even rapid offline work results in cle
 
 - Thread files: Your filesystem + your git remote (GitHub, GitLab, etc.)
 - Embeddings: Local `graph/baseline/search-index.jsonl`
-- FalkorDB (T2): Local Docker container
 - LLM calls: Your configured endpoint (local llama-server or API)
 
 **No data is sent to Anthropic, OpenAI, or watercooler servers** unless you explicitly configure an external API.
@@ -459,8 +435,6 @@ Threads are in git - your backup strategy is your git remote:
 - Your git host (GitHub, GitLab) provides redundancy
 - Clone to multiple machines if desired
 
-For the local graph database (FalkorDB), standard Docker volume backup applies.
-
 ### Can I migrate from another tool?
 
 Watercooler uses plain text. To migrate:
@@ -503,19 +477,10 @@ The format is `<platform>:<model>:<role>`. Ensure you include all three parts se
 **Symptom**: Local changes not appearing on GitHub
 
 **Check**:
-1. Run `watercooler_health()` - check git status
+1. Run `watercooler_health()` - check git and worktree status
 2. Verify SSH keys / GitHub auth: `gh auth status`
-3. Check async coordinator logs: `~/.watercooler/logs/`
-4. Force sync: `watercooler_sync_branch_state()`
-
-### Smart query returns empty results
-
-**Symptom**: `watercooler_smart_query` finds nothing
-
-**Check**:
-1. Embeddings generated? Run `watercooler_graph_enrich(embeddings=True)`
-2. T2 enabled? Check `WATERCOOLER_TIER_T2_ENABLED`
-3. FalkorDB running? Check `watercooler_health()`
+3. Check server logs: `~/.watercooler/logs/`
+4. Verify worktree exists: `ls ~/.watercooler/worktrees/<repo>/`
 
 ### Entry summaries not generating
 
@@ -532,6 +497,5 @@ The format is `<platform>:<model>:<role>`. Ensure you include all three parts se
 
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Detailed problem-solving guide with flowcharts
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design and internals
-- **[USE_CASES.md](archive/USE_CASES.md)** - End-to-end workflow examples
 - **[mcp-server.md](mcp-server.md)** - MCP tool reference
-- **[SETUP_AND_QUICKSTART.md](SETUP_AND_QUICKSTART.md)** - Getting started guide
+- **[QUICKSTART.md](QUICKSTART.md)** - Getting started guide

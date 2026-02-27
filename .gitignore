@@ -69,7 +69,7 @@ instance/
 .scrapy
 
 # Sphinx documentation
-docs/_build/
+dev_docs/_build/
 
 # PyBuilder
 .pybuilder/
@@ -258,3 +258,18 @@ pipeline_work/
 # Migration checkpoint files (runtime state, not version controlled)
 .migration_checkpoint.json
 .vercel
+
+# Local planning/review artifacts
+todos/
+docs/brainstorms/
+docs/plans/
+
+# ---------------------------------------------------------------------------
+# Benchmark artifacts (generated outputs; keep out of git)
+# ---------------------------------------------------------------------------
+/logs/
+gold.validate-gold.json
+*__*.swebench-*.json
+*__*.cooperbench-*.json
+external/wcbench-corpora/
+docs/watercooler-planning/

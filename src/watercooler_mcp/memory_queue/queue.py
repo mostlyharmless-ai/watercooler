@@ -247,7 +247,9 @@ class MemoryTaskQueue:
                     if len(tasks) < max_count:
                         try:
                             tasks.append(MemoryTask.from_json_line(line))
-                        except (json.JSONDecodeError, KeyError):
+                        except (json.JSONDecodeError, KeyError, ValueError):
+                            # ValueError: MemoryTask.__post_init__ rejects
+                            # BULK tasks with empty group_id.
                             remaining_lines.append(line)
                     else:
                         remaining_lines.append(line)
@@ -307,7 +309,9 @@ class MemoryTaskQueue:
                         try:
                             task = MemoryTask.from_json_line(line)
                             self._tasks[task.task_id] = task
-                        except (json.JSONDecodeError, KeyError) as e:
+                        except (json.JSONDecodeError, KeyError, ValueError) as e:
+                            # ValueError: MemoryTask.__post_init__ rejects
+                            # BULK tasks with empty group_id.
                             logger.warning("MEMORY_QUEUE: skipping corrupt line: %s", e)
             except OSError as e:
                 logger.warning("MEMORY_QUEUE: could not load queue: %s", e)

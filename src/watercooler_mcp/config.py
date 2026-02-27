@@ -157,6 +157,18 @@ def _create_orphan_branch(code_root: Path) -> bool:
     # Create initial empty commit in the worktree
     _run_git(["commit", "--allow-empty", "-m", "Initialize watercooler threads"], wt_path)
 
+    # Create structured directory layout for new repos.
+    # Add .gitkeep files so empty directories are tracked by git.
+    from watercooler.fs import ensure_directory_structure
+    created = ensure_directory_structure(wt_path)
+    for d in created:
+        gitkeep = d / ".gitkeep"
+        if not gitkeep.exists():
+            gitkeep.touch()
+    _run_git(["add", "."], wt_path)
+    _run_git(["commit", "-m", "Add structured directory layout"], wt_path)
+    log_debug(f"CONFIG: Created structured directory layout in {wt_path}")
+
     # Push to origin if remote exists
     _run_git(["push", "-u", "origin", ORPHAN_BRANCH_NAME], wt_path)
 

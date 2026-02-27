@@ -86,9 +86,48 @@ def cleanup_test_databases() -> None:
     yield  # Run tests (results persist for inspection)
 
 
+def _bootstrap_graph_from_md(threads_dir: Path, md_path: Path) -> None:
+    """Bootstrap graph data from a .md fixture (test infrastructure only)."""
+    from watercooler.thread_entries import parse_thread_entries, parse_thread_header
+    from watercooler.baseline_graph import storage
+
+    topic = md_path.stem
+    title, status, ball, last_update = parse_thread_header(md_path)
+    content = md_path.read_text(encoding="utf-8")
+    entries = parse_thread_entries(content)
+
+    graph_dir = storage.ensure_graph_dir(threads_dir)
+    thread_dir = storage.ensure_thread_graph_dir(graph_dir, topic)
+
+    meta = {
+        "id": f"thread:{topic}",
+        "topic": topic,
+        "title": title,
+        "status": status,
+        "ball": ball,
+        "last_updated": last_update,
+    }
+    storage.atomic_write_json(thread_dir / "meta.json", meta)
+
+    entry_dicts = []
+    for i, e in enumerate(entries):
+        entry_dicts.append({
+            "id": f"entry:{e.entry_id or f'{topic}:{i}'}",
+            "entry_id": e.entry_id or f"{topic}:{i}",
+            "agent": e.agent,
+            "role": e.role,
+            "entry_type": e.entry_type,
+            "title": e.title,
+            "timestamp": e.timestamp,
+            "body": e.body,
+            "index": e.index,
+        })
+    storage.atomic_write_jsonl(thread_dir / "entries.jsonl", entry_dicts)
+
+
 @pytest.fixture
-def watercooler_threads_dir() -> Path:
-    """Path to test watercooler threads (bundled with tests).
+def watercooler_threads_dir(tmp_path) -> Path:
+    """Copy test watercooler threads to tmp_path and bootstrap graph data.
 
     Note: Contains unified-branch-parity-protocol.md (~68KB, 1798 lines, 38 entries).
     This real watercooler thread provides realistic test data for backend validation
@@ -97,7 +136,16 @@ def watercooler_threads_dir() -> Path:
     The 38 entries are sufficient for hierarchical clustering validation: LeanRAG's
     GMM + UMAP clustering typically requires 30+ samples for reliable community detection.
     """
-    return Path(__file__).parent.parent / "fixtures" / "threads"
+    import shutil
+
+    src_dir = Path(__file__).parent.parent / "fixtures" / "threads"
+    threads_dir = tmp_path / "threads"
+    threads_dir.mkdir()
+    for md_file in src_dir.glob("*.md"):
+        dest = threads_dir / md_file.name
+        shutil.copy2(md_file, dest)
+        _bootstrap_graph_from_md(threads_dir, dest)
+    return threads_dir
 
 
 @pytest.fixture
@@ -124,9 +172,11 @@ def watercooler_corpus(watercooler_threads_dir: Path) -> CorpusPayload:
     config = GraphConfig(chunker=ChunkerConfig.watercooler_preset())
     graph = MemoryGraph(config=config)
     for thread_file in test_threads:
-        thread_path = watercooler_threads_dir / thread_file
-        if thread_path.exists():
-            graph.add_thread(thread_path)
+        topic = thread_file.removesuffix(".md")
+        try:
+            graph.add_thread(watercooler_threads_dir, topic)
+        except FileNotFoundError:
+            pass  # Skip missing threads
 
     # Chunk all entries using the custom watercooler chunker with headers
     chunk_nodes = graph.chunk_all_entries()

@@ -99,8 +99,8 @@ def test_all_commands_exist_and_exit_zero():
             # Commands that modify thread files should print the .md file path
             assert ".md" in cp.stdout
         elif parts[0] == "list":
-            # List command emits tab-separated rows; just ensure output is present
-            assert len(cp.stdout.strip()) > 0
+            # List command reads from graph; output may be empty if no graph
+            assert cp.returncode == 0
         elif parts[0] == "reindex":
             # Reindex command prints path to generated index.md file
             assert cp.stdout.strip().endswith("index.md")

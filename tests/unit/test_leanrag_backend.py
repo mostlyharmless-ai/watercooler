@@ -662,7 +662,9 @@ class TestApplyConfigToEnv:
         assert os.environ.get("DEEPSEEK_BASE_URL") is None
         assert os.environ.get("GLM_MODEL") is None
         assert os.environ.get("GLM_BASE_URL") is None
-        assert os.environ.get("FALKORDB_PASSWORD") is None
+        # FALKORDB_PASSWORD is set to "" by setdefault (safe default for
+        # LeanRAG config.yaml env substitution even when no password is needed)
+        assert os.environ.get("FALKORDB_PASSWORD") == ""
 
     def test_bridges_standard_env_vars_to_leanrag(self, tmp_path, monkeypatch):
         """Test that standard watercooler env vars are bridged to LeanRAG equivalents.
@@ -726,3 +728,62 @@ class TestApplyConfigToEnv:
         # LeanRAG-specific vars should NOT be overwritten
         assert os.environ["DEEPSEEK_MODEL"] == "leanrag-specific-model"
         assert os.environ["GLM_MODEL"] == "leanrag-specific-embed"
+
+    def test_deepseek_timeout_set_when_toml_overrides_default(self, tmp_path, monkeypatch):
+        """Test that DEEPSEEK_TIMEOUT is set when TOML specifies a non-default timeout."""
+        from watercooler.config_schema import LLM_TIMEOUT_DEFAULT
+        from watercooler.memory_config import ResolvedLLMConfig
+
+        monkeypatch.delenv("DEEPSEEK_TIMEOUT", raising=False)
+        monkeypatch.delenv("LLM_TIMEOUT", raising=False)
+        monkeypatch.setattr(LeanRAGBackend, '_validate_config', lambda self: None)
+
+        # Mock resolve_llm_config to return a non-default timeout
+        custom_timeout = 45.0
+        assert custom_timeout != LLM_TIMEOUT_DEFAULT
+        mock_llm = ResolvedLLMConfig(
+            api_key="k", api_base="http://x", model="m",
+            timeout=custom_timeout, max_tokens=4096, context_size=8192,
+        )
+        monkeypatch.setattr(
+            "watercooler.memory_config.resolve_llm_config",
+            lambda backend: mock_llm,
+        )
+
+        leanrag_dir = tmp_path / "leanrag"
+        leanrag_dir.mkdir()
+        config = LeanRAGConfig(leanrag_path=leanrag_dir, llm_api_key="key")
+        backend = LeanRAGBackend(config)
+
+        assert os.environ["DEEPSEEK_TIMEOUT"] == str(custom_timeout)
+        assert os.environ["DEEPSEEK_MAX_ATTEMPTS"] == "3"
+
+    def test_deepseek_timeout_not_set_when_toml_uses_default(self, tmp_path, monkeypatch):
+        """Test that DEEPSEEK_TIMEOUT is not set when TOML uses the schema default.
+
+        This lets LeanRAG's config.yaml ${DEEPSEEK_TIMEOUT:-120} fall through
+        to its own 120s default rather than forcing the watercooler 60s default.
+        """
+        from watercooler.config_schema import LLM_TIMEOUT_DEFAULT
+        from watercooler.memory_config import ResolvedLLMConfig
+
+        monkeypatch.delenv("DEEPSEEK_TIMEOUT", raising=False)
+        monkeypatch.delenv("LLM_TIMEOUT", raising=False)
+        monkeypatch.setattr(LeanRAGBackend, '_validate_config', lambda self: None)
+
+        # Mock resolve_llm_config to return exactly the schema default
+        mock_llm = ResolvedLLMConfig(
+            api_key="k", api_base="http://x", model="m",
+            timeout=LLM_TIMEOUT_DEFAULT, max_tokens=4096, context_size=8192,
+        )
+        monkeypatch.setattr(
+            "watercooler.memory_config.resolve_llm_config",
+            lambda backend: mock_llm,
+        )
+
+        leanrag_dir = tmp_path / "leanrag"
+        leanrag_dir.mkdir()
+        config = LeanRAGConfig(leanrag_path=leanrag_dir, llm_api_key="key")
+        backend = LeanRAGBackend(config)
+
+        assert "DEEPSEEK_TIMEOUT" not in os.environ

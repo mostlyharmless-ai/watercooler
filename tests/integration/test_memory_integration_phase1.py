@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from watercooler.baseline_graph import storage
+
 # Configure pytest-asyncio mode
 pytestmark = pytest.mark.anyio
 
@@ -71,7 +73,7 @@ class TestSearchRoutingIntegration:
         """Mode inference defaults to entries for most queries."""
         from watercooler_mcp.tools.graph import infer_search_mode
 
-        mode = infer_search_mode("auto", "find authentication code", semantic=False)
+        mode = infer_search_mode("auto", "find authentication code", False)
         assert mode == "entries"
 
     def test_explicit_backend_override(self):
@@ -119,6 +121,30 @@ Title: Second entry
 
 Second integration test entry.
 """)
+
+        # Bootstrap graph data
+        graph_dir = storage.ensure_graph_dir(threads_dir)
+        thread_dir = storage.ensure_thread_graph_dir(graph_dir, "integration-test")
+        storage.atomic_write_json(thread_dir / "meta.json", {
+            "id": "thread:integration-test",
+            "type": "thread",
+            "topic": "integration-test",
+            "title": "integration-test",
+            "status": "OPEN",
+            "ball": "Claude (dev)",
+            "entry_count": 2,
+            "last_updated": "2025-01-15T11:00:00Z",
+        })
+        storage.atomic_write_jsonl(thread_dir / "entries.jsonl", [
+            {"id": "entry:01INT001", "entry_id": "01INT001", "index": 0,
+             "agent": "Claude (dev)", "role": "implementer", "entry_type": "Note",
+             "title": "First entry", "timestamp": "2025-01-15T10:00:00Z",
+             "body": "First integration test entry."},
+            {"id": "entry:01INT002", "entry_id": "01INT002", "index": 1,
+             "agent": "Human (dev)", "role": "reviewer", "entry_type": "Note",
+             "title": "Second entry", "timestamp": "2025-01-15T11:00:00Z",
+             "body": "Second integration test entry."},
+        ])
 
         return threads_dir
 
@@ -317,7 +343,7 @@ End-to-end test content about authentication implementation.
             assert backend == "graphiti"
 
             # Mode inference still works
-            mode = infer_search_mode("auto", "authentication", semantic=False)
+            mode = infer_search_mode("auto", "authentication", False)
             assert mode == "entries"
 
 

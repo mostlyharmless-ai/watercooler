@@ -3,6 +3,7 @@
 import pytest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import AsyncMock, Mock, patch
 
 from watercooler_memory.backends import BackendError, TransientError
@@ -150,6 +151,208 @@ class TestLeanRAGTestMode:
         assert result == original
         assert result.name == "pytest__leanrag-work"
         assert result.name.count("pytest__") == 1
+
+
+class TestGraphitiClientConstruction:
+    """Unit tests for Graphiti client construction details."""
+
+    @staticmethod
+    def _fake_graphiti_modules(
+        captured: dict[str, object], include_openai_reranker: bool = False
+    ) -> dict[str, ModuleType]:
+        """Create a fake graphiti_core module tree for import-time patching."""
+        graphiti_core = ModuleType("graphiti_core")
+        driver_pkg = ModuleType("graphiti_core.driver")
+        driver_mod = ModuleType("graphiti_core.driver.falkordb_driver")
+        llm_pkg = ModuleType("graphiti_core.llm_client")
+        llm_openai_mod = ModuleType("graphiti_core.llm_client.openai_generic_client")
+        llm_config_mod = ModuleType("graphiti_core.llm_client.config")
+        embedder_mod = ModuleType("graphiti_core.embedder")
+        embedder_openai_mod = ModuleType("graphiti_core.embedder.openai")
+        cross_encoder_pkg = ModuleType("graphiti_core.cross_encoder")
+        cross_encoder_client_mod = ModuleType("graphiti_core.cross_encoder.client")
+
+        class FakeGraphiti:
+            def __init__(self, **kwargs):
+                captured["graphiti_kwargs"] = kwargs
+                self.driver = kwargs.get("graph_driver")
+
+        class FakeFalkorDriver:
+            def __init__(self, **kwargs):
+                captured["driver_kwargs"] = kwargs
+
+            def close(self) -> None:
+                return None
+
+        class FakeLLMConfig:
+            def __init__(self, api_key=None, model=None, base_url=None):
+                self.api_key = api_key
+                self.model = model
+                self.base_url = base_url
+
+        class FakeOpenAIGenericClient:
+            def __init__(self, config=None, **kwargs):
+                self.config = config
+                self.client = object()
+
+        class FakeOpenAIEmbedderConfig:
+            def __init__(
+                self, embedding_model=None, api_key=None, base_url=None, embedding_dim=None
+            ):
+                self.embedding_model = embedding_model
+                self.api_key = api_key
+                self.base_url = base_url
+                self.embedding_dim = embedding_dim
+
+        class FakeOpenAIEmbedder:
+            def __init__(self, config=None):
+                self.config = config
+
+        class FakeCrossEncoderClient:
+            async def rank(self, query: str, passages: list[str]):
+                del query
+                return [(p, 0.0) for p in passages]
+
+        graphiti_core.Graphiti = FakeGraphiti
+        driver_mod.FalkorDriver = FakeFalkorDriver
+        llm_openai_mod.OpenAIGenericClient = FakeOpenAIGenericClient
+        llm_config_mod.LLMConfig = FakeLLMConfig
+        embedder_mod.OpenAIEmbedder = FakeOpenAIEmbedder
+        embedder_openai_mod.OpenAIEmbedderConfig = FakeOpenAIEmbedderConfig
+        cross_encoder_pkg.CrossEncoderClient = FakeCrossEncoderClient
+        cross_encoder_client_mod.CrossEncoderClient = FakeCrossEncoderClient
+
+        modules = {
+            "graphiti_core": graphiti_core,
+            "graphiti_core.driver": driver_pkg,
+            "graphiti_core.driver.falkordb_driver": driver_mod,
+            "graphiti_core.llm_client": llm_pkg,
+            "graphiti_core.llm_client.openai_generic_client": llm_openai_mod,
+            "graphiti_core.llm_client.config": llm_config_mod,
+            "graphiti_core.embedder": embedder_mod,
+            "graphiti_core.embedder.openai": embedder_openai_mod,
+            "graphiti_core.cross_encoder": cross_encoder_pkg,
+            "graphiti_core.cross_encoder.client": cross_encoder_client_mod,
+        }
+
+        if include_openai_reranker:
+            cross_encoder_openai_mod = ModuleType(
+                "graphiti_core.cross_encoder.openai_reranker_client"
+            )
+
+            class FakeOpenAIRerankerClient(FakeCrossEncoderClient):
+                def __init__(self, config=None, client=None):
+                    self.config = config
+                    self.client = client
+
+            cross_encoder_openai_mod.OpenAIRerankerClient = FakeOpenAIRerankerClient
+            modules[
+                "graphiti_core.cross_encoder.openai_reranker_client"
+            ] = cross_encoder_openai_mod
+
+        return modules
+
+    @pytest.fixture(autouse=True)
+    def clear_noop_cache(self):
+        """Reset the lru_cache on _build_noop_cross_encoder between tests.
+
+        The cache holds a CrossEncoderClient instance whose base class is
+        whichever fake was active at first call. Clearing between tests keeps
+        each test fully isolated regardless of run order.
+        """
+        from watercooler_memory.backends.graphiti import _build_noop_cross_encoder
+
+        _build_noop_cross_encoder.cache_clear()
+        yield
+        _build_noop_cross_encoder.cache_clear()
+
+    @pytest.mark.parametrize("reranker", ["rrf", "mmr"])
+    def test_create_graphiti_client_sets_noop_cross_encoder_for_non_cross_encoder_modes(
+        self, reranker: str
+    ):
+        """rrf and mmr reranker modes both use the noop cross encoder (same code path).
+
+        Neither should trigger Graphiti's implicit OpenAI reranker initialization.
+        """
+        config = GraphitiConfig(
+            llm_api_key="test-llm-key",
+            embedding_api_key="test-embed-key",
+            llm_api_base="http://localhost:11434/v1",
+            embedding_api_base="http://localhost:8080/v1",
+            reranker=reranker,
+        )
+        with patch.object(GraphitiBackend, "_validate_config"):
+            backend = GraphitiBackend(config)
+
+        captured: dict[str, object] = {}
+        modules = self._fake_graphiti_modules(captured)
+        with patch.object(backend, "_ensure_embedding_service_available"), patch.dict(
+            "sys.modules", modules, clear=False
+        ):
+            backend._create_graphiti_client()
+
+        kwargs = captured["graphiti_kwargs"]
+        assert kwargs["cross_encoder"].__class__.__name__ == "_NoopCrossEncoderClient"
+
+    def test_create_graphiti_client_cross_encoder_uses_llm_config(self):
+        """cross_encoder mode should use configured LLM settings, not env defaults."""
+        config = GraphitiConfig(
+            llm_api_key="llm-key-123",
+            embedding_api_key="embed-key-123",
+            llm_api_base="https://example-openai-compatible/v1",
+            llm_model="my-llm-model",
+            reranker="cross_encoder",
+        )
+        with patch.object(GraphitiBackend, "_validate_config"):
+            backend = GraphitiBackend(config)
+
+        captured: dict[str, object] = {}
+        modules = self._fake_graphiti_modules(captured, include_openai_reranker=True)
+        with patch.object(backend, "_ensure_embedding_service_available"), patch.dict(
+            "sys.modules", modules, clear=False
+        ):
+            backend._create_graphiti_client()
+
+        kwargs = captured["graphiti_kwargs"]
+        cross_encoder = kwargs["cross_encoder"]
+        assert cross_encoder.__class__.__name__ == "FakeOpenAIRerankerClient"
+        assert cross_encoder.config.api_key == "llm-key-123"
+        assert cross_encoder.config.model == "my-llm-model"
+        assert cross_encoder.config.base_url == "https://example-openai-compatible/v1"
+
+    def test_create_graphiti_client_cross_encoder_with_anthropic_raises(self):
+        """cross_encoder reranker with an Anthropic URL must raise ConfigError."""
+        config = GraphitiConfig(
+            llm_api_key="ant-key",
+            embedding_api_key="embed-key",
+            llm_api_base="https://api.anthropic.com/v1",
+            reranker="cross_encoder",
+        )
+        with patch.object(GraphitiBackend, "_validate_config"):
+            backend = GraphitiBackend(config)
+
+        captured: dict[str, object] = {}
+        modules = self._fake_graphiti_modules(captured)
+        with patch.object(backend, "_ensure_embedding_service_available"), patch.dict(
+            "sys.modules", modules, clear=False
+        ):
+            # Anthropic provides its own client path; we need to also fake that module.
+            anthropic_mod = ModuleType("graphiti_core.llm_client.anthropic_client")
+
+            class FakeAnthropicClient:
+                def __init__(self, config=None, **kwargs):
+                    pass
+
+            anthropic_mod.AnthropicClient = FakeAnthropicClient
+            with patch.dict(
+                "sys.modules",
+                {"graphiti_core.llm_client.anthropic_client": anthropic_mod},
+                clear=False,
+            ):
+                from watercooler_memory.backends import ConfigError
+
+                with pytest.raises(ConfigError, match="cross_encoder.*Anthropic"):
+                    backend._create_graphiti_client()
 
 
 class TestGraphitiAddEpisodeDirect:
@@ -664,8 +867,13 @@ class TestNormalizeDepthLimit:
 class TestDictToListCoercionValidation:
     """Tests for validation before wrapping a single dict in a list."""
 
-    def test_coercion_skipped_when_no_matching_keys(self):
-        """Dict with no keys matching target model fields is NOT coerced."""
+    def test_coercion_to_empty_list_when_no_matching_keys(self):
+        """Dict with no keys matching target model fields is coerced to empty list.
+
+        When a scalar/dict value appears where list[Model] is expected and the
+        keys don't match the inner model, the normalizer coerces to [] to
+        avoid Pydantic validation failures from local LLM responses.
+        """
         from pydantic import BaseModel
 
         class Inner(BaseModel):
@@ -678,8 +886,9 @@ class TestDictToListCoercionValidation:
         # Dict has keys that don't match Inner's fields at all
         data = {"items": {"totally_unrelated": "garbage", "xyz": 99}}
         result = _normalize_json_response(data, Outer)
-        # Should NOT be wrapped in a list — left as original dict
-        assert isinstance(result["items"], dict)
+        # Coerced to empty list (safe default for unrecognizable data)
+        assert isinstance(result["items"], list)
+        assert result["items"] == []
 
     def test_coercion_applied_when_keys_overlap(self):
         """Dict with at least one matching key IS coerced to list."""

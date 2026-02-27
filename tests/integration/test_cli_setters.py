@@ -57,5 +57,5 @@ def test_append_entry(tmp_path: Path):
     )
     assert cp.returncode == 0
     s = (tmp_path / "topic2.md").read_text(encoding="utf-8")
-    assert "in-review" in s
+    assert "in-review" in s.lower()
     assert "Did the thing" in s

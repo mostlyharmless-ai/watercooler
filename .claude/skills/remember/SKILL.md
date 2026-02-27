@@ -2,42 +2,16 @@
 name: remember
 description: Add important context or knowledge to project memory. Use for external knowledge, decisions made outside threads, or important context that should be searchable.
 allowed-tools:
-  - Bash(mcp-cli *)
+  - ToolSearch
+  - mcp__watercooler-cloud__watercooler_diagnose_memory
+  - mcp__watercooler-cloud__watercooler_graphiti_add_episode
+  - mcp__watercooler-cloud__watercooler_say
+  - mcp__watercooler-cloud__watercooler_list_threads
 ---
 
 # Add to Memory
 
 Remember: $ARGUMENTS
-
-## Argument Safety
-
-When constructing JSON for `mcp-cli call`, **never** interpolate `$ARGUMENTS` directly into a JSON string.
-Instead, use `jq` for safe construction:
-
-```bash
-mcp-cli call watercooler-cloud/watercooler_graphiti_add_episode "$(jq -n --arg content "$ARGUMENTS" '{content: $content, source: "manual", source_description: "User-provided context via /remember"}')"
-```
-
-This prevents JSON injection from user input containing quotes, backslashes, or control characters.
-
-For the T1 fallback (`watercooler_say`), the same principle applies — note that `$BODY`
-is a variable you construct (not raw `$ARGUMENTS`):
-
-```bash
-mcp-cli call watercooler-cloud/watercooler_say "$(jq -n \
-  --arg topic 'project-context' \
-  --arg title '<GENERATED: concise descriptive title>' \
-  --arg body "$BODY" \
-  --arg role 'scribe' \
-  --arg entry_type 'Note' \
-  --arg code_path '<repo-root>' \
-  --arg agent_func 'Claude Code:opus-4-5:scribe' \
-  '{topic: $topic, title: $title, body: $body, role: $role, entry_type: $entry_type, code_path: $code_path, agent_func: $agent_func}')"
-```
-
-**IMPORTANT**: Never use `mcp-cli call tool - < /tmp/file.json` — file redirection
-to stdin does not work with `mcp-cli`. Always use `jq` command substitution or pipe
-(`cat file.json | mcp-cli call tool -`) instead.
 
 ## Decision Tree
 
@@ -74,26 +48,28 @@ to stdin does not work with `mcp-cli`. Always use `jq` command substitution or p
 
 ## Steps
 
-1. **Check memory status first**:
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_diagnose_memory
-   mcp-cli call watercooler-cloud/watercooler_diagnose_memory '{}'
+1. **Load diagnostic tool and check memory status**:
+   ```
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_diagnose_memory
+   ```
+   Then call:
+   ```
+   mcp__watercooler-cloud__watercooler_diagnose_memory()
    ```
 
 2. **If T2 (Graphiti) is available** (diagnose shows `t2.enabled: true` and `t2.connected: true`):
 
-   Check schema:
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_graphiti_add_episode
+   Load tool:
    ```
-
-   Add episode:
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_graphiti_add_episode '{
-     "content": "<content to remember>",
-     "source": "manual",
-     "source_description": "User-provided context via /remember"
-   }'
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_graphiti_add_episode
+   ```
+   Then call:
+   ```
+   mcp__watercooler-cloud__watercooler_graphiti_add_episode(
+     content="<content to remember>",
+     source="manual",
+     source_description="User-provided context via /remember"
+   )
    ```
 
    Report:
@@ -101,18 +77,19 @@ to stdin does not work with `mcp-cli`. Always use `jq` command substitution or p
    - Entities extracted
    - How to retrieve later
 
-3. **If T2 unavailable** (diagnose shows `t2.enabled: false` or `t2.connected: false`) — fall back to T1 thread entry:
+3. **If T2 unavailable** — fall back to T1 thread entry:
 
    Explain to the user that T2 is unavailable and the content will be stored as a thread entry instead.
 
-   Check schema:
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_say
+   Load tools:
+   ```
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_say
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_list_threads
    ```
 
-   Check if the target thread exists before writing:
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_list_threads '{}'
+   Check if the target thread exists:
+   ```
+   mcp__watercooler-cloud__watercooler_list_threads()
    ```
 
    Prepare the entry content:
@@ -125,17 +102,17 @@ to stdin does not work with `mcp-cli`. Always use `jq` command substitution or p
      For longer content (3+ sentences), organize with context and key takeaways.
      Always include `Spec: scribe` as the first line of the body.
 
-   Assign the prepared body to `BODY` and create the entry (use `jq` for safe JSON construction):
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_say "$(jq -n \
-     --arg topic '<thread-topic>' \
-     --arg title '<GENERATED: concise descriptive title>' \
-     --arg body "$BODY" \
-     --arg role 'scribe' \
-     --arg entry_type 'Note' \
-     --arg code_path '<repo-root>' \
-     --arg agent_func 'Claude Code:opus-4-5:scribe' \
-     '{topic: $topic, title: $title, body: $body, role: $role, entry_type: $entry_type, code_path: $code_path, agent_func: $agent_func}')"
+   Create the entry:
+   ```
+   mcp__watercooler-cloud__watercooler_say(
+     topic="<thread-topic>",
+     title="<concise descriptive title>",
+     body="Spec: scribe\n\n<content>",
+     role="scribe",
+     entry_type="Note",
+     code_path="<repo-root>",
+     agent_func="Claude Code:opus-4-6:scribe"
+   )
    ```
 
    Thread selection:

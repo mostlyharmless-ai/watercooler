@@ -85,8 +85,6 @@ from .projector import (
     project_thread_header_only,
     write_thread_markdown,
     project_and_write_thread,
-    append_entry_and_project,
-    update_header_and_write,
     create_thread_file,
     # New tool suite
     ProjectResult,
@@ -180,8 +178,6 @@ __all__ = [
     "project_thread_header_only",
     "write_thread_markdown",
     "project_and_write_thread",
-    "append_entry_and_project",
-    "update_header_and_write",
     "create_thread_file",
     # Search
     "SearchQuery",

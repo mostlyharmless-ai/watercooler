@@ -6,11 +6,12 @@ Uses Pydantic for schema enforcement and clear error messages.
 
 from __future__ import annotations
 
+import os
 import warnings
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class CommonConfig(BaseModel):
@@ -416,6 +417,101 @@ class HostedConfig(BaseModel):
     # Note: API keys and secrets should remain env-only for security
 
 
+class ThreadAuditorConfig(BaseModel):
+    """Configuration for the thread auditor daemon."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable the thread auditor daemon (opt-in, requires global daemons.enabled=True)",
+    )
+    interval: float = Field(
+        default=300.0,
+        ge=10.0,
+        description="Seconds between audit scans",
+    )
+    check_missing_status: bool = Field(
+        default=True,
+        description="Flag threads with no Status: header",
+    )
+    check_missing_ball: bool = Field(
+        default=True,
+        description="Flag threads with no Ball: header",
+    )
+    check_missing_entry_ids: bool = Field(
+        default=True,
+        description="Flag entries with no Entry-ID comment",
+    )
+    check_missing_summaries: bool = Field(
+        default=True,
+        description="Flag entries/threads missing graph summaries",
+    )
+    check_stale_threads: bool = Field(
+        default=True,
+        description="Flag threads with no recent activity",
+    )
+    stale_days: int = Field(
+        default=14,
+        ge=1,
+        description="Days of inactivity before a thread is considered stale",
+    )
+    check_classification: bool = Field(
+        default=True,
+        description="Suggest directory reclassification for misplaced threads",
+    )
+    max_findings_per_run: int = Field(
+        default=200,
+        ge=1,
+        description="Cap findings per tick to prevent runaway",
+    )
+
+
+class CompoundConfig(BaseModel):
+    """Per-project opt-in for compound artifact generation.
+
+    **Reserved for future use.** These fields define the schema for compound
+    artifact generation (reports, learnings, suggestions) but are not yet
+    wired to any runtime code path. Setting ``enabled = true`` currently
+    has no effect. Implementation is tracked as a follow-up milestone.
+
+    Compound artifacts are visible workflow artifacts that imply a process
+    step was completed. They require explicit opt-in per project.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable compound artifact generation (must be explicitly opted in)",
+    )
+    auto_report_on_closure: bool = Field(
+        default=True,
+        description="Generate report when thread closes (if enabled)",
+    )
+    auto_learnings: bool = Field(
+        default=True,
+        description="Extract learnings from threads (if enabled)",
+    )
+    auto_suggestions: bool = Field(
+        default=True,
+        description="Generate suggestions from threads (if enabled)",
+    )
+
+
+class DaemonsConfig(BaseModel):
+    """Daemon management configuration."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable daemon management system globally (opt-in per project)",
+    )
+    compound: CompoundConfig = Field(
+        default_factory=CompoundConfig,
+        description="Compound artifact generation settings (off by default)",
+    )
+    thread_auditor: ThreadAuditorConfig = Field(
+        default_factory=ThreadAuditorConfig,
+        description="Thread auditor daemon settings",
+    )
+
+
 class McpConfig(BaseModel):
     """MCP server configuration."""
 
@@ -486,6 +582,10 @@ class McpConfig(BaseModel):
     hosted: HostedConfig = Field(
         default_factory=HostedConfig,
         description="Hosted service (watercooler.dev) settings",
+    )
+    daemons: DaemonsConfig = Field(
+        default_factory=DaemonsConfig,
+        description="Daemon management system settings",
     )
 
     # Agent-specific overrides (keyed by platform slug)
@@ -616,6 +716,10 @@ class ValidationConfig(BaseModel):
 # =============================================================================
 
 
+# Exported so consumers can detect "no explicit TOML override" without magic numbers.
+LLM_TIMEOUT_DEFAULT = 60.0
+
+
 class LLMServiceConfig(BaseModel):
     """LLM service configuration for memory backends.
 
@@ -635,7 +739,7 @@ class LLMServiceConfig(BaseModel):
         description="LLM model name. Empty means use context-specific default.",
     )
     timeout: float = Field(
-        default=60.0,
+        default=LLM_TIMEOUT_DEFAULT,
         ge=1.0,
         description="Request timeout in seconds",
     )
@@ -944,6 +1048,111 @@ class MemoryConfig(BaseModel):
     leanrag: LeanRAGBackendConfig = Field(default_factory=LeanRAGBackendConfig)
 
 
+class FederationScoringConfig(BaseModel):
+    """Scoring parameters for federated search.
+
+    Uses ConfigDict(frozen=True) — intentional Pydantic v2 pattern upgrade.
+    Existing config models use legacy `class Config:` pattern.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    local_weight: float = Field(
+        default=1.0, ge=0.0, le=10.0,
+        description="NW for primary namespace (max 10.0; 0.0 disables the namespace; values > ~1.43 produce ranking_score > 1.0)",
+    )
+    wide_weight: float = Field(
+        default=0.55, ge=0.0, le=10.0,
+        description="NW for wide-scope namespaces (max 10.0; 0.0 disables the namespace; values > ~1.43 produce ranking_score > 1.0)",
+    )
+    recency_floor: float = Field(default=0.7, ge=0.0, le=1.0)
+    recency_half_life_days: float = Field(default=60.0, gt=0.0)
+
+
+class FederationNamespaceConfig(BaseModel):
+    """Configuration for a single federated namespace."""
+
+    model_config = ConfigDict(frozen=True)
+
+    code_path: str = Field(description="Absolute path to the namespace's code repo root")
+    deny_topics: List[str] = Field(default_factory=list)
+
+    @field_validator("code_path")
+    @classmethod
+    def validate_code_path(cls, v: str) -> str:
+        """Reject null bytes, require absolute path, resolve traversals."""
+        if "\x00" in v:
+            raise ValueError("code_path contains null bytes")
+        if not os.path.isabs(v):
+            raise ValueError(f"code_path must be absolute, got: {v}")
+        return str(Path(v).resolve())
+
+
+class FederationAccessConfig(BaseModel):
+    """Per-primary-namespace access allowlists."""
+
+    model_config = ConfigDict(frozen=True)
+
+    allowlists: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Map of primary namespace -> list of allowed secondary namespaces",
+    )
+
+
+class FederationConfig(BaseModel):
+    """Top-level federation configuration.
+
+    Lives at `[federation]` in TOML config, peer of [memory], [common], etc.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = Field(default=False, description="Enable federation features")
+    namespaces: Dict[str, FederationNamespaceConfig] = Field(default_factory=dict)
+    access: FederationAccessConfig = Field(default_factory=FederationAccessConfig)
+    scoring: FederationScoringConfig = Field(default_factory=FederationScoringConfig)
+    namespace_timeout: float = Field(
+        default=0.4, gt=0.0, le=30.0,
+        description="Per-namespace search timeout in seconds (max 30). Note: cancelling "
+                    "a timed-out asyncio.to_thread task stops the coroutine wrapper "
+                    "but the underlying search_graph thread runs to completion. "
+                    "Tune conservatively to avoid thread accumulation under load.",
+    )
+    max_namespaces: int = Field(
+        default=5, ge=1, le=20,
+        description="Maximum number of secondary namespaces to query "
+                    "(primary is always included and does not count toward this limit)",
+    )
+    max_total_timeout: float = Field(
+        default=2.0, gt=0.0, le=60.0,
+        description="Total wall-clock budget for all namespace searches combined (max 60s)",
+    )
+
+    @model_validator(mode="after")
+    def check_timeout_ordering(self) -> "FederationConfig":
+        """Ensure per-namespace timeout does not exceed total timeout budget."""
+        if self.namespace_timeout > self.max_total_timeout:
+            raise ValueError(
+                f"namespace_timeout ({self.namespace_timeout}s) must be <= "
+                f"max_total_timeout ({self.max_total_timeout}s)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def check_no_basename_collisions(self) -> "FederationConfig":
+        """Reject configs where two namespaces map to the same worktree basename."""
+        basenames: Dict[str, str] = {}
+        for ns_id, ns_config in self.namespaces.items():
+            basename = Path(ns_config.code_path).name
+            if basename in basenames:
+                raise ValueError(
+                    f"Namespace basename collision: '{ns_id}' and '{basenames[basename]}' "
+                    f"both resolve to worktree basename '{basename}'"
+                )
+            basenames[basename] = ns_id
+        return self
+
+
 class WatercoolerConfig(BaseModel):
     """Root configuration model."""
 
@@ -958,6 +1167,7 @@ class WatercoolerConfig(BaseModel):
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    federation: FederationConfig = Field(default_factory=FederationConfig)
 
     @classmethod
     def default(cls) -> "WatercoolerConfig":

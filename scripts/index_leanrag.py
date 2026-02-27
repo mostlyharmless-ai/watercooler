@@ -65,12 +65,12 @@ def build_corpus(
         graph = MemoryGraph(config=config)
 
         for thread_file in thread_files:
-            thread_path = threads_dir / thread_file
-            if thread_path.exists():
-                print(f"  Loading {thread_file}...")
-                graph.add_thread(thread_path)
-            else:
-                print(f"  Warning: {thread_file} not found, skipping")
+            topic = thread_file.removesuffix(".md")
+            print(f"  Loading {thread_file}...")
+            try:
+                graph.add_thread(threads_dir, topic)
+            except FileNotFoundError:
+                print(f"  Warning: {thread_file} not found in graph, skipping")
 
         # Chunk all entries using the custom watercooler chunker with headers
         print("Chunking entries...")

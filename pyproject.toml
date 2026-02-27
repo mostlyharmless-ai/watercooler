@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "watercooler-cloud"
-version = "0.2.4"
+version = "0.2.5"
 description = "File-based collaboration protocol for agentic coding projects"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ authors = [
     {name = "Mostly Harmless AI", email = "hello@watercoolerdev.com"}
 ]
 dependencies = [
-    "fastmcp>=2.0",
+    "fastmcp>=2.0,<3",  # pin until fastmcp 3.x migration (#189)
     "python-ulid>=2.0",
     "GitPython>=3.1.0",
     "pydantic>=2.0",
@@ -48,9 +48,22 @@ dev = [
     "jsonschema>=4.0",
     "tqdm>=4.0",
 ]
+bench = [
+    # Benchmark runners (SWE-bench + custom harnesses)
+    "litellm>=1.0",
+    "docker>=7.0",
+    "datasets>=2.0",
+    "swebench>=1.0,<2",
+    # LeanRAG T3 corpus building — heavy transitive deps (numba via umap-learn).
+    # Not needed for production memory backends; only for building T3 corpus artifacts.
+    "jieba>=0.42.1",
+    "rapidfuzz>=3.10.1",
+    "umap-learn>=0.5.6",
+]
 mcp = [
-    "fastmcp>=2.0",
-    "python-ulid>=2.0",
+    # All MCP deps (fastmcp, python-ulid) are already in [project].dependencies.
+    # This extras group is kept as a valid install target (pip install .[mcp])
+    # but carries no additional packages.
 ]
 http = [
     "fastapi>=0.100",
@@ -99,7 +112,7 @@ local = [
     "httpx>=0.25",
 ]
 # Interactive graph visualization for baseline graphs (scripts/visualize_graph.py)
-# See docs/visualization.md for usage
+# See dev_docs/visualization.md for usage
 visualization = [
     "pyvis>=0.3.0",
     "networkx>=3.0",
@@ -118,6 +131,9 @@ watercooler = "watercooler.cli:main"
 watercooler-mcp = "watercooler_mcp.server:main"
 
 [tool.pytest.ini_options]
+norecursedirs = [
+    "tests/benchmarks/custom/repo",
+]
 markers = [
     "http: marks tests as requiring HTTP facade dependencies (deselect with '-m \"not http\"')",
     "integration: marks tests as integration tests requiring real git repositories (run with '-m integration')",
@@ -125,6 +141,9 @@ markers = [
     "integration_leanrag_llm: marks tests requiring LeanRAG with LLM APIs (DeepSeek, GLM embeddings)",
     "integration_graphiti: marks tests requiring Graphiti backend with API key (run with '-m integration_graphiti')",
     "benchmark: marks tests as performance benchmarks (run with '-m benchmark')",
+    "integration_cooperbench: marks tests requiring CooperBench + Docker + API key (run with '-m integration_cooperbench')",
+    "needs_embedding: marks tests requiring live embedding service (llama-server:8080)",
     "network: marks tests requiring network access (deselect with '-m \"not network\"')",
     "slow: marks tests as slow running (deselect with '-m \"not slow\"')",
+    "e2e: marks tests as end-to-end tests with fixture data (run with '-m e2e')",
 ]

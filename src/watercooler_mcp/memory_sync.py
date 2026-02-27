@@ -15,6 +15,7 @@ Issue #83: This module extracts Graphiti-specific code from baseline_graph/sync.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import threading
@@ -75,6 +76,12 @@ async def _call_graphiti_add_episode(
 
         # Use unified project group_id (derived from code_path via config)
         unified_group_id = config.database
+
+        # Pre-flight dedup: skip if already indexed
+        if entry_id and backend.entry_episode_index is not None:
+            if backend.entry_episode_index.has_any_mapping(entry_id):
+                logger.debug("MEMORY: Skipping already-indexed entry %s", entry_id)
+                return {"success": True, "skipped": True, "skip_reason": "already_indexed"}
 
         # Parse timestamp
         if timestamp:
@@ -163,6 +170,27 @@ async def _call_graphiti_add_episode_chunked(
                 error_msg = backend.get("message", error_msg)
             return {"success": False, "error": error_msg}
 
+        # Pre-flight dedup: skip entire entry if any chunk already indexed.
+        # All-or-nothing semantics: if a crash left partial chunks (e.g. only
+        # chunk 0 committed), remaining chunks are NOT retried on the next call.
+        # Clear the entry from entry_episode_index manually to force re-indexing.
+        if entry_id and backend.entry_episode_index is not None:
+            if backend.entry_episode_index.has_any_mapping(entry_id):
+                if not backend.entry_episode_index.has_entry(entry_id):
+                    # Chunk mapping exists but no full-entry mapping — possible
+                    # partial indexing from a prior crash.
+                    logger.warning(
+                        "MEMORY: Entry %s has partial chunk mapping (crash recovery path). "
+                        "Remaining chunks will NOT be re-indexed. Clear index to retry.",
+                        entry_id,
+                    )
+                else:
+                    logger.debug("MEMORY: Skipping already-indexed entry %s (chunked)", entry_id)
+                return {
+                    "success": True, "chunk_count": 0, "total_chunks": 0,
+                    "episode_uuids": [], "skipped": True, "skip_reason": "already_indexed",
+                }
+
         # Configure chunking
         chunker_config = ChunkerConfig(
             max_tokens=max_tokens,
@@ -229,8 +257,7 @@ async def _call_graphiti_add_episode_chunked(
 
                     # Track chunk mapping if entry_id provided and index available
                     if entry_id and backend.entry_episode_index is not None:
-                        # Generate a simple chunk_id based on entry_id and index
-                        import hashlib
+                        # Generate a chunk_id based on entry_id and chunk content
                         chunk_id = hashlib.sha256(
                             f"{entry_id}:{i}:{chunk_text_content[:100]}".encode()
                         ).hexdigest()[:16]
@@ -642,7 +669,7 @@ def init_memory_queue_executors() -> None:
             entry_id=task.entry_id,
             timestamp=task.timestamp,
             title=task.title,
-            code_path=task.source_description.split("|")[0].strip() if "|" in task.source_description else "",
+            code_path=task.code_path or "",
         )
         if not result.get("success", False):
             raise RuntimeError(result.get("error", "Graphiti sync failed"))
@@ -655,56 +682,191 @@ def init_memory_queue_executors() -> None:
     worker.register_executor("graphiti", graphiti_executor)
     logger.info("MEMORY: Registered graphiti executor with memory task queue")
 
-    worker.register_executor("graph_recover", _graph_recover_executor_fn)
-    logger.info("MEMORY: Registered graph_recover executor with memory task queue")
+    # NOTE: graph_recover executor removed — recovery is now a script-only operation.
+    # See scripts/recover_baseline_graph.py
+
+    worker.register_executor("leanrag_pipeline", _leanrag_pipeline_executor_fn)
+    logger.info("MEMORY: Registered leanrag_pipeline executor with memory task queue")
 
 
-async def _graph_recover_executor_fn(task: "MemoryTask") -> Dict[str, Any]:
-    """Execute a per-topic graph recovery from a queued task.
+def episodes_to_chunk_payload(
+    episodes: list, group_id: str,
+) -> "ChunkPayload":
+    """Convert Graphiti episodes to a ChunkPayload for LeanRAG pipeline.
 
-    Parses ``task.content`` as JSON with ``schema_version`` validation,
-    then delegates to ``sync_thread_to_graph()`` for the single topic
-    stored in ``task.topic``.
+    Args:
+        episodes: List of EpisodeRecord instances from the Graphiti backend.
+        group_id: Project group identifier for metadata tagging.
+
+    Returns:
+        A ChunkPayload ready for LeanRAG indexing.
     """
-    from watercooler.baseline_graph.sync import sync_thread_to_graph
+    import hashlib
+    from watercooler_memory.backends import ChunkPayload
 
-    # Parse and validate content payload
+    chunks = []
+    for ep in episodes:
+        content = ep.content
+        if not content:
+            logger.debug("episodes_to_chunk_payload: skipping episode %s with empty content", ep.uuid)
+            continue
+        chunk_id = ep.uuid or hashlib.md5(
+            content.encode(), usedforsecurity=False
+        ).hexdigest()
+        chunks.append({
+            "id": chunk_id,
+            "text": content,
+            "metadata": {
+                "group_id": group_id,
+                "source": "graphiti_episode",
+            },
+        })
+    return ChunkPayload(manifest_version="1.0", chunks=chunks)
+
+
+async def _leanrag_pipeline_executor_fn(task: "MemoryTask") -> dict[str, Any]:
+    """Execute a LeanRAG pipeline from a queued task.
+
+    Routing logic:
+    - BULK tasks always run the full pipeline (full rebuild).
+    - SINGLE tasks use incremental_index() when saved cluster state exists,
+      otherwise fall back to full index().
+    """
+    from .memory_queue.task import TaskType
+
+    # Parse pipeline params from task.content (JSON for BULK, raw text for SINGLE)
     try:
-        payload = json.loads(task.content)
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError(f"Invalid task content JSON: {exc}") from exc
+        params = json.loads(task.content) if task.content else {}
+        if not isinstance(params, dict):
+            params = {}
+    except (ValueError, TypeError):
+        # SINGLE tasks store raw text content, not JSON
+        params = {}
 
-    schema_version = payload.get("schema_version")
-    if schema_version != 1:
+    # Get LeanRAG backend via unified config factory
+    code_path = task.code_path or ""
+    if not code_path:
         raise RuntimeError(
-            f"Unsupported schema_version={schema_version!r}, expected 1"
+            "LeanRAG pipeline requires code_path for project-scoped config. "
+            "Set code_path on the MemoryTask or provide it to the MCP tool. "
+            f"(group_id={task.group_id!r}, task_id={task.task_id!r})"
+        )
+    try:
+        from .memory import load_leanrag_config
+        from watercooler_memory.backends.leanrag import LeanRAGBackend
+
+        config = load_leanrag_config(code_path=code_path)
+        if config is None:
+            raise RuntimeError(
+                "LeanRAG config unavailable (disabled or misconfigured). "
+                f"code_path={code_path!r}, group_id={task.group_id!r}"
+            )
+        backend = LeanRAGBackend(config)
+    except ImportError as exc:
+        raise RuntimeError(
+            "LeanRAG backend unavailable. Install with: pip install watercooler-cloud[memory]"
+        ) from exc
+
+    # ---------- SINGLE task: incremental path ----------
+    if task.task_type == TaskType.SINGLE:
+        if not task.content:
+            raise RuntimeError("Missing content in LeanRAG SINGLE task")
+
+        import hashlib
+        from watercooler_memory.backends import ChunkPayload
+
+        content = task.content
+        chunk_id = task.entry_id or hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
+        chunk_payload = ChunkPayload(
+            manifest_version="1.0",
+            chunks=[{
+                "id": chunk_id,
+                "text": content,
+                "metadata": {
+                    "group_id": task.group_id or "",
+                    "source": "single_entry",
+                    "entry_id": task.entry_id or "",
+                },
+            }],
         )
 
-    threads_dir_str = payload.get("threads_dir", "")
-    if not threads_dir_str:
-        raise RuntimeError("Missing threads_dir in task content")
+        # Use incremental path if state exists and not forced full rebuild
+        use_incremental = params.get("incremental", True)
+        if use_incremental and backend.has_incremental_state():
+            result = await asyncio.to_thread(backend.incremental_index, chunk_payload)
+            logger.info(
+                "MEMORY: LeanRAG incremental index for entry %s: %s",
+                task.entry_id, result.message,
+            )
+        else:
+            result = await asyncio.to_thread(backend.index, chunk_payload)
+            logger.info(
+                "MEMORY: LeanRAG full index (no incremental state) for entry %s",
+                task.entry_id,
+            )
 
-    threads_dir = Path(threads_dir_str)
-    if not threads_dir.is_dir():
-        raise RuntimeError(f"threads_dir not found: {threads_dir}")
+        return {
+            "episode_uuid": task.entry_id or "",
+            "entities_extracted": [],
+            "facts_extracted": result.indexed_count,
+            "message": result.message,
+        }
 
-    generate_summaries = payload.get("generate_summaries", False)
-    generate_embeddings = payload.get("generate_embeddings", True)
+    # ---------- BULK task: full pipeline ----------
+    group_id = task.group_id
+    if not group_id:
+        raise RuntimeError("Missing group_id in LeanRAG BULK task")
 
-    success = sync_thread_to_graph(
-        threads_dir=threads_dir,
-        topic=task.topic,
-        generate_summaries=generate_summaries,
-        generate_embeddings=generate_embeddings,
+    # Fetch episodes from Graphiti for this group via unified config
+    try:
+        from .memory import load_graphiti_config
+        from watercooler_memory.backends.graphiti import GraphitiBackend
+
+        graphiti_config = load_graphiti_config(code_path=code_path)
+        if graphiti_config is None:
+            raise RuntimeError(
+                "Graphiti config unavailable — required for episode retrieval. "
+                f"code_path={code_path!r}, group_id={group_id!r}"
+            )
+        graphiti = GraphitiBackend(graphiti_config)
+        start_date = params.get("start_date", "")
+        end_date = params.get("end_date", "")
+        episodes = await asyncio.to_thread(
+            graphiti.get_group_episodes,
+            group_id=group_id,
+            start_time=start_date,
+            end_time=end_date,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "Graphiti backend required to fetch episodes for LeanRAG pipeline"
+        ) from exc
+
+    if not episodes:
+        return {
+            "group_id": group_id,
+            "clusters_created": 0,
+            "chunks_processed": 0,
+            "message": f"No episodes found for group '{group_id}'",
+        }
+
+    chunk_payload = episodes_to_chunk_payload(episodes, group_id)
+
+    # BULK always runs full index (full rebuild)
+    result = await asyncio.to_thread(backend.index, chunk_payload)
+
+    logger.info(
+        "MEMORY: LeanRAG pipeline completed for %s: %d chunks -> %d clusters",
+        group_id, len(chunk_payload.chunks), result.indexed_count,
     )
 
-    if not success:
-        raise RuntimeError(f"sync_thread_to_graph failed for topic={task.topic!r}")
-
+    # BULK pipeline tasks do not produce per-entry episode UUIDs;
+    # the worker defaults missing keys to ""/None/0.
     return {
-        "topic": task.topic,
-        "threads_dir": str(threads_dir),
-        "recovered": True,
+        "group_id": group_id,
+        "clusters_created": result.indexed_count,
+        "chunks_processed": len(chunk_payload.chunks),
+        "message": result.message,
     }
 
 

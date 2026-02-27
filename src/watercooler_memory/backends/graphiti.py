@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Any, Final, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,13 @@ from watercooler.path_resolver import derive_group_id
 
 # Providers whose OpenAI-compatible APIs do NOT support json_schema
 # structured outputs (response_format type). These need json_object fallback.
-_NO_STRUCTURED_OUTPUTS_DOMAINS = ("deepseek.com",)
+_NO_STRUCTURED_OUTPUTS_DOMAINS = (
+    "deepseek.com",
+    # Local OpenAI-compatible servers (llama.cpp, etc.) generally do not support
+    # json_schema structured outputs; force json_object mode.
+    "localhost",
+    "127.0.0.1",
+)
 # DeepSeek max output tokens is 8192; graphiti_core defaults to 16384
 _DEEPSEEK_MAX_TOKENS = 8192
 
@@ -225,6 +232,32 @@ def _best_extra_match(missing_field: str, extras: set[str]) -> str | None:
 # Graphiti responses are 2-3 levels deep; this is a defensive ceiling.
 MAX_NORMALIZE_DEPTH = 10
 
+# Sentinel for detecting truly-unset Pydantic fields (vs fields with a default).
+try:
+    from pydantic_core import PydanticUndefined as _PYDANTIC_UNDEFINED
+except Exception:  # pragma: no cover
+    _PYDANTIC_UNDEFINED = object()  # type: ignore[assignment]
+
+
+def _default_for_annotation(annotation: Any) -> Any:
+    """Return a safe empty default for a Pydantic field annotation."""
+    origin = getattr(annotation, "__origin__", None)
+    if origin is list:
+        return []
+    if origin is dict:
+        return {}
+    if annotation in (list, tuple, set):
+        return []
+    if annotation is dict:
+        return {}
+    if annotation is str:
+        return ""
+    if annotation is bool:
+        return False
+    if annotation in (int, float):
+        return 0
+    return []
+
 
 def _normalize_json_response(
     data: dict[str, Any], response_model: type,
@@ -280,12 +313,69 @@ def _normalize_json_response(
             )
             remapped[m_field] = remapped.pop(e_field)
 
+    # --- fill required fields with safe defaults ---
+    # Some OpenAI-compatible servers return `{}` or omit required keys even when
+    # the prompt asks for structured JSON. Prefer an empty-but-valid payload
+    # over hard failure so the episode can still be ingested.
+    for field_name, field_info in response_model.model_fields.items():
+        if field_name in remapped:
+            continue
+        if not field_info.is_required():
+            continue
+        if getattr(field_info, "default", _PYDANTIC_UNDEFINED) is not _PYDANTIC_UNDEFINED:
+            remapped[field_name] = field_info.default
+            continue
+        default_factory = getattr(field_info, "default_factory", None)
+        if default_factory is not None:
+            try:
+                remapped[field_name] = default_factory()
+                continue
+            except Exception:
+                pass
+        remapped[field_name] = _default_for_annotation(field_info.annotation)
+
     # --- recurse into nested Pydantic models ---
     for field_name, field_info in response_model.model_fields.items():
         value = remapped.get(field_name)
         if value is None:
             continue
+        # --- scalar coercions for weak local models ---
+        # Graphiti schemas often use integer indices (e.g. edge endpoints) but
+        # smaller models sometimes emit ULID-like strings. Coerce to 0 to avoid
+        # Pydantic hard failures; downstream graphiti_core validation will
+        # drop invalid indices.
+        if field_info.annotation is int:
+            v = value
+            if isinstance(v, list):
+                v = v[0] if v else 0
+            if isinstance(v, bool):  # must check before int (bool is subclass)
+                remapped[field_name] = int(v)
+            elif isinstance(v, int):
+                remapped[field_name] = v
+            elif isinstance(v, str):
+                try:
+                    remapped[field_name] = int(v)
+                except Exception:
+                    remapped[field_name] = 0
+            else:
+                remapped[field_name] = 0
+            value = remapped[field_name]
+        elif field_info.annotation is str:
+            v = value
+            if isinstance(v, list):
+                v = v[0] if v else ""
+            remapped[field_name] = v if isinstance(v, str) else ""
+            value = remapped[field_name]
         inner_model = _get_list_item_model(field_info.annotation)
+        if inner_model is not None and not isinstance(value, (list, dict)):
+            # Some local models return a scalar where a list-of-objects is expected.
+            # Prefer dropping the field to an empty list rather than failing validation.
+            logger.warning(
+                "json_object list coercion: expected list[%s] for '%s' in %s, got %s; coercing to []",
+                inner_model.__name__, field_name, response_model.__name__, type(value).__name__,
+            )
+            remapped[field_name] = []
+            continue
         if inner_model is not None and isinstance(value, list):
             remapped[field_name] = [
                 _normalize_json_response(item, inner_model, _depth=_depth + 1)
@@ -321,6 +411,7 @@ def _normalize_json_response(
                     inner_model.__name__, model_fields, field_name,
                     response_model.__name__,
                 )
+                remapped[field_name] = []
             else:
                 logger.info(
                     "json_object list coercion: wrapping single dict in list "
@@ -389,6 +480,31 @@ class _JsonObjectOnlyClient:
                 return raw
 
         return _Inner(**kwargs)
+
+
+@functools.lru_cache(maxsize=1)
+def _build_noop_cross_encoder() -> Any:
+    """Build a type-compatible no-op cross encoder (cached singleton).
+
+    Graphiti initializes a default OpenAI reranker when ``cross_encoder`` is
+    omitted. That implicit default requires ``OPENAI_API_KEY`` even for
+    non-cross-encoder reranker modes, which breaks provider-agnostic setups.
+
+    Graphiti validates ``cross_encoder`` as a ``CrossEncoderClient`` instance,
+    so this helper creates a small subclass at runtime to satisfy that contract.
+    The subclass is defined inside the function (rather than at module level)
+    because ``CrossEncoderClient`` is a lazy import; the cache freezes it to
+    whichever import was live at first call, which is correct for a long-running
+    process where ``graphiti_core`` is never reloaded.
+    """
+    from graphiti_core.cross_encoder.client import CrossEncoderClient
+
+    class _NoopCrossEncoderClient(CrossEncoderClient):
+        async def rank(self, query: str, passages: list[str]) -> list[tuple[str, float]]:
+            del query  # Unused in the no-op path
+            return [(passage, 0.0) for passage in passages]
+
+    return _NoopCrossEncoderClient()
 
 
 @dataclass
@@ -584,6 +700,23 @@ def _filter_by_time_range(
     return filtered
 
 
+def _filter_active_only(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Filter results to only include currently-valid (non-superseded) facts.
+
+    Removes entries where ``invalid_at`` is set to a non-None value, keeping
+    only facts that have not been invalidated by a later contradicting episode.
+
+    Args:
+        results: List of result dicts, each optionally containing ``invalid_at``.
+
+    Returns:
+        Filtered list containing only entries where ``invalid_at`` is None.
+    """
+    # Graphiti serializes invalid_at as edge.invalid_at.isoformat() or None —
+    # never an empty string — so `is None` is the correct strict check here.
+    return [r for r in results if r.get("invalid_at") is None]
+
+
 class GraphitiBackend(MemoryBackend):
     """
     Graphiti adapter implementing MemoryBackend contract.
@@ -624,8 +757,12 @@ class GraphitiBackend(MemoryBackend):
     DEFAULT_MAX_FACTS = 10
     DEFAULT_MAX_EPISODES = 10
     # Search result validation limits
-    MIN_SEARCH_RESULTS = 1  # Minimum valid max_results parameter
+    MIN_SEARCH_RESULTS = 1   # Minimum valid max_results parameter
     MAX_SEARCH_RESULTS = 50  # Maximum valid max_results parameter
+    # Over-fetch multiplier for post-filter queries (active_only, time-range).
+    # Assumes at most ~66% of returned edges are filtered out; callers may receive
+    # fewer than `limit` results if the actual supersession rate exceeds this.
+    OVERFETCH_MULTIPLIER = 3
     
     # Community limits (top-5 to prevent payload bloat per Codex feedback)
     MAX_COMMUNITIES_RETURNED = 5
@@ -1125,6 +1262,14 @@ class GraphitiBackend(MemoryBackend):
         llm_api_base = self.config.llm_api_base or ""
         is_anthropic = is_anthropic_url(llm_api_base)
 
+        # Hoisted above the is_anthropic branch so the cross_encoder setup
+        # below can reference it regardless of which LLM client path is taken.
+        llm_config = LLMConfig(
+            api_key=self.config.llm_api_key,
+            model=self.config.llm_model,
+            base_url=self.config.llm_api_base,
+        )
+
         if is_anthropic:
             # Use native Anthropic client for Anthropic API
             from graphiti_core.llm_client.anthropic_client import AnthropicClient
@@ -1134,11 +1279,6 @@ class GraphitiBackend(MemoryBackend):
             )
         else:
             # Use OpenAI-compatible client for OpenAI, DeepSeek, Groq, local servers
-            llm_config = LLMConfig(
-                api_key=self.config.llm_api_key,
-                model=self.config.llm_model,
-                base_url=self.config.llm_api_base,
-            )
             if _needs_json_object_only(llm_api_base):
                 # DeepSeek (and similar) don't support json_schema structured
                 # outputs. Use a thin wrapper that forces json_object mode.
@@ -1153,6 +1293,29 @@ class GraphitiBackend(MemoryBackend):
                 )
             else:
                 llm_client = OpenAIGenericClient(config=llm_config)
+
+        # Always provide an explicit cross_encoder to avoid Graphiti's default
+        # OpenAIRerankerClient() initialization (which assumes OPENAI_API_KEY).
+        reranker = self.config.reranker.lower()
+        if reranker == "cross_encoder":
+            if is_anthropic:
+                raise ConfigError(
+                    "Graphiti reranker 'cross_encoder' requires an OpenAI-compatible "
+                    "LLM endpoint. Anthropic URLs are not supported for reranking."
+                )
+            from graphiti_core.cross_encoder.openai_reranker_client import (
+                OpenAIRerankerClient,
+            )
+            # Both OpenAIGenericClient and _JsonObjectOnlyClient (DeepSeek)
+            # expose a .client attribute (AsyncOpenAI).  The getattr fallback
+            # to None is a safety net; OpenAIRerankerClient handles None by
+            # constructing its own AsyncOpenAI from config, so either way is safe.
+            cross_encoder = OpenAIRerankerClient(
+                config=llm_config,
+                client=getattr(llm_client, "client", None),
+            )
+        else:
+            cross_encoder = _build_noop_cross_encoder()
 
         # Configure embedder (supports OpenAI, local llama.cpp, etc.)
         # Check if embedding service needs auto-start
@@ -1170,6 +1333,7 @@ class GraphitiBackend(MemoryBackend):
             graph_driver=falkor_driver,
             llm_client=llm_client,
             embedder=embedder,
+            cross_encoder=cross_encoder,
         )
 
         # Cache the client for reuse
@@ -1910,16 +2074,14 @@ class GraphitiBackend(MemoryBackend):
         """
         # Validate query is not empty
         if not query or not query.strip():
-            from . import ConfigError
             raise ConfigError("query cannot be empty")
-        
+
         # Validate max_results to prevent resource exhaustion
         if max_results < self.MIN_SEARCH_RESULTS or max_results > self.MAX_SEARCH_RESULTS:
-            from . import ConfigError
             raise ConfigError(
                 f"max_results must be between {self.MIN_SEARCH_RESULTS} and {self.MAX_SEARCH_RESULTS}, got {max_results}"
             )
-        
+
         try:
             graphiti = self._create_graphiti_client()
         except Exception as e:
@@ -2056,6 +2218,7 @@ class GraphitiBackend(MemoryBackend):
         center_node_id: str | None = None,
         start_time: str = "",
         end_time: str = "",
+        active_only: bool = False,
     ) -> list[dict[str, Any]]:
         """Search for facts (edges) using semantic search.
 
@@ -2068,6 +2231,7 @@ class GraphitiBackend(MemoryBackend):
             center_node_id: Optional node UUID to center search around
             start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
             end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
+            active_only: If True, exclude superseded facts (those with invalid_at set).
 
         Returns:
             List of fact dicts with edge data
@@ -2097,6 +2261,7 @@ class GraphitiBackend(MemoryBackend):
             center_node_uuid=center_node_id,
             start_time=start_time,
             end_time=end_time,
+            active_only=active_only,
         )
         
         # Add CoreResult-compliant fields to each result
@@ -2273,6 +2438,7 @@ class GraphitiBackend(MemoryBackend):
         center_node_uuid: str | None = None,
         start_time: str = "",
         end_time: str = "",
+        active_only: bool = False,
     ) -> list[dict[str, Any]]:
         """Search for facts (edges) with optional center-node traversal.
 
@@ -2288,6 +2454,8 @@ class GraphitiBackend(MemoryBackend):
             center_node_uuid: Optional node UUID to center search around
             start_time: ISO 8601 lower bound for created_at (inclusive). Empty = no bound.
             end_time: ISO 8601 upper bound for created_at (inclusive). Empty = no bound.
+            active_only: If True, exclude superseded facts (those with invalid_at set).
+                Over-fetches by 3x before filtering to preserve result count.
 
         Returns:
             List of fact dicts with edge data
@@ -2308,8 +2476,19 @@ class GraphitiBackend(MemoryBackend):
                 sanitized_group_ids = [self._sanitize_thread_id(gid) for gid in group_ids]
 
             # Use search_() API for facts with reranker scores (match query_memory pattern)
-            limit = min(max_facts, self.MAX_SEARCH_RESULTS)
-            search_config = self._get_search_config()
+            # Over-fetch when post-filters are active to preserve result count after filtering.
+            # The multiplied limit is injected into a copy of the SearchConfig so Graphiti
+            # actually returns more edges before Python-side post-filters reduce the count.
+            # Note: if the combined supersession/time-filter rate exceeds
+            # (1 - 1/OVERFETCH_MULTIPLIER) ≈ 66%, the caller will receive fewer
+            # than `max_facts` results with no explicit truncation signal.
+            base_limit = min(max_facts, self.MAX_SEARCH_RESULTS)
+            has_post_filters = bool(start_time or end_time or active_only)
+            limit = min(base_limit * self.OVERFETCH_MULTIPLIER, self.MAX_SEARCH_RESULTS) if has_post_filters else base_limit
+            # model_copy(update=...) is the Pydantic v2 idiom for a modified shallow copy.
+            # SearchConfig is unfrozen and we only update the scalar `limit` field, so
+            # nested sub-configs (EdgeSearchConfig etc.) are safely shared by reference.
+            search_config = self._get_search_config().model_copy(update={"limit": limit})
 
             # Unified database: no driver cloning needed
             # group_ids filters by property within the single project database
@@ -2320,17 +2499,20 @@ class GraphitiBackend(MemoryBackend):
                 center_node_uuid=center_node_uuid,
             )
 
-            # Extract edges with scores
-            edges = search_results.edges[:limit] if search_results.edges else []
-            
+            # Extract edges with scores (already limited by search_config.limit above).
+            # When no post-filters are active, cap at base_limit before the formatting
+            # loop so we don't do unnecessary dict construction for discarded edges.
+            edges = search_results.edges if search_results.edges else []
+            edges_to_format = edges if has_post_filters else edges[:base_limit]
+
             # Format results with reranker scores
             results = []
-            for idx, edge in enumerate(edges):
+            for idx, edge in enumerate(edges_to_format):
                 # Extract score with defensive indexing (match query_memory pattern)
                 score = 0.0
                 if idx < len(search_results.edge_reranker_scores):
                     score = search_results.edge_reranker_scores[idx]
-                
+
                 results.append({
                     "uuid": edge.uuid,
                     "name": edge.name,  # Relation name (e.g. "IMPLEMENTS")
@@ -2345,8 +2527,16 @@ class GraphitiBackend(MemoryBackend):
                     "score": score,  # Hybrid search reranker score
                 })
 
-            # Post-filter by time range (Graphiti search_ ignores time filters)
-            return _filter_by_time_range(results, start_time, end_time)
+            # Post-filter by time range (Graphiti search_ ignores time filters).
+            # Uses time_key="created_at" (default) — filters by when the fact was
+            # first recorded, NOT by when it was superseded. Combining end_time with
+            # active_only is therefore valid: "facts created before T that are still
+            # active". (time_key="invalid_at" exists but is not wired here; see #258.)
+            results = _filter_by_time_range(results, start_time, end_time)
+            # Post-filter to active (non-superseded) facts only
+            if active_only:
+                results = _filter_active_only(results)
+            return results[:base_limit]
 
         try:
             return asyncio.run(search_facts_async())
@@ -2443,6 +2633,144 @@ class GraphitiBackend(MemoryBackend):
             return asyncio.run(search_episodes_async())
         except Exception as e:
             raise BackendError(f"Episode search failed for '{query}': {e}") from e
+
+    # Safety limit for full-corpus enumeration (get_group_episodes).
+    # Prevents unbounded result sets from consuming all memory.
+    EPISODE_SAFETY_LIMIT: Final[int] = 10_000
+
+    def get_group_episodes(
+        self,
+        group_id: str,
+        start_time: str = "",
+        end_time: str = "",
+    ) -> list["EpisodeRecord"]:
+        """Get ALL episodes for a group via Cypher (not semantic search).
+
+        Unlike get_episodes() which performs semantic search and requires a
+        query string, this method enumerates the complete episode set for a
+        group_id. Used by LeanRAG pipeline which needs the full corpus for
+        UMAP/clustering.
+
+        This is NOT a MemoryBackend protocol method — it is only meaningful
+        for Graphiti (FalkorDB-backed storage). LeanRAG does not store episodes
+        directly; it consumes them from Graphiti.
+
+        Args:
+            group_id: Project group ID (e.g., "watercooler_cloud")
+            start_time: ISO 8601 lower bound for created_at (inclusive)
+            end_time: ISO 8601 upper bound for created_at (inclusive)
+
+        Returns:
+            List of EpisodeRecord dataclasses for the group.
+            Results are truncated at ``EPISODE_SAFETY_LIMIT`` (10,000)
+            with a WARNING log.  When a time filter is also active, the
+            safety limit is applied *before* the Python-side time filter,
+            so the returned list may be smaller than the true matching
+            set — a second WARNING is emitted when this happens.  Callers
+            should check logs if completeness is critical.
+
+        Raises:
+            ConfigError: If group_id is empty
+            TransientError: If database connection fails
+            BackendError: If query execution fails
+
+        Warning:
+            This is a **synchronous** method that internally calls
+            ``asyncio.run()``. It must NOT be called directly from
+            an async context — use ``await asyncio.to_thread(...)``
+            instead, which runs in a thread pool with its own event
+            loop.
+        """
+        from . import EpisodeRecord
+
+        if not group_id or not group_id.strip():
+            raise ConfigError("group_id is required for get_group_episodes")
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass  # No running loop — safe to call asyncio.run()
+        else:
+            raise RuntimeError(
+                "get_group_episodes() called from async context. "
+                "Use `await asyncio.to_thread(backend.get_group_episodes, ...)` instead."
+            )
+
+        try:
+            graphiti = self._create_graphiti_client()
+        except Exception as e:
+            raise TransientError(f"Database connection failed: {e}") from e
+
+        sanitized_group_id = self._sanitize_thread_id(group_id)
+
+        async def _fetch_all() -> list[EpisodeRecord]:
+            driver = graphiti.clients.driver
+            # NOTE: Time-range filtering (start_time / end_time) is intentionally
+            # kept in Python (_filter_by_time_range) rather than pushed into this
+            # Cypher WHERE clause.  FalkorDB stores created_at as an opaque string,
+            # so lexicographic comparison in Cypher is fragile across ISO-8601
+            # offset variants.  Deferring to Phase 2 once datetime semantics are
+            # validated end-to-end.  ORDER BY is safe here because FalkorDB sorts
+            # strings lexicographically and our created_at values are ISO-8601 UTC
+            # (constant-width, zero-offset), so chronological order is preserved.
+            cypher = """
+            MATCH (e:Episodic)
+            WHERE e.group_id = $group_id
+            RETURN e.uuid as uuid, e.name as name, e.content as content,
+                   e.source_description as source_description,
+                   e.group_id as group_id, e.created_at as created_at
+            ORDER BY e.created_at
+            LIMIT $safety_limit
+            """
+            result, _, _ = await driver.execute_query(
+                cypher,
+                group_id=sanitized_group_id,
+                safety_limit=self.EPISODE_SAFETY_LIMIT,
+            )
+
+            raw_dicts = [dict(record) for record in result]
+
+            pre_filter_count = len(raw_dicts)
+            if pre_filter_count >= self.EPISODE_SAFETY_LIMIT:
+                logger.warning(
+                    "get_group_episodes: hit safety limit %d for group %s"
+                    " — results may be incomplete",
+                    self.EPISODE_SAFETY_LIMIT,
+                    group_id,
+                )
+
+            # Filter by time range on raw dicts (before dataclass construction)
+            filtered = _filter_by_time_range(raw_dicts, start_time, end_time)
+
+            if pre_filter_count >= self.EPISODE_SAFETY_LIMIT and len(filtered) < pre_filter_count:
+                logger.warning(
+                    "get_group_episodes: time filter reduced %d → %d for group %s"
+                    " (safety limit may have excluded matching episodes)",
+                    pre_filter_count,
+                    len(filtered),
+                    group_id,
+                )
+
+            # Construct typed records with null-safe defaults
+            records = []
+            for r in filtered:
+                safe = {k: v if v is not None else "" for k, v in r.items()}
+                if not safe.get("uuid"):
+                    logger.warning(
+                        "get_group_episodes: episode with empty uuid in group %s"
+                        " (source_description=%s) — downstream will use md5 fallback",
+                        group_id,
+                        safe.get("source_description", "")[:80],
+                    )
+                records.append(EpisodeRecord(**safe))
+            return records
+
+        try:
+            return asyncio.run(_fetch_all())
+        except Exception as e:
+            raise BackendError(
+                f"get_group_episodes failed for group '{group_id}': {e}"
+            ) from e
 
     async def find_episode_by_chunk_id_async(
         self,

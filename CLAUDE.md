@@ -2,14 +2,15 @@
 
 ## Project Overview
 
-watercooler-cloud is a file-based collaboration protocol for agentic coding projects. It provides a Python library and MCP server for managing threaded conversations between human developers and AI agents using git-friendly markdown files.
+watercooler-cloud is a graph-first collaboration protocol for agentic coding projects. It provides a Python library and MCP server for managing threaded conversations between human developers and AI agents. The baseline graph (JSON) is the sole source of truth for reads; markdown `.md` files are write-only projections for human review and git diffs.
 
 ## Project Structure & Module Organization
 
 - **Core library**: `src/watercooler/` - Main Python package with CLI and core functionality
 - **MCP server**: `src/watercooler_mcp/` - Model Context Protocol server integration
 - **Tests**: `tests/` - Test suite mirroring source structure (e.g., `src/watercooler/cli.py` → `tests/test_cli.py`)
-- **Documentation**: `docs/` - User and developer documentation
+- **User documentation**: `docs/` - User-facing setup and reference docs
+- **Developer documentation**: `dev_docs/` - Architecture, brainstorms, plans, and internal guides
 - **Templates**: `src/watercooler/templates/` - Bundled thread and entry templates
 - **Configuration**: Root-level config files (`pyproject.toml`, etc.)
 
@@ -23,7 +24,7 @@ watercooler-cloud is a file-based collaboration protocol for agentic coding proj
 ## Design Principles
 
 1. **Minimal dependencies in core**: Core thread operations (init, say, ack) use stdlib-only. Config/credentials loading may use standard Python ecosystem tools (pydantic, tomllib/tomli, tomlkit) that are already MCP requirements.
-2. **File-based**: Git-friendly markdown format for threads
+2. **Graph-first**: Baseline graph (JSON) is the source of truth; `.md` files are write-only projections for git diffs and human review
 3. **Zero-config**: Works out-of-box for standard layouts
 4. **CLI parity**: Drop-in replacement workflows for existing watercooler.py
 
@@ -268,7 +269,7 @@ Standardize how Claude (this assistant) uses Watercooler tools so entries remain
 - **Browse entry headers**: Use `watercooler_list_thread_entries` with `format="json"` and explicit `offset`/`limit` to get a "TOC with abstracts" — each entry includes a `summary` field alongside metadata.
 - **Fetch specific entries**: Follow up with `watercooler_get_thread_entry` (by `entry_id` or index) for the full body when you need it.
 - **Scan a range**: Use `watercooler_get_thread_entry_range(summary_only=true)` to preview a span before fetching full bodies.
-- Switch to `format="markdown"` when you intend to quote entries back to a human. The markdown payload mirrors the thread file and avoids accidental reformatting.
+- Use `format="markdown"` when you intend to quote entries back to a human. The markdown output is reconstructed from graph data (not read from `.md` files). Prefer `format="json"` for programmatic access.
 - Use `watercooler_read_thread(format="json")` (without `summary_only`) only when you need every entry body (e.g., exporting or analytics). For routine reading, prefer summary-first or paginated entry tools to stay under stdio size caps.
 - Large threads can exceed the MCP stdio ceiling; always chunk requests (batch size of ~5–10 entries works well) before relaying content.
 - Preserve provenance by capturing the `entry_id` from JSON responses when referencing a specific entry in follow-up messages or commits.
@@ -364,19 +365,20 @@ Each Watercooler entry includes:
 - **PR**: Pull request related entries
 - **Closure**: Thread conclusion and summary
 
-## Branch Pairing Contract (Team Invariant)
+## Thread Storage Contract (Team Invariant)
 
-- **Repositories**: Pair each code repo with a dedicated threads repo named `<repo>-threads`.
-- **Branches**: Mirror code branches in the threads repo (same branch name).
-- **Write behavior**: Before a write, ensure the threads repo is on the same-named branch; push with rebase+retry.
-- **Commit footer convention** (in threads repo):
+- **Orphan branch**: Threads live on a `watercooler/threads` orphan branch in the code repo (no separate `-threads` repository).
+- **Worktree**: Accessed via git worktree at `~/.watercooler/worktrees/<repo>/`, created automatically on first write.
+- **Branch scoping**: Entries are tagged with `code_branch` metadata (auto-populated from current code branch). Reads filter by `code_branch` by default.
+- **Write behavior**: `lock → pull → write → commit → push` with rebase+retry.
+- **Commit footer convention** (on orphan branch):
   - `Code-Repo: <org>/<repo>`
   - `Code-Branch: <branch>`
   - `Code-Commit: <short-sha>`
   - `Watercooler-Entry-ID: <ULID>`
   - `Watercooler-Topic: <topic>`
 - **Authoring**: Include a visible `Spec: <value>` in the entry body and align the Role to the specialization (pm/planner/implementer/tester/docs/ops/etc.).
-- **Closure**: On merge, post a Closure entry referencing the PR; optionally consolidate to `threads:main` with a brief summary.
+- **Closure**: On merge, post a Closure entry referencing the PR.
 
 ## Security & Configuration
 
@@ -412,7 +414,7 @@ Each Watercooler entry includes:
 
 Update these files as needed:
 - `docs/QUICKSTART.md` - Getting started guide
-- `docs/archive/integration.md` - Integration patterns
+- `docs/CONFIGURATION.md` - Configuration reference
 - `docs/mcp-server.md` - MCP tool reference
 - `docs/TROUBLESHOOTING.md` - Common issues
 - `README.md` - Project overview
@@ -437,12 +439,11 @@ Update these files as needed:
 ### Installation
 
 ```bash
-# Install with all development dependencies
-pip install -e ".[dev,mcp]"
-
-# Or with specific extras
+# Install with development dependencies
 pip install -e ".[dev]"  # pytest, mypy, black, ruff
-pip install -e ".[mcp]"   # MCP server dependencies
+
+# MCP server dependencies (fastmcp, python-ulid) are core deps —
+# no extras group needed.
 ```
 
 ### Code Quality
@@ -513,7 +514,7 @@ python3 -m watercooler_mcp
 ## Best Practices
 
 1. **Keep dependencies minimal**: Core library should use stdlib-only
-2. **File-based operations**: All operations should work with git-friendly markdown files
+2. **Graph-first reads**: The baseline graph is the sole source of truth for all reads. Markdown `.md` files are write-only projections
 3. **Zero-config defaults**: Provide sensible defaults that work out-of-box
 4. **CLI parity**: Ensure CLI commands match expected workflows
 5. **Test coverage**: Maintain high test coverage for core functionality
@@ -581,32 +582,29 @@ When Claude uses Watercooler MCP tools:
 6. **Manage ball appropriately**: Use `say` for normal back-and-forth, `ack` to keep ball, `handoff` for explicit coordination
 7. **Recall context proactively**: Before starting significant work, use `watercooler_smart_query` or `watercooler_search` to recall relevant prior decisions and context
 
-### mcp-cli Invocation Safety
+### MCP Tool Invocation
 
-When invoking watercooler tools via `mcp-cli` in Bash, follow these rules:
+Skills call watercooler MCP tools via **native tool calls**, not shell commands.
+Deferred MCP tools must be loaded with `ToolSearch` before first use:
 
-**Safe input patterns:**
-- `jq` command substitution (PREFERRED): `mcp-cli call tool "$(jq -n --arg k 'v' '{key: $k}')"`
-- Pipe from file: `cat /tmp/payload.json | mcp-cli call tool -`
-- Inline JSON (small payloads): `mcp-cli call tool '{"key": "value"}'`
-
-**Broken input pattern (NEVER USE):**
-- File redirection: `mcp-cli call tool - < /tmp/payload.json` — causes `JSON Parse error: Unexpected EOF`
-
-**Pipes don't work in Claude Code's Bash tool** (known bug, see
-[#774](https://github.com/anthropics/claude-code/issues/774),
-[#14595](https://github.com/anthropics/claude-code/issues/14595)):
-- `mcp-cli call tool '{}' | jq .` → **0 bytes**
-- `echo "$var" | python3 -c "..."` → **0 bytes**
-- ANY `cmd | cmd` pattern → **0 bytes**
-
-This affects ALL shell pipes, not just `mcp-cli`. The Claude Code Bash tool
-executes commands in a mode where pipe output is lost.
-
-**Safe output patterns (file redirect then parse):**
-```bash
-mcp-cli call tool '{}' > /tmp/out.json && python3 -c "import json; ..."
+```
+ToolSearch: select:mcp__watercooler-cloud__watercooler_smart_query
 ```
 
-This is a Claude Code Bash tool limitation, not an `mcp-cli` issue. The `jq`
-command substitution pattern is the convention across all skills in this repository.
+Then call directly with named parameters:
+
+```
+mcp__watercooler-cloud__watercooler_smart_query(query="...")
+```
+
+Tool names follow the pattern `mcp__watercooler-cloud__watercooler_<tool_name>`.
+For Serena tools: `mcp__plugin_serena_serena__<tool_name>`.
+
+### Known Bash Tool Limitation
+
+Shell pipes (`cmd | cmd`) may produce 0 bytes in Claude Code's Bash tool
+([#774](https://github.com/anthropics/claude-code/issues/774),
+[#14595](https://github.com/anthropics/claude-code/issues/14595)).
+This affects ALL `cmd | cmd` patterns, not just specific tools. Workarounds:
+redirect to a temp file (`cmd > /tmp/out.json && python3 ...`), or use
+`jq -n --arg data "$(cmd)" '$data'` to safely capture output without pipes.

@@ -4,7 +4,7 @@ Tools:
 - watercooler_baseline_graph_stats: Graph statistics
 - watercooler_search: Search threads and entries (tier-aware routing)
 - watercooler_find_similar: Find similar entries
-- watercooler_graph_health: Graph sync health
+- watercooler_baseline_sync_status: Baseline graph sync health
 - watercooler_access_stats: Access statistics
 
 New Tool Suite (Fresh Suite Design):
@@ -127,19 +127,19 @@ def get_search_backend(backend: str) -> str:
     return "baseline"
 
 
-def infer_search_mode(mode: str, query: str, semantic: bool) -> str:
+def infer_search_mode(mode: str, _query: str, _semantic: bool) -> str:
     """Infer the search mode based on the query and parameters.
 
     Args:
-        mode: Requested mode - "auto", "entries", "entities", or "episodes"
-        query: The search query
-        semantic: Whether semantic search is enabled
+        mode: Requested mode - "auto", "entries", "entities", "episodes", or "facts"
+        _query: Reserved for future NL heuristics (e.g. entity-like query detection)
+        _semantic: Reserved for future mode inference based on search type
 
     Returns:
-        Resolved mode: "entries", "entities", or "episodes"
+        Resolved mode: "entries", "entities", "episodes", or "facts"
     """
     # Explicit modes are respected
-    if mode in ("entries", "entities", "episodes"):
+    if mode in ("entries", "entities", "episodes", "facts"):
         return mode
 
     # Auto mode: infer from query characteristics
@@ -155,6 +155,7 @@ async def route_search(
     backend: str,
     mode: str,
     code_path: str = "",
+    active_only: bool = False,
     **kwargs: Any,
 ) -> str:
     """Route search to the appropriate backend based on tier and mode.
@@ -165,7 +166,8 @@ async def route_search(
         query: Search query
         backend: Resolved backend ("baseline", "graphiti", "leanrag")
         code_path: Path to code repository (for database name derivation)
-        mode: Resolved mode ("entries", "entities", "episodes")
+        mode: Resolved mode ("entries", "entities", "episodes", "facts")
+        active_only: If True (Graphiti only), exclude superseded facts from results
         **kwargs: Additional search parameters
 
     Returns:
@@ -174,14 +176,44 @@ async def route_search(
     fallback_used = False
     fallback_reason = None
 
+    # Facts mode — Graphiti temporal fact edges; hard-fails if Graphiti unavailable.
+    # Broad except: intentional — MCP callers must always receive structured JSON,
+    # not the bare error string returned by the outer handler. Any exception
+    # (connection error, missing config, etc.) is logged server-side and surfaced
+    # as a parseable error envelope to the agent.
+    # The error message is intentionally static (not derived from the exception)
+    # so that internal details (host names, paths, stack traces) are never leaked
+    # to MCP callers. The full exception is available in server-side logs.
+    if mode == "facts":
+        try:
+            return await _search_graphiti_impl(
+                ctx=ctx,
+                threads_dir=threads_dir,
+                query=query,
+                code_path=code_path,
+                mode=mode,
+                active_only=active_only,
+                **kwargs,
+            )
+        except Exception as e:
+            logger.warning("facts mode: Graphiti unavailable: %s", e)
+            return json.dumps({
+                "error": "facts_mode_requires_graphiti",
+                "message": "Graphiti backend is not available.",
+                "hint": "Set WATERCOOLER_GRAPHITI_ENABLED=1 and configure WATERCOOLER_LLM_API_KEY.",
+                "results": [],
+                "count": 0,
+            })
+
     # Entities/episodes modes require Graphiti
     if mode in ("entities", "episodes"):
         if backend == "baseline":
             # Can't do entities/episodes on baseline - fall back to entries
+            original_mode = mode
             logger.info(f"Mode {mode} requires Graphiti, but backend is baseline. Falling back to entries mode.")
             mode = "entries"
             fallback_used = True
-            fallback_reason = f"{mode} requires memory backend"
+            fallback_reason = f"{original_mode} requires memory backend"
         else:
             # Route to Graphiti entity/episode search
             try:
@@ -216,6 +248,8 @@ async def route_search(
                 threads_dir=threads_dir,
                 query=query,
                 code_path=code_path,
+                mode=mode,
+                active_only=active_only,
                 **kwargs,
             )
         except Exception as e:
@@ -230,6 +264,7 @@ async def route_search(
                 ctx=ctx,
                 threads_dir=threads_dir,
                 query=query,
+                code_path=code_path,
                 **kwargs,
             )
         except Exception as e:
@@ -322,6 +357,7 @@ def _search_baseline_impl(
     output: Dict[str, Any] = {
         "count": results.count,
         "total_scanned": results.total_scanned,
+        "scanned_by_source": results.scanned_by_source,
         "backend": "baseline",
         "results": [],
     }
@@ -331,6 +367,7 @@ def _search_baseline_impl(
             "type": result.node_type,
             "id": result.node_id,
             "score": result.score,
+            "score_type": result.score_type,
             "matched_fields": result.matched_fields,
         }
 
@@ -369,11 +406,19 @@ async def _search_graphiti_impl(
     query: str,
     code_path: str = "",
     limit: int = 10,
+    mode: str = "entries",
+    active_only: bool = False,
     **kwargs: Any,
 ) -> str:
-    """Search Graphiti memory backend for facts/episodes.
+    """Search Graphiti memory backend for temporal facts (entity edges).
 
-    Routes to watercooler_search_memory_facts for entries search in Graphiti.
+    Routes to backend.search_facts(), which queries Graphiti entity edges with
+    optional active_only / time-range post-filters.
+
+    Note: ``mode`` is metadata-only here — routing already happened in
+    route_search(). Both facts and entries modes follow the same code path
+    through this function; ``mode`` is forwarded to the output envelope so
+    callers can identify which search type produced the results.
     """
     from .. import memory as mem
 
@@ -385,30 +430,27 @@ async def _search_graphiti_impl(
     if not backend:
         raise RuntimeError("Graphiti backend unavailable")
 
-    # Extract time filters from kwargs (passed through from route_search)
+    # Extract time filters from kwargs; active_only is an explicit parameter
     start_time = kwargs.get("start_time", "")
     end_time = kwargs.get("end_time", "")
     has_time_filters = bool(start_time or end_time)
 
-    # Over-fetch when time filters are active (post-filter reduces result count)
-    fetch_limit = min(limit * 3, 50) if has_time_filters else limit
-
+    # Over-fetching is handled by search_memory_facts when post-filters are active.
     # Use Graphiti's search_memory_facts for entry-level search
     # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
     results = await asyncio.to_thread(
         backend.search_facts,
         query=query,
-        max_results=fetch_limit,
+        max_results=limit,
         start_time=start_time,
         end_time=end_time,
+        active_only=active_only,
     )
-
-    # Trim to requested limit after post-filtering
-    results = results[:limit]
 
     output: Dict[str, Any] = {
         "count": len(results),
         "backend": "graphiti",
+        "mode": mode,
         "results": [
             {
                 "type": "fact",
@@ -419,15 +461,20 @@ async def _search_graphiti_impl(
                 "name": r.get("name", ""),
                 "source_node": r.get("source_node_uuid", ""),
                 "target_node": r.get("target_node_uuid", ""),
+                "valid_at": r.get("valid_at"),
+                "invalid_at": r.get("invalid_at"),
             }
             for r in results
         ],
     }
+    applied_filters: Dict[str, Any] = {}
     if has_time_filters:
-        output["filters_applied"] = {
-            "start_time": start_time or None,
-            "end_time": end_time or None,
-        }
+        applied_filters["start_time"] = start_time or None
+        applied_filters["end_time"] = end_time or None
+    if active_only:
+        applied_filters["active_only"] = True
+    if applied_filters:
+        output["filters_applied"] = applied_filters
 
     return json.dumps(output, indent=2)
 
@@ -497,8 +544,9 @@ async def _search_graphiti_episodes_impl(
     end_time = kwargs.get("end_time", "")
     has_time_filters = bool(start_time or end_time)
 
-    # Over-fetch when time filters are active (post-filter reduces result count)
-    fetch_limit = min(limit * 3, 50) if has_time_filters else limit
+    # Over-fetch when time filters are active (post-filter reduces result count).
+    # Cap matches GraphitiBackend.MAX_SEARCH_RESULTS so the two stay in sync.
+    fetch_limit = min(limit * 3, backend.MAX_SEARCH_RESULTS) if has_time_filters else limit
 
     # Backend methods use asyncio.run() internally, so run in thread to avoid event loop conflict
     results = await asyncio.to_thread(
@@ -540,6 +588,7 @@ def _search_leanrag_impl(
     ctx: Context,
     threads_dir: Path,
     query: str,
+    code_path: str = "",
     limit: int = 10,
     **kwargs: Any,
 ) -> str:
@@ -552,6 +601,7 @@ def _search_leanrag_impl(
         ctx: MCP context
         threads_dir: Path to threads directory
         query: Search query string
+        code_path: Path to code repository (for config/database derivation)
         limit: Maximum number of results
         **kwargs: Additional search parameters
 
@@ -559,14 +609,13 @@ def _search_leanrag_impl(
         JSON string with search results
     """
     try:
-        from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
+        from watercooler_mcp.memory import load_leanrag_config
+        from watercooler_memory.backends.leanrag import LeanRAGBackend
         from watercooler_memory.backends import QueryPayload
 
-        # Configure backend with threads_dir as work_dir
-        config = LeanRAGConfig(
-            work_dir=threads_dir / "graph" / "leanrag",
-            leanrag_path=Path("external/LeanRAG"),
-        )
+        config = load_leanrag_config(code_path=code_path)
+        if config is None:
+            raise RuntimeError("LeanRAG config unavailable (disabled or misconfigured)")
 
         backend = LeanRAGBackend(config)
 
@@ -609,7 +658,7 @@ def _search_leanrag_impl(
 baseline_graph_stats = None
 search_graph_tool = None
 find_similar_entries_tool = None
-graph_health_tool = None
+baseline_sync_status_tool = None
 access_stats_tool = None
 
 
@@ -668,6 +717,7 @@ async def _search_graph_impl(
     include_entries: bool = True,
     mode: str = "auto",
     backend: str = "auto",
+    active_only: bool = False,
 ) -> str:
     """Unified search across threads and entries with tier-aware routing.
 
@@ -682,6 +732,9 @@ async def _search_graph_impl(
           the removed watercooler_search_nodes tool.
         - mode="episodes": Search episodic content from Graphiti. Replaces the
           removed watercooler_get_episodes tool.
+        - mode="facts": Search Graphiti temporal fact edges (bi-temporal edges with
+          valid_at/invalid_at). Use active_only=True to return only currently-valid
+          facts. Hard-fails (structured error) if Graphiti backend is unavailable.
 
     Args:
         code_path: Path to code repository (for resolving threads dir).
@@ -701,18 +754,28 @@ async def _search_graph_impl(
         combine: How to combine filters - "AND" or "OR" (default: AND).
         include_threads: Include thread nodes in results (default: True).
         include_entries: Include entry nodes in results (default: True).
-        mode: Search mode - "auto", "entries", "entities", or "episodes".
+        mode: Search mode - "auto", "entries", "entities", "episodes", or "facts".
             - auto: Infer from query (default is entries)
             - entries: Search thread entries (baseline graph or Graphiti facts)
             - entities: Search entity nodes (requires Graphiti backend). Use this
               mode instead of the removed watercooler_search_nodes tool.
             - episodes: Search episodes (requires Graphiti backend). Use this
               mode instead of the removed watercooler_get_episodes tool.
+            - facts: Search Graphiti temporal fact edges. Returns uuid, fact text,
+              valid_at, invalid_at, score. Both timestamp fields are ISO 8601 strings
+              or null. invalid_at=null means the fact is currently active (not
+              superseded); valid_at=null means no known start time. Use active_only=True
+              to return only currently-active facts instead of filtering manually.
+              Unlike entries mode, facts mode does not fall back to the baseline graph
+              — returns a structured error if Graphiti is unavailable.
         backend: Search backend - "auto", "baseline", "graphiti", or "leanrag".
             - auto: Use WATERCOOLER_MEMORY_BACKEND env var, fallback to baseline
             - baseline: Free tier - baseline graph only
             - graphiti: Paid tier - Graphiti memory backend
             - leanrag: Paid tier - LeanRAG hierarchical clusters
+        active_only: If True (Graphiti facts and entries modes), exclude superseded facts —
+            facts whose ``invalid_at`` field is set because a later episode contradicted
+            them. Has no effect on baseline or leanrag backends.
 
     Returns:
         JSON with search results including matched nodes and metadata.
@@ -726,6 +789,9 @@ async def _search_graph_impl(
 
         # Search episodes (replaces watercooler_get_episodes)
         watercooler_search(query="implementation decisions", mode="episodes", limit=10)
+
+        # Search temporal fact edges — currently-active facts only
+        watercooler_search(query="API key rotation", mode="facts", active_only=True)
     """
     try:
         error, context = validation._require_context(code_path)
@@ -746,7 +812,19 @@ async def _search_graph_impl(
         resolved_backend = get_search_backend(backend)
         resolved_mode = infer_search_mode(mode, query, semantic)
 
-        # Route to appropriate search implementation
+        # mode="facts" always routes through _search_graphiti_impl regardless of
+        # resolved_backend, so active_only is honoured there even for baseline backend.
+        if active_only and resolved_backend != "graphiti" and resolved_mode != "facts":
+            logger.warning(
+                "active_only=True has no effect on %s backend (no bi-temporal supersession); "
+                "use backend='graphiti' or omit active_only",
+                resolved_backend,
+            )
+
+        # Route to appropriate search implementation.
+        # active_only is an explicit parameter on route_search and _search_graphiti_impl.
+        # It is applied as a post-filter on entity edges (Graphiti only). It is a
+        # no-op on baseline and leanrag backends, which have no bi-temporal supersession.
         return await route_search(
             ctx=ctx,
             threads_dir=threads_dir,
@@ -767,6 +845,7 @@ async def _search_graph_impl(
             combine=combine,
             include_threads=include_threads,
             include_entries=include_entries,
+            active_only=active_only,
         )
 
     except Exception as e:
@@ -856,31 +935,26 @@ def _find_similar_entries_impl(
         return f"Error finding similar entries: {str(e)}"
 
 
-async def _graph_health_impl(
+async def _baseline_sync_status_impl(
     ctx: Context,
     code_path: str = "",
-    verify_parity: bool = False,
 ) -> str:
-    """Check graph synchronization health and report any issues.
+    """Check baseline graph sync status for all threads.
 
-    Reports the status of all threads in the graph:
-    - Synced threads (graph matches markdown)
-    - Stale threads (need sync)
-    - Error threads (sync failed)
-    - Pending threads (sync in progress)
+    Reports whether each thread's baseline graph (JSON) is up to date
+    with the thread data. This does NOT check FalkorDB or memory tier
+    health — use watercooler_diagnose_memory for that.
 
-    Optionally verifies data parity between graph nodes and parsed markdown:
-    - entry_count: Does graph node count match actual entries in markdown?
-    - last_updated: Does graph timestamp match latest entry timestamp?
+    Status categories:
+    - Synced: baseline graph matches thread data
+    - Stale: thread has changed since last graph sync
+    - Error: last sync attempt failed
+    - Pending: sync in progress
 
-    Use this to diagnose graph sync issues before running reconcile.
+    Use this to diagnose baseline graph issues before running reconcile.
 
     Args:
         code_path: Path to code repository (for resolving threads dir).
-        verify_parity: If True, parse each thread's markdown and compare
-            entry_count and last_updated against graph node values.
-            This is slower but catches data accuracy issues that sync
-            state alone doesn't detect.
 
     Returns:
         JSON health report with thread statuses and recommendations.
@@ -903,10 +977,10 @@ async def _graph_health_impl(
         # Check if graph exists at all
         graph_available = is_graph_available(threads_dir)
 
-        # Get health report (with optional parity verification).
+        # Get health report.
         # Run in thread to avoid blocking event loop (#128).
         health = await asyncio.to_thread(
-            check_graph_health, threads_dir, verify_parity=verify_parity
+            check_graph_health, threads_dir
         )
 
         output = {
@@ -921,13 +995,6 @@ async def _graph_health_impl(
             "recommendations": [],
         }
 
-        # Add parity verification results if requested
-        if verify_parity:
-            output["parity_verified"] = health.parity_verified
-            output["parity_mismatches"] = [
-                asdict(m) for m in health.parity_mismatches
-            ]
-
         # Add recommendations
         if not graph_available:
             output["recommendations"].append(
@@ -935,27 +1002,14 @@ async def _graph_health_impl(
             )
         if health.stale_threads:
             output["recommendations"].append(
-                f"{len(health.stale_threads)} threads need sync. Run watercooler_reconcile_graph."
+                f"{len(health.stale_threads)} threads lack sync state. "
+                "Run watercooler_graph_enrich(mode='missing') to backfill summaries/embeddings."
             )
         if health.error_threads:
             output["recommendations"].append(
-                f"{health.error_threads} threads have sync errors. Check error_details and run reconcile."
+                f"{health.error_threads} threads have sync errors. "
+                "Check error_details and run watercooler_graph_enrich on affected topics."
             )
-        if health.parity_mismatches:
-            count_mismatches = sum(
-                1 for m in health.parity_mismatches if m.field == "entry_count"
-            )
-            ts_mismatches = sum(
-                1 for m in health.parity_mismatches if m.field == "last_updated"
-            )
-            if count_mismatches:
-                output["recommendations"].append(
-                    f"{count_mismatches} threads have entry_count mismatches. Run watercooler_reconcile_graph."
-                )
-            if ts_mismatches:
-                output["recommendations"].append(
-                    f"{ts_mismatches} threads have last_updated mismatches. Run watercooler_reconcile_graph."
-                )
 
         return json.dumps(output, indent=2)
 
@@ -1147,229 +1201,41 @@ async def _graph_enrich_impl(
 async def _graph_recover_impl(
     ctx: Context,
     code_path: str = "",
-    mode: str = "stale",
-    topics: str = "",
-    generate_summaries: bool = True,
-    generate_embeddings: bool = True,
-    dry_run: bool = False,
 ) -> str:
-    """Rebuild graph from markdown (emergency recovery).
+    """Graph recovery from markdown (moved to scripts/).
 
-    WARNING: This parses markdown to rebuild graph nodes. Use only when:
-    - Graph data is corrupted or lost
-    - Manual edits were made to markdown
-    - Migrating from old format
-    - Recovering stale/error threads
+    Graph recovery is an extraordinary operation that reads .md files to
+    rebuild graph data. It has been moved out of the MCP runtime to
+    scripts/recover_baseline_graph.py.
 
-    In normal operation, the graph is the source of truth.
-    This tool is the exception for recovery scenarios.
+    Usage:
+        ./scripts/recover_baseline_graph.py /path/to/threads --mode stale
+        ./scripts/recover_baseline_graph.py /path/to/threads --mode all --dry-run
 
-    When the memory task queue is available, recovery tasks are enqueued
-    per-topic and processed asynchronously. Poll watercooler_memory_task_status
-    for progress. Falls back to synchronous recovery if queue unavailable.
-
-    Modes:
-    - "stale": Recover only stale/error threads (auto-detected)
-    - "selective": Recover specific topics only
-    - "all": Full rebuild from all markdown (slow, destructive)
+    In normal operation, the graph is the sole source of truth and .md files
+    are write-only projections. If the graph is lost, restore from git history
+    (git checkout <commit> -- graph/) or run the recovery script.
 
     Args:
-        code_path: Path to code repository (for resolving threads dir).
-        mode: Recovery mode - "stale", "selective", or "all". Default: "stale".
-        topics: Comma-separated list of topics (required for "selective" mode).
-        generate_summaries: Generate summaries during recovery. Default: True.
-        generate_embeddings: Generate embeddings during recovery. Default: True.
-        dry_run: If True, return what would be recovered without making changes.
+        code_path: Unused (retained for tool registration compatibility).
 
     Returns:
-        JSON with recovery results: threads recovered, entries parsed, errors
+        Instructions for using the recovery script.
     """
-    try:
-        from watercooler.baseline_graph.sync import (
-            recover_graph,
-            resolve_recovery_targets,
-        )
-
-        error, context = validation._require_context(code_path)
-        if error:
-            return error
-        if context is None or not context.threads_dir:
-            return "Error: Unable to resolve threads directory."
-
-        threads_dir = context.threads_dir
-        if not threads_dir.exists():
-            return f"Threads directory not found: {threads_dir}"
-
-        # Parse topics list
-        topic_list = None
-        if topics:
-            topic_list = [t.strip() for t in topics.split(",") if t.strip()]
-
-        # Resolve targets — may call check_graph_health() in "stale" mode,
-        # so run in thread to avoid blocking event loop (#128).
-        target_topics, resolve_errors = await asyncio.to_thread(
-            resolve_recovery_targets, threads_dir, mode, topic_list
-        )
-        if resolve_errors:
-            return json.dumps({"errors": resolve_errors}, indent=2)
-        if not target_topics:
-            return json.dumps(
-                {"action": "graph_recover", "mode": mode, "message": "Nothing to recover."},
-                indent=2,
-            )
-
-        # dry_run: delegate to recover_graph (no queue, no git sync)
-        if dry_run:
-            result = recover_graph(
-                threads_dir=threads_dir,
-                mode=mode,
-                topics=topic_list,
-                generate_summaries=generate_summaries,
-                generate_embeddings=generate_embeddings,
-                dry_run=True,
-            )
-            return json.dumps(result.to_dict(), indent=2)
-
-        # Try queue path: enqueue one MemoryTask per topic
-        queue, worker = _get_recover_queue()
-        if queue is not None:
-            return _enqueue_recovery_tasks(
-                queue=queue,
-                worker=worker,
-                target_topics=target_topics,
-                threads_dir=threads_dir,
-                code_root=context.code_root,
-                mode=mode,
-                generate_summaries=generate_summaries,
-                generate_embeddings=generate_embeddings,
-            )
-
-        # Fallback: synchronous recovery with git parity.
-        # Run in thread to avoid blocking event loop (#128).
-        # Note: asyncio.to_thread() worker threads continue after timeout —
-        # the operation completes in the background. This is acceptable since
-        # the server survives and the work completes.
-        def _do_recover() -> dict:
-            result = recover_graph(
-                threads_dir=threads_dir,
-                mode=mode,
-                topics=topic_list,
-                generate_summaries=generate_summaries,
-                generate_embeddings=generate_embeddings,
-                dry_run=False,
-            )
-            return result.to_dict()
-
-        output = await asyncio.to_thread(
-            run_with_graph_sync,
-            context,
-            _do_recover,
-            f"graph: recover mode={mode}",
-        )
-        return json.dumps(output, indent=2)
-
-    except SyncError as e:
-        return f"Branch parity error: {str(e)}"
-    except Exception as e:
-        return f"Error recovering graph: {str(e)}"
-
-
-def _get_recover_queue() -> tuple[Optional[MemoryTaskQueue], Optional[MemoryTaskWorker]]:
-    """Return (queue, worker) if the memory task queue is available, else (None, None)."""
-    try:
-        from ..memory_queue import get_queue, get_worker
-
-        queue = get_queue()
-        worker = get_worker()
-        if queue is None:
-            return None, None
-        return queue, worker
-    except ImportError:
-        return None, None
-
-
-def _enqueue_recovery_tasks(
-    *,
-    queue: MemoryTaskQueue,
-    worker: Optional[MemoryTaskWorker],
-    target_topics: list[str],
-    threads_dir: Path,
-    code_root: Optional[Path],
-    mode: str,
-    generate_summaries: bool,
-    generate_embeddings: bool,
-) -> str:
-    """Enqueue one MemoryTask per topic for async graph recovery.
-
-    Returns JSON response with task_ids, skipped topics, and queue status.
-    """
-    group_id = derive_group_id(code_path=code_root) if code_root else derive_group_id(threads_dir=threads_dir)
-
-    content_payload = json.dumps({
-        "schema_version": 1,
-        "threads_dir": str(threads_dir),
-        "generate_summaries": generate_summaries,
-        "generate_embeddings": generate_embeddings,
-    })
-
-    task_ids: list[str] = []
-    enqueued_topics: list[str] = []
-    skipped: list[dict[str, str]] = []
-
-    for topic in target_topics:
-        task = MemoryTask(
-            backend="graph_recover",
-            # Composite key prevents dedup collisions across repos/groups
-            entry_id=f"{group_id}:{topic}",
-            topic=topic,
-            group_id=group_id,
-            content=content_payload,
-            title=f"graph_recover:{topic}",
-            source_description=f"{threads_dir}|graph_recover|{mode}",
-        )
-        try:
-            tid = queue.enqueue(task)
-            task_ids.append(tid)
-            enqueued_topics.append(topic)
-        except DuplicateTaskError:
-            skipped.append({"topic": topic, "reason": "duplicate"})
-        except QueueFullError:
-            skipped.append({"topic": topic, "reason": "queue_full"})
-
-    # Wake worker to start processing
-    if worker is not None and task_ids:
-        worker.wake()
-
-    if task_ids:
-        message = (
-            f"Recovery queued for {len(task_ids)} threads. "
-            "Poll watercooler_memory_task_status for progress."
-        )
-    else:
-        reasons = {s["reason"] for s in skipped}
-        if reasons == {"duplicate"}:
-            message = (
-                f"All {len(skipped)} topics already queued or recently processed. "
-                "Poll watercooler_memory_task_status for existing task progress."
-            )
-        else:
-            message = (
-                f"No tasks enqueued — {len(skipped)} topics skipped. "
-                "Check 'skipped' for details."
-            )
-
-    output = {
+    return json.dumps({
         "action": "graph_recover",
-        "mode": "queued" if task_ids else "all_skipped",
-        "recovery_mode": mode,
-        "tasks_enqueued": len(task_ids),
-        "task_ids": task_ids,
-        "topics": enqueued_topics,
-        "skipped": skipped,
-        "queue_status": queue.status_summary(),
-        "message": message,
-    }
-    return json.dumps(output, indent=2)
+        "status": "moved_to_script",
+        "message": (
+            "Graph recovery has been moved out of the MCP runtime. "
+            "Use scripts/recover_baseline_graph.py instead. "
+            "For routine issues, try: git checkout <commit> -- graph/"
+        ),
+        "script": "scripts/recover_baseline_graph.py",
+        "examples": [
+            "./scripts/recover_baseline_graph.py /path/to/threads --mode stale",
+            "./scripts/recover_baseline_graph.py /path/to/threads --mode all --dry-run",
+        ],
+    }, indent=2)
 
 
 def _graph_project_impl(
@@ -1466,14 +1332,14 @@ def register_graph_tools(mcp):
         mcp: The FastMCP server instance
     """
     global baseline_graph_stats, search_graph_tool
-    global find_similar_entries_tool, graph_health_tool, access_stats_tool
+    global find_similar_entries_tool, baseline_sync_status_tool, access_stats_tool
     global graph_enrich_tool, graph_recover_tool, graph_project_tool
 
     # Register tools and store references for testing
     baseline_graph_stats = mcp.tool(name="watercooler_baseline_graph_stats")(_baseline_graph_stats_impl)
     search_graph_tool = mcp.tool(name="watercooler_search")(_search_graph_impl)
     find_similar_entries_tool = mcp.tool(name="watercooler_find_similar")(_find_similar_entries_impl)
-    graph_health_tool = mcp.tool(name="watercooler_graph_health")(_graph_health_impl)
+    baseline_sync_status_tool = mcp.tool(name="watercooler_baseline_sync_status")(_baseline_sync_status_impl)
     access_stats_tool = mcp.tool(name="watercooler_access_stats")(_access_stats_impl)
 
     # New tool suite (Fresh Suite Design)

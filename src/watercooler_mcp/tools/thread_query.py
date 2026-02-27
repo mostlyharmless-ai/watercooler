@@ -35,18 +35,22 @@ from ..helpers import (
     _get_startup_warnings,
     _format_warnings_for_response,
     # Thread parsing
-    _extract_thread_metadata_from_md,  # MD-only: for hosted mode
-    _get_thread_metadata,  # Canonical: graph with MD fallback
+    _get_thread_metadata,  # Canonical: graph-first
     _resolve_format,
     # Entry loading
     _entry_header_payload,
     _entry_full_payload,
     # Graph helpers
     _track_access,
+    _use_graph_for_reads,
     _load_entries,
     _list_threads,
     _get_thread_summary,
     _scan_thread_entries,
+)
+from watercooler.baseline_graph.reader import (
+    read_thread_from_graph,
+    format_thread_markdown,
 )
 from ..errors import (
     ContextError,
@@ -449,19 +453,23 @@ def _read_thread_impl(
             if load_error:
                 raise HostedModeError(load_error, operation="load_entries")
 
-            # Extract metadata from content
-            title, status, ball, last = _extract_thread_metadata_from_md(content, topic)
+            # Read metadata from graph (meta.json) instead of parsing markdown
+            from ..hosted_ops import load_thread_metadata_hosted
+            meta_error, meta = load_thread_metadata_hosted(topic)
+            if meta_error:
+                # Fallback to defaults if meta.json read fails
+                meta = {"title": topic, "status": "OPEN", "ball": "", "last_updated": "", "summary": ""}
 
             payload = {
                 "topic": topic,
                 "format": "json",
                 "entry_count": len(entries),
                 "meta": {
-                    "title": title,
-                    "status": status,
-                    "ball": ball,
-                    "last_entry_at": last,
-                    "summary": "",
+                    "title": meta.get("title", topic),
+                    "status": meta.get("status", "OPEN"),
+                    "ball": meta.get("ball", ""),
+                    "last_entry_at": meta.get("last_updated", ""),
+                    "summary": meta.get("summary", ""),
                 },
                 "entries": [_entry_full_payload(entry) for entry in entries],
             }
@@ -496,26 +504,27 @@ def _read_thread_impl(
         if not threads_dir.exists():
             threads_dir.mkdir(parents=True, exist_ok=True)
 
-        thread_path = fs.thread_path(topic, threads_dir)
-
-        if not thread_path.exists():
+        # Check thread existence via graph (source of truth)
+        graph_result = read_thread_from_graph(threads_dir, topic, code_branch=code_branch)
+        if not graph_result:
             raise ThreadNotFoundError(topic=topic)
 
         # Track thread access (non-blocking)
         _track_access(threads_dir, "thread", topic)
 
-        # Read full thread content
-        content = fs.read_body(thread_path)
+        # Serve markdown format reconstructed from graph
         if resolved_format == "markdown" and not summary_only:
+            graph_thread, graph_entries = graph_result
+            content = format_thread_markdown(graph_thread, graph_entries)
             return _format_warnings_for_response(content)
 
-        # Load entries from graph (canonical) with MD fallback
+        # Load entries from graph (canonical)
         load_error, entries, summaries = _load_entries(topic, context, code_branch=code_branch)
         if load_error:
             return load_error
 
-        # Extract metadata from graph (preferred) with MD fallback
-        title, status, ball, last = _get_thread_metadata(threads_dir, topic, content)
+        # Extract metadata from graph
+        title, status, ball, last = _get_thread_metadata(threads_dir, topic)
         thread_summary = _get_thread_summary(threads_dir, topic)
 
         if summary_only:

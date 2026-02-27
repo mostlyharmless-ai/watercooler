@@ -4,6 +4,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Generator
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -51,6 +52,12 @@ def anyio_backend():
 # ============================================================================
 # Memory Backend Test Fixtures
 # ============================================================================
+
+
+@pytest.fixture
+def mock_context() -> MagicMock:
+    """Create mock MCP context."""
+    return MagicMock()
 
 
 @pytest.fixture

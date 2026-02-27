@@ -2,7 +2,8 @@
 name: recall
 description: Recall relevant project context before starting work. Use when beginning a new task, investigating unfamiliar code, or needing background on past decisions.
 allowed-tools:
-  - Bash(mcp-cli *)
+  - ToolSearch
+  - mcp__watercooler-cloud__watercooler_smart_query
 ---
 
 # Recall Context
@@ -16,14 +17,14 @@ Otherwise, show human-readable summary only.
 
 ## Steps
 
-1. **Check schema first** (mandatory):
-   ```bash
-   mcp-cli info watercooler-cloud/watercooler_smart_query
+1. **Load MCP tool**:
+   ```
+   ToolSearch: select:mcp__watercooler-cloud__watercooler_smart_query
    ```
 
-2. **Execute query** (sanitize user input — do not interpolate `$ARGUMENTS` directly into JSON):
-   ```bash
-   mcp-cli call watercooler-cloud/watercooler_smart_query "$(jq -n --arg q '<topic/task description>' '{query: $q}')"
+2. **Execute query** (scope to current repo with `code_path`):
+   ```
+   mcp__watercooler-cloud__watercooler_smart_query(query="<topic/task description from $ARGUMENTS>", code_path="<repo root>")
    ```
 
 3. **Summarize findings** in categories:

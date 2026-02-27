@@ -11,14 +11,13 @@ This module contains:
 These are extracted from server.py for modularity and testability.
 """
 
-import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
 # Local application imports
 from watercooler import commands, fs
 from watercooler.config_facade import config
-from watercooler.thread_entries import ThreadEntry, parse_thread_entries
+from watercooler.thread_entries import ThreadEntry
 from watercooler.baseline_graph.reader import (
     is_graph_available,
     list_threads_from_graph,
@@ -31,7 +30,7 @@ from .config import (
     ThreadContext,
     resolve_thread_context,
 )
-from .observability import log_debug
+from .observability import log_debug, log_warning
 
 
 # ============================================================================
@@ -44,15 +43,6 @@ _ALLOWED_FORMATS = {"markdown", "json"}
 _MAX_LIMIT = 1000  # Maximum entries that can be requested in a single call
 _MAX_OFFSET = 100000  # Maximum offset to prevent excessive memory usage
 
-# Regex patterns for extracting thread metadata from content
-_TITLE_RE = re.compile(r"^#\s*(?P<val>.+)$", re.MULTILINE)
-_STAT_RE = re.compile(r"^Status:\s*(?P<val>.+)$", re.IGNORECASE | re.MULTILINE)
-_BALL_RE = re.compile(r"^Ball:\s*(?P<val>.+)$", re.IGNORECASE | re.MULTILINE)
-_ENTRY_RE = re.compile(
-    r"^Entry:\s*(?P<who>.+?)\s+(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s*$",
-    re.MULTILINE,
-)
-_CLOSED_STATES = {"done", "closed", "merged", "resolved", "abandoned", "obsolete"}
 
 
 # ============================================================================
@@ -134,52 +124,21 @@ def _normalize_status(s: str) -> str:
     return s.strip().lower()
 
 
-def _extract_thread_metadata_from_md(content: str, topic: str) -> tuple[str, str, str, str]:
-    """Extract thread metadata from markdown content string.
-
-    This MD-parsing version is needed for hosted mode where we only have
-    GitHub API content, and as a fallback when graph data is unavailable.
-
-    Args:
-        content: Full thread markdown content
-        topic: Thread topic (used as fallback for title)
-
-    Returns:
-        Tuple of (title, status, ball, last_entry_timestamp)
-    """
-    title_match = _TITLE_RE.search(content)
-    title = title_match.group("val").strip() if title_match else topic
-
-    status_match = _STAT_RE.search(content)
-    status = _normalize_status(status_match.group("val") if status_match else "open")
-
-    ball_match = _BALL_RE.search(content)
-    ball = ball_match.group("val").strip() if ball_match else "unknown"
-
-    # Extract last entry timestamp
-    hits = list(_ENTRY_RE.finditer(content))
-    last = hits[-1].group("ts").strip() if hits else fs.utcnow_iso()
-
-    return title, status, ball, last
-
-
 def _get_thread_metadata(
-    threads_dir: Path, topic: str, content: str | None = None
+    threads_dir: Path, topic: str,
 ) -> tuple[str, str, str, str]:
-    """Get thread metadata from canonical graph with MD fallback.
+    """Get thread metadata from canonical graph.
 
-    Reads from canonical graph JSONL. Falls back to MD parsing
-    if graph data is not available.
+    Reads from canonical graph JSONL. Returns defaults if graph data
+    is unavailable (no markdown fallback).
 
     Args:
         threads_dir: Threads directory
         topic: Thread topic
-        content: Optional MD content (avoids re-reading file if already loaded)
 
     Returns:
         Tuple of (title, status, ball, last_entry_timestamp)
     """
-    # Try graph first
     if _use_graph_for_reads(threads_dir):
         try:
             result = read_thread_from_graph(threads_dir, topic)
@@ -192,22 +151,16 @@ def _get_thread_metadata(
                 )
                 return (
                     graph_thread.title,
-                    graph_thread.status,
+                    _normalize_status(graph_thread.status),
                     graph_thread.ball,
                     last_ts,
                 )
         except Exception as e:
             log_debug(f"[GRAPH] Failed to get metadata from graph: {e}")
 
-    # Fallback to MD parsing
-    if content is None:
-        thread_path = threads_dir / f"{topic}.md"
-        if thread_path.exists():
-            content = fs.read_body(thread_path)
-        else:
-            return topic, "open", "unknown", fs.utcnow_iso()
-
-    return _extract_thread_metadata_from_md(content, topic)
+    # No graph or thread not in graph — return defaults
+    log_debug(f"[GRAPH] No graph metadata for '{topic}', returning defaults")
+    return topic, "open", "unknown", fs.utcnow_iso()
 
 
 def _resolve_format(
@@ -228,48 +181,6 @@ def _resolve_format(
 # ============================================================================
 # Entry Loading Helpers
 # ============================================================================
-
-
-def _load_entries_from_md(
-    topic: str, context: ThreadContext
-) -> tuple[str | None, list[ThreadEntry]]:
-    """Load and parse thread entries from markdown on disk.
-
-    Thread Safety Note:
-        This function performs unlocked reads. This is safe because:
-        - Write operations (say, ack, handoff) use AdvisoryLock for serialization
-        - Reads may see partially written entries, but won't corrupt existing ones
-        - Thread entry boundaries (---) ensure partial writes don't break parsing
-        - File system guarantees atomic writes at the block level
-        - MCP tool calls are typically infrequent enough that read/write races are rare
-
-    For high-concurrency scenarios, consider adding shared/exclusive locking
-    or caching with mtime-based invalidation.
-    """
-    threads_dir = context.threads_dir
-    thread_path = fs.thread_path(topic, threads_dir)
-
-    if not thread_path.exists():
-        if threads_dir.exists():
-            available_list = [p.stem for p in fs.discover_thread_files(threads_dir)]
-            if len(available_list) > 10:
-                available = (
-                    ", ".join(available_list[:10])
-                    + f" (and {len(available_list) - 10} more)"
-                )
-            else:
-                available = ", ".join(available_list) if available_list else "none"
-        else:
-            available = "none"
-        return (
-            f"Error: Thread '{topic}' not found in {threads_dir}\n\n"
-            f"Available threads: {available}",
-            [],
-        )
-
-    content = fs.read_body(thread_path)
-    entries = parse_thread_entries(content)
-    return (None, entries)
 
 
 def _entry_header_payload(entry: ThreadEntry, summary: str = "") -> Dict[str, object]:
@@ -305,24 +216,24 @@ def _entry_full_payload(entry: ThreadEntry, summary: str = "") -> Dict[str, obje
 # ============================================================================
 
 
+_use_graph_warned = False
+
+
 def _use_graph_for_reads(threads_dir: Path) -> bool:
     """Check if graph should be used for read operations.
 
-    The graph is used when:
-    1. WATERCOOLER_USE_GRAPH env var is set to "1" (explicit opt-in)
-    2. OR graph data exists and is available
-
-    This allows graceful fallback - if graph doesn't exist or is broken,
-    we fall back to markdown parsing.
+    Graph is always the source of truth when available. Returns False only
+    when no graph directory exists (e.g. a brand-new repo without a graph).
     """
-    explicit_opt_in = config.env.get("WATERCOOLER_USE_GRAPH", "0") == "1"
-    if explicit_opt_in:
-        return is_graph_available(threads_dir)
-    # Auto-use graph if available and not explicitly disabled
-    auto_use = config.env.get("WATERCOOLER_USE_GRAPH", "auto") == "auto"
-    if auto_use:
-        return is_graph_available(threads_dir)
-    return False
+    import os
+    global _use_graph_warned
+    if not _use_graph_warned and os.environ.get("WATERCOOLER_USE_GRAPH") == "0":
+        _use_graph_warned = True
+        log_warning(
+            "WATERCOOLER_USE_GRAPH=0 is no longer supported; "
+            "graph reads are always used when available."
+        )
+    return is_graph_available(threads_dir)
 
 
 def _track_access(threads_dir: Path, node_type: str, node_id: str) -> None:
@@ -387,19 +298,19 @@ def _load_entries(
     context: ThreadContext,
     code_branch: str | None = None,
 ) -> tuple[str | None, list[ThreadEntry], dict[str, str]]:
-    """Load thread entries from canonical graph JSONL, with legacy markdown backfill.
+    """Load thread entries from canonical graph JSONL.
 
-    Canonical source of truth is the baseline graph JSONL (`graph/baseline/*`) in the
-    threads repo. Markdown is a derived, human-friendly projection.
+    Graph is the sole source of truth. Bodies are read directly from graph
+    entries. If a graph entry lacks a body, its summary is used as fallback
+    body text.
 
-    This function prefers graph reads. If graph data is missing/stale (e.g., older
-    repos or incomplete backfills), it may temporarily fall back to markdown parsing
-    to keep UX usable, and optionally auto-repair the graph from markdown. That
-    fallback path is compatibility-only and should shrink over time.
+    If graph is unavailable (no graph dir), returns an error — no silent
+    markdown fallback.
 
     Args:
         topic: Thread topic
         context: Thread context
+        code_branch: Optional branch filter
 
     Returns:
         Tuple of (error_message, entries, summaries). Error is None on success.
@@ -407,111 +318,45 @@ def _load_entries(
     """
     threads_dir = context.threads_dir
 
-    # Try graph first if available
-    if _use_graph_for_reads(threads_dir):
-        try:
-            result = read_thread_from_graph(threads_dir, topic, code_branch=code_branch)
-            if not result:
-                log_debug(f"[GRAPH] Topic '{topic}' not in graph, falling back to markdown")
-            if result:
-                graph_thread, graph_entries = result
+    if not _use_graph_for_reads(threads_dir):
+        return (
+            f"Error: Graph data not found for '{topic}'. Run `watercooler reindex` to rebuild the graph.",
+            [],
+            {},
+        )
 
-                # Extract summaries from graph entries
-                summaries: dict[str, str] = {
-                    ge.entry_id: ge.summary
-                    for ge in graph_entries
-                    if ge.entry_id and ge.summary
-                }
-
-                # Graph entries may not have full body - need to get from markdown
-                # For now, use summaries from graph (bodies are optional in graph)
-                thread_path = fs.thread_path(topic, threads_dir)
-                if thread_path.exists():
-                    # Parse markdown to check graph completeness
-                    content = fs.read_body(thread_path)
-                    md_entries = parse_thread_entries(content)
-
-                    # Check if graph is stale (fewer entries than markdown)
-                    if len(graph_entries) < len(md_entries):
-                        log_debug(
-                            f"[GRAPH] Graph stale for {topic}: "
-                            f"{len(graph_entries)} graph vs {len(md_entries)} markdown. "
-                            "Auto-repairing from markdown."
-                        )
-                        # Auto-repair: sync full thread to graph
-                        try:
-                            from watercooler.baseline_graph.sync import (
-                                sync_thread_to_graph,
-                            )
-                            from watercooler_mcp.config import get_watercooler_config
-
-                            wc_config = get_watercooler_config()
-                            graph_config = wc_config.mcp.graph
-
-                            sync_result = sync_thread_to_graph(
-                                threads_dir=threads_dir,
-                                topic=topic,
-                                generate_summaries=graph_config.generate_summaries,
-                                generate_embeddings=graph_config.generate_embeddings,
-                            )
-                            if sync_result:
-                                log_debug(f"[GRAPH] Auto-repair succeeded for {topic}")
-                                # Re-read from graph after repair
-                                repaired = read_thread_from_graph(threads_dir, topic)
-                                if repaired:
-                                    _, graph_entries = repaired
-                                    # Update summaries from repaired graph
-                                    summaries = {
-                                        ge.entry_id: ge.summary
-                                        for ge in graph_entries
-                                        if ge.entry_id and ge.summary
-                                    }
-                            else:
-                                log_debug(
-                                    "[GRAPH] Auto-repair failed, using markdown entries"
-                                )
-                                return (None, md_entries, summaries)
-                        except Exception as repair_err:
-                            log_debug(
-                                f"[GRAPH] Auto-repair error: {repair_err}, "
-                                "using markdown"
-                            )
-                            return (None, md_entries, summaries)
-
-                    # Merge: use graph metadata with markdown bodies
-                    entries = []
-                    for ge in graph_entries:
-                        # Find matching markdown entry by index
-                        md_entry = next(
-                            (e for e in md_entries if e.index == ge.index),
-                            None,
-                        )
-                        if md_entry:
-                            entries.append(md_entry)
-                        else:
-                            # Use graph entry with summary as body
-                            entries.append(_graph_entry_to_thread_entry(ge))
-                    log_debug(
-                        f"[GRAPH] Loaded {len(entries)} entries from graph for {topic}"
-                    )
-                    return (None, entries, summaries)
-                else:
-                    # No markdown, use graph entries directly
-                    entries = [_graph_entry_to_thread_entry(ge) for ge in graph_entries]
-                    log_debug(
-                        f"[GRAPH] Loaded {len(entries)} entries from graph only "
-                        f"for {topic}"
-                    )
-                    return (None, entries, summaries)
-        except Exception as e:
-            log_debug(
-                f"[GRAPH] Failed to load from graph, falling back to markdown: {e}"
+    try:
+        result = read_thread_from_graph(threads_dir, topic, code_branch=code_branch)
+        if not result:
+            return (
+                f"Error: Thread '{topic}' not found in graph.",
+                [],
+                {},
             )
 
-    # Fallback to markdown parsing (no summaries available)
-    log_debug(f"[GRAPH] Using markdown fallback for '{topic}' entries")
-    err, entries = _load_entries_from_md(topic, context)
-    return (err, entries, {})
+        graph_thread, graph_entries = result
+
+        # Extract summaries
+        summaries: dict[str, str] = {
+            ge.entry_id: ge.summary
+            for ge in graph_entries
+            if ge.entry_id and ge.summary
+        }
+
+        # Convert graph entries to ThreadEntry objects (uses graph body directly)
+        entries = [_graph_entry_to_thread_entry(ge) for ge in graph_entries]
+        log_debug(
+            f"[GRAPH] Loaded {len(entries)} entries from graph for {topic}"
+        )
+        return (None, entries, summaries)
+
+    except Exception as e:
+        log_debug(f"[GRAPH] Failed to load entries from graph: {e}")
+        return (
+            f"Error: Failed to read thread '{topic}' from graph: {e}",
+            [],
+            {},
+        )
 
 
 def _list_threads(
@@ -519,7 +364,9 @@ def _list_threads(
     open_only: bool | None = None,
     agent: str | None = None,
 ) -> list[tuple[str, str, str, str, Path, bool, str, int]]:
-    """List threads from canonical graph JSONL, with legacy markdown backfill.
+    """List threads from canonical graph JSONL.
+
+    Graph is the sole source of truth. No markdown fallback.
 
     Args:
         threads_dir: Threads directory
@@ -530,55 +377,44 @@ def _list_threads(
     Returns:
         List of thread tuples (title, status, ball, updated, path, is_new, summary, entry_count)
     """
-    # Try graph first if available
-    if _use_graph_for_reads(threads_dir):
-        try:
-            graph_threads = list_threads_from_graph(threads_dir, open_only)
-            if not graph_threads:
-                log_debug("[GRAPH] No threads in graph, falling back to markdown")
-            if graph_threads:
-                # Convert to expected tuple format
-                result = []
-                for gt in graph_threads:
-                    thread_path = threads_dir / f"{gt.topic}.md"
-                    # Compute is_new: if agent is provided and ball is held by
-                    # someone else, there may be new content to review.
-                    # This is a heuristic - the ball being elsewhere suggests
-                    # another agent has contributed since the current agent last
-                    # had the ball.
-                    if agent and gt.ball:
-                        # Normalize comparison (case-insensitive, partial match)
-                        ball_lower = gt.ball.lower()
-                        agent_lower = agent.lower()
-                        # is_new if ball is not held by this agent
-                        is_new = agent_lower not in ball_lower
-                    else:
-                        # No agent provided or empty ball - can't determine is_new
-                        is_new = False
-                    result.append(
-                        (
-                            gt.title,
-                            gt.status,
-                            gt.ball,
-                            gt.last_updated,
-                            thread_path,
-                            is_new,
-                            gt.summary or "",
-                            gt.entry_count,
-                        )
-                    )
-                log_debug(f"[GRAPH] Listed {len(result)} threads from graph")
-                return result
-        except Exception as e:
-            log_debug(
-                f"[GRAPH] Failed to list from graph, falling back to markdown: {e}"
-            )
+    if not _use_graph_for_reads(threads_dir):
+        log_debug("[GRAPH] Graph not available for list_threads")
+        return []
 
-    # Fallback to markdown (no summaries or entry counts available)
-    log_debug("[GRAPH] Using markdown fallback for list_threads")
-    md_threads = commands.list_threads(threads_dir=threads_dir, open_only=open_only)
-    # Extend 6-tuples to 8-tuples with empty summary and 0 entry_count
-    return [(t, s, b, u, p, n, "", 0) for t, s, b, u, p, n in md_threads]
+    try:
+        graph_threads = list_threads_from_graph(threads_dir, open_only)
+        if not graph_threads:
+            log_debug("[GRAPH] No threads in graph")
+            return []
+
+        result = []
+        for gt in graph_threads:
+            thread_file = fs.thread_path(gt.topic, threads_dir)
+            # Compute is_new heuristic
+            if agent and gt.ball:
+                ball_lower = gt.ball.lower()
+                agent_lower = agent.lower()
+                is_new = agent_lower not in ball_lower
+            else:
+                is_new = False
+            result.append(
+                (
+                    gt.title,
+                    gt.status,
+                    gt.ball,
+                    gt.last_updated,
+                    thread_file,
+                    is_new,
+                    gt.summary or "",
+                    gt.entry_count,
+                )
+            )
+        log_debug(f"[GRAPH] Listed {len(result)} threads from graph")
+        return result
+
+    except Exception as e:
+        log_debug(f"[GRAPH] Failed to list from graph: {e}")
+        return []
 
 
 def _get_thread_summary(threads_dir: Path, topic: str) -> str:

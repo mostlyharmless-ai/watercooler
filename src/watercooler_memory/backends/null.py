@@ -96,6 +96,7 @@ class NullBackend(MemoryBackend):
         group_ids: Sequence[str] | None = None,
         max_results: int = 10,
         center_node_id: str | None = None,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Null implementation - raises UnsupportedOperationError."""
         from . import UnsupportedOperationError

@@ -145,9 +145,16 @@ def enqueue_memory_task(
     title: str = "",
     timestamp: str = "",
     source_description: str = "",
+    code_path: str = "",
     max_attempts: int = 3,
 ) -> Optional[str]:
     """Convenience helper: create and enqueue a single-entry memory task.
+
+    Args:
+        code_path: Stored for provenance. The call site in sync.py passes the
+            threads worktree path; this is NOT the code repo root. Callers
+            should derive ``group_id`` via ``derive_group_id(...)`` before
+            enqueuing.
 
     Returns:
         The task_id, or ``None`` if the queue is not initialised or the
@@ -173,6 +180,7 @@ def enqueue_memory_task(
         title=title,
         timestamp=timestamp,
         source_description=source_description,
+        code_path=code_path,
         max_attempts=max_attempts,
     )
 

@@ -80,12 +80,63 @@ def _make_entry(**overrides) -> ThreadEntry:
     return ThreadEntry(**defaults)
 
 
+def _create_graph_data(threads_dir):
+    """Create per-thread graph data matching _THREAD_TEXT content."""
+    topic = "summary-test"
+    graph_dir = threads_dir / "graph" / "baseline" / "threads" / topic
+    graph_dir.mkdir(parents=True, exist_ok=True)
+
+    meta = {
+        "type": "thread",
+        "topic": topic,
+        "title": "Summary Test Thread",
+        "status": "OPEN",
+        "ball": "Claude (caleb)",
+        "last_updated": "2025-11-14T08:15:55Z",
+        "summary": "Thread for testing summary passthrough",
+        "entry_count": 2,
+    }
+    (graph_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+    entries = [
+        {
+            "entry_id": "01SUMMARY0000000000000001",
+            "thread_topic": topic,
+            "index": 0,
+            "agent": "Claude (caleb)",
+            "role": "planner",
+            "entry_type": "Plan",
+            "title": "Initial planning",
+            "timestamp": "2025-11-14T08:09:39Z",
+            "summary": "Initial planning for the feature",
+            "body": "Spec: planner-architecture\nPlanning the feature.\n",
+        },
+        {
+            "entry_id": "01SUMMARY0000000000000002",
+            "thread_topic": topic,
+            "index": 1,
+            "agent": "Claude (caleb)",
+            "role": "implementer",
+            "entry_type": "Note",
+            "title": "Implementation started",
+            "timestamp": "2025-11-14T08:15:55Z",
+            "summary": "Started implementing the feature",
+            "body": "Spec: implementer-code\nStarted implementing the feature.\n",
+        },
+    ]
+    lines = [json.dumps(e) for e in entries]
+    (graph_dir / "entries.jsonl").write_text("\n".join(lines) + "\n")
+
+
 @pytest.fixture
 def patched_context(tmp_path, monkeypatch):
     threads_dir = tmp_path / "threads"
     threads_dir.mkdir()
     thread_path = threads_dir / "summary-test.md"
     thread_path.write_text(_THREAD_TEXT, encoding="utf-8")
+
+    # Create graph data (source of truth for reads)
+    _create_graph_data(threads_dir)
 
     context = ThreadContext(
         code_root=tmp_path,

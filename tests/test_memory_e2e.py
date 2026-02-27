@@ -30,12 +30,6 @@ pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
-def mock_context() -> MagicMock:
-    """Create mock MCP context."""
-    return MagicMock()
-
-
-@pytest.fixture
 def mock_threads_dir(tmp_path: Path) -> Path:
     """Create mock threads directory with baseline graph."""
     threads_dir = tmp_path / "threads"
@@ -116,6 +110,7 @@ def mock_graphiti_backend() -> MagicMock:
         }
 
     mock.add_episode_direct = AsyncMock(side_effect=mock_add_episode)
+    mock.entry_episode_index = None  # Guard 4 is transparent by default
     mock.index_entry_as_episode = MagicMock()
     mock.clear_group_episodes = MagicMock(
         return_value={"removed": 5, "group_id": "test", "message": "Cleared"}
@@ -443,6 +438,148 @@ class TestDiagnoseMemoryE2E:
         assert "python_version" in result_data
         assert "python_executable" in result_data
 
+    def test_diagnose_memory_t3_disabled(
+        self, mock_context: MagicMock, monkeypatch
+    ) -> None:
+        """T3 disabled: t3_leanrag present with leanrag_enabled=False and config_issue."""
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
+
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=None):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        t3 = result_data["t3_leanrag"]
+
+        assert t3["leanrag_enabled"] is False
+        assert "config_issue" in t3
+
+    def test_diagnose_memory_t3_import_failure(
+        self, mock_context: MagicMock, monkeypatch
+    ) -> None:
+        """T3 backend import fails: leanrag_backend_import shows the error string."""
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
+
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=None), \
+             patch.dict("sys.modules", {"watercooler_memory.backends.leanrag": None}):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        t3 = result_data["t3_leanrag"]
+
+        assert "✗" in t3["leanrag_backend_import"]
+
+    def test_diagnose_memory_t3_enabled_success(
+        self, mock_context: MagicMock, monkeypatch
+    ) -> None:
+        """T3 enabled and backend init succeeds: backend_init success, has_incremental_state populated."""
+        pytest.importorskip("watercooler_memory.backends.leanrag")
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
+
+        mock_cfg = MagicMock()
+        mock_cfg.leanrag_path = None
+        mock_cfg.work_dir = None
+        mock_cfg.falkordb_host = "localhost"
+        mock_cfg.falkordb_port = 6379
+        mock_cfg.llm_api_key = "sk-test"
+        mock_cfg.llm_api_base = "https://api.deepseek.com/v1"
+        mock_cfg.llm_model = "deepseek-chat"
+        mock_cfg.embedding_api_base = "http://localhost:8080"
+        mock_cfg.embedding_model = "bge-m3"
+
+        mock_backend = MagicMock()
+        mock_backend.has_incremental_state.return_value = True
+
+        mock_backend_cls = MagicMock(return_value=mock_backend)
+
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=mock_cfg), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", mock_backend_cls):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        t3 = result_data["t3_leanrag"]
+
+        assert t3["leanrag_enabled"] is True
+        assert "✓" in t3["backend_init"]
+        assert t3["has_incremental_state"] is True
+        # leanrag_path=None takes the else-False branch in leanrag_path_exists
+        assert t3["leanrag_path_exists"] is False
+
+    def test_diagnose_memory_t3_backend_init_failure(
+        self, mock_context: MagicMock, monkeypatch
+    ) -> None:
+        """LeanRAGBackend constructor raising is captured in backend_init, result still valid JSON."""
+        pytest.importorskip("watercooler_memory.backends.leanrag")
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
+
+        mock_cfg = MagicMock()
+        mock_cfg.leanrag_path = None
+        mock_cfg.work_dir = None
+        mock_cfg.falkordb_host = "localhost"
+        mock_cfg.falkordb_port = 6379
+        mock_cfg.llm_api_key = "sk-test"
+        mock_cfg.llm_api_base = None
+        mock_cfg.llm_model = None
+        mock_cfg.embedding_api_base = None
+        mock_cfg.embedding_model = None
+
+        mock_backend_cls = MagicMock(side_effect=RuntimeError("cannot connect to FalkorDB"))
+
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=mock_cfg), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", mock_backend_cls):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        t3 = result_data["t3_leanrag"]
+
+        assert t3["leanrag_enabled"] is True
+        assert "✗" in t3["backend_init"]
+        assert "cannot connect to FalkorDB" in t3["backend_init"]
+        assert "has_incremental_state" not in t3
+
+    def test_diagnose_memory_t3_has_incremental_state_raises(
+        self, mock_context: MagicMock, monkeypatch
+    ) -> None:
+        """has_incremental_state() raising is captured, not silently dropped."""
+        pytest.importorskip("watercooler_memory.backends.leanrag")
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
+
+        mock_cfg = MagicMock()
+        mock_cfg.leanrag_path = None
+        mock_cfg.work_dir = None
+        mock_cfg.falkordb_host = "localhost"
+        mock_cfg.falkordb_port = 6379
+        mock_cfg.llm_api_key = "sk-test"
+        mock_cfg.llm_api_base = None
+        mock_cfg.llm_model = None
+        mock_cfg.embedding_api_base = None
+        mock_cfg.embedding_model = None
+
+        mock_backend = MagicMock()
+        mock_backend.has_incremental_state.side_effect = RuntimeError("FalkorDB connection refused")
+
+        mock_backend_cls = MagicMock(return_value=mock_backend)
+
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=mock_cfg), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", mock_backend_cls):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        t3 = result_data["t3_leanrag"]
+
+        assert "has_incremental_state" in t3
+        assert "✗" in t3["has_incremental_state"]
+        assert "FalkorDB connection refused" in t3["has_incremental_state"]
+
 
 # ============================================================================
 # Graphiti Add Episode E2E Tests
@@ -631,6 +768,7 @@ class TestLeanRAGPipelineE2E:
             result = await _leanrag_run_pipeline_impl(
                 group_id="test-group",
                 ctx=mock_context,
+                code_path="/tmp/test-repo",
                 dry_run=True,
             )
 
@@ -652,6 +790,7 @@ class TestLeanRAGPipelineE2E:
             result = await _leanrag_run_pipeline_impl(
                 group_id="test-group",
                 ctx=mock_context,
+                code_path="/tmp/test-repo",
             )
 
         result_data = json.loads(result.content[0].text)
@@ -659,21 +798,22 @@ class TestLeanRAGPipelineE2E:
         assert result_data["success"] is False
         assert "unavailable" in result_data["error"].lower()
 
-    async def test_pipeline_empty_group_id(
+    async def test_pipeline_missing_code_path(
         self, mock_context: MagicMock
     ) -> None:
-        """Test error when group_id is empty."""
+        """Test error when code_path is empty (required for BULK runs)."""
         from watercooler_mcp.tools.memory import _leanrag_run_pipeline_impl
 
         result = await _leanrag_run_pipeline_impl(
-            group_id="",
+            group_id="test-group",
             ctx=mock_context,
+            code_path="",
         )
 
         result_data = json.loads(result.content[0].text)
 
         assert result_data["success"] is False
-        assert "group_id" in result_data["error"].lower()
+        assert "code_path" in result_data["error"].lower()
 
 
 # ============================================================================

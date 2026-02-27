@@ -84,14 +84,14 @@ class TestSearchModeInference:
         """Auto mode with keyword query should use entries mode."""
         from watercooler_mcp.tools.graph import infer_search_mode
 
-        mode = infer_search_mode("auto", query="authentication", semantic=False)
+        mode = infer_search_mode("auto", "authentication", False)
         assert mode == "entries"
 
     def test_infer_search_mode_auto_semantic_query(self):
         """Auto mode with semantic query should use entries mode."""
         from watercooler_mcp.tools.graph import infer_search_mode
 
-        mode = infer_search_mode("auto", query="how does auth work", semantic=True)
+        mode = infer_search_mode("auto", "how does auth work", True)
         assert mode == "entries"
 
     def test_infer_search_mode_auto_entity_query(self):
@@ -99,7 +99,7 @@ class TestSearchModeInference:
         from watercooler_mcp.tools.graph import infer_search_mode
 
         # Queries that look like entity searches
-        mode = infer_search_mode("auto", query="Claude", semantic=False)
+        mode = infer_search_mode("auto", "Claude", False)
         # Without explicit entity markers, defaults to entries
         assert mode == "entries"
 
@@ -107,21 +107,21 @@ class TestSearchModeInference:
         """Explicit entities mode should be respected."""
         from watercooler_mcp.tools.graph import infer_search_mode
 
-        mode = infer_search_mode("entities", query="any query", semantic=False)
+        mode = infer_search_mode("entities", "any query", False)
         assert mode == "entities"
 
     def test_infer_search_mode_explicit_episodes(self):
         """Explicit episodes mode should be respected."""
         from watercooler_mcp.tools.graph import infer_search_mode
 
-        mode = infer_search_mode("episodes", query="any query", semantic=False)
+        mode = infer_search_mode("episodes", "any query", False)
         assert mode == "episodes"
 
     def test_infer_search_mode_explicit_entries(self):
         """Explicit entries mode should be respected."""
         from watercooler_mcp.tools.graph import infer_search_mode
 
-        mode = infer_search_mode("entries", query="any query", semantic=True)
+        mode = infer_search_mode("entries", "any query", True)
         assert mode == "entries"
 
 
@@ -423,3 +423,180 @@ class TestSearchToolParameters:
         backend_param = sig.parameters.get("backend")
         assert backend_param is not None
         assert backend_param.default == "auto"
+
+    def test_infer_search_mode_explicit_facts(self):
+        """Explicit facts mode should pass through unchanged."""
+        from watercooler_mcp.tools.graph import infer_search_mode
+
+        mode = infer_search_mode("facts", "any query", False)
+        assert mode == "facts"
+
+
+class TestFactsModeRouting:
+    """Tests for mode='facts' routing and error handling."""
+
+    @pytest.fixture
+    def mock_context(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_threads_dir(self, tmp_path):
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+        graph_dir = threads_dir / "graph" / "baseline"
+        graph_dir.mkdir(parents=True)
+        (graph_dir / "nodes.jsonl").write_text("")
+        (graph_dir / "edges.jsonl").write_text("")
+        return threads_dir
+
+    async def test_facts_mode_routes_to_graphiti_with_mode_kwarg(
+        self, mock_context, mock_threads_dir
+    ):
+        """mode='facts' must pass mode='facts' to _search_graphiti_impl."""
+        from watercooler_mcp.tools.graph import route_search
+
+        with patch(
+            "watercooler_mcp.tools.graph._search_graphiti_impl",
+            new_callable=AsyncMock,
+        ) as mock_graphiti:
+            mock_graphiti.return_value = json.dumps({"results": [], "count": 0})
+
+            await route_search(
+                ctx=mock_context,
+                threads_dir=mock_threads_dir,
+                query="test query",
+                backend="graphiti",
+                mode="facts",
+            )
+
+            mock_graphiti.assert_called_once()
+            assert mock_graphiti.call_args.kwargs.get("mode") == "facts"
+
+    async def test_entries_mode_graphiti_passes_mode_entries(
+        self, mock_context, mock_threads_dir
+    ):
+        """mode='entries' with graphiti backend must pass mode='entries', not 'facts'."""
+        from watercooler_mcp.tools.graph import route_search
+
+        with patch(
+            "watercooler_mcp.tools.graph._search_graphiti_impl",
+            new_callable=AsyncMock,
+        ) as mock_graphiti:
+            mock_graphiti.return_value = json.dumps({"results": [], "count": 0})
+
+            await route_search(
+                ctx=mock_context,
+                threads_dir=mock_threads_dir,
+                query="test query",
+                backend="graphiti",
+                mode="entries",
+            )
+
+            mock_graphiti.assert_called_once()
+            assert mock_graphiti.call_args.kwargs.get("mode") == "entries"
+
+    async def test_facts_mode_returns_structured_json_error_on_any_exception(
+        self, mock_context, mock_threads_dir
+    ):
+        """Any exception from Graphiti in facts mode → structured JSON (not bare string)."""
+        from watercooler_mcp.tools.graph import route_search
+
+        for exc in [
+            RuntimeError("Graphiti not configured"),
+            ConnectionError("FalkorDB unreachable"),
+            OSError("socket timeout"),
+        ]:
+            with patch(
+                "watercooler_mcp.tools.graph._search_graphiti_impl",
+                new_callable=AsyncMock,
+            ) as mock_graphiti:
+                mock_graphiti.side_effect = exc
+
+                result = await route_search(
+                    ctx=mock_context,
+                    threads_dir=mock_threads_dir,
+                    query="test query",
+                    backend="graphiti",
+                    mode="facts",
+                )
+
+                data = json.loads(result)
+                assert data["error"] == "facts_mode_requires_graphiti"
+                assert data["results"] == []
+                assert data["count"] == 0
+                assert "hint" in data, "structured error envelope must include a 'hint' key"
+                # Must not expose raw exception text in the message field
+                assert str(exc) not in data.get("message", "")
+
+    async def test_facts_mode_does_not_fall_back_to_baseline(
+        self, mock_context, mock_threads_dir
+    ):
+        """facts mode must NOT silently fall back to baseline — hard error only."""
+        from watercooler_mcp.tools.graph import route_search
+
+        with patch(
+            "watercooler_mcp.tools.graph._search_graphiti_impl",
+            new_callable=AsyncMock,
+        ) as mock_graphiti, patch(
+            "watercooler_mcp.tools.graph._search_baseline_impl",
+        ) as mock_baseline:
+            mock_graphiti.side_effect = RuntimeError("Graphiti not available")
+
+            await route_search(
+                ctx=mock_context,
+                threads_dir=mock_threads_dir,
+                query="test query",
+                backend="graphiti",
+                mode="facts",
+            )
+
+            # Baseline must never be called in facts mode
+            mock_baseline.assert_not_called()
+
+    async def test_active_only_passed_through_in_facts_mode(
+        self, mock_context, mock_threads_dir
+    ):
+        """active_only kwarg must be forwarded to _search_graphiti_impl in facts mode."""
+        from watercooler_mcp.tools.graph import route_search
+
+        with patch(
+            "watercooler_mcp.tools.graph._search_graphiti_impl",
+            new_callable=AsyncMock,
+        ) as mock_graphiti:
+            mock_graphiti.return_value = json.dumps({"results": [], "count": 0})
+
+            await route_search(
+                ctx=mock_context,
+                threads_dir=mock_threads_dir,
+                query="test query",
+                backend="graphiti",
+                mode="facts",
+                active_only=True,
+            )
+
+            mock_graphiti.assert_called_once()
+            assert mock_graphiti.call_args.kwargs.get("active_only") is True
+
+    async def test_active_only_passed_through_in_entries_graphiti_mode(
+        self, mock_context, mock_threads_dir
+    ):
+        """active_only must also be forwarded when mode=entries and backend=graphiti."""
+        from watercooler_mcp.tools.graph import route_search
+
+        with patch(
+            "watercooler_mcp.tools.graph._search_graphiti_impl",
+            new_callable=AsyncMock,
+        ) as mock_graphiti:
+            mock_graphiti.return_value = json.dumps({"results": [], "count": 0})
+
+            await route_search(
+                ctx=mock_context,
+                threads_dir=mock_threads_dir,
+                query="test query",
+                backend="graphiti",
+                mode="entries",
+                active_only=True,
+            )
+
+            mock_graphiti.assert_called_once()
+            assert mock_graphiti.call_args.kwargs.get("active_only") is True

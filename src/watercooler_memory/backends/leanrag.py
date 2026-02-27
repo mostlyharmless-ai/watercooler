@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import logging
@@ -243,6 +244,13 @@ class LeanRAGConfig:
     # Max workers for graph building
     max_workers: int = 8
 
+    # Max concurrent LLM calls during triple extraction.
+    # Controls asyncio.Semaphore for generate_text_async calls.
+    # Default of 20 is well within DeepSeek's rate limits (~500 RPM) while
+    # providing ~5x throughput improvement over the previous default of 4.
+    # Lower values (2-4) can be used if hitting rate limits on restricted plans.
+    max_concurrent_llm_calls: int = 20
+
     @classmethod
     def from_unified(cls) -> "LeanRAGConfig":
         """Create LeanRAGConfig from unified watercooler configuration.
@@ -335,7 +343,11 @@ class LeanRAGBackend(MemoryBackend):
             ("LLM_API_KEY", "DEEPSEEK_API_KEY"),
             ("LLM_MODEL", "DEEPSEEK_MODEL"),
             ("LLM_API_BASE", "DEEPSEEK_BASE_URL"),
+            ("LLM_TIMEOUT", "DEEPSEEK_TIMEOUT"),
+            ("LLM_MAX_RETRIES", "DEEPSEEK_MAX_ATTEMPTS"),
             ("EMBEDDING_MODEL", "GLM_MODEL"),
+            # LeanRAG config.yaml may use a distinct var name for embeddings.
+            ("EMBEDDING_MODEL", "GLM_EMBEDDING_MODEL"),
             ("EMBEDDING_API_BASE", "GLM_BASE_URL"),
         ]
         for standard_var, leanrag_var in standard_to_leanrag:
@@ -343,15 +355,36 @@ class LeanRAGBackend(MemoryBackend):
                 os.environ[leanrag_var] = os.environ[standard_var]
                 logger.debug(f"Bridged {standard_var} → {leanrag_var}")
 
+        # Resolve LLM timeout/retry from unified config for LeanRAG backend.
+        # Only set DEEPSEEK_TIMEOUT if TOML has an explicit override;
+        # otherwise let config.yaml's ${DEEPSEEK_TIMEOUT:-120} default apply.
+        # Lazy import: resolve_llm_config imports config_schema which imports
+        # pydantic — keep it out of module-level to avoid circular imports
+        # when watercooler_memory is imported before watercooler is fully loaded.
+        from watercooler.config_schema import LLM_TIMEOUT_DEFAULT
+        from watercooler.memory_config import resolve_llm_config
+        llm = resolve_llm_config("leanrag")
+        deepseek_timeout = None
+        # Note: float equality is stable here (literal constant comparison).
+        # If someone explicitly sets timeout=60.0 in TOML, it reads as "no
+        # override" and config.yaml's ${DEEPSEEK_TIMEOUT:-120} default applies.
+        if llm.timeout != LLM_TIMEOUT_DEFAULT:
+            deepseek_timeout = str(llm.timeout)
+
         # Set from resolved config (only if not already set)
         env_mappings = [
+            # LeanRAG path (needed by _ensure_leanrag_available() / _get_leanrag_path())
+            ("LEANRAG_PATH", str(self.config.leanrag_path) if self.config.leanrag_path else None),
             # LLM config (used by generate_text via OpenAI client)
             ("DEEPSEEK_API_KEY", self.config.llm_api_key),
             ("DEEPSEEK_MODEL", self.config.llm_model),
             ("DEEPSEEK_BASE_URL", self.config.llm_api_base),
+            ("DEEPSEEK_TIMEOUT", deepseek_timeout),
+            ("DEEPSEEK_MAX_ATTEMPTS", "3"),  # config.yaml reads DEEPSEEK_MAX_ATTEMPTS (not MAX_RETRIES)
             # Embedding config (used by embedding() via raw HTTP POST - no auth)
             ("GLM_BASE_URL", self.config.embedding_api_base),
             ("GLM_MODEL", self.config.embedding_model),
+            ("GLM_EMBEDDING_MODEL", self.config.embedding_model),
             # Database config
             ("FALKORDB_HOST", self.config.falkordb_host),
             ("FALKORDB_PORT", str(self.config.falkordb_port) if self.config.falkordb_port else None),
@@ -362,10 +395,32 @@ class LeanRAGBackend(MemoryBackend):
                 os.environ[env_name] = value
                 logger.debug(f"Set {env_name} from unified config")
 
+        # LeanRAG's config.yaml env substitution requires the variable to be
+        # present even when unset (e.g., no password for local FalkorDB).
+        os.environ.setdefault("FALKORDB_PASSWORD", "")
+
+        # LeanRAG config.yaml references MYSQL_* even in FalkorDB-only deployments.
+        # These are never used for actual connections; they prevent config-load
+        # failures from unresolved env var substitutions.
+        os.environ.setdefault("MYSQL_HOST", "localhost")
+        os.environ.setdefault("MYSQL_PORT", "3306")
+        os.environ.setdefault("MYSQL_USER", "root")
+        os.environ.setdefault("MYSQL_PASSWORD", "")
+
     def _validate_config(self) -> None:
         """Validate configuration and LeanRAG availability."""
         # Ensure leanrag is importable (installed package or submodule)
         _ensure_leanrag_available()
+
+        # Log provenance to help debug "patched submodule but running different package"
+        # FileNotFoundError: installed leanrag's config.yaml lookup fails if CWD != LeanRAG dir.
+        # This is expected when calling from the project root; the real import (with correct CWD)
+        # happens inside index() / incremental_index() under the _chdir_lock.
+        try:
+            import leanrag as _lr
+            logger.debug("LeanRAG loaded from: %s", getattr(_lr, '__file__', 'unknown'))
+        except (ImportError, FileNotFoundError):
+            logger.debug("LeanRAG not importable for provenance check (config.yaml not in CWD)")
 
     def _normalize_entity_name(self, name: str | None) -> str | None:
         """Normalize entity name by stripping quotes and whitespace.
@@ -538,10 +593,11 @@ class LeanRAGBackend(MemoryBackend):
         return chunks
 
     def _ensure_chunk_file(self, work_dir: Path, chunks: ChunkPayload) -> Path:
-        """Ensure threads_chunk.json exists in the working directory."""
+        """Write chunks to threads_chunk.json in the working directory.
+
+        Always overwrites any existing file to ensure fresh data is used.
+        """
         chunk_file = work_dir / "threads_chunk.json"
-        if chunk_file.exists():
-            return chunk_file
 
         serialized = []
         for item in chunks.chunks:
@@ -625,8 +681,11 @@ class LeanRAGBackend(MemoryBackend):
                     last_report_time = [time.perf_counter()]
                     report_interval = 10.0  # Report every 10 seconds
 
+                    _llm_sem = asyncio.Semaphore(self.config.max_concurrent_llm_calls)
+
                     async def _tracked_llm(prompt: str, **kwargs) -> str:
-                        result = await generate_text_async(prompt, **kwargs)
+                        async with _llm_sem:
+                            result = await generate_text_async(prompt, **kwargs)
                         llm_call_count[0] += 1
                         # Report progress periodically
                         now = time.perf_counter()
@@ -709,6 +768,239 @@ class LeanRAGBackend(MemoryBackend):
             raise BackendError(f"LeanRAG build error: {exc}") from exc
         except Exception as exc:
             raise BackendError(f"Unexpected error during index: {exc}") from exc
+
+    def has_incremental_state(self) -> bool:
+        """Check if saved cluster state exists for incremental updates.
+
+        Returns True if a prior full build saved cluster centroids + UMAP
+        models that the incremental path can reuse.
+        """
+        work_dir = self.config.work_dir
+        if work_dir is None:
+            return False
+
+        work_dir = work_dir.resolve()
+        work_dir = self._apply_test_prefix(work_dir)
+        state_dir = work_dir / ".cluster_state"
+
+        if not state_dir.exists():
+            return False
+
+        try:
+            leanrag_abspath = self.config.leanrag_path.resolve()
+
+            with _chdir_lock:
+                if str(leanrag_abspath) not in sys.path:
+                    sys.path.insert(0, str(leanrag_abspath))
+
+                original_cwd = os.getcwd()
+                try:
+                    os.chdir(str(self.config.leanrag_path))
+                    from leanrag.clustering.state_manager import StateManager
+
+                    with StateManager(state_dir) as sm:
+                        return sm.has_cluster_state(layer=0)
+                finally:
+                    os.chdir(original_cwd)
+        except Exception as exc:
+            logger.debug("has_incremental_state check failed: %s", exc)
+            return False
+
+    def incremental_index(
+        self,
+        chunks: ChunkPayload,
+        progress_callback: Any | None = None,
+    ) -> IndexResult:
+        """Run incremental LeanRAG entity extraction and cluster assignment.
+
+        Uses saved cluster state from a prior full build to assign new entities
+        to existing clusters without rebuilding the entire hierarchy.
+
+        Falls back to full ``index()`` if no saved cluster state exists.
+
+        Args:
+            chunks: ChunkPayload containing new chunks to index.
+            progress_callback: Optional callback for progress updates.
+        """
+        import time
+
+        if not self.has_incremental_state():
+            # Guard against degenerate UMAP with very few chunks.
+            # UMAP requires n_neighbors > 0, which fails for N < ~5 samples.
+            # Skip the full build and return a descriptive result instead.
+            MIN_CHUNKS_FOR_INITIAL_BUILD = 5
+            if len(chunks.chunks) < MIN_CHUNKS_FOR_INITIAL_BUILD:
+                logger.info(
+                    "Too few chunks (%d) for initial build — skipping (need >= %d)",
+                    len(chunks.chunks), MIN_CHUNKS_FOR_INITIAL_BUILD,
+                )
+                return IndexResult(
+                    manifest_version=chunks.manifest_version,
+                    indexed_count=0,
+                    message=(
+                        f"Skipped: {len(chunks.chunks)} chunks insufficient for "
+                        f"initial build (need >= {MIN_CHUNKS_FOR_INITIAL_BUILD})"
+                    ),
+                )
+            logger.info("No incremental state found — falling back to full index()")
+            return self.index(chunks, progress_callback=progress_callback)
+
+        def _report(stage: str, step: str, current: int = 0, total: int = 0) -> None:
+            if progress_callback:
+                progress_callback(stage, step, current, total)
+
+        work_dir = self.config.work_dir or Path(tempfile.mkdtemp(prefix="leanrag-incr-"))
+        work_dir = work_dir.resolve()
+        work_dir = self._apply_test_prefix(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            chunk_file = self._ensure_chunk_file(work_dir, chunks)
+            leanrag_abspath = self.config.leanrag_path.resolve()
+
+            with open(chunk_file, "r") as fh:
+                corpus = json.load(fh)
+            chunks_dict = {item["hash_code"]: item["text"] for item in corpus}
+
+            # Stage 1: Triple extraction (same as full index)
+            num_chunks = len(chunks_dict)
+            _report("triple_extraction", "starting", 0, num_chunks)
+            extraction_start = time.perf_counter()
+
+            with _chdir_lock:
+                if str(leanrag_abspath) not in sys.path:
+                    sys.path.insert(0, str(leanrag_abspath))
+
+                original_cwd = os.getcwd()
+                try:
+                    os.chdir(str(self.config.leanrag_path))
+
+                    from leanrag.extraction.chunk import triple_extraction
+                    from leanrag.core.llm import generate_text_async, embedding
+
+                    _llm_sem = asyncio.Semaphore(self.config.max_concurrent_llm_calls)
+
+                    async def _tracked_llm(prompt: str, **kwargs) -> str:
+                        async with _llm_sem:
+                            return await generate_text_async(prompt, **kwargs)
+
+                    asyncio.run(
+                        triple_extraction(
+                            chunks_dict, _tracked_llm, str(work_dir), save_filtered=False
+                        )
+                    )
+                finally:
+                    os.chdir(original_cwd)
+
+            _report("triple_extraction", "complete", num_chunks, num_chunks)
+
+            # Stage 2: Load extracted entities and generate embeddings
+            _report("incremental_update", "embedding", 0, 3)
+
+            with _chdir_lock:
+                if str(leanrag_abspath) not in sys.path:
+                    sys.path.insert(0, str(leanrag_abspath))
+
+                original_cwd = os.getcwd()
+                try:
+                    os.chdir(str(self.config.leanrag_path))
+
+                    from leanrag.core.llm import embedding as embed_fn
+                    from leanrag.core.llm import generate_text
+                    try:
+                        from leanrag.pipelines.incremental import incremental_update
+                    except ImportError:
+                        logger.warning(
+                            "leanrag.pipelines.incremental not available; "
+                            "falling back to full rebuild"
+                        )
+                        incremental_update = None  # type: ignore[assignment]
+
+                    # Load extracted entities
+                    entity_path = work_dir / "entity.jsonl"
+                    if not entity_path.exists():
+                        logger.warning("No entities extracted — nothing to index incrementally")
+                        return IndexResult(
+                            manifest_version=chunks.manifest_version,
+                            indexed_count=0,
+                            message="No entities extracted from chunks",
+                        )
+
+                    import json as _json
+                    entities_meta = []
+                    entity_descriptions = []
+                    with open(entity_path) as f:
+                        for line in f:
+                            ent = _json.loads(line)
+                            name = str(ent.get("entity_name", ""))
+                            entities_meta.append({
+                                "entity_id": int(hashlib.sha256(name.encode()).hexdigest(), 16) % (2**31),
+                                "entity_name": name,
+                            })
+                            entity_descriptions.append(
+                                ent.get("description", name)[:4096]
+                            )
+
+                    if not entities_meta:
+                        return IndexResult(
+                            manifest_version=chunks.manifest_version,
+                            indexed_count=0,
+                            message="No entities extracted",
+                        )
+
+                    # Generate embeddings
+                    import numpy as np
+
+                    batch_size = 64
+                    all_embeddings = []
+                    for i in range(0, len(entity_descriptions), batch_size):
+                        batch = entity_descriptions[i:i + batch_size]
+                        emb = embed_fn(batch)
+                        all_embeddings.append(emb)
+
+                    embeddings = np.vstack(all_embeddings)
+
+                    if incremental_update is None:
+                        # Fallback: full rebuild when incremental module unavailable
+                        logger.info(
+                            "Incremental pipeline unavailable; delegating to full index()"
+                        )
+                        os.chdir(original_cwd)  # restore before calling index()
+                        return self.index(chunks, progress_callback=progress_callback)
+
+                    # Stage 3: Run incremental update pipeline
+                    _report("incremental_update", "assigning", 1, 3)
+                    state_dir = str(work_dir / ".cluster_state")
+
+                    # Wire up llm_func so dirty communities get re-summarized.
+                    # generate_text is the sync LLM wrapper used by the full
+                    # build pipeline (same signature: str -> str).
+                    inc_result = incremental_update(
+                        working_dir=str(work_dir),
+                        new_entity_embeddings=embeddings,
+                        new_entity_metadata=entities_meta,
+                        state_dir=state_dir,
+                        llm_func=generate_text,
+                    )
+                finally:
+                    os.chdir(original_cwd)
+
+            _report("incremental_update", "complete", 3, 3)
+
+            return IndexResult(
+                manifest_version=chunks.manifest_version,
+                indexed_count=len(chunks.chunks),
+                message=(
+                    f"Incremental index: {inc_result.entities_assigned} entities assigned, "
+                    f"{inc_result.entities_orphaned} orphaned, "
+                    f"{inc_result.communities_resummarized} communities re-summarized "
+                    f"in {inc_result.duration_seconds:.1f}s"
+                ),
+            )
+        except FileNotFoundError as exc:
+            raise ConfigError(f"Required LeanRAG files not found: {exc}") from exc
+        except Exception as exc:
+            raise BackendError(f"Incremental index error: {exc}") from exc
 
     def query(self, query: QueryPayload) -> QueryResult:
         """
@@ -918,6 +1210,7 @@ class LeanRAGBackend(MemoryBackend):
         group_ids: Sequence[str] | None = None,
         max_results: int = 10,
         center_node_id: str | None = None,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Search for facts/relationships via entity search + hierarchical edge traversal.
 
@@ -931,6 +1224,8 @@ class LeanRAGBackend(MemoryBackend):
             group_ids: Optional list of group IDs to filter by (ignored - LeanRAG uses separate databases)
             max_results: Maximum number of results to return
             center_node_id: Optional entity name to center search around (not yet implemented)
+            **kwargs: Absorbs Graphiti-specific params (active_only, start_time, end_time)
+                that have no effect on LeanRAG — LeanRAG has no bi-temporal supersession.
 
         Returns:
             List of normalized CoreResult dictionaries with fact/edge data
@@ -1352,7 +1647,7 @@ class LeanRAGBackend(MemoryBackend):
             supports_falkor=True,
             supports_milvus=bool(self.config.embedding_api_base),
             supports_neo4j=False,
-            max_tokens=1024,
+            max_tokens=768,
             
             # Phase 1 protocol extensions
             supports_nodes=True,       # ✅ Via Milvus vector search on entity embeddings

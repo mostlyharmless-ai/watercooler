@@ -4,7 +4,7 @@ Complete command-line interface reference for watercooler-cloud.
 
 ## Overview
 
-Watercooler provides 16 CLI commands for thread-based collaboration with explicit status and ball tracking. All commands default to the `.watercooler` directory. Use `--threads-dir` to override.
+Watercooler provides 12 CLI commands for thread-based collaboration with explicit status and ball tracking. All commands default to the `.watercooler` directory. Use `--threads-dir` to override.
 
 ---
 
@@ -413,94 +413,8 @@ watercooler reindex
 
 ---
 
-## Slack Integration Commands
-
-### slack setup
-
-Interactive wizard to configure Slack webhook notifications.
-
-**Syntax:**
-```bash
-watercooler slack setup
-```
-
-**Process:**
-1. Prompts for Slack webhook URL
-2. Validates webhook format
-3. Sends test notification
-4. Saves to `~/.watercooler/config.toml`
-
-**Example:**
-```bash
-watercooler slack setup
-# Enter your Slack webhook URL: https://hooks.slack.com/services/T.../B.../xxx
-# ✓ Webhook validated
-# ✓ Test notification sent
-# ✓ Configuration saved
-```
-
----
-
-### slack test
-
-Send a test notification to verify Slack configuration.
-
-**Syntax:**
-```bash
-watercooler slack test [options]
-```
-
-**Options:**
-- `--message <text>` - Custom test message (default: "Test notification from Watercooler")
-
-**Example:**
-```bash
-watercooler slack test --message "Hello from watercooler!"
-```
-
----
-
-### slack status
-
-Show current Slack configuration and connection status.
-
-**Syntax:**
-```bash
-watercooler slack status
-```
-
-**Output:**
-```
-Slack Integration Status
-========================
-Webhook URL: https://hooks.slack.com/services/T***/B***/*** (configured)
-Bot Token: xoxb-*** (configured)
-Notifications: enabled
-  - notify_on_say: true
-  - notify_on_ball_flip: true
-  - notify_on_status_change: true
-```
-
----
-
-### slack disable
-
-Disable Slack notifications.
-
-**Syntax:**
-```bash
-watercooler slack disable
-```
-
-**Note:** This removes the webhook URL from config but preserves other settings.
-
----
-
 ## Additional Resources
 
 - **[Installation Guide](INSTALLATION.md)** - Setup and configuration
-- **[Slack Integration](SLACK_INTEGRATION.md)** - Full bidirectional sync setup
 - **[Structured Entries](STRUCTURED_ENTRIES.md)** - Detailed entry format specification
-- **[Agent Registry](archive/AGENT_REGISTRY.md)** - Agent configuration and counterparts
-- **[Templates](archive/TEMPLATES.md)** - Template syntax and customization
 - **[MCP Server Guide](mcp-server.md)** - AI agent integration via MCP

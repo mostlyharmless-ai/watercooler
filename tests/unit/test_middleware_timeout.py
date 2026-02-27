@@ -37,12 +37,11 @@ def test_tool_timeouts_dict_is_importable():
 
 def test_known_tools_have_custom_timeouts():
     """Verify expected tools have custom timeout values."""
-    assert _TOOL_TIMEOUTS["watercooler_graph_health"] == 180.0
+    assert _TOOL_TIMEOUTS["watercooler_baseline_sync_status"] == 180.0
     assert _TOOL_TIMEOUTS["watercooler_graph_enrich"] == 300.0
     assert _TOOL_TIMEOUTS["watercooler_graph_recover"] == 300.0
     assert _TOOL_TIMEOUTS["watercooler_leanrag_run_pipeline"] == 300.0
     assert _TOOL_TIMEOUTS["watercooler_smart_query"] == 120.0
-    assert _TOOL_TIMEOUTS["watercooler_audit_branch_pairing"] == 120.0
 
 
 def test_default_timeout_applies_to_unknown_tool():
@@ -127,13 +126,13 @@ async def test_timeout_error_message_includes_server_alive(monkeypatch):
 
     Tool = _make_tool_class(run)
     _instrument(Tool)
-    tool = Tool("watercooler_graph_health")
+    tool = Tool("watercooler_baseline_sync_status")
 
-    monkeypatch.setitem(_mw._TOOL_TIMEOUTS, "watercooler_graph_health", 0.05)
+    monkeypatch.setitem(_mw._TOOL_TIMEOUTS, "watercooler_baseline_sync_status", 0.05)
     with pytest.raises(TimeoutError) as exc_info:
         await Tool.run(tool, {})
     msg = str(exc_info.value)
-    assert "watercooler_graph_health" in msg
+    assert "watercooler_baseline_sync_status" in msg
     assert "server is still running" in msg
     assert "0s timeout" in msg  # Verify timeout value appears in message
 
@@ -154,7 +153,7 @@ async def test_custom_timeout_applies_to_mapped_tool():
 
     Tool = _make_tool_class(run)
     _instrument(Tool)
-    tool = Tool("watercooler_graph_health")
+    tool = Tool("watercooler_baseline_sync_status")
 
     with mock.patch.object(_mw.asyncio, "wait_for", side_effect=spy_wait_for):
         await Tool.run(tool, {})
@@ -308,17 +307,17 @@ async def test_thread_offloaded_tool_timeout_fires(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Integration-style test: real _graph_health_impl with blocking mock
+# Integration-style test: real _baseline_sync_status_impl with blocking mock
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.anyio
-async def test_graph_health_impl_timeout_fires():
-    """Real _graph_health_impl with blocking check_graph_health — timeout fires.
+async def test_baseline_sync_status_impl_timeout_fires():
+    """Real _baseline_sync_status_impl with blocking check_graph_health — timeout fires.
 
     Unlike the generic mock tests above, this calls the actual tool implementation
     function with a mocked blocking dependency. It proves that asyncio.to_thread()
-    in _graph_health_impl yields control to the event loop, allowing
+    in _baseline_sync_status_impl yields control to the event loop, allowing
     asyncio.wait_for() to cancel it — exactly the middleware's mechanism.
 
     Addresses PR #172 review feedback requesting an integration test that validates
@@ -327,7 +326,7 @@ async def test_graph_health_impl_timeout_fires():
     import time
     from pathlib import Path
     from unittest.mock import MagicMock, patch
-    from watercooler_mcp.tools.graph import _graph_health_impl
+    from watercooler_mcp.tools.graph import _baseline_sync_status_impl
 
     mock_threads_dir = MagicMock(spec=Path)
     mock_threads_dir.exists.return_value = True
@@ -352,6 +351,6 @@ async def test_graph_health_impl_timeout_fires():
     ):
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(
-                _graph_health_impl(MagicMock(), code_path="/repo"),
+                _baseline_sync_status_impl(MagicMock(), code_path="/repo"),
                 timeout=0.05,
             )

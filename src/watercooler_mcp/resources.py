@@ -101,9 +101,20 @@ The **ball** indicates whose turn it is:
   - Use `mode="entries"` for thread entries (default)
   - Use `mode="entities"` for entity nodes (people, concepts)
   - Use `mode="episodes"` for episodic content
+  - Use `backend="leanrag"` for T3 hierarchical cluster search
 - `watercooler_smart_query` - Multi-tier intelligent query with auto-escalation
   - Best for natural language questions about project history
 - `watercooler_find_similar` - Find entries similar to a given entry
+- `watercooler_get_entry_provenance` - Bidirectional entry/episode provenance lookup
+  - `episode_uuid` → entry_id + thread_id (trace T2 results to T1 source)
+  - `entry_id` → episode list with chunk metadata (find episodes for an entry)
+
+### Federation Tools
+- `watercooler_federated_search` - Cross-namespace keyword search
+  - Searches across configured watercooler repositories
+  - Results are scored by keyword relevance, namespace proximity, and recency
+  - Parameters: `query` (required), `code_path`, `namespaces` (comma-separated override), `limit`
+  - Returns JSON envelope with `schema_version`, scored results, and per-namespace status
 
 ### Utility Tools
 - `watercooler_reindex` - Generate summary of all threads
@@ -123,6 +134,13 @@ watercooler_search(query="OAuth", mode="entries", code_path=".")
 ```
 
 This helps you avoid re-inventing solutions and stay aligned with prior decisions.
+
+## Reverse Provenance (T3 → T1)
+
+When a T3 (LeanRAG) result needs source verification:
+1. `watercooler_search(query=<leaf description>, mode="episodes")` → episode UUID
+2. `watercooler_get_entry_provenance(episode_uuid=<uuid>)` → entry_id + thread_id
+3. `watercooler_get_thread_entry(topic=<thread_id>, entry_id=<entry_id>)` → source
 
 ## Pro Tips
 

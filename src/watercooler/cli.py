@@ -27,10 +27,6 @@ def main(argv: list[str] | None = None) -> None:
     p_init.add_argument("--status", default="open", help="Initial status (default: open)")
     p_init.add_argument("--ball", default="codex", help="Initial ball owner (default: codex)")
     p_init.add_argument("--threads-dir", help="Threads directory (default: ./watercooler or $WATERCOOLER_DIR)")
-    p_init.add_argument("--body", help="Optional initial body text or @file path")
-    p_init.add_argument("--owner", help="Thread owner (default: Team)")
-    p_init.add_argument("--participants", help="Comma-separated list of participants")
-    p_init.add_argument("--templates-dir", help="Templates directory override")
 
     p_web = sub.add_parser("web-export", help="Generate HTML index")
     p_web.add_argument("--threads-dir")
@@ -48,7 +44,7 @@ def main(argv: list[str] | None = None) -> None:
     p_say.add_argument("--body", required=True, help="Entry body text or @file path")
     p_say.add_argument("--status", help="Optional status update")
     p_say.add_argument("--ball", help="Optional ball update (auto-flips if not provided)")
-    p_say.add_argument("--templates-dir", help="Templates directory override")
+
     p_say.add_argument("--agents-file", help="Agent registry JSON file")
 
     p_ack = sub.add_parser("ack", help="Acknowledge without ball flip")
@@ -61,7 +57,7 @@ def main(argv: list[str] | None = None) -> None:
     p_ack.add_argument("--body", help="Entry body text or @file path (default: ack)")
     p_ack.add_argument("--status", help="Optional status update")
     p_ack.add_argument("--ball", help="Optional ball update (does NOT auto-flip)")
-    p_ack.add_argument("--templates-dir", help="Templates directory override")
+
     p_ack.add_argument("--agents-file", help="Agent registry JSON file")
 
     p_handoff = sub.add_parser("handoff", help="Flip ball to counterpart and append handoff entry")
@@ -70,7 +66,7 @@ def main(argv: list[str] | None = None) -> None:
     p_handoff.add_argument("--agent", help="Agent performing handoff (defaults to Team)")
     p_handoff.add_argument("--role", default="pm", help="Agent role (default: pm)")
     p_handoff.add_argument("--note", help="Optional custom handoff message")
-    p_handoff.add_argument("--templates-dir", help="Templates directory override")
+
     p_handoff.add_argument("--agents-file", help="Agent registry JSON file")
 
     p_list = sub.add_parser("list", help="List threads")
@@ -158,7 +154,7 @@ def main(argv: list[str] | None = None) -> None:
     p_append.add_argument("--body", required=True, help="Entry body text or @file path")
     p_append.add_argument("--status", help="Optional status update")
     p_append.add_argument("--ball", help="Optional ball update (auto-flips if not provided)")
-    p_append.add_argument("--templates-dir", help="Templates directory override")
+
     p_append.add_argument("--agents-file", help="Agent registry JSON file")
 
     p_set_status = sub.add_parser("set-status", help="Update thread status")
@@ -220,30 +216,25 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "init-thread":
         from pathlib import Path
-        from .fs import read_body
-        from .path_resolver import resolve_threads_dir, resolve_templates_dir
-        from .commands import init_thread
+        from .path_resolver import resolve_threads_dir
+        from .commands_graph import init_thread
 
-        body = read_body(args.body)
         out = init_thread(
             args.topic,
             threads_dir=resolve_threads_dir(args.threads_dir),
             title=args.title,
             status=args.status,
             ball=args.ball,
-            body=body,
-            owner=args.owner,
-            participants=args.participants,
-            templates_dir=resolve_templates_dir(args.templates_dir) if args.templates_dir else None,
         )
         print(str(out))
         sys.exit(0)
 
     if args.cmd == "append-entry":
         from pathlib import Path
+        from ulid import ULID
         from .fs import read_body
-        from .path_resolver import resolve_threads_dir, resolve_templates_dir
-        from .commands import append_entry
+        from .path_resolver import resolve_threads_dir
+        from .commands_graph import append_entry
         from .agents import _load_agents_registry
 
         body = read_body(args.body)
@@ -258,15 +249,15 @@ def main(argv: list[str] | None = None) -> None:
             body=body,
             status=args.status,
             ball=args.ball,
-            templates_dir=resolve_templates_dir(args.templates_dir) if args.templates_dir else None,
             registry=registry,
+            entry_id=str(ULID()),
         )
         print(str(out))
         sys.exit(0)
 
     if args.cmd == "set-status":
         from pathlib import Path
-        from .commands import set_status
+        from .commands_graph import set_status
         from .path_resolver import resolve_threads_dir
 
         out = set_status(args.topic, threads_dir=resolve_threads_dir(args.threads_dir), status=args.status)
@@ -275,7 +266,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "set-ball":
         from pathlib import Path
-        from .commands import set_ball
+        from .commands_graph import set_ball
         from .path_resolver import resolve_threads_dir
 
         out = set_ball(args.topic, threads_dir=resolve_threads_dir(args.threads_dir), ball=args.ball)
@@ -368,9 +359,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "say":
         from pathlib import Path
+        from ulid import ULID
         from .fs import read_body
-        from .path_resolver import resolve_threads_dir, resolve_templates_dir
-        from .commands import say
+        from .path_resolver import resolve_threads_dir
+        from .commands_graph import say
         from .agents import _load_agents_registry
 
         body = read_body(args.body)
@@ -385,17 +377,18 @@ def main(argv: list[str] | None = None) -> None:
             body=body,
             status=args.status,
             ball=args.ball,
-            templates_dir=resolve_templates_dir(args.templates_dir) if args.templates_dir else None,
             registry=registry,
+            entry_id=str(ULID()),
         )
         print(str(out))
         sys.exit(0)
 
     if args.cmd == "ack":
         from pathlib import Path
+        from ulid import ULID
         from .fs import read_body
-        from .commands import ack
-        from .path_resolver import resolve_threads_dir, resolve_templates_dir
+        from .commands_graph import ack
+        from .path_resolver import resolve_threads_dir
         from .agents import _load_agents_registry
 
         body = read_body(args.body) if args.body else None
@@ -410,16 +403,17 @@ def main(argv: list[str] | None = None) -> None:
             body=body,
             status=args.status,
             ball=args.ball,
-            templates_dir=resolve_templates_dir(args.templates_dir) if args.templates_dir else None,
             registry=registry,
+            entry_id=str(ULID()),
         )
         print(str(out))
         sys.exit(0)
 
     if args.cmd == "handoff":
         from pathlib import Path
-        from .commands import handoff
-        from .path_resolver import resolve_threads_dir, resolve_templates_dir
+        from ulid import ULID
+        from .commands_graph import handoff
+        from .path_resolver import resolve_threads_dir
         from .agents import _load_agents_registry
 
         registry = _load_agents_registry(args.agents_file) if hasattr(args, 'agents_file') and args.agents_file else None
@@ -430,7 +424,7 @@ def main(argv: list[str] | None = None) -> None:
             role=args.role,
             note=args.note,
             registry=registry,
-            templates_dir=resolve_templates_dir(args.templates_dir) if args.templates_dir else None,
+            entry_id=str(ULID()),
         )
         print(str(out))
         sys.exit(0)

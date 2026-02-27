@@ -81,20 +81,22 @@ class MemoryGraph:
 
     def add_thread(
         self,
-        thread_path: Path,
+        threads_dir: Path,
+        topic: str,
         branch_context: Optional[str] = None,
     ) -> ThreadNode:
         """Add a thread to the graph.
 
         Args:
-            thread_path: Path to thread markdown file.
+            threads_dir: Path to the threads directory.
+            topic: Thread topic identifier.
             branch_context: Optional git branch name.
 
         Returns:
             The created ThreadNode.
         """
         thread, entries, edges = parse_thread_to_nodes(
-            thread_path, branch_context
+            threads_dir, topic, branch_context
         )
 
         # Store thread
