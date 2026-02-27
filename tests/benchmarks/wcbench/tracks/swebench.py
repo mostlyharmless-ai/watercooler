@@ -49,7 +49,7 @@ def run_swebench_track(cfg: RunConfig, *, layout: RunLayout, event_logger: Event
     cmd += ["--wc-mode", "baseline"]
   else:
     if cfg.swebench_wc_pack is None:
-      raise SystemExit("SWE-bench wc modes require --swebench-wc-pack")
+      raise ValueError("SWE-bench wc modes require --swebench-wc-pack")
     cmd += ["--wc-pack", str(cfg.swebench_wc_pack)]
     cmd += ["--wc-mode", cfg.mode]
     cmd += ["--wc-max-calls", str(cfg.wc_max_calls)]
@@ -115,5 +115,5 @@ def run_swebench_track(cfg: RunConfig, *, layout: RunLayout, event_logger: Event
   )
 
   if p.returncode != 0:
-    raise SystemExit(f"SWE-bench runner failed (exit={p.returncode}); see {output_dir}")
+    raise RuntimeError(f"SWE-bench runner failed (exit={p.returncode}); see {output_dir}")
 

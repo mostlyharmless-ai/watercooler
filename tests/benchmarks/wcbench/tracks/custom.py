@@ -82,16 +82,16 @@ def _load_guidance(cfg: RunConfig) -> str:
 def run_custom_track(cfg: RunConfig, *, layout: RunLayout, event_logger: EventLogger, run_summary: RunSummary) -> None:
   """Run the existing custom tasks under the standardized wcbench run layout."""
   if cfg.custom_tasks_path is None:
-    raise SystemExit("custom track requires RunConfig.custom_tasks_path")
+    raise ValueError("custom track requires RunConfig.custom_tasks_path")
   if cfg.custom_repo_dir is None:
-    raise SystemExit("custom track requires RunConfig.custom_repo_dir")
+    raise ValueError("custom track requires RunConfig.custom_repo_dir")
 
   # Load API keys from ~/.watercooler/credentials.toml (shared helper)
   try:
     from tests.benchmarks.scripts.run_swebench import setup_api_keys
     setup_api_keys()
-  except Exception:
-    pass
+  except Exception as exc:
+    log.warning("API key setup failed: %s", exc)
 
   tasks_cfg = json.loads(_read_text(cfg.custom_tasks_path))
   dockerfile_dir = cfg.custom_tasks_path.parent.parent  # tests/benchmarks/custom

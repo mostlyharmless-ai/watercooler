@@ -76,20 +76,20 @@ def run_memory_qa_track(
   run_summary: RunSummary,
 ) -> None:
   if cfg.wc_code_path is None:
-    raise SystemExit("memory_qa track requires --wc-code-path (RunConfig.wc_code_path)")
+    raise ValueError("memory_qa track requires --wc-code-path (RunConfig.wc_code_path)")
 
   tasks_path = Path(__file__).resolve().parent.parent.parent / "memory_qa" / "tasks.json"
   tasks = json.loads(_read_text(tasks_path))
   if not isinstance(tasks, list):
-    raise SystemExit("memory_qa tasks.json must be a JSON list")
+    raise ValueError("memory_qa tasks.json must be a JSON list")
 
   # Load API keys (shared helper) for Graphiti / LeanRAG backends.
   try:
     from tests.benchmarks.scripts.run_swebench import setup_api_keys
 
     setup_api_keys()
-  except Exception:
-    pass
+  except Exception as exc:
+    log.warning("API key setup failed: %s", exc)
 
   from tests.benchmarks.wcbench.memory_seed import SeededEntry, build_leanrag_index_from_group, seed_into_graphiti
   from tests.benchmarks.scripts.wc_text_tools import WcToolSession

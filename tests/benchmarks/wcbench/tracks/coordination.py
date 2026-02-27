@@ -21,14 +21,14 @@ def run_coordination_track(cfg: RunConfig, *, layout: RunLayout, event_logger: E
   Phase 2 ("AgentB"): start from a clean repo state, read the handoff note, implement and test.
   """
   if cfg.custom_tasks_path is None:
-    raise SystemExit("coordination track requires RunConfig.custom_tasks_path")
+    raise ValueError("coordination track requires RunConfig.custom_tasks_path")
 
   # Load API keys (shared helper)
   try:
     from tests.benchmarks.scripts.run_swebench import setup_api_keys
     setup_api_keys()
-  except Exception:
-    pass
+  except Exception as exc:
+    log.warning("API key setup failed: %s", exc)
 
   tasks_cfg = json.loads(Path(cfg.custom_tasks_path).read_text(encoding="utf-8"))
   dockerfile_dir = Path(cfg.custom_tasks_path).parent.parent
@@ -40,7 +40,7 @@ def run_coordination_track(cfg: RunConfig, *, layout: RunLayout, event_logger: E
       target = t
       break
   if target is None:
-    raise SystemExit(f"coordination task not found: {cfg.coordination_task_id}")
+    raise ValueError(f"coordination task not found: {cfg.coordination_task_id}")
 
   client = docker.from_env()
   # Reuse the custom bench image tag from config
