@@ -138,9 +138,12 @@ def mock_graphiti_config() -> MagicMock:
     config.embedding_api_key = "stub-embed-key"
     config.llm_model = "gpt-4o-mini"
     config.embedding_model = "bge-m3"
+    config.embedding_api_base = "http://localhost:8080/v1"
     config.database = "test_db"
     config.openai_api_key = None
     config.llm_api_base = "http://localhost:8000/v1"
+    config.falkordb_host = "localhost"
+    config.falkordb_port = 6379
     return config
 
 
@@ -423,6 +426,191 @@ class TestDiagnoseMemoryE2E:
         assert result_data["graphiti_enabled"] is True
         assert "backend_init" in result_data
         assert "✓" in result_data["backend_init"]
+        # T2 FalkorDB / graph / embedding fields (new in this PR)
+        assert result_data["falkordb_host"] == "localhost"
+        assert result_data["falkordb_port"] == 6379
+        assert result_data["graph_name"] == "test_db"
+        assert result_data["embedding_model"] == "bge-m3"
+        assert result_data["embedding_api_base"] == "http://localhost:8080/v1"
+        assert result_data["embedding_api_key_set"] is True
+
+    def test_diagnose_memory_graph_name_fallback(
+        self,
+        mock_context: MagicMock,
+        mock_graphiti_backend: MagicMock,
+        mock_graphiti_config: MagicMock,
+    ) -> None:
+        """graph_name falls back to 'watercooler' when config.database is None."""
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+
+        mock_graphiti_config.database = None
+
+        with patch(
+            "watercooler_mcp.memory.load_graphiti_config",
+            return_value=mock_graphiti_config,
+        ), patch(
+            "watercooler_mcp.memory.get_graphiti_backend",
+            return_value=mock_graphiti_backend,
+        ):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        assert result_data["graph_name"] == "watercooler"
+
+    def test_diagnose_memory_embedding_model_none(
+        self,
+        mock_context: MagicMock,
+        mock_graphiti_backend: MagicMock,
+        mock_graphiti_config: MagicMock,
+    ) -> None:
+        """embedding_model None surfaces as '(not set)' rather than null."""
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+
+        mock_graphiti_config.embedding_model = None
+
+        with patch(
+            "watercooler_mcp.memory.load_graphiti_config",
+            return_value=mock_graphiti_config,
+        ), patch(
+            "watercooler_mcp.memory.get_graphiti_backend",
+            return_value=mock_graphiti_backend,
+        ):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        assert result_data["embedding_model"] == "(not set)"
+
+    def test_diagnose_memory_falkordb_host_none(
+        self,
+        mock_context: MagicMock,
+        mock_graphiti_backend: MagicMock,
+        mock_graphiti_config: MagicMock,
+    ) -> None:
+        """falkordb_host falls back to 'localhost' when config value is None."""
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+
+        mock_graphiti_config.falkordb_host = None
+
+        with patch(
+            "watercooler_mcp.memory.load_graphiti_config",
+            return_value=mock_graphiti_config,
+        ), patch(
+            "watercooler_mcp.memory.get_graphiti_backend",
+            return_value=mock_graphiti_backend,
+        ):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        assert result_data["falkordb_host"] == "localhost"
+
+    def test_diagnose_memory_falkordb_port_none(
+        self,
+        mock_context: MagicMock,
+        mock_graphiti_backend: MagicMock,
+        mock_graphiti_config: MagicMock,
+    ) -> None:
+        """falkordb_port falls back to 6379 when config value is None."""
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+
+        mock_graphiti_config.falkordb_port = None
+
+        with patch(
+            "watercooler_mcp.memory.load_graphiti_config",
+            return_value=mock_graphiti_config,
+        ), patch(
+            "watercooler_mcp.memory.get_graphiti_backend",
+            return_value=mock_graphiti_backend,
+        ):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        assert result_data["falkordb_port"] == 6379
+
+    def test_diagnose_memory_embedding_api_base_none(
+        self,
+        mock_context: MagicMock,
+        mock_graphiti_backend: MagicMock,
+        mock_graphiti_config: MagicMock,
+    ) -> None:
+        """embedding_api_base None surfaces as '(not set)'."""
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+
+        mock_graphiti_config.embedding_api_base = None
+
+        with patch(
+            "watercooler_mcp.memory.load_graphiti_config",
+            return_value=mock_graphiti_config,
+        ), patch(
+            "watercooler_mcp.memory.get_graphiti_backend",
+            return_value=mock_graphiti_backend,
+        ):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        assert result_data["embedding_api_base"] == "(not set)"
+
+    def test_diagnose_memory_t3_graph_name_work_dir_set(
+        self, mock_context: MagicMock, monkeypatch
+    ) -> None:
+        """T3 graph_name is basename(work_dir) when work_dir is set."""
+        pytest.importorskip("watercooler_memory.backends.leanrag")
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+        from pathlib import Path
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
+
+        mock_cfg = MagicMock()
+        mock_cfg.leanrag_path = None
+        mock_cfg.work_dir = Path("/home/user/.watercooler/leanrag_myproject")
+        mock_cfg.falkordb_host = "localhost"
+        mock_cfg.falkordb_port = 6379
+        mock_cfg.llm_api_key = None
+        mock_cfg.llm_api_base = None
+        mock_cfg.llm_model = None
+        mock_cfg.embedding_api_base = None
+        mock_cfg.embedding_model = None
+
+        mock_backend = MagicMock()
+        mock_backend.has_incremental_state.return_value = False
+        mock_backend_cls = MagicMock(return_value=mock_backend)
+
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=mock_cfg), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", mock_backend_cls):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        assert result_data["t3_leanrag"]["graph_name"] == "leanrag_myproject"
+
+    def test_diagnose_memory_t3_graph_name_work_dir_none(
+        self, mock_context: MagicMock, monkeypatch
+    ) -> None:
+        """T3 graph_name is '(not set)' when work_dir is None."""
+        pytest.importorskip("watercooler_memory.backends.leanrag")
+        from watercooler_mcp.tools.memory import _diagnose_memory_impl
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
+
+        mock_cfg = MagicMock()
+        mock_cfg.leanrag_path = None
+        mock_cfg.work_dir = None
+        mock_cfg.falkordb_host = "localhost"
+        mock_cfg.falkordb_port = 6379
+        mock_cfg.llm_api_key = None
+        mock_cfg.llm_api_base = None
+        mock_cfg.llm_model = None
+        mock_cfg.embedding_api_base = None
+        mock_cfg.embedding_model = None
+
+        mock_backend = MagicMock()
+        mock_backend.has_incremental_state.return_value = False
+        mock_backend_cls = MagicMock(return_value=mock_backend)
+
+        with patch("watercooler_mcp.memory.load_leanrag_config", return_value=mock_cfg), \
+             patch("watercooler_memory.backends.leanrag.LeanRAGBackend", mock_backend_cls):
+            result = _diagnose_memory_impl(ctx=mock_context)
+
+        result_data = json.loads(result.content[0].text)
+        assert result_data["t3_leanrag"]["graph_name"] == "(not set)"
 
     def test_diagnose_memory_shows_python_info(
         self, mock_context: MagicMock, monkeypatch
