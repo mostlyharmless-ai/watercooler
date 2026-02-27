@@ -18,8 +18,6 @@ import socket
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 import pytest
 
 from .ground_truth import (
@@ -28,6 +26,8 @@ from .ground_truth import (
     build_paraphrase_pairs,
     build_recall_goldens,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================

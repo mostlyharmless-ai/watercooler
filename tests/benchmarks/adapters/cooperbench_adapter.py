@@ -127,16 +127,19 @@ class WatercoolerMessagingConnector:
         twice.  Returns dicts with keys ``from``, ``to``, ``content``,
         ``timestamp`` — matching CooperBench's message format.
         """
-        result = read_thread_from_graph(self.threads_dir, self.topic)
-        if result is None:
-            return []
-
-        _, entries = result
         with self._lock:
+            result = read_thread_from_graph(self.threads_dir, self.topic)
+            if result is None:
+                return []
+
+            _, entries = result
             new_entries = [
                 e for e in entries[self._cursor:]
                 if not self._is_own_entry(e.agent)
             ]
+            # Advance past *all* entries (including own) so they aren't
+            # re-examined on the next call.  Own messages are excluded from
+            # the return value but still count as "read".
             self._cursor = len(entries)
 
         return [
@@ -164,12 +167,13 @@ class WatercoolerMessagingConnector:
 
     def peek(self) -> int:
         """Count unread messages from other agents without consuming them."""
-        result = read_thread_from_graph(self.threads_dir, self.topic)
-        if result is None:
-            return 0
+        with self._lock:
+            result = read_thread_from_graph(self.threads_dir, self.topic)
+            if result is None:
+                return 0
 
-        _, entries = result
-        return sum(
-            1 for e in entries[self._cursor:]
-            if not self._is_own_entry(e.agent)
-        )
+            _, entries = result
+            return sum(
+                1 for e in entries[self._cursor:]
+                if not self._is_own_entry(e.agent)
+            )

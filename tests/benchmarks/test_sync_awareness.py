@@ -45,6 +45,13 @@ def test_code_branch_filtering(benchmark_graph, branch_entries):
             f"{e.code_branch} (expected {branch_entries['branch']})"
         )
 
+    # Verify entries from other branches are excluded
+    returned_ids = {e.entry_id for e in entries}
+    assert "BMDP001" not in returned_ids, (
+        "Entry BMDP001 (code_branch='main') should be excluded by "
+        f"code_branch='{branch_entries['branch']}' filter"
+    )
+
 
 @pytest.mark.benchmark
 def test_entry_provenance(benchmark_graph, entries_with_commits):

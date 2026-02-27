@@ -52,9 +52,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--cooperbench-dir",
         type=Path,
-        default=Path.home()
-        / "Work/Personal/MostlyHarmless-AI/repo/CooperBench",
-        help="Path to CooperBench clone",
+        default=Path(os.environ["COOPERBENCH_DIR"]) if "COOPERBENCH_DIR" in os.environ else None,
+        help="Path to CooperBench clone (or set COOPERBENCH_DIR env var)",
+        required="COOPERBENCH_DIR" not in os.environ,
     )
 
     # Task selection: either --subset OR --repo/--task/--features

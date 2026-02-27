@@ -22,6 +22,13 @@ from .metrics import (
     wilson_confidence_interval,
 )
 
+# Minimum acceptable thresholds for keyword-only search over 5 goldens.
+# With file-based search (no embeddings), keyword matching is inherently
+# limited — 0.4 mean F1@5 and 0.5 top-1 hit rate represent a baseline
+# that should hold as long as entry titles/bodies contain query terms.
+MIN_MEAN_F1_AT_5 = 0.4
+MIN_TOP1_HIT_RATE = 0.5
+
 _RECALL_GOLDENS = build_recall_goldens()
 
 
@@ -71,8 +78,8 @@ def test_aggregate_recall_metrics(benchmark_graph, recall_goldens):
     hit_rate = sum(binary_hits) / len(binary_hits)
     ci_lo, ci_hi = wilson_confidence_interval(sum(binary_hits), len(binary_hits))
 
-    assert mean_f1 >= 0.4, f"Mean F1@5: {mean_f1:.3f}"
-    assert hit_rate >= 0.5, (
+    assert mean_f1 >= MIN_MEAN_F1_AT_5, f"Mean F1@5: {mean_f1:.3f}"
+    assert hit_rate >= MIN_TOP1_HIT_RATE, (
         f"Top-1 hit rate: {hit_rate:.2f} (CI: [{ci_lo:.2f}, {ci_hi:.2f}])"
     )
 
