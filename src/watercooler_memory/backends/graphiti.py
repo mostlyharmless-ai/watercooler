@@ -232,6 +232,32 @@ def _best_extra_match(missing_field: str, extras: set[str]) -> str | None:
 # Graphiti responses are 2-3 levels deep; this is a defensive ceiling.
 MAX_NORMALIZE_DEPTH = 10
 
+# Sentinel for detecting truly-unset Pydantic fields (vs fields with a default).
+try:
+    from pydantic_core import PydanticUndefined as _PYDANTIC_UNDEFINED
+except Exception:  # pragma: no cover
+    _PYDANTIC_UNDEFINED = object()  # type: ignore[assignment]
+
+
+def _default_for_annotation(annotation: Any) -> Any:
+    """Return a safe empty default for a Pydantic field annotation."""
+    origin = getattr(annotation, "__origin__", None)
+    if origin is list:
+        return []
+    if origin is dict:
+        return {}
+    if annotation in (list, tuple, set):
+        return []
+    if annotation is dict:
+        return {}
+    if annotation is str:
+        return ""
+    if annotation is bool:
+        return False
+    if annotation in (int, float):
+        return 0
+    return []
+
 
 def _normalize_json_response(
     data: dict[str, Any], response_model: type,
@@ -291,35 +317,12 @@ def _normalize_json_response(
     # Some OpenAI-compatible servers return `{}` or omit required keys even when
     # the prompt asks for structured JSON. Prefer an empty-but-valid payload
     # over hard failure so the episode can still be ingested.
-    try:
-        from pydantic_core import PydanticUndefined
-    except Exception:  # pragma: no cover
-        PydanticUndefined = object()  # type: ignore[assignment]
-
-    def _default_for(annotation: Any) -> Any:
-        origin = getattr(annotation, "__origin__", None)
-        if origin is list:
-            return []
-        if origin is dict:
-            return {}
-        if annotation in (list, tuple, set):
-            return []
-        if annotation is dict:
-            return {}
-        if annotation is str:
-            return ""
-        if annotation is bool:
-            return False
-        if annotation in (int, float):
-            return 0
-        return []
-
     for field_name, field_info in response_model.model_fields.items():
         if field_name in remapped:
             continue
         if not field_info.is_required():
             continue
-        if getattr(field_info, "default", PydanticUndefined) is not PydanticUndefined:
+        if getattr(field_info, "default", _PYDANTIC_UNDEFINED) is not _PYDANTIC_UNDEFINED:
             remapped[field_name] = field_info.default
             continue
         default_factory = getattr(field_info, "default_factory", None)
@@ -329,7 +332,7 @@ def _normalize_json_response(
                 continue
             except Exception:
                 pass
-        remapped[field_name] = _default_for(field_info.annotation)
+        remapped[field_name] = _default_for_annotation(field_info.annotation)
 
     # --- recurse into nested Pydantic models ---
     for field_name, field_info in response_model.model_fields.items():
@@ -345,7 +348,7 @@ def _normalize_json_response(
             v = value
             if isinstance(v, list):
                 v = v[0] if v else 0
-            if isinstance(v, bool):
+            if isinstance(v, bool):  # must check before int (bool is subclass)
                 remapped[field_name] = int(v)
             elif isinstance(v, int):
                 remapped[field_name] = v

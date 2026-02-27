@@ -399,9 +399,9 @@ class LeanRAGBackend(MemoryBackend):
         # present even when unset (e.g., no password for local FalkorDB).
         os.environ.setdefault("FALKORDB_PASSWORD", "")
 
-        # LeanRAG's config.yaml currently includes legacy MySQL placeholders
-        # even when `database.backend='falkordb'`. Provide safe defaults so
-        # config loading doesn't fail in FalkorDB-only deployments.
+        # LeanRAG config.yaml references MYSQL_* even in FalkorDB-only deployments.
+        # These are never used for actual connections; they prevent config-load
+        # failures from unresolved env var substitutions.
         os.environ.setdefault("MYSQL_HOST", "localhost")
         os.environ.setdefault("MYSQL_PORT", "3306")
         os.environ.setdefault("MYSQL_USER", "root")
@@ -598,7 +598,6 @@ class LeanRAGBackend(MemoryBackend):
         Always overwrites any existing file to ensure fresh data is used.
         """
         chunk_file = work_dir / "threads_chunk.json"
-
 
         serialized = []
         for item in chunks.chunks:

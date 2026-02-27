@@ -78,7 +78,7 @@ def run_memory_qa_track(
   if cfg.wc_code_path is None:
     raise SystemExit("memory_qa track requires --wc-code-path (RunConfig.wc_code_path)")
 
-  tasks_path = Path("tests/benchmarks/memory_qa/tasks.json")
+  tasks_path = Path(__file__).resolve().parent.parent.parent / "memory_qa" / "tasks.json"
   tasks = json.loads(_read_text(tasks_path))
   if not isinstance(tasks, list):
     raise SystemExit("memory_qa tasks.json must be a JSON list")
