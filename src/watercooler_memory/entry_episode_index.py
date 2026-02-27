@@ -383,6 +383,9 @@ class EntryEpisodeIndex:
             )
 
             self._by_chunk[chunk_id] = mapping
+            # Allow reverse provenance lookup for chunked episodes.
+            # `wc-provenance` resolves episode_uuid -> entry_id.
+            self._by_episode[episode_uuid] = entry_id
 
             # Maintain ordered list of chunks per entry
             if entry_id not in self._chunks_by_entry:
