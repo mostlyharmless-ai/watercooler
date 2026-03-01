@@ -2,12 +2,26 @@ from __future__ import annotations
 
 import time
 import os
+import re
 from pathlib import Path
 
 from tests.benchmarks.wcbench.config import RunConfig
 from tests.benchmarks.wcbench.events import EventLogger
 from tests.benchmarks.wcbench.run_layout import make_run_layout
 from tests.benchmarks.wcbench.summary import RunSummary
+
+
+_COMPOSE_PROJECT_RE = re.compile(r"[^a-z0-9_-]+")
+
+
+def _sanitize_compose_project_name(run_id: str) -> str:
+  """Docker compose project names must be [a-z0-9][a-z0-9_-]*."""
+  s = (run_id or "").strip().lower()
+  s = _COMPOSE_PROJECT_RE.sub("-", s)
+  s = re.sub(r"-+", "-", s).strip("-_")
+  if not s or not s[0].isalnum():
+    s = f"wcbench-{s}" if s else "wcbench"
+  return s[:63]
 
 
 def run_wcbench(cfg: RunConfig) -> None:
@@ -31,7 +45,7 @@ def run_wcbench(cfg: RunConfig) -> None:
     os.environ["FALKORDB_PORT"] = str(falkor_port)
     compose_spec = ComposeSpec(
       compose_file=compose_file,
-      project_name=f"wcbench-{cfg.run_id}",
+      project_name=_sanitize_compose_project_name(f"wcbench-{cfg.run_id}"),
       env={"FALKORDB_PORT": str(falkor_port)},
     )
     logger.emit(

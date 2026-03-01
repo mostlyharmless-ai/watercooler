@@ -14,6 +14,14 @@ from tests.benchmarks.wcbench.summary import RunSummary, TaskSummary
 log = logging.getLogger(__name__)
 
 
+def _fraction_found(expected: list[str], observed_text: str) -> float:
+  if not expected:
+    return 1.0
+  text = observed_text.lower()
+  hits = sum(1 for item in expected if str(item).lower() in text)
+  return float(hits) / float(len(expected))
+
+
 def run_coordination_track(cfg: RunConfig, *, layout: RunLayout, event_logger: EventLogger, run_summary: RunSummary) -> None:
   """CooperBench-like subset: two-phase handoff under overlap.
 
@@ -125,6 +133,9 @@ def run_coordination_track(cfg: RunConfig, *, layout: RunLayout, event_logger: E
       workdir=workdir,
     )
 
+    handoff_text = str(agent_a.raw.get("model_patch", "") or "")
+    expected_handoff_facts = list(target.get("coordination_expected_facts", []) or [])
+    handoff_fact_recall = _fraction_found(expected_handoff_facts, handoff_text)
     run_summary.tasks.append(
       TaskSummary(
         task_id=phase1_id,
@@ -137,10 +148,24 @@ def run_coordination_track(cfg: RunConfig, *, layout: RunLayout, event_logger: E
         wc_entry_ids_returned=list(agent_a.raw.get("wc_entry_ids_returned", []) or []),
         bash_commands=int(agent_a.raw.get("bash_commands", 0) or 0),
         test_runs=int(agent_a.raw.get("test_runs", 0) or 0),
-        details={"patch_chars": len(agent_a.model_patch or "")},
+        details={
+          "patch_chars": len(agent_a.model_patch or ""),
+          "handoff_fact_recall_completeness": handoff_fact_recall,
+        },
       )
     )
-    event_logger.emit("task_end", run_id=cfg.run_id, task_id=phase1_id, payload={"ok": True})
+    event_logger.emit(
+      "task_end",
+      run_id=cfg.run_id,
+      task_id=phase1_id,
+      payload={
+        "ok": True,
+        "steps": int(agent_a.steps),
+        "details": {
+          "handoff_fact_recall_completeness": handoff_fact_recall,
+        },
+      },
+    )
 
     # Reset repo to force overlap/handoff usage
     exec_in_container(container, "git reset --hard HEAD", workdir=workdir)
@@ -195,6 +220,14 @@ def run_coordination_track(cfg: RunConfig, *, layout: RunLayout, event_logger: E
     test_exit, test_out = exec_in_container(container, test_cmd, workdir=workdir)
     ok = test_exit == 0
 
+    expected_citation_ids = set(str(x) for x in (target.get("coordination_expected_citation_ids", []) or []) if str(x))
+    observed_citations = set(str(x) for x in (agent_b.raw.get("wc_entry_ids_returned", []) or []) if str(x))
+    citation_accuracy = 1.0
+    if expected_citation_ids:
+      citation_accuracy = float(len(expected_citation_ids.intersection(observed_citations))) / float(
+        len(expected_citation_ids)
+      )
+
     run_summary.tasks.append(
       TaskSummary(
         task_id=phase2_id,
@@ -207,7 +240,15 @@ def run_coordination_track(cfg: RunConfig, *, layout: RunLayout, event_logger: E
         wc_entry_ids_returned=list(agent_b.raw.get("wc_entry_ids_returned", []) or []),
         bash_commands=int(agent_b.raw.get("bash_commands", 0) or 0),
         test_runs=int(agent_b.raw.get("test_runs", 0) or 0),
-        details={"test_command": test_cmd, "test_output": test_out},
+        details={
+          "test_command": test_cmd,
+          "test_output": test_out,
+          "citation_required": bool(expected_citation_ids),
+          "citation_gold_ids": sorted(expected_citation_ids),
+          "citation_observed_ids": sorted(observed_citations),
+          "citation_accuracy": citation_accuracy,
+          "speed_to_first_correct_patch_test_steps": int(agent_b.steps),
+        },
       )
     )
 
@@ -217,7 +258,22 @@ def run_coordination_track(cfg: RunConfig, *, layout: RunLayout, event_logger: E
       task_id=phase2_id,
       payload={"command": test_cmd, "exit_code": test_exit, "passed": ok, "output": test_out[:8000]},
     )
-    event_logger.emit("task_end", run_id=cfg.run_id, task_id=phase2_id, payload={"ok": ok})
+    event_logger.emit(
+      "task_end",
+      run_id=cfg.run_id,
+      task_id=phase2_id,
+      payload={
+        "ok": ok,
+        "steps": int(agent_b.steps),
+        "details": {
+          "citation_required": bool(expected_citation_ids),
+          "citation_gold_ids": sorted(expected_citation_ids),
+          "citation_observed_ids": sorted(observed_citations),
+          "citation_accuracy": citation_accuracy,
+          "speed_to_first_correct_patch_test_steps": int(agent_b.steps),
+        },
+      },
+    )
 
   finally:
     try:

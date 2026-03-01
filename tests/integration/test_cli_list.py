@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SRC = _REPO_ROOT / "src"
 
 
 def _relative_threads_dir() -> str:
@@ -11,7 +15,18 @@ def _relative_threads_dir() -> str:
 
 
 def run_cli(*args: str, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([sys.executable, "-m", "watercooler.cli", *args], capture_output=True, text=True, cwd=cwd)
+    env = os.environ.copy()
+    # When cwd is set, PYTHONPATH may be relative and break; ensure absolute src path.
+    if cwd:
+        parts = [str(_SRC)] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+        env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(parts))
+    return subprocess.run(
+        [sys.executable, "-m", "watercooler.cli", *args],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env=env,
+    )
 
 
 def test_list_shows_threads(tmp_path: Path):

@@ -121,6 +121,21 @@ def run_custom_track(cfg: RunConfig, *, layout: RunLayout, event_logger: EventLo
       run_id=cfg.run_id,
       task_id=task_id,
     )
+    for thread_seed in list(task.get("additional_seed_threads", []) or []):
+      if not isinstance(thread_seed, dict):
+        continue
+      add_topic = str(thread_seed.get("topic") or "").strip()
+      if not add_topic:
+        continue
+      add_entries = list(thread_seed.get("entries", []) or [])
+      _seed_threads(
+        threads_dir,
+        add_topic,
+        add_entries,
+        event_logger=event_logger,
+        run_id=cfg.run_id,
+        task_id=task_id,
+      )
 
     raw_phases = task.get("phases")
     has_phases = isinstance(raw_phases, list) and len(raw_phases) > 0
@@ -235,6 +250,9 @@ def run_custom_track(cfg: RunConfig, *, layout: RunLayout, event_logger: EventLo
             "test_command": test_cmd if is_last else "",
             "test_output": test_out,
             "reset_repo_after": bool(phase.get("reset_repo_after", False)),
+            "citation_required": bool(task.get("citation_required", False)),
+            "citation_gold_ids": list(task.get("citation_gold_ids", []) or []),
+            "citation_observed_ids": list(agent_run.raw.get("wc_entry_ids_returned", []) or []),
           },
         )
         run_summary.tasks.append(task_summary)
@@ -263,6 +281,7 @@ def run_custom_track(cfg: RunConfig, *, layout: RunLayout, event_logger: EventLo
             "wc_commands": task_summary.wc_commands,
             "wc_tools_used": task_summary.wc_tools_used,
             "wc_entry_ids_returned": task_summary.wc_entry_ids_returned[:10],
+            "details": task_summary.details,
           },
         )
 

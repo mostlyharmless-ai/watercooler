@@ -18,6 +18,7 @@ EventType = Literal[
   "shell_command",
   "shell_result",
   "test_result",
+  "seed_error",
 ]
 
 
