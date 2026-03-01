@@ -40,10 +40,13 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TASKS_PATH = Path("tests/benchmarks/agent_value/tasks.json")
 
-# Regex matching the watercooler MCP tools we want the agent to see
+# Regex matching tools the agent can use: base tools + watercooler MCP tools.
+# filter_tools_regex applies to ALL tools (not just MCP), so we must include
+# the built-in TerminalTool and FileEditorTool names too.
 _WC_TOOLS_REGEX = (
-  "watercooler_(search|smart_query|read_thread|get_thread_entry"
-  "|list_thread_entries|list_threads)"
+  "(terminal|file_editor|str_replace_editor"
+  "|watercooler_(search|smart_query|read_thread|get_thread_entry"
+  "|list_thread_entries|list_threads))"
 )
 
 
