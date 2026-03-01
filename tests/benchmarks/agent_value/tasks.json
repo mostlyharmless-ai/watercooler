@@ -1,0 +1,226 @@
+{
+  "version": 1,
+  "description": "Agent value benchmark: does an agent with watercooler tools succeed at tasks that an agent without them fails?",
+  "tasks": [
+    {
+      "task_id": "a1-decision-recall-notification-mechanism",
+      "category": "decision_recall",
+      "title": "Choose the right notification mechanism based on prior decision",
+      "problem_statement": "You are working on a dashboard that needs push notification support.\n\nThe team has previously discussed and decided on a notification mechanism. Your task:\n1. Write a file called DECISION.md that states which notification mechanism was chosen (Pusher, WebSockets, long polling, or SSE).\n2. Include the specific endpoint path that was decided on.\n3. Include the polling interval that was specified.\n\nDo NOT guess — find the decision that was already made.",
+      "seed_threads": [
+        {
+          "thread_id": "system-design-debug-polish",
+          "entries": [
+            {
+              "entry_id": "01KF09DJ1BFF40N2K7C8M5SARA",
+              "title": "Decision: Long Polling for Dashboard Push Notifications",
+              "timestamp": "2026-01-15T07:37:50Z",
+              "body": "Decision: Selected approach is long polling with DB check (no external dependencies).\n\nRationale: Paid Neon tier removes connection/compute concerns. No external service dependency (vs Pusher). Simple implementation (~2 hours). Less than 2 second update latency.\n\nNew Endpoint: GET /api/dashboard/wait-for-update?since=<ISO timestamp>. Holds request open for up to 25 seconds. Polls DB every 1.5 seconds for lastSyncedAt changes. Returns immediately when update detected. Client loops: receive response, fetch data, start new long poll.\n\nAlternatives rejected: Pusher (external dependency, $49/mo), WebSockets (complex session management), SSE (limited browser support for auth headers)."
+            }
+          ]
+        }
+      ],
+      "test_cmd": "grep -qi 'long polling' DECISION.md && grep -q '/api/dashboard/wait-for-update' DECISION.md && grep -q '1.5' DECISION.md",
+      "workspace_setup": []
+    },
+    {
+      "task_id": "a2-decision-recall-production-testing-policy",
+      "category": "decision_recall",
+      "title": "Document the production testing policy",
+      "problem_statement": "You need to document the team's deployment and testing policy.\n\nThe team has an established policy about testing in production environments. Your task:\n1. Write a file called POLICY.md that states the policy on testing in production.\n2. Include the branch-to-environment mapping (which branches deploy where).\n3. State which deployment methods are allowed.\n\nDo NOT make up a policy — find the one that was already established.",
+      "seed_threads": [
+        {
+          "thread_id": "service-reference-vercel",
+          "entries": [
+            {
+              "entry_id": "01KF2ESRY5TT074BBFH9DEHRNX",
+              "title": "POLICY DECISION: Never Test in Production - Branch Workflow Reinforced",
+              "timestamp": "2026-01-16T03:50:21Z",
+              "body": "POLICY: WE DO NOT TEST IN PRODUCTION. This is an absolute rule. Testing happens in Preview environment, never Production.\n\nBranch to Environment Mapping (ENFORCED):\n- stable branch -> Production (release-ready code only)\n- main branch -> Preview (all development/testing)\n- staging branch -> Preview (staging/QA)\n- feature/* branches -> Preview (auto-generated preview URL, feature development)\n\nDeployment Methods: Use GitHub Push (Auto-Deploy). Never use Vercel CLI deploy to production. Never push directly to stable without PR review."
+            }
+          ]
+        }
+      ],
+      "test_cmd": "grep -qi 'never test in production\\|do not test in production' POLICY.md && grep -qi 'stable.*production' POLICY.md && grep -qi 'main.*preview' POLICY.md",
+      "workspace_setup": []
+    },
+    {
+      "task_id": "b1-rehydration-neon-transfer-summary",
+      "category": "context_rehydration",
+      "title": "Summarize the Neon transfer spike root cause and resolution",
+      "problem_statement": "There was a major database transfer spike incident with the Neon PostgreSQL database.\n\nYour task:\n1. Write a file called INCIDENT_SUMMARY.md summarizing:\n   - The root cause of the transfer spike\n   - The specific data volume involved\n   - What optimization was applied\n   - The before and after transfer rates\n\nDo NOT speculate — find the actual incident details from project records.",
+      "seed_threads": [
+        {
+          "thread_id": "neon-database-transfer-optimization",
+          "entries": [
+            {
+              "entry_id": "01KADE9VNTAF47AF5RBWNTY489",
+              "title": "Root Cause Found: Backfill Script + Delete-All Pattern",
+              "timestamp": "2025-11-19T06:54:48Z",
+              "body": "Root Cause Identified: Found the actual cause of the 3.37GB write transfer. Timeline: Nov 18 - 89 snapshots created across 3 repo syncs. Nov 19 - All 89 records updated by backfill script. The Problem: Each sync uses deleteMany + createMany pattern. Even for first sync (no existing data), deleteMany still executes. 3 syncs times delete plus create equals 6 write operations. 89 snapshots times 40KB equals about 3.6MB per operation."
+            },
+            {
+              "entry_id": "01KADEBVKTHDVNZX2PVX4JW678",
+              "title": "Critical Finding: Migration Table Rewrite Caused 3.37GB Write",
+              "timestamp": "2025-11-19T06:55:55Z",
+              "body": "Root Cause: Migration Table Rewrite. The migration on Nov 19 at 01:27:34 added 5 columns with DEFAULT values to an existing table with 89 rows. When you add NOT NULL columns with DEFAULT values, PostgreSQL rewrites the entire table to populate the defaults. This is a full table copy operation including all data pages, all indexes (2MB), WAL entries, and table metadata."
+            },
+            {
+              "entry_id": "01KAG43JE6GBRA6GZEXRR8649W",
+              "title": "Status Update: Transfer Rate Stabilized at 21.5 MB/day",
+              "timestamp": "2025-11-20T07:54:19Z",
+              "body": "Transfer rate has stabilized at a sustainable level. All three optimization phases are working correctly. The 5GB limit will now last approximately 233 days instead of 1 day - a 233x improvement. Current transfer rate: 37.66 MB over 1.75 days = approximately 21.5 MB/day. Baseline (pre-optimization) was 4800 MB/day. Phase 1+2 target was 53 MB/day, actual is 21.5 MB/day (59% better than target)."
+            }
+          ]
+        }
+      ],
+      "test_cmd": "grep -qi '3.37\\|3.37GB' INCIDENT_SUMMARY.md && grep -qi '21.5' INCIDENT_SUMMARY.md && grep -qi '233' INCIDENT_SUMMARY.md",
+      "workspace_setup": []
+    },
+    {
+      "task_id": "b2-rehydration-slack-integration-status",
+      "category": "context_rehydration",
+      "title": "Report current state of Slack integration",
+      "problem_statement": "You need to write a status report on the Slack integration work.\n\nYour task:\n1. Write a file called SLACK_STATUS.md that describes:\n   - Which phases of the Slack integration are complete\n   - What is currently being worked on (active work)\n   - Any known debugging issues\n\nDo NOT speculate — find the actual project status from records.",
+      "seed_threads": [
+        {
+          "thread_id": "slack-integration",
+          "entries": [
+            {
+              "entry_id": "01KFD58Q924S3HN1N05S9PBFHA",
+              "title": "Implementation Plan: Multi-Workspace OAuth, Channel Binding & Branch Switching",
+              "timestamp": "2026-01-20T07:35:24Z",
+              "body": "Current State: watercooler-site has comprehensive Slack integration infrastructure including OAuth flow, token service, events webhook, interactions handler, and Block Kit formatting in TypeScript. Prisma schema includes SlackWorkspace, SlackThreadMapping, SlackChannelConfig, ProcessedSlackEvent. Critical Gap: No workspace is currently connected. Implementation Plan covers Phase 1 (Multi-Workspace OAuth), Phase 2 (Channel-repo binding), Phase 3 (Slash commands), Phase 4 (Token service)."
+            },
+            {
+              "entry_id": "01KFH7HK64SHKSR34453AHBZKE",
+              "title": "Status Snapshot: Slack Integration Complete State (2026-01-21)",
+              "timestamp": "2026-01-21T21:32:09Z",
+              "body": "Implementation Status Overview: Phase 1 (OAuth flow, Connect Slack button) COMPLETE. Phase 2 (Channel-repo binding, baseline sync) COMPLETE. Phase 3 (Slash commands: sync, rebuild, help) COMPLETE. Phase 4 (Multi-workspace token service) COMPLETE. Active Work: Phase 5 Legacy Auth Removal - remove all SLACK_BOT_TOKEN env var fallbacks. Current Debugging Issues: Add Entry modal view_submission not reaching Vercel, Close modal MCP success but data not persisted."
+            }
+          ]
+        }
+      ],
+      "test_cmd": "grep -qi 'phase 1.*complete\\|phase 1.*done' SLACK_STATUS.md && grep -qi 'phase 5\\|legacy auth' SLACK_STATUS.md && grep -qi 'view_submission\\|modal' SLACK_STATUS.md",
+      "workspace_setup": []
+    },
+    {
+      "task_id": "c1-temporal-prisma-corrected-root-cause",
+      "category": "temporal_reasoning",
+      "title": "Identify the CORRECT root cause of the Prisma migration failure",
+      "problem_statement": "There was a Prisma migration failure. The initial analysis was later corrected with a more accurate root cause.\n\nYour task:\n1. Write a file called ROOT_CAUSE.md with:\n   - The CORRECT (most recent) root cause of the migration failure\n   - Explicitly state what the INCORRECT earlier analysis said\n   - Explain why the earlier analysis was wrong\n\nIMPORTANT: There are two analyses — an initial one and a corrected one. You must identify and use the CORRECTED root cause, not the initial one.",
+      "seed_threads": [
+        {
+          "thread_id": "postmortem-prisma-migration-workflow",
+          "entries": [
+            {
+              "entry_id": "01KEHCN2YG59WC6PGNY3DFTP6N",
+              "title": "Postmortem: Prisma Migration Workflow Deviation",
+              "timestamp": "2026-01-09T12:45:51Z",
+              "body": "Initial Analysis: The migration failure was caused by workflow deviation — running migrate dev instead of db push, which created an inconsistent migration history. The team deviated from the established migration workflow."
+            },
+            {
+              "entry_id": "01KEKEWMV0TCW7B4Q111NV6X7K",
+              "title": "CORRECTED: Root Cause - Index vs Constraint Mismatch",
+              "timestamp": "2026-01-10T08:03:19Z",
+              "body": "CORRECTION: The migration failure was NOT caused by workflow deviation. The actual root cause was an index vs constraint mismatch: db push creates unique constraints as indexes visible in pg_indexes, while prisma migrate checks pg_constraint. When migrate runs, it doesn't see the constraint in pg_constraint (even though the index exists in pg_indexes) and tries to create it again, causing a conflict. This supersedes the earlier analysis that blamed workflow deviation."
+            }
+          ]
+        }
+      ],
+      "test_cmd": "grep -qi 'index.*constraint\\|constraint.*mismatch\\|pg_indexes.*pg_constraint' ROOT_CAUSE.md && grep -qi 'workflow deviation' ROOT_CAUSE.md && grep -qi 'incorrect\\|wrong\\|supersede\\|corrected' ROOT_CAUSE.md",
+      "workspace_setup": []
+    },
+    {
+      "task_id": "c2-temporal-dashboard-data-access",
+      "category": "temporal_reasoning",
+      "title": "Describe how the dashboard currently accesses thread data",
+      "problem_statement": "The way the dashboard accesses thread data has changed over time. There was an old approach that was replaced.\n\nYour task:\n1. Write a file called DATA_ACCESS.md with:\n   - The CURRENT approach for how the dashboard accesses thread data\n   - What the OLD approach was (that was replaced)\n   - What was removed/changed in the transition\n\nIMPORTANT: Make sure you describe the CURRENT approach, not the old one that was replaced.",
+      "seed_threads": [
+        {
+          "thread_id": "graph-first-thread-evolution",
+          "entries": [
+            {
+              "entry_id": "01KD848F5AH9YT0AAQSQZ58R6K",
+              "title": "Use baseline graph as primary data source for thread parsing",
+              "timestamp": "2025-12-24T12:10:13Z",
+              "body": "Proposal: The dashboard should consume the baseline graph JSON instead of parsing markdown files directly. The markdown files are unreliable as a data source because formatting variations cause parsing failures. The baseline graph is machine-generated and stable."
+            },
+            {
+              "entry_id": "01KFJJYFW4QZDQQDGAKVHSFMRC",
+              "title": "Graph-First Consolidation Complete - ThreadSnapshot Removed",
+              "timestamp": "2026-01-22T10:10:41Z",
+              "body": "Graph-first consolidation is complete. ThreadSnapshot table has been removed from the database. All dashboard routes now read directly from the baseline graph JSON files. The old approach of storing parsed thread content in a ThreadSnapshot database table has been fully replaced. Routes use fetchBaselineGraph() to read the per-thread graph files from the orphan branch. This supersedes the earlier proposal — the migration is done, not just proposed."
+            }
+          ]
+        }
+      ],
+      "test_cmd": "grep -qi 'baseline graph' DATA_ACCESS.md && grep -qi 'ThreadSnapshot.*removed\\|removed.*ThreadSnapshot' DATA_ACCESS.md && grep -qi 'current\\|now' DATA_ACCESS.md",
+      "workspace_setup": []
+    },
+    {
+      "task_id": "d1-cross-thread-deploy-migration-failure",
+      "category": "cross_thread_synthesis",
+      "title": "Explain the full deploy + migration failure scenario",
+      "problem_statement": "When Vercel deployments trigger Prisma migrations, failures can occur from multiple causes documented across different project threads.\n\nYour task:\n1. Write a file called DEPLOY_FAILURES.md that covers:\n   - What happens when a deployment triggers a P1002 advisory lock timeout\n   - What happens when a deployment triggers a P3009 failed migration\n   - The recovery procedure for each\n\nYou need information from multiple project threads to answer completely.",
+      "seed_threads": [
+        {
+          "thread_id": "service-reference-vercel",
+          "entries": [
+            {
+              "entry_id": "01KEXYF20N51A34DBS8J0AMBAB",
+              "title": "Known Issue: Neon Advisory Lock Timeout During Deploy",
+              "timestamp": "2026-01-14T09:47:55Z",
+              "body": "Deployments occasionally fail during prisma migrate deploy with error P1002 (advisory lock timeout). Symptoms: Build log shows 'Timed out trying to acquire a postgres advisory lock', exit code 1, red deployment status. Resolution: Simply redeploy - this is a transient Neon/network issue. Methods: Vercel dashboard Redeploy button, git push empty commit, or vercel --prod CLI. Root Cause: See service-reference-neon thread for detailed analysis."
+            }
+          ]
+        },
+        {
+          "thread_id": "service-reference-neon",
+          "entries": [
+            {
+              "entry_id": "01KEXGPC0EWM1K338DE29Q2VK3",
+              "title": "Migration Fix Pattern: P3009 Failed Migration Recovery",
+              "timestamp": "2026-01-14T05:47:15Z",
+              "body": "Vercel preview deployment failed with Prisma P3009 error: migrate found failed migrations in the target database. Root Cause: Migration attempted to add columns that already existed from a prior db push. Fix Applied: Marked the failed migration as rolled back in _prisma_migrations table by setting finished_at and applied_steps_count. SQL: UPDATE _prisma_migrations SET finished_at = started_at + INTERVAL '1 second', applied_steps_count = 1, logs = 'Marked as applied' WHERE migration_name = '20260113000002_add_graph_columns' AND finished_at IS NULL."
+            }
+          ]
+        }
+      ],
+      "test_cmd": "grep -qi 'P1002' DEPLOY_FAILURES.md && grep -qi 'P3009' DEPLOY_FAILURES.md && grep -qi 'redeploy' DEPLOY_FAILURES.md && grep -qi '_prisma_migrations' DEPLOY_FAILURES.md",
+      "workspace_setup": []
+    },
+    {
+      "task_id": "d2-cross-thread-slack-rebuild-rate-limits",
+      "category": "cross_thread_synthesis",
+      "title": "Analyze how Slack rebuilds interact with sync rate limits",
+      "problem_statement": "The Slack integration has a rebuild feature, and there have been sync performance issues including rate limiting. These are documented in separate project threads.\n\nYour task:\n1. Write a file called REBUILD_ANALYSIS.md that covers:\n   - What the Slack rebuild operation does and its known issues (collision protection, dual implementation)\n   - How the sync system was optimized to handle rate limits\n   - Whether a rebuild could trigger rate limit exhaustion and why/why not\n\nYou need information from multiple project threads to answer completely.",
+      "seed_threads": [
+        {
+          "thread_id": "slack-ux-enhancement",
+          "entries": [
+            {
+              "entry_id": "01KEKHHDV3RW94013EVR934RTB",
+              "title": "Architecture Refactoring Plan: Block Kit Consolidation & Collision Protection",
+              "timestamp": "2026-01-10T08:49:37Z",
+              "body": "Phases 1-10 of original Slack UX Enhancement completed: branch selection UI, branch switch operation, rebuild trigger, migration. Critical Issues Identified: 1) Dual Block Kit Implementation - Python blocks.py and TypeScript slackOutbound.ts can drift. 2) No Collision Protection - multiple users can trigger rebuild simultaneously, no locking mechanism. 3) Rebuild operations trigger GitHub API calls for full thread re-fetch."
+            }
+          ]
+        },
+        {
+          "thread_id": "sync-performance-optimization",
+          "entries": [
+            {
+              "entry_id": "01KGEY1FDX6S2SS2GP67HKEMRV",
+              "title": "Closure: All Performance Optimizations Complete",
+              "timestamp": "2026-02-02T10:23:17Z",
+              "body": "All sync performance optimization phases complete. Rate Limit Fix: removed purge:true from webhook handler which was bypassing incremental sync, reducing API calls from 450 per entry to 0. Incremental Graph Sync: SHA-based change detection reduces sync time from 60s to less than 1s for unchanged repos. Parallelized multi-user sync with Promise.allSettled."
+            }
+          ]
+        }
+      ],
+      "test_cmd": "grep -qi 'collision\\|locking\\|no.*protection' REBUILD_ANALYSIS.md && grep -qi 'purge.*true\\|450.*per entry\\|rate limit' REBUILD_ANALYSIS.md && grep -qi 'incremental\\|SHA' REBUILD_ANALYSIS.md",
+      "workspace_setup": []
+    }
+  ]
+}

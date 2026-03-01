@@ -7,7 +7,7 @@ from typing import Literal, Optional, Sequence
 
 WcbenchMode = Literal["baseline", "inject", "tools", "tools_guided"]
 WcTierCeiling = Literal["T1", "T2", "T3"]
-Track = Literal["custom", "swebench", "coordination", "memory_qa"]
+Track = Literal["custom", "swebench", "coordination", "memory_qa", "agent_value"]
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,10 @@ class RunConfig:
   swebench_eval_only: bool = False
 
   coordination_task_id: str = "multi-hop-with-citations"
+
+  # Agent value track
+  agent_value_tasks_path: Optional[Path] = None
+  agent_value_only_task_ids: Optional[Sequence[str]] = None
 
   # Output
   output_root: Path = Path("logs")

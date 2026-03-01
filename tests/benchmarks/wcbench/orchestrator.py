@@ -94,6 +94,10 @@ def run_wcbench(cfg: RunConfig) -> None:
       from tests.benchmarks.wcbench.tracks.memory_qa import run_memory_qa_track
 
       run_memory_qa_track(cfg, layout=layout, event_logger=logger, run_summary=summary)
+    elif cfg.track == "agent_value":
+      from tests.benchmarks.wcbench.tracks.agent_value import run_agent_value_track
+
+      run_agent_value_track(cfg, layout=layout, event_logger=logger, run_summary=summary)
     else:
       raise SystemExit(f"Track not implemented yet: {cfg.track}")
 
