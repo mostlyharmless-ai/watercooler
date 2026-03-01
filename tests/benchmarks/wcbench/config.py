@@ -46,7 +46,6 @@ class RunConfig:
   # Agent value track
   agent_value_tasks_path: Optional[Path] = None
   agent_value_only_task_ids: Optional[Sequence[str]] = None
-  agent_value_image_tag: str = "python:3.12"
 
   # Output
   output_root: Path = Path("logs")

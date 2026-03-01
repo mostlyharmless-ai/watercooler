@@ -45,7 +45,6 @@ def main() -> None:
   # Agent value track args
   parser.add_argument("--agent-value-tasks", type=str, default="tests/benchmarks/agent_value/tasks.json")
   parser.add_argument("--agent-value-only", nargs="+", default=None, help="Run only these agent_value task_ids")
-  parser.add_argument("--agent-value-image-tag", type=str, default="python:3.12", help="Docker image for agent_value workspaces")
 
   # Coordination track args
   parser.add_argument("--coordination-task-id", type=str, default="multi-hop-with-citations")
@@ -69,7 +68,6 @@ def main() -> None:
     wc_code_path=Path(args.wc_code_path) if args.wc_code_path else None,
     agent_value_tasks_path=Path(args.agent_value_tasks),
     agent_value_only_task_ids=args.agent_value_only,
-    agent_value_image_tag=args.agent_value_image_tag,
     custom_tasks_path=Path(args.custom_tasks),
     custom_image_tag=args.custom_image_tag,
     custom_repo_dir=Path(args.custom_repo_dir),
