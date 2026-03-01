@@ -13,6 +13,8 @@ EventType = Literal[
   "task_start",
   "task_end",
   "agent_message",
+  "agent_action",
+  "agent_observation",
   "tool_call",
   "tool_result",
   "shell_command",

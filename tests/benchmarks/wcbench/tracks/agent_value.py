@@ -174,7 +174,10 @@ def _make_agent(
   }
 
   if with_wc_tools and threads_dir is not None:
-    env = {"WATERCOOLER_DIR": str(threads_dir)}
+    env = {
+      "WATERCOOLER_DIR": str(threads_dir),
+      "WATERCOOLER_LOG_LEVEL": "DEBUG",
+    }
     if code_path is not None:
       env["WATERCOOLER_CODE_PATH"] = str(code_path)
 
@@ -197,19 +200,40 @@ def _run_conversation(
   workspace_dir: Path,
   problem_statement: str,
   max_steps: int,
+  *,
+  transcript_dir: Optional[Path] = None,
+  event_logger: Optional[EventLogger] = None,
+  run_id: str = "",
+  task_id: str = "",
 ) -> dict[str, Any]:
   """Run an OpenHands conversation and extract metrics.
+
+  Args:
+    agent: OpenHands Agent instance.
+    workspace_dir: Workspace for the agent.
+    problem_statement: Task prompt.
+    max_steps: Max agent iterations.
+    transcript_dir: If set, OpenHands persists per-event JSON files here
+      and we write a consolidated transcript.jsonl after the run.
+    event_logger: If set, emit per-action/observation events.
+    run_id: For event_logger correlation.
+    task_id: For event_logger correlation.
 
   Returns:
     Dict with keys: ok, steps, cost, wc_commands, wc_tools_used, events.
   """
   from openhands.sdk import Conversation
 
-  conversation = Conversation(
-    agent=agent,
-    workspace=str(workspace_dir),
-    max_iteration_per_run=max_steps,
-  )
+  conv_kwargs: dict[str, Any] = {
+    "agent": agent,
+    "workspace": str(workspace_dir),
+    "max_iteration_per_run": max_steps,
+  }
+  if transcript_dir is not None:
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    conv_kwargs["persistence_dir"] = str(transcript_dir)
+
+  conversation = Conversation(**conv_kwargs)
 
   try:
     conversation.send_message(problem_statement)
@@ -231,22 +255,89 @@ def _run_conversation(
 
     try:
       for event in conversation.state.events:
-        event_dict: dict[str, Any] = {"type": type(event).__name__}
+        event_type_name = type(event).__name__
+        event_dict: dict[str, Any] = {"type": event_type_name}
 
-        # Count action events as steps
-        if hasattr(event, "tool_name"):
+        if event_type_name == "ActionEvent":
           steps += 1
           tool_name = str(getattr(event, "tool_name", ""))
           event_dict["tool_name"] = tool_name
+
+          # Extract tool_call arguments for transcript
+          tool_args = ""
+          try:
+            tc = getattr(event, "tool_call", None)
+            if tc is not None:
+              tool_args = str(getattr(tc, "arguments", ""))[:4000]
+          except Exception:
+            pass
+          event_dict["tool_args"] = tool_args
+
+          # Extract agent reasoning
+          thought_text = ""
+          try:
+            thought = getattr(event, "thought", None)
+            if thought:
+              thought_text = " ".join(
+                str(getattr(t, "text", "")) for t in thought
+              )[:2000]
+          except Exception:
+            pass
+          if thought_text:
+            event_dict["thought"] = thought_text
 
           # Track watercooler tool usage
           if "watercooler" in tool_name.lower():
             wc_commands += 1
             wc_tools_used[tool_name] = wc_tools_used.get(tool_name, 0) + 1
 
+          # Emit per-action event to EventLogger
+          if event_logger:
+            event_logger.emit(
+              "agent_action",
+              run_id=run_id,
+              task_id=task_id,
+              payload={
+                "tool_name": tool_name,
+                "tool_args": tool_args[:4000],
+                "thought": thought_text[:2000],
+              },
+            )
+
+        elif event_type_name == "ObservationEvent":
+          tool_name = str(getattr(event, "tool_name", ""))
+          event_dict["tool_name"] = tool_name
+          obs_content = ""
+          is_error = False
+          try:
+            obs = getattr(event, "observation", None)
+            if obs is not None:
+              obs_content = str(getattr(obs, "content", ""))[:4000]
+            is_error = bool(getattr(event, "is_error", False))
+          except Exception:
+            pass
+          event_dict["observation"] = obs_content
+          event_dict["is_error"] = is_error
+
+          if event_logger:
+            event_logger.emit(
+              "agent_observation",
+              run_id=run_id,
+              task_id=task_id,
+              payload={
+                "tool_name": tool_name,
+                "observation": obs_content[:4000],
+                "is_error": is_error,
+              },
+            )
+
         events_data.append(event_dict)
     except Exception as exc:
       log.warning("Error extracting events: %s", exc)
+
+    # Write consolidated transcript.jsonl alongside OpenHands persistence
+    if transcript_dir is not None:
+      _write_transcript(transcript_dir / "transcript.jsonl", events_data)
 
     status = "unknown"
     try:
@@ -282,6 +373,18 @@ def _run_conversation(
       pass
 
 
+def _write_transcript(path: Path, events_data: list[dict[str, Any]]) -> None:
+  """Write events_data as newline-delimited JSON (transcript.jsonl)."""
+  try:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+      for entry in events_data:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    log.info("Transcript written: %s (%d events)", path, len(events_data))
+  except Exception as exc:
+    log.warning("Failed to write transcript %s: %s", path, exc)
+
+
 # ---------------------------------------------------------------------------
 # Single paired run
 # ---------------------------------------------------------------------------
@@ -298,6 +401,7 @@ def _run_one(
   threads_dir: Path,
   workspace_dir: Path,
   event_logger: EventLogger,
+  layout: RunLayout,
 ) -> tuple[TaskSummary, str]:
   """Run one agent (baseline or tools) in a workspace.
 
@@ -326,12 +430,20 @@ def _run_one(
     code_path=cfg.wc_code_path,
   )
 
+  # Transcript dir for OpenHands persistence + our transcript.jsonl
+  transcript_dir = layout.artifacts_dir / "transcripts" / task_id / mode
+  transcript_dir.mkdir(parents=True, exist_ok=True)
+
   # Run the conversation
   result = _run_conversation(
     agent=agent,
     workspace_dir=workspace_dir,
     problem_statement=problem_statement,
     max_steps=cfg.max_steps,
+    transcript_dir=transcript_dir,
+    event_logger=event_logger,
+    run_id=cfg.run_id,
+    task_id=tagged_task_id,
   )
 
   # Run test command in the workspace
@@ -507,6 +619,12 @@ def run_agent_value_track(
     raise FileNotFoundError(f"Agent value tasks file not found: {tasks_path}")
 
   tasks_cfg = json.loads(tasks_path.read_text(encoding="utf-8"))
+
+  # Remove the answer key from the agent's filesystem so it can't cheat.
+  # The harness already has the data in memory; the file is not needed again.
+  tasks_path.unlink(missing_ok=True)
+  log.info("Removed answer key from agent filesystem: %s", tasks_path)
+
   tasks = list(tasks_cfg.get("tasks", []))
   project_context = str(tasks_cfg.get("project_context", ""))
 
@@ -568,6 +686,7 @@ def run_agent_value_track(
       threads_dir=threads_dir,
       workspace_dir=baseline_workspace,
       event_logger=event_logger,
+      layout=layout,
     )
     run_summary.tasks.append(baseline_summary)
 
@@ -587,6 +706,7 @@ def run_agent_value_track(
       threads_dir=threads_dir,
       workspace_dir=tools_workspace,
       event_logger=event_logger,
+      layout=layout,
     )
     run_summary.tasks.append(tools_summary)
 
