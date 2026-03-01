@@ -59,8 +59,6 @@ bench = [
     "jieba>=0.42.1",
     "rapidfuzz>=3.10.1",
     "umap-learn>=0.5.6",
-    # OpenHands agent SDK for agent_value benchmark track
-    "openhands-sdk>=0.1",
 ]
 mcp = [
     # All MCP deps (fastmcp, python-ulid) are already in [project].dependencies.
