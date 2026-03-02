@@ -3,31 +3,26 @@
 Answers one question: does an agent with watercooler tools succeed at tasks
 that an agent without them fails?
 
-For each task we run two paired agent sessions via OpenHands SDK:
-  1. **baseline** -- agent has bash + file editor only
-  2. **tools**    -- same agent + watercooler MCP server for search/read
+For each task we run two paired agent sessions in **separate Docker containers**:
+  1. **baseline** -- agent has bash + file editor only; no thread data mounted
+  2. **tools**    -- same agent + watercooler MCP server; thread graph mounted ro
 
-Both agents get the same problem statement and workspace.  After each run
-we execute ``test_cmd`` to get a deterministic pass/fail.
-Results go to ``COMPARISON.md`` and ``pair_results.json``.
+Both containers get the same problem statement and workspace.  After the agent
+finishes we exec ``test_cmd`` *inside the same container* to get a deterministic
+pass/fail.  Results go to ``COMPARISON.md`` and ``pair_results.json``.
 
-Uses OpenHands Software Agent SDK with native MCP integration.
-The watercooler MCP server (``python -m watercooler_mcp``) is spawned as
-a stdio MCP server via ``mcp_config``, pointed at seeded thread data
-using the ``WATERCOOLER_DIR`` environment variable.
+Container isolation guarantees the baseline agent has zero access to thread
+data — ``find / -name '*.jsonl'`` will find nothing watercooler-related.
 """
 
 from __future__ import annotations
 
-import glob
 import json
 import logging
-import shutil
-import sys
-import time
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from tests.benchmarks.wcbench.config import RunConfig
 from tests.benchmarks.wcbench.events import EventLogger
@@ -42,13 +37,16 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TASKS_PATH = Path("tests/benchmarks/agent_value/tasks.json")
 
-# Regex matching tools the agent can use: base tools + watercooler MCP tools.
-# filter_tools_regex applies to ALL tools (not just MCP), so we must include
-# the built-in TerminalTool and FileEditorTool names too.
-_WC_TOOLS_REGEX = (
-  "(terminal|file_editor|str_replace_editor"
-  "|watercooler_(search|smart_query|read_thread|get_thread_entry"
-  "|list_thread_entries|list_threads))"
+IMAGE_NAME = "wcbench-agent-value:latest"
+CONTAINER_RUNNER_PATH = "/app/tests/benchmarks/agent_value/container_runner.py"
+
+# API key env vars to forward into agent containers.
+_API_KEY_VARS = (
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "GROQ_API_KEY",
+  "MINIMAX_API_KEY",
 )
 
 
@@ -131,268 +129,57 @@ def _seed_threads(
 
 
 # ---------------------------------------------------------------------------
-# OpenHands agent helpers
+# Docker container helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_llm(model: str) -> Any:
-  """Create an OpenHands LLM instance.
+def _collect_api_env() -> dict[str, str]:
+  """Collect API key env vars that are set in the current process."""
+  env: dict[str, str] = {}
+  for var in _API_KEY_VARS:
+    val = os.environ.get(var)
+    if val:
+      env[var] = val
+  return env
 
-  API keys are expected to be in the environment (loaded by setup_api_keys).
-  LiteLLM model strings are used directly (e.g. ``minimax/MiniMax-M2.5``).
-  """
-  from openhands.sdk import LLM
 
-  return LLM(model=model)
-
-
-def _make_agent(
-  llm: Any,
+def _exec_in_container(
+  container: Any,
+  cmd: str,
   *,
-  with_wc_tools: bool = False,
-  threads_dir: Optional[Path] = None,
-  code_path: Optional[Path] = None,
-) -> Any:
-  """Create an OpenHands Agent.
-
-  Args:
-    llm: LLM instance.
-    with_wc_tools: If True, attach watercooler MCP server via mcp_config.
-    threads_dir: Path to seeded thread data (for WATERCOOLER_DIR).
-    code_path: Code path for WATERCOOLER_CODE_PATH.
-  """
-  from openhands.sdk import Agent, Tool
-  from openhands.tools.file_editor import FileEditorTool
-  from openhands.tools.terminal import TerminalTool
-
-  base_tools = [
-    Tool(name=TerminalTool.name),
-    Tool(name=FileEditorTool.name),
-  ]
-
-  kwargs: dict[str, Any] = {
-    "llm": llm,
-    "tools": base_tools,
-  }
-
-  if with_wc_tools and threads_dir is not None:
-    env = {
-      "WATERCOOLER_DIR": str(threads_dir),
-      "WATERCOOLER_LOG_LEVEL": "DEBUG",
-    }
-    if code_path is not None:
-      env["WATERCOOLER_CODE_PATH"] = str(code_path)
-
-    kwargs["mcp_config"] = {
-      "mcpServers": {
-        "watercooler": {
-          "command": sys.executable,
-          "args": ["-m", "watercooler_mcp"],
-          "env": env,
-        }
-      }
-    }
-    kwargs["filter_tools_regex"] = _WC_TOOLS_REGEX
-
-  return Agent(**kwargs)
-
-
-def _run_conversation(
-  agent: Any,
-  workspace_dir: Path,
-  problem_statement: str,
-  max_steps: int,
-  *,
-  transcript_dir: Optional[Path] = None,
-  event_logger: Optional[EventLogger] = None,
-  run_id: str = "",
-  task_id: str = "",
-) -> dict[str, Any]:
-  """Run an OpenHands conversation and extract metrics.
-
-  Args:
-    agent: OpenHands Agent instance.
-    workspace_dir: Workspace for the agent.
-    problem_statement: Task prompt.
-    max_steps: Max agent iterations.
-    transcript_dir: If set, OpenHands persists per-event JSON files here
-      and we write a consolidated transcript.jsonl after the run.
-    event_logger: If set, emit per-action/observation events.
-    run_id: For event_logger correlation.
-    task_id: For event_logger correlation.
-
-  Returns:
-    Dict with keys: ok, steps, cost, wc_commands, wc_tools_used, events.
-  """
-  from openhands.sdk import Conversation
-
-  conv_kwargs: dict[str, Any] = {
-    "agent": agent,
-    "workspace": str(workspace_dir),
-    "max_iteration_per_run": max_steps,
-  }
-  if transcript_dir is not None:
-    transcript_dir.mkdir(parents=True, exist_ok=True)
-    conv_kwargs["persistence_dir"] = str(transcript_dir)
-
-  conversation = Conversation(**conv_kwargs)
-
+  workdir: str = "/app",
+  timeout: int = 300,
+) -> tuple[int, str]:
+  """Execute a command in a running container. Returns (exit_code, output)."""
   try:
-    conversation.send_message(problem_statement)
-    conversation.run()
-
-    # Extract metrics
-    cost = 0.0
-    try:
-      spend = conversation.conversation_stats.get_combined_metrics()
-      cost = float(spend.accumulated_cost)
-    except Exception:
-      pass
-
-    # Count steps and watercooler tool calls from event log
-    steps = 0
-    wc_commands = 0
-    wc_tools_used: dict[str, int] = {}
-    events_data: list[dict[str, Any]] = []
-
-    try:
-      for event in conversation.state.events:
-        event_type_name = type(event).__name__
-        event_dict: dict[str, Any] = {"type": event_type_name}
-
-        if event_type_name == "ActionEvent":
-          steps += 1
-          tool_name = str(getattr(event, "tool_name", ""))
-          event_dict["tool_name"] = tool_name
-
-          # Extract tool_call arguments for transcript
-          tool_args = ""
-          try:
-            tc = getattr(event, "tool_call", None)
-            if tc is not None:
-              tool_args = str(getattr(tc, "arguments", ""))[:4000]
-          except Exception:
-            pass
-          event_dict["tool_args"] = tool_args
-
-          # Extract agent reasoning
-          thought_text = ""
-          try:
-            thought = getattr(event, "thought", None)
-            if thought:
-              thought_text = " ".join(
-                str(getattr(t, "text", "")) for t in thought
-              )[:2000]
-          except Exception:
-            pass
-          if thought_text:
-            event_dict["thought"] = thought_text
-
-          # Track watercooler tool usage
-          if "watercooler" in tool_name.lower():
-            wc_commands += 1
-            wc_tools_used[tool_name] = wc_tools_used.get(tool_name, 0) + 1
-
-          # Emit per-action event to EventLogger
-          if event_logger:
-            event_logger.emit(
-              "agent_action",
-              run_id=run_id,
-              task_id=task_id,
-              payload={
-                "tool_name": tool_name,
-                "tool_args": tool_args[:4000],
-                "thought": thought_text[:2000],
-              },
-            )
-
-        elif event_type_name == "ObservationEvent":
-          tool_name = str(getattr(event, "tool_name", ""))
-          event_dict["tool_name"] = tool_name
-          obs_content = ""
-          is_error = False
-          try:
-            obs = getattr(event, "observation", None)
-            if obs is not None:
-              obs_content = str(getattr(obs, "content", ""))[:4000]
-            is_error = bool(getattr(event, "is_error", False))
-          except Exception:
-            pass
-          event_dict["observation"] = obs_content
-          event_dict["is_error"] = is_error
-
-          if event_logger:
-            event_logger.emit(
-              "agent_observation",
-              run_id=run_id,
-              task_id=task_id,
-              payload={
-                "tool_name": tool_name,
-                "observation": obs_content[:4000],
-                "is_error": is_error,
-              },
-            )
-
-        events_data.append(event_dict)
-    except Exception as exc:
-      log.warning("Error extracting events: %s", exc)
-
-    # Write consolidated transcript.jsonl alongside OpenHands persistence
-    if transcript_dir is not None:
-      _write_transcript(transcript_dir / "transcript.jsonl", events_data)
-
-    status = "unknown"
-    try:
-      status = str(conversation.state.execution_status.value)
-    except Exception:
-      pass
-
-    return {
-      "ok": True,
-      "status": status,
-      "steps": steps,
-      "cost": cost,
-      "wc_commands": wc_commands,
-      "wc_tools_used": wc_tools_used,
-      "events": events_data,
-    }
-  except Exception as exc:
-    log.error("Conversation failed: %s", exc)
-    return {
-      "ok": False,
-      "status": "error",
-      "steps": 0,
-      "cost": 0.0,
-      "wc_commands": 0,
-      "wc_tools_used": {},
-      "events": [],
-      "error": str(exc),
-    }
-  finally:
-    try:
-      conversation.close()
-    except Exception:
-      pass
-
-
-def _write_transcript(path: Path, events_data: list[dict[str, Any]]) -> None:
-  """Write events_data as newline-delimited JSON (transcript.jsonl)."""
-  try:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-      for entry in events_data:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    log.info("Transcript written: %s (%d events)", path, len(events_data))
-  except Exception as exc:
-    log.warning("Failed to write transcript %s: %s", path, exc)
+    result = container.exec_run(
+      ["bash", "-c", cmd],
+      workdir=workdir,
+      demux=True,
+    )
+    stdout = result.output[0].decode("utf-8", errors="replace") if result.output[0] else ""
+    stderr = result.output[1].decode("utf-8", errors="replace") if result.output[1] else ""
+    output = stdout
+    if stderr:
+      output += "\n" + stderr
+    # Truncate very long output
+    if len(output) > 30000:
+      output = (
+        output[:10000]
+        + f"\n... ({len(output) - 20000} chars truncated) ...\n"
+        + output[-10000:]
+      )
+    return result.exit_code, output
+  except Exception as e:
+    return -1, f"exec_in_container error: {e}"
 
 
 # ---------------------------------------------------------------------------
-# Single paired run
+# Single containerized run
 # ---------------------------------------------------------------------------
 
 
-def _run_one(
+def _run_one_in_container(
   *,
   problem_statement: str,
   test_cmd: str,
@@ -400,16 +187,29 @@ def _run_one(
   mode: str,
   task_id: str,
   category: str,
-  threads_dir: Path,
-  workspace_dir: Path,
+  host_threads_dir: Path,
+  host_workspace_dir: Path,
+  host_output_dir: Path,
+  api_env: dict[str, str],
   event_logger: EventLogger,
   layout: RunLayout,
 ) -> tuple[TaskSummary, str]:
-  """Run one agent (baseline or tools) in a workspace.
+  """Run one agent mode (baseline or tools) in an isolated Docker container.
+
+  Args:
+    host_threads_dir: Seeded thread graph on the host; mounted read-only
+      into the tools container at ``/data/threads``.  NOT mounted for baseline.
+    host_workspace_dir: Agent workspace on the host; mounted rw at ``/workspace``.
+    host_output_dir: Output dir on the host; mounted rw at ``/output``.
+      The harness writes ``runner_config.json`` here before exec, and reads
+      ``result.json`` after the agent finishes.
+    api_env: API key env vars to inject into the container.
 
   Returns:
     (TaskSummary, test_output)
   """
+  import docker
+
   tagged_task_id = f"{task_id}:{mode}"
 
   event_logger.emit(
@@ -423,47 +223,98 @@ def _run_one(
     },
   )
 
-  # Create LLM and agent
-  llm = _make_llm(cfg.model)
-  agent = _make_agent(
-    llm,
-    with_wc_tools=(mode == "tools"),
-    threads_dir=threads_dir,
-    code_path=cfg.wc_code_path,
-  )
+  # ---- Write runner config to host output dir ----
+  host_output_dir.mkdir(parents=True, exist_ok=True)
+  host_workspace_dir.mkdir(parents=True, exist_ok=True)
 
-  # Transcript dir for OpenHands persistence + our transcript.jsonl
-  transcript_dir = layout.artifacts_dir / "transcripts" / task_id / mode
-  transcript_dir.mkdir(parents=True, exist_ok=True)
+  transcript_dir = "/output/transcripts"
+  runner_cfg: dict[str, Any] = {
+    "model": cfg.model,
+    "problem_statement": problem_statement,
+    "max_steps": cfg.max_steps,
+    "mode": mode,
+    "workspace_dir": "/workspace",
+    "result_path": "/output/result.json",
+    "transcript_dir": transcript_dir,
+  }
+  if mode == "tools":
+    runner_cfg["threads_dir"] = "/data/threads"
 
-  # Run the conversation
-  result = _run_conversation(
-    agent=agent,
-    workspace_dir=workspace_dir,
-    problem_statement=problem_statement,
-    max_steps=cfg.max_steps,
-    transcript_dir=transcript_dir,
-    event_logger=event_logger,
-    run_id=cfg.run_id,
-    task_id=tagged_task_id,
-  )
+  config_path = host_output_dir / "runner_config.json"
+  config_path.write_text(json.dumps(runner_cfg, indent=2), encoding="utf-8")
 
-  # Run test command in the workspace
-  import subprocess
+  # ---- Build volume mounts ----
+  volumes: dict[str, dict[str, str]] = {
+    str(host_workspace_dir.resolve()): {"bind": "/workspace", "mode": "rw"},
+    str(host_output_dir.resolve()): {"bind": "/output", "mode": "rw"},
+  }
+  if mode == "tools":
+    volumes[str(host_threads_dir.resolve())] = {
+      "bind": "/data/threads", "mode": "ro",
+    }
+
+  # ---- Create and run container ----
+  client = docker.from_env()
+  container = None
+  test_exit = 1
+  test_output = ""
+  result: dict[str, Any] = {
+    "ok": False, "status": "error", "steps": 0,
+    "cost": 0.0, "wc_commands": 0, "wc_tools_used": {},
+  }
 
   try:
-    proc = subprocess.run(
-      ["bash", "-c", test_cmd],
-      cwd=str(workspace_dir),
-      capture_output=True,
-      text=True,
-      timeout=60,
+    container = client.containers.run(
+      IMAGE_NAME,
+      command="sleep infinity",
+      detach=True,
+      remove=False,
+      volumes=volumes,
+      environment=api_env,
     )
-    test_exit = proc.returncode
-    test_output = (proc.stdout + proc.stderr).strip()
+    log.info(
+      "  [%s] container %s started (image=%s)",
+      mode, container.short_id, IMAGE_NAME,
+    )
+
+    # ---- Run the agent via container_runner.py ----
+    runner_cmd = f"python {CONTAINER_RUNNER_PATH} /output/runner_config.json"
+    exit_code, runner_output = _exec_in_container(
+      container, runner_cmd, workdir="/app", timeout=600,
+    )
+    log.info("  [%s] container_runner exit=%d", mode, exit_code)
+    if exit_code != 0:
+      log.warning("  [%s] container_runner failed:\n%s", mode, runner_output[:2000])
+
+    # ---- Run test_cmd inside the container ----
+    test_exit, test_output = _exec_in_container(
+      container, test_cmd, workdir="/workspace", timeout=60,
+    )
+    log.info("  [%s] test_cmd exit=%d", mode, test_exit)
+
+    # ---- Read result.json from host output dir ----
+    result_path = host_output_dir / "result.json"
+    if result_path.exists():
+      try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+      except Exception as exc:
+        log.warning("  [%s] Failed to parse result.json: %s", mode, exc)
+    else:
+      log.warning("  [%s] result.json not found at %s", mode, result_path)
+
   except Exception as exc:
-    test_exit = 1
-    test_output = f"test_cmd execution failed: {exc}"
+    log.error("  [%s] Container run failed: %s", mode, exc)
+    test_output = f"Container error: {exc}"
+  finally:
+    if container is not None:
+      try:
+        container.stop(timeout=5)
+      except Exception:
+        pass
+      try:
+        container.remove(force=True)
+      except Exception:
+        pass
 
   ok = test_exit == 0
 
@@ -615,23 +466,16 @@ def run_agent_value_track(
   event_logger: EventLogger,
   run_summary: RunSummary,
 ) -> None:
-  """Run the agent value benchmark: paired baseline vs tools runs."""
+  """Run the agent value benchmark: paired baseline vs tools runs.
+
+  Each mode runs in a separate Docker container for true isolation.
+  The baseline container has NO access to thread data.
+  """
   tasks_path = cfg.agent_value_tasks_path or DEFAULT_TASKS_PATH
   if not tasks_path.exists():
     raise FileNotFoundError(f"Agent value tasks file not found: {tasks_path}")
 
   tasks_cfg = json.loads(tasks_path.read_text(encoding="utf-8"))
-
-  # Remove the answer key from the agent's filesystem so it can't cheat.
-  # The harness already has the data in memory; the file is not needed again.
-  tasks_path.unlink(missing_ok=True)
-  log.info("Removed answer key from agent filesystem: %s", tasks_path)
-
-  # Clean prior run logs so the agent can't grep DECISION.md from earlier runs.
-  for prior in glob.glob("/app/logs/wcbench-agent_value-*"):
-    if prior != str(layout.root):
-      shutil.rmtree(prior, ignore_errors=True)
-      log.info("Cleaned prior run artifacts: %s", prior)
 
   tasks = list(tasks_cfg.get("tasks", []))
   project_context = str(tasks_cfg.get("project_context", ""))
@@ -651,6 +495,8 @@ def run_agent_value_track(
   except Exception as exc:
     log.warning("API key setup failed: %s", exc)
 
+  api_env = _collect_api_env()
+
   pair_results: list[_PairResult] = []
 
   for task in tasks:
@@ -661,10 +507,10 @@ def run_agent_value_track(
 
     log.info("=== Agent value task: %s (%s) ===", task_id, category)
 
-    # ---- Seed threads outside /app (only reachable via MCP) ----
-    threads_dir = Path(f"/tmp/wc-threads/{task_id}")
+    # ---- Seed threads on host filesystem ----
+    host_threads_dir = layout.artifacts_dir / "threads" / task_id
     topics = _seed_threads(
-      threads_dir, task,
+      host_threads_dir, task,
       event_logger=event_logger,
       run_id=cfg.run_id,
       task_id=task_id,
@@ -674,53 +520,58 @@ def run_agent_value_track(
     # form. The MCP server reads only from graph JSON (meta.json,
     # entries.jsonl, edges.jsonl). The .md files are write-only projections
     # that must not exist where the agent could find them.
-    for md_file in threads_dir.rglob("*.md"):
+    for md_file in host_threads_dir.rglob("*.md"):
       md_file.unlink()
-    log.info("Stripped .md projections from %s", threads_dir)
+    log.info("Stripped .md projections from %s", host_threads_dir)
 
-    # ---- Create workspace outside /app so agent starts clean ----
-    workspace_base = Path(f"/workspace/{task_id}")
-    workspace_base.mkdir(parents=True, exist_ok=True)
-
-    # Write project context as README so the agent has domain context
-    readme_path = workspace_base / "README.md"
-    readme_path.write_text(project_context, encoding="utf-8")
-
-    # ---- Baseline run (no WC tools) ----
-    log.info("  [baseline] starting...")
-    baseline_workspace = workspace_base / "baseline"
+    # ---- Prepare host-side workspace and output dirs per mode ----
+    baseline_workspace = layout.artifacts_dir / "workspaces" / task_id / "baseline"
     baseline_workspace.mkdir(parents=True, exist_ok=True)
     (baseline_workspace / "README.md").write_text(project_context, encoding="utf-8")
 
-    baseline_summary, baseline_output = _run_one(
+    baseline_output = layout.artifacts_dir / "output" / task_id / "baseline"
+    baseline_output.mkdir(parents=True, exist_ok=True)
+
+    # ---- Baseline run (no WC tools, no thread data mounted) ----
+    log.info("  [baseline] starting container...")
+
+    baseline_summary, baseline_test_output = _run_one_in_container(
       problem_statement=problem_statement,
       test_cmd=test_cmd,
       cfg=cfg,
       mode="baseline",
       task_id=task_id,
       category=category,
-      threads_dir=threads_dir,
-      workspace_dir=baseline_workspace,
+      host_threads_dir=host_threads_dir,
+      host_workspace_dir=baseline_workspace,
+      host_output_dir=baseline_output,
+      api_env=api_env,
       event_logger=event_logger,
       layout=layout,
     )
     run_summary.tasks.append(baseline_summary)
 
-    # ---- Tools run (with WC tools) ----
-    log.info("  [tools] starting...")
-    tools_workspace = workspace_base / "tools"
+    # ---- Tools run (with WC tools, thread data mounted ro) ----
+    log.info("  [tools] starting container...")
+
+    tools_workspace = layout.artifacts_dir / "workspaces" / task_id / "tools"
     tools_workspace.mkdir(parents=True, exist_ok=True)
     (tools_workspace / "README.md").write_text(project_context, encoding="utf-8")
 
-    tools_summary, tools_output = _run_one(
+    tools_output = layout.artifacts_dir / "output" / task_id / "tools"
+    tools_output.mkdir(parents=True, exist_ok=True)
+
+    tools_summary, tools_test_output = _run_one_in_container(
       problem_statement=problem_statement,
       test_cmd=test_cmd,
       cfg=cfg,
       mode="tools",
       task_id=task_id,
       category=category,
-      threads_dir=threads_dir,
-      workspace_dir=tools_workspace,
+      host_threads_dir=host_threads_dir,
+      host_workspace_dir=tools_workspace,
+      host_output_dir=tools_output,
+      api_env=api_env,
       event_logger=event_logger,
       layout=layout,
     )
@@ -739,8 +590,8 @@ def run_agent_value_track(
       wc_calls=tools_summary.wc_commands,
       wc_tools_used=dict(tools_summary.wc_tools_used),
       test_cmd=test_cmd,
-      baseline_test_output=baseline_output[:2000],
-      tools_test_output=tools_output[:2000],
+      baseline_test_output=baseline_test_output[:2000],
+      tools_test_output=tools_test_output[:2000],
     )
     pair_results.append(pair)
 

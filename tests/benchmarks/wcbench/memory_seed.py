@@ -298,16 +298,18 @@ def seed_into_graphiti(
           if se.entry_id == superseding_id:
             superseding_ts = _parse_ts(se.timestamp)
             break
-        # FalkorDB stores episodes as comma-separated strings, use CONTAINS.
+        # FalkorDB stores episodes as a list (SET e = $edge_data keeps Python list).
+        # Use list-based ANY() predicate for membership check.
+        invalid_at_str = superseding_ts.isoformat()
         await graphiti.driver.execute_query(
           """
           MATCH (s:Entity)-[e:RELATES_TO]->(t:Entity)
-          WHERE e.episodes CONTAINS $ep_uuid AND e.invalid_at IS NULL
+          WHERE ANY(ep IN e.episodes WHERE ep = $ep_uuid) AND e.invalid_at IS NULL
           SET e.invalid_at = $invalid_at
           RETURN count(e) AS invalidated
           """,
           ep_uuid=superseded_episode,
-          invalid_at=superseding_ts,
+          invalid_at=invalid_at_str,
         )
     return entry_to_episode
 

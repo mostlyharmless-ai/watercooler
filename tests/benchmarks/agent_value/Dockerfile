@@ -17,11 +17,16 @@ RUN pip install --no-cache-dir -e ".[bench]"
 # - prior run logs (may contain DECISION.md from earlier runs)
 # - .claude conversation history
 # - .git history (contains all file content)
+# - test fixtures and local thread data (stale .jsonl files)
 RUN rm -rf /app/external/wcbench-corpora \
            /app/tests/benchmarks/agent_value/tasks.json \
+           /app/tests/benchmarks/memory_qa/tasks.json \
+           /app/docs/plans \
            /app/logs \
            /app/.claude \
-           /app/.git
+           /app/.git \
+           /app/tests/integration/.cli-threads \
+           /app/watercooler/threads
 
 ENV PYTHONPATH=/app/src
 
