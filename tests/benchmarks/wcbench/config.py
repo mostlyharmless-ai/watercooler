@@ -46,6 +46,10 @@ class RunConfig:
   # Agent value track
   agent_value_tasks_path: Optional[Path] = None
   agent_value_only_task_ids: Optional[Sequence[str]] = None
+  agent_value_site_repo: str = "https://github.com/mostlyharmless-ai/watercooler-site.git"
+  agent_value_site_commit: str = "main"
+  agent_value_threads_branch: str = "watercooler/threads"
+  agent_value_image: str = "wcbench-agent-base:wc-site-v1"
 
   # Output
   output_root: Path = Path("logs")

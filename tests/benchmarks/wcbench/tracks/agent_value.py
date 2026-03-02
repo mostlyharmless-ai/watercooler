@@ -3,13 +3,19 @@
 Answers one question: does an agent with watercooler tools succeed at tasks
 that an agent without them fails?
 
-For each task we run two paired agent sessions in **separate Docker containers**:
-  1. **baseline** -- agent has bash + file editor only; no thread data mounted
-  2. **tools**    -- same agent + watercooler MCP server; thread graph mounted ro
+Both agents get the **watercooler-site codebase** (baked into the Docker image
+at ``/repo``).  The tools agent additionally gets the real **thread history**
+from the ``watercooler/threads`` orphan branch, bind-mounted at
+``/data/threads``.
 
-Both containers get the same problem statement and workspace.  After the agent
-finishes we exec ``test_cmd`` *inside the same container* to get a deterministic
-pass/fail.  Results go to ``COMPARISON.md`` and ``pair_results.json``.
+For each task we run two paired agent sessions in **separate Docker containers**:
+  1. **baseline** -- agent has bash + file editor only; no thread data
+  2. **tools**    -- same agent + watercooler MCP server; thread graph at /data/threads
+
+Both containers use the same image (``wcbench-agent-base:wc-site-v1``).
+After the agent finishes we exec ``test_cmd`` *inside the same container*
+to get a deterministic pass/fail.  Results go to ``COMPARISON.md`` and
+``pair_results.json``.
 
 Container isolation guarantees the baseline agent has zero access to thread
 data — ``find / -name '*.jsonl'`` will find nothing watercooler-related.
@@ -20,6 +26,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,8 +45,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TASKS_PATH = Path("tests/benchmarks/agent_value/tasks.json")
 
-IMAGE_NAME = "wcbench-agent-value:latest"
-CONTAINER_RUNNER_PATH = "/app/tests/benchmarks/agent_value/container_runner.py"
+# The container_runner.py script on the host, bind-mounted into containers.
+_HOST_RUNNER_PATH = Path("tests/benchmarks/agent_value/container_runner.py")
+_CONTAINER_RUNNER_PATH = "/runner/container_runner.py"
 
 # API key env vars to forward into agent containers.
 _API_KEY_VARS = (
@@ -75,57 +84,62 @@ class _PairResult:
 
 
 # ---------------------------------------------------------------------------
-# Thread seeding (same pattern as custom track)
+# Orphan branch clone (replaces per-task thread seeding)
 # ---------------------------------------------------------------------------
 
 
-def _seed_threads(
-  threads_dir: Path,
-  task: dict[str, Any],
-  *,
-  event_logger: EventLogger,
-  run_id: str,
-  task_id: str,
-) -> list[str]:
-  """Seed watercooler threads from task definition.
+def _clone_orphan_threads(
+  repo_url: str,
+  branch: str,
+  dest: Path,
+) -> Path:
+  """Shallow-clone the orphan threads branch to a host-side directory.
+
+  The clone is shared across all tasks in a single run.  The harness
+  bind-mounts it read-only into tools containers at ``/data/threads``.
+
+  After cloning, ``.md`` projections under ``threads/`` are deleted —
+  they contain human-readable answer text that must not leak to agents.
+  The MCP server reads only from ``graph/baseline/``.
+
+  Args:
+    repo_url: Git remote URL (e.g. watercooler-site on GitHub).
+    branch: Orphan branch name (e.g. ``watercooler/threads``).
+    dest: Host-side directory to clone into.
 
   Returns:
-    List of topic slugs that were seeded.
+    Path to the cloned directory.
   """
-  from ulid import ULID
-  from watercooler.commands_graph import say
+  if dest.exists():
+    log.info("Orphan branch clone already exists: %s", dest)
+    return dest
 
-  threads_dir.mkdir(parents=True, exist_ok=True)
-  topics: list[str] = []
+  dest.mkdir(parents=True, exist_ok=True)
+  log.info("Cloning orphan branch %s from %s -> %s", branch, repo_url, dest)
+  subprocess.run(
+    [
+      "git", "clone",
+      "--single-branch", "--depth=1",
+      "--branch", branch,
+      repo_url, str(dest),
+    ],
+    check=True,
+    capture_output=True,
+  )
 
-  for thread_seed in task.get("seed_threads", []):
-    topic = thread_seed["thread_id"]
-    topics.append(topic)
-    for e in thread_seed.get("entries", []):
-      entry_id = str(e.get("entry_id") or ULID())
-      say(
-        topic,
-        threads_dir=threads_dir,
-        agent="WCBenchAgentValue (system)",
-        role=e.get("role", "planner"),
-        title=e["title"],
-        body=e["body"],
-        entry_type=e.get("entry_type", "Note"),
-        entry_id=entry_id,
-      )
-      event_logger.emit(
-        "tool_result",
-        run_id=run_id,
-        task_id=task_id,
-        payload={
-          "tool": "watercooler.commands_graph.say",
-          "topic": topic,
-          "entry_id": entry_id,
-          "title": e.get("title", ""),
-        },
-      )
+  # Remove .git (not needed at runtime, saves space).
+  git_dir = dest / ".git"
+  if git_dir.exists():
+    shutil.rmtree(git_dir)
 
-  return topics
+  # Strip .md projections — they contain human-readable answers.
+  threads_md_dir = dest / "threads"
+  if threads_md_dir.exists():
+    for md_file in threads_md_dir.rglob("*.md"):
+      md_file.unlink()
+    log.info("Stripped .md projections from %s", threads_md_dir)
+
+  return dest
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +161,7 @@ def _exec_in_container(
   container: Any,
   cmd: str,
   *,
-  workdir: str = "/app",
+  workdir: str = "/repo",
   timeout: int = 300,
 ) -> tuple[int, str]:
   """Execute a command in a running container. Returns (exit_code, output)."""
@@ -188,21 +202,25 @@ def _run_one_in_container(
   task_id: str,
   category: str,
   host_threads_dir: Path,
-  host_workspace_dir: Path,
   host_output_dir: Path,
+  host_runner_path: Path,
   api_env: dict[str, str],
   event_logger: EventLogger,
   layout: RunLayout,
 ) -> tuple[TaskSummary, str]:
   """Run one agent mode (baseline or tools) in an isolated Docker container.
 
+  The container image has the watercooler-site codebase baked in at ``/repo``.
+  No host-side workspace dir is needed — each container starts fresh.
+
   Args:
-    host_threads_dir: Seeded thread graph on the host; mounted read-only
+    host_threads_dir: Orphan branch clone on the host; mounted read-only
       into the tools container at ``/data/threads``.  NOT mounted for baseline.
-    host_workspace_dir: Agent workspace on the host; mounted rw at ``/workspace``.
     host_output_dir: Output dir on the host; mounted rw at ``/output``.
       The harness writes ``runner_config.json`` here before exec, and reads
       ``result.json`` after the agent finishes.
+    host_runner_path: Path to container_runner.py on the host; mounted ro
+      at ``/runner/container_runner.py``.
     api_env: API key env vars to inject into the container.
 
   Returns:
@@ -210,6 +228,7 @@ def _run_one_in_container(
   """
   import docker
 
+  image_name = cfg.agent_value_image
   tagged_task_id = f"{task_id}:{mode}"
 
   event_logger.emit(
@@ -225,7 +244,6 @@ def _run_one_in_container(
 
   # ---- Write runner config to host output dir ----
   host_output_dir.mkdir(parents=True, exist_ok=True)
-  host_workspace_dir.mkdir(parents=True, exist_ok=True)
 
   transcript_dir = "/output/transcripts"
   runner_cfg: dict[str, Any] = {
@@ -233,7 +251,7 @@ def _run_one_in_container(
     "problem_statement": problem_statement,
     "max_steps": cfg.max_steps,
     "mode": mode,
-    "workspace_dir": "/workspace",
+    "workspace_dir": "/repo",
     "result_path": "/output/result.json",
     "transcript_dir": transcript_dir,
   }
@@ -245,8 +263,10 @@ def _run_one_in_container(
 
   # ---- Build volume mounts ----
   volumes: dict[str, dict[str, str]] = {
-    str(host_workspace_dir.resolve()): {"bind": "/workspace", "mode": "rw"},
     str(host_output_dir.resolve()): {"bind": "/output", "mode": "rw"},
+    str(host_runner_path.resolve()): {
+      "bind": _CONTAINER_RUNNER_PATH, "mode": "ro",
+    },
   }
   if mode == "tools":
     volumes[str(host_threads_dir.resolve())] = {
@@ -265,7 +285,7 @@ def _run_one_in_container(
 
   try:
     container = client.containers.run(
-      IMAGE_NAME,
+      image_name,
       command="sleep infinity",
       detach=True,
       remove=False,
@@ -274,13 +294,13 @@ def _run_one_in_container(
     )
     log.info(
       "  [%s] container %s started (image=%s)",
-      mode, container.short_id, IMAGE_NAME,
+      mode, container.short_id, image_name,
     )
 
     # ---- Run the agent via container_runner.py ----
-    runner_cmd = f"python {CONTAINER_RUNNER_PATH} /output/runner_config.json"
+    runner_cmd = f"python {_CONTAINER_RUNNER_PATH} /output/runner_config.json"
     exit_code, runner_output = _exec_in_container(
-      container, runner_cmd, workdir="/app", timeout=600,
+      container, runner_cmd, workdir="/repo", timeout=600,
     )
     log.info("  [%s] container_runner exit=%d", mode, exit_code)
     if exit_code != 0:
@@ -288,7 +308,7 @@ def _run_one_in_container(
 
     # ---- Run test_cmd inside the container ----
     test_exit, test_output = _exec_in_container(
-      container, test_cmd, workdir="/workspace", timeout=60,
+      container, test_cmd, workdir="/repo", timeout=60,
     )
     log.info("  [%s] test_cmd exit=%d", mode, test_exit)
 
@@ -468,8 +488,11 @@ def run_agent_value_track(
 ) -> None:
   """Run the agent value benchmark: paired baseline vs tools runs.
 
-  Each mode runs in a separate Docker container for true isolation.
-  The baseline container has NO access to thread data.
+  Architecture:
+    - Both containers use the same image with watercooler-site code at /repo.
+    - The harness clones the orphan branch (thread history) once per run.
+    - Baseline containers: /repo (code) only.
+    - Tools containers: /repo (code) + /data/threads (orphan branch, ro).
   """
   tasks_path = cfg.agent_value_tasks_path or DEFAULT_TASKS_PATH
   if not tasks_path.exists():
@@ -497,44 +520,42 @@ def run_agent_value_track(
 
   api_env = _collect_api_env()
 
+  # ---- Clone orphan branch (once for the entire run) ----
+  threads_clone_dir = layout.artifacts_dir / "threads-clone"
+  _clone_orphan_threads(
+    repo_url=cfg.agent_value_site_repo,
+    branch=cfg.agent_value_threads_branch,
+    dest=threads_clone_dir,
+  )
+
+  # Resolve host-side runner script path
+  host_runner_path = _HOST_RUNNER_PATH.resolve()
+  if not host_runner_path.exists():
+    raise FileNotFoundError(
+      f"container_runner.py not found: {host_runner_path}"
+    )
+
+  # Prepend project context to the problem statement so agents know
+  # what project they're working in (matches the old README.md seeding).
+  def _full_problem(ps: str) -> str:
+    if project_context:
+      return f"{project_context}\n\n---\n\n{ps}"
+    return ps
+
   pair_results: list[_PairResult] = []
 
   for task in tasks:
     task_id = task["task_id"]
     category = task.get("category", "")
     test_cmd = task.get("test_cmd", "true")
-    problem_statement = task["problem_statement"]
+    problem_statement = _full_problem(task["problem_statement"])
 
     log.info("=== Agent value task: %s (%s) ===", task_id, category)
 
-    # ---- Seed threads on host filesystem ----
-    host_threads_dir = layout.artifacts_dir / "threads" / task_id
-    topics = _seed_threads(
-      host_threads_dir, task,
-      event_logger=event_logger,
-      run_id=cfg.run_id,
-      task_id=task_id,
-    )
-
-    # Delete .md projections — they contain answer text in human-readable
-    # form. The MCP server reads only from graph JSON (meta.json,
-    # entries.jsonl, edges.jsonl). The .md files are write-only projections
-    # that must not exist where the agent could find them.
-    for md_file in host_threads_dir.rglob("*.md"):
-      md_file.unlink()
-    log.info("Stripped .md projections from %s", host_threads_dir)
-
-    # ---- Prepare host-side workspace and output dirs per mode ----
-    baseline_workspace = layout.artifacts_dir / "workspaces" / task_id / "baseline"
-    baseline_workspace.mkdir(parents=True, exist_ok=True)
-    (baseline_workspace / "README.md").write_text(project_context, encoding="utf-8")
-
-    baseline_output = layout.artifacts_dir / "output" / task_id / "baseline"
-    baseline_output.mkdir(parents=True, exist_ok=True)
-
-    # ---- Baseline run (no WC tools, no thread data mounted) ----
+    # ---- Baseline run (no WC tools, no thread data) ----
     log.info("  [baseline] starting container...")
 
+    baseline_output = layout.artifacts_dir / "output" / task_id / "baseline"
     baseline_summary, baseline_test_output = _run_one_in_container(
       problem_statement=problem_statement,
       test_cmd=test_cmd,
@@ -542,9 +563,9 @@ def run_agent_value_track(
       mode="baseline",
       task_id=task_id,
       category=category,
-      host_threads_dir=host_threads_dir,
-      host_workspace_dir=baseline_workspace,
+      host_threads_dir=threads_clone_dir,
       host_output_dir=baseline_output,
+      host_runner_path=host_runner_path,
       api_env=api_env,
       event_logger=event_logger,
       layout=layout,
@@ -554,13 +575,7 @@ def run_agent_value_track(
     # ---- Tools run (with WC tools, thread data mounted ro) ----
     log.info("  [tools] starting container...")
 
-    tools_workspace = layout.artifacts_dir / "workspaces" / task_id / "tools"
-    tools_workspace.mkdir(parents=True, exist_ok=True)
-    (tools_workspace / "README.md").write_text(project_context, encoding="utf-8")
-
     tools_output = layout.artifacts_dir / "output" / task_id / "tools"
-    tools_output.mkdir(parents=True, exist_ok=True)
-
     tools_summary, tools_test_output = _run_one_in_container(
       problem_statement=problem_statement,
       test_cmd=test_cmd,
@@ -568,9 +583,9 @@ def run_agent_value_track(
       mode="tools",
       task_id=task_id,
       category=category,
-      host_threads_dir=host_threads_dir,
-      host_workspace_dir=tools_workspace,
+      host_threads_dir=threads_clone_dir,
       host_output_dir=tools_output,
+      host_runner_path=host_runner_path,
       api_env=api_env,
       event_logger=event_logger,
       layout=layout,

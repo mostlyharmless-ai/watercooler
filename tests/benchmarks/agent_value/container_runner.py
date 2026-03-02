@@ -1,14 +1,20 @@
 """Self-contained agent runner for the agent_value benchmark.
 
 This script runs **inside** a Docker container launched by the harness
-(``agent_value.py``).  It is invoked as::
+(``agent_value.py``).  It is bind-mounted at ``/runner/container_runner.py``
+and invoked as::
 
-    python /app/tests/benchmarks/agent_value/container_runner.py /output/runner_config.json
+    python /runner/container_runner.py /output/runner_config.json
 
-The harness writes a JSON config to the bind-mounted ``/output`` volume
-before exec-ing this script.  Results are written back to
-``/output/result.json`` so the harness can read them after the container
+The container image (``wcbench-agent-base``) contains the watercooler-site
+codebase at ``/repo``.  The harness writes a JSON config to the bind-mounted
+``/output`` volume before exec-ing this script.  Results are written back
+to ``/output/result.json`` so the harness can read them after the container
 stops.
+
+For **tools** mode, the orphan-branch thread data is bind-mounted at
+``/data/threads`` and the MCP server is configured with
+``WATERCOOLER_DIR=/data/threads``.
 
 No imports from ``agent_value.py`` — this module is fully standalone.
 """

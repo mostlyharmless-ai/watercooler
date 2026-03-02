@@ -1,7 +1,7 @@
 {
-  "version": 1,
-  "description": "Agent value benchmark: does an agent with watercooler tools succeed at tasks that an agent without them fails?",
-  "workdir": "/workspace",
+  "version": 2,
+  "description": "Agent value benchmark: does an agent with watercooler tools succeed at tasks that an agent without them fails? Both agents get the watercooler-site codebase. The tools agent additionally gets the real thread history from the orphan branch.",
+  "workdir": "/repo",
   "project_context": "You are working on 'watercooler-site', a Next.js web dashboard for collaborative agentic coding. Tech stack: Next.js 14 + TypeScript, Vercel (deployment), Neon PostgreSQL + Prisma ORM (database), Slack integration (Block Kit, OAuth), GitHub OAuth for authentication, watercooler protocol for threaded project history.\n\nIf you have access to project knowledge tools (watercooler search/read), use them to find accurate information. Otherwise, do your best based on available context.",
   "tasks": [
     {
@@ -9,19 +9,8 @@
       "category": "decision_recall",
       "title": "Recall the chosen notification mechanism",
       "problem_statement": "The team previously discussed and decided on a real-time notification mechanism for the dashboard.\n\nWrite a file called DECISION.md that states:\n1. Which mechanism was chosen (Pusher, WebSockets, long polling, or SSE)\n2. The specific endpoint path that was decided on\n3. The polling interval in seconds\n4. Which alternatives were rejected and why\n\nDo NOT guess - find the decision that was already made.",
-      "seed_threads": [
-        {
-          "thread_id": "system-design-debug-polish",
-          "entries": [
-            {
-              "entry_id": "01KF09DJ1BFF40N2K7C8M5SARA",
-              "title": "Decision: Long Polling for Dashboard Push Notifications",
-              "timestamp": "2026-01-15T07:37:50Z",
-              "body": "Decision: Selected approach is long polling with DB check (no external dependencies).\n\nRationale: Paid Neon tier removes connection/compute concerns. No external service dependency (vs Pusher). Simple implementation (~2 hours). Less than 2 second update latency.\n\nNew Endpoint: GET /api/dashboard/wait-for-update?since=<ISO timestamp>. Holds request open for up to 25 seconds. Polls DB every 1.5 seconds for lastSyncedAt changes. Returns immediately when update detected. Client loops: receive response, fetch data, start new long poll.\n\nAlternatives rejected: Pusher (external dependency, $49/mo), WebSockets (complex session management), SSE (limited browser support for auth headers)."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["system-design-debug-polish"],
+      "gold_entry_ids": ["01KF09DJ1BFF40N2K7C8M5SARA"],
       "test_cmd": "grep -qi 'long polling' DECISION.md && grep -q '/api/dashboard/wait-for-update' DECISION.md && grep -q '1.5' DECISION.md"
     },
     {
@@ -29,19 +18,8 @@
       "category": "decision_recall",
       "title": "Recall the production testing policy",
       "problem_statement": "The team has an established policy about testing in production environments and branch-to-environment mapping.\n\nWrite a file called POLICY.md that states:\n1. The policy on testing in production\n2. The complete branch-to-environment mapping (which branches deploy where)\n3. Which deployment methods are allowed and which are forbidden\n\nDo NOT make up a policy - find the one that was already established.",
-      "seed_threads": [
-        {
-          "thread_id": "service-reference-vercel",
-          "entries": [
-            {
-              "entry_id": "01KF2ESRY5TT074BBFH9DEHRNX",
-              "title": "POLICY DECISION: Never Test in Production - Branch Workflow Reinforced",
-              "timestamp": "2026-01-16T03:50:21Z",
-              "body": "POLICY: WE DO NOT TEST IN PRODUCTION. This is an absolute rule. Testing happens in Preview environment, never Production.\n\nBranch to Environment Mapping (ENFORCED):\n- stable branch -> Production (release-ready code only)\n- main branch -> Preview (all development/testing)\n- staging branch -> Preview (staging/QA)\n- feature/* branches -> Preview (auto-generated preview URL, feature development)\n\nDeployment Methods: Use GitHub Push (Auto-Deploy). Never use Vercel CLI deploy to production. Never push directly to stable without PR review."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["service-reference-vercel"],
+      "gold_entry_ids": ["01KF2ESRY5TT074BBFH9DEHRNX"],
       "test_cmd": "grep -qi 'never test in production\\|do not test in production' POLICY.md && grep -qi 'stable.*production' POLICY.md && grep -qi 'main.*preview' POLICY.md"
     },
     {
@@ -49,19 +27,8 @@
       "category": "decision_recall",
       "title": "Recall the stdio-to-HTTP bridging approach",
       "problem_statement": "The team evaluated three approaches to bridge the gap between the local stdio MCP mode and the hosted HTTP mode. A decision was made.\n\nWrite a file called ARCHITECTURE.md that states:\n1. Which approach was selected (Full GitHub API Migration, Context Propagation with Mode Detection, or Server-Side Clone)\n2. Why it was selected over the alternatives\n3. The key design elements of the chosen approach\n\nDo NOT guess - find the architectural decision that was already made.",
-      "seed_threads": [
-        {
-          "thread_id": "manifesto-system-design-review",
-          "entries": [
-            {
-              "entry_id": "01KF043RK24QQYQ8M9MKCM0CR2",
-              "title": "Solution Approach: Context Propagation with Mode Detection",
-              "timestamp": "2026-01-15T06:05:05Z",
-              "body": "Decision: Option B selected - Context Propagation with Mode Detection.\n\nEvaluated three approaches to bridge the stdio-to-HTTP gap:\n\nOption A: Full GitHub API Migration (HIGH EFFORT) - Replace ALL filesystem and git operations with GitHub REST/GraphQL API. Rejected: Too much effort (6-8 weeks), race conditions, API rate limits.\n\nOption B: Context Propagation with Mode Detection (MEDIUM EFFORT) - Selected. Pass HTTP context to tools via anyio context variables. Tools detect hosted mode and use GitHub API. Best balance of effort vs value.\n\nOption C: Server-Side Clone (LOW EFFORT) - Clone repos to temp directories per-request. Rejected: Doesn't scale, not truly stateless.\n\nKey design: Context Variable Bridge using Python contextvars, Mode Detection via is_hosted_mode() check, GitHub API Layer for read/write, Dual Code Paths per tool."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["manifesto-system-design-review"],
+      "gold_entry_ids": ["01KF043RK24QQYQ8M9MKCM0CR2"],
       "test_cmd": "grep -qi 'context propagation' ARCHITECTURE.md && grep -qi 'mode detection' ARCHITECTURE.md && grep -qi 'contextvars\\|context variable' ARCHITECTURE.md"
     },
     {
@@ -69,19 +36,8 @@
       "category": "decision_recall",
       "title": "Recall the P3009 migration recovery procedure",
       "problem_statement": "There is an established pattern for recovering from Prisma P3009 'failed migration' errors in the production database.\n\nWrite a file called RECOVERY.md that documents:\n1. What causes a P3009 error\n2. How to diagnose it (what SQL queries to run)\n3. The exact fix pattern (the SQL UPDATE statement)\n\nDo NOT guess - find the established recovery pattern.",
-      "seed_threads": [
-        {
-          "thread_id": "service-reference-neon",
-          "entries": [
-            {
-              "entry_id": "01KEXGPC0EWM1K338DE29Q2VK3",
-              "title": "Migration Fix Pattern: P3009 Failed Migration Recovery",
-              "timestamp": "2026-01-14T05:47:15Z",
-              "body": "Incident (2026-01-14): Vercel preview deployment failed with Prisma P3009 error. Migration attempted to add columns that already existed (likely from a prior db push): column graphNodes of relation ConnectedRepo already exists.\n\nDiagnosis: Check migration status with SELECT migration_name, finished_at FROM _prisma_migrations WHERE finished_at IS NULL. Check if columns exist in information_schema.\n\nFix Applied: Since columns already existed, marked the failed migration as rolled back:\nUPDATE _prisma_migrations SET finished_at = started_at + INTERVAL '1 second', applied_steps_count = 1, logs = 'Marked as applied - schema already correct' WHERE migration_name = '20260113000002_add_graph_columns' AND finished_at IS NULL."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["service-reference-neon"],
+      "gold_entry_ids": ["01KEXGPC0EWM1K338DE29Q2VK3"],
       "test_cmd": "grep -qi 'P3009' RECOVERY.md && grep -qi '_prisma_migrations' RECOVERY.md && grep -qi 'finished_at' RECOVERY.md"
     },
     {
@@ -89,19 +45,8 @@
       "category": "decision_recall",
       "title": "Recall why dashboard shows 'No threads found'",
       "problem_statement": "Users reported that the dashboard shows 'No threads found' after connecting a repository. The root cause was diagnosed.\n\nWrite a file called DIAGNOSIS.md that explains:\n1. The root cause of the 'No threads found' issue\n2. Which step in the data flow is broken\n3. What the user has to do manually as a workaround\n\nDo NOT guess - find the diagnosis that was already made.",
-      "seed_threads": [
-        {
-          "thread_id": "hosted-dashboard-with-oauth",
-          "entries": [
-            {
-              "entry_id": "01KAAHVVSBGHWRTC6TPY2324ZK",
-              "title": "DIAGNOSIS: No threads found - Missing automatic sync after repo connection",
-              "timestamp": "2025-11-18T03:59:20Z",
-              "body": "Root Cause Found: Dashboard shows 'No threads found' because users must manually click Sync Threads after connecting repos, but there is no indication they need to do this.\n\nData Flow Audit:\n- Steps 1-3 (OAuth, Repo Discovery): WORKING\n- Step 4 (Connect Repository): WORKING but does NOT trigger sync automatically\n- Step 5 (Sync Threads): User must manually navigate to Dashboard and click Sync Threads\n\nThe missing automatic sync after repo connection is the root cause. The connect action saves to ConnectedRepo table with enabled=true but does not trigger any thread synchronization."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["hosted-dashboard-with-oauth"],
+      "gold_entry_ids": ["01KAAHVVSBGHWRTC6TPY2324ZK"],
       "test_cmd": "grep -qi 'automatic sync\\|auto.*sync\\|sync.*automatic' DIAGNOSIS.md && grep -qi 'manually' DIAGNOSIS.md && grep -qi 'connect' DIAGNOSIS.md"
     },
     {
@@ -109,31 +54,8 @@
       "category": "context_rehydration",
       "title": "Summarize the Neon transfer spike incident",
       "problem_statement": "There was a major database transfer spike incident with the Neon PostgreSQL database that threatened to exhaust the 5GB transfer limit.\n\nWrite a file called INCIDENT_SUMMARY.md summarizing:\n1. The root cause of the transfer spike (what specific operation caused it)\n2. The specific data volume involved\n3. What optimization phases were applied\n4. The before and after transfer rates (MB/day)\n5. How many days the 5GB limit will now last\n\nDo NOT speculate - find the actual incident details from project records.",
-      "seed_threads": [
-        {
-          "thread_id": "neon-database-transfer-optimization",
-          "entries": [
-            {
-              "entry_id": "01KADE9VNTAF47AF5RBWNTY489",
-              "title": "Root Cause Found: Backfill Script + Delete-All Pattern",
-              "timestamp": "2025-11-19T06:54:48Z",
-              "body": "Root Cause Identified: Found the actual cause of the 3.37GB write transfer. Timeline: Nov 18 - 89 snapshots created across 3 repo syncs. Nov 19 - All 89 records updated by backfill script. The Problem: Each sync uses deleteMany + createMany pattern. Even for first sync (no existing data), deleteMany still executes. 3 syncs times delete plus create equals 6 write operations. 89 snapshots times 40KB equals about 3.6MB per operation."
-            },
-            {
-              "entry_id": "01KADEBVKTHDVNZX2PVX4JW678",
-              "title": "Critical Finding: Migration Table Rewrite Caused 3.37GB Write",
-              "timestamp": "2025-11-19T06:55:55Z",
-              "body": "Root Cause: Migration Table Rewrite. The migration on Nov 19 at 01:27:34 added 5 columns with DEFAULT values to an existing table with 89 rows. When you add NOT NULL columns with DEFAULT values, PostgreSQL rewrites the entire table to populate the defaults. This is a full table copy operation including all data pages, all indexes (2MB), WAL entries, and table metadata."
-            },
-            {
-              "entry_id": "01KAG43JE6GBRA6GZEXRR8649W",
-              "title": "Status Update: Transfer Rate Stabilized at 21.5 MB/day",
-              "timestamp": "2025-11-20T07:54:19Z",
-              "body": "Transfer rate has stabilized at a sustainable level. All three optimization phases are working correctly. The 5GB limit will now last approximately 233 days instead of 1 day - a 233x improvement. Current transfer rate: 37.66 MB over 1.75 days = approximately 21.5 MB/day. Baseline (pre-optimization) was 4800 MB/day. Phase 1+2 target was 53 MB/day, actual is 21.5 MB/day (59% better than target)."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["neon-database-transfer-optimization"],
+      "gold_entry_ids": ["01KADE9VNTAF47AF5RBWNTY489", "01KADEBVKTHDVNZX2PVX4JW678", "01KAG43JE6GBRA6GZEXRR8649W"],
       "test_cmd": "grep -qi '3.37\\|3\\.37' INCIDENT_SUMMARY.md && grep -qi '21.5\\|21\\.5' INCIDENT_SUMMARY.md && grep -qi '233' INCIDENT_SUMMARY.md"
     },
     {
@@ -141,31 +63,8 @@
       "category": "context_rehydration",
       "title": "Report current state of Slack integration",
       "problem_statement": "You need to write a status report on the Slack integration work for a stakeholder check-in.\n\nWrite a file called SLACK_STATUS.md that describes:\n1. Which implementation phases are complete (list each phase and status)\n2. What is currently being worked on (active work)\n3. Any known debugging issues or open bugs\n\nDo NOT speculate - find the actual project status from records.",
-      "seed_threads": [
-        {
-          "thread_id": "slack-integration",
-          "entries": [
-            {
-              "entry_id": "01KFD58Q924S3HN1N05S9PBFHA",
-              "title": "Implementation Plan: Multi-Workspace OAuth, Channel Binding & Branch Switching",
-              "timestamp": "2026-01-20T07:35:24Z",
-              "body": "Current State: watercooler-site has comprehensive Slack integration infrastructure including OAuth flow, token service, events webhook, interactions handler, and Block Kit formatting in TypeScript. Prisma schema includes SlackWorkspace, SlackThreadMapping, SlackChannelConfig, ProcessedSlackEvent. Critical Gap: No workspace is currently connected. Implementation Plan covers Phase 1 (Multi-Workspace OAuth), Phase 2 (Channel-repo binding), Phase 3 (Slash commands), Phase 4 (Token service)."
-            },
-            {
-              "entry_id": "01KFEWB1VSP4B3A1V25TDJY146",
-              "title": "Auto-Channel Provisioning Complete + OAuth Scope Fix",
-              "timestamp": "2026-01-20T23:37:52Z",
-              "body": "Completed auto-channel provisioning: automatic Slack channel creation when repositories are enabled. New files: slackChannelManagement.ts for channel create/archive/unarchive, provision-channels route, isManaged migration. Flow: User enables repo -> syncRepoSlackChannel creates wc-<repo-name> channel. User disables repo -> Channel archived (reversible). Bug Fix: Missing OAuth Scopes - conversations.list returned missing_scope error. Root cause: OAuth scopes did not include groups:read for private channels."
-            },
-            {
-              "entry_id": "01KFH7HK64SHKSR34453AHBZKE",
-              "title": "Status Snapshot: Slack Integration Complete State (2026-01-21)",
-              "timestamp": "2026-01-21T21:32:09Z",
-              "body": "Implementation Status Overview: Phase 1 (OAuth flow, Connect Slack button) COMPLETE. Phase 2 (Channel-repo binding, baseline sync) COMPLETE. Phase 3 (Slash commands: sync, rebuild, help) COMPLETE. Phase 4 (Multi-workspace token service) COMPLETE. Active Work: Phase 5 Legacy Auth Removal - remove all SLACK_BOT_TOKEN env var fallbacks. Current Debugging Issues: Add Entry modal view_submission not reaching Vercel, Close modal MCP success but data not persisted."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["slack-integration"],
+      "gold_entry_ids": ["01KFD58Q924S3HN1N05S9PBFHA", "01KFEWB1VSP4B3A1V25TDJY146", "01KFH7HK64SHKSR34453AHBZKE"],
       "test_cmd": "grep -qi 'phase 1.*complete\\|phase 1.*done' SLACK_STATUS.md && grep -qi 'phase 5\\|legacy auth' SLACK_STATUS.md && grep -qi 'view_submission\\|modal' SLACK_STATUS.md"
     },
     {
@@ -173,25 +72,8 @@
       "category": "context_rehydration",
       "title": "Summarize the OAuth redirect failure root cause",
       "problem_statement": "The NextAuth OAuth login flow had a critical failure that was diagnosed and fixed.\n\nWrite a file called OAUTH_POSTMORTEM.md that explains:\n1. What error the user saw (the symptom)\n2. The root cause (what API mismatch caused it)\n3. What specific code changes fixed it\n4. Any remaining cleanup work\n\nDo NOT speculate - find the actual postmortem from project records.",
-      "seed_threads": [
-        {
-          "thread_id": "hosted-dashboard-with-oauth",
-          "entries": [
-            {
-              "entry_id": "01KA7H7CYQ58K3VN9D5YVRPD2B",
-              "title": "ROOT CAUSE FOUND: NextAuth v4/v5 API mismatch - OAuth now fixed",
-              "timestamp": "2025-11-16T23:50:27Z",
-              "body": "Root Cause Analysis: Why OAuth Redirect Failed. Found three critical failures from mixing v4 and v5 APIs. Failure 1: Wrong Import Source - used next-auth/react (v4 client API) instead of @/lib/auth (v5 server action). Failure 2: Wrong Parameter Name - used callbackUrl (v4) instead of redirectTo (v5). Failure 3: Client Component - signIn must be called from server-side route in v5, not from client component."
-            },
-            {
-              "entry_id": "01KAAAM6H53NB2KCBHMV284D19",
-              "title": "OAuth Fix: NextAuth v5 API Migration + Remaining Workarounds Analysis",
-              "timestamp": "2025-11-18T01:52:49Z",
-              "body": "Fixed the immediate OAuth failure (UnknownAction error) by migrating from custom routes to NextAuth v5 native signIn API. Root cause: NextAuth v5 removed the /api/auth/signin/{provider} GET endpoint that existed in v4. Our custom routes were redirecting to this non-existent endpoint. Changes: hooks/useOnboardingState.ts updated. 189 lines of encoding/decoding workarounds remain from Cursor's iterations that may need cleanup."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["hosted-dashboard-with-oauth"],
+      "gold_entry_ids": ["01KA7H7CYQ58K3VN9D5YVRPD2B", "01KAAAM6H53NB2KCBHMV284D19"],
       "test_cmd": "grep -qi 'v4.*v5\\|v5.*v4\\|NextAuth' OAUTH_POSTMORTEM.md && grep -qi 'callbackUrl\\|redirectTo\\|UnknownAction' OAUTH_POSTMORTEM.md && grep -qi '189\\|workaround\\|cleanup' OAUTH_POSTMORTEM.md"
     },
     {
@@ -199,19 +81,8 @@
       "category": "context_rehydration",
       "title": "Summarize sync performance optimizations",
       "problem_statement": "Multiple phases of sync performance optimization were completed. You need to document the results.\n\nWrite a file called PERF_REPORT.md that covers:\n1. What optimizations were made (list each phase)\n2. The before and after performance numbers\n3. How the rate limit issue was fixed\n4. The specific technique used for change detection\n\nDo NOT speculate - find the actual optimization results from project records.",
-      "seed_threads": [
-        {
-          "thread_id": "sync-performance-optimization",
-          "entries": [
-            {
-              "entry_id": "01KGEY1FDX6S2SS2GP67HKEMRV",
-              "title": "Closure: All Performance Optimizations Complete",
-              "timestamp": "2026-02-02T10:23:17Z",
-              "body": "All sync performance optimization phases have been implemented and verified. Phase 2: Incremental Snapshot Updates - replaced delete-all/create-all with incremental updates (commit 4092070). Phase 3: Incremental Graph Sync - added fetchBaselineGraphIncremental for SHA-based change detection, performance from 60s (555 fetches) to less than 1s (0 fetches) for unchanged repos (commit 63aa359). Rate Limit Fix - removed purge:true from webhook handler, API calls reduced from 450 per entry to 0 (commit 4b34fab). Additional: Parallelized multi-user sync with Promise.allSettled, single-fetch with broadcast for multi-subscriber repos."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["sync-performance-optimization"],
+      "gold_entry_ids": ["01KGEY1FDX6S2SS2GP67HKEMRV"],
       "test_cmd": "grep -qi 'incremental' PERF_REPORT.md && grep -qi 'SHA\\|sha' PERF_REPORT.md && grep -qi '60.*1\\|less than 1' PERF_REPORT.md && grep -qi '450\\|purge' PERF_REPORT.md"
     },
     {
@@ -219,25 +90,8 @@
       "category": "temporal_reasoning",
       "title": "Identify the CORRECTED root cause (not the initial wrong one)",
       "problem_statement": "There was a Prisma migration failure. The initial analysis was later CORRECTED with a more accurate root cause.\n\nWrite a file called ROOT_CAUSE.md with:\n1. The CORRECT (most recent) root cause of the migration failure\n2. What the INCORRECT earlier analysis said (so we don't repeat the mistake)\n3. Why the earlier analysis was wrong\n\nIMPORTANT: There are two analyses - an initial one and a corrected one. You MUST identify and use the CORRECTED root cause, not the initial one. The initial analysis blamed 'workflow deviation' but that was wrong.",
-      "seed_threads": [
-        {
-          "thread_id": "postmortem-prisma-migration-workflow",
-          "entries": [
-            {
-              "entry_id": "01KEHCN2YG59WC6PGNY3DFTP6N",
-              "title": "Postmortem: Prisma Migration Workflow Deviation",
-              "timestamp": "2026-01-09T12:45:51Z",
-              "body": "Initial Analysis: The migration failure was caused by workflow deviation - running migrate dev instead of db push, which created an inconsistent migration history. The team deviated from the established migration workflow."
-            },
-            {
-              "entry_id": "01KEKEWMV0TCW7B4Q111NV6X7K",
-              "title": "CORRECTED: Root Cause - Index vs Constraint Mismatch",
-              "timestamp": "2026-01-10T08:03:19Z",
-              "body": "CORRECTION: The migration failure was NOT caused by workflow deviation. The actual root cause was an index vs constraint mismatch: db push creates unique constraints as indexes visible in pg_indexes, while prisma migrate checks pg_constraint. When migrate runs, it doesn't see the constraint in pg_constraint (even though the index exists in pg_indexes) and tries to create it again, causing a conflict. This supersedes the earlier analysis that blamed workflow deviation."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["postmortem-prisma-migration-workflow"],
+      "gold_entry_ids": ["01KEHCN2YG59WC6PGNY3DFTP6N", "01KEKEWMV0TCW7B4Q111NV6X7K"],
       "test_cmd": "grep -qi 'index.*constraint\\|constraint.*mismatch\\|pg_indexes.*pg_constraint' ROOT_CAUSE.md && grep -qi 'workflow deviation' ROOT_CAUSE.md && grep -qi 'incorrect\\|wrong\\|supersede\\|corrected\\|not caused' ROOT_CAUSE.md"
     },
     {
@@ -245,25 +99,8 @@
       "category": "temporal_reasoning",
       "title": "Describe current (not old) dashboard data access approach",
       "problem_statement": "The way the dashboard accesses thread data has changed over time. An old approach was replaced with a new one.\n\nWrite a file called DATA_ACCESS.md with:\n1. The CURRENT approach for how the dashboard accesses thread data\n2. What the OLD approach was (that was replaced)\n3. What database table was removed in the transition\n\nIMPORTANT: Make sure you describe the CURRENT approach, not the old one. The old approach used a database table; the new one reads directly from files.",
-      "seed_threads": [
-        {
-          "thread_id": "graph-first-thread-evolution",
-          "entries": [
-            {
-              "entry_id": "01KD848F5AH9YT0AAQSQZ58R6K",
-              "title": "Use baseline graph as primary data source for thread parsing",
-              "timestamp": "2025-12-24T12:10:13Z",
-              "body": "Proposal: The dashboard should consume the baseline graph JSON instead of parsing markdown files directly. The markdown files are unreliable as a data source because formatting variations cause parsing failures. The baseline graph is machine-generated and stable."
-            },
-            {
-              "entry_id": "01KFJJYFW4QZDQQDGAKVHSFMRC",
-              "title": "Graph-First Consolidation Complete - ThreadSnapshot Removed",
-              "timestamp": "2026-01-22T10:10:41Z",
-              "body": "Graph-first consolidation is complete. ThreadSnapshot table has been removed from the database. All dashboard routes now read directly from the baseline graph JSON files. The old approach of storing parsed thread content in a ThreadSnapshot database table has been fully replaced. Routes use fetchBaselineGraph() to read the per-thread graph files from the orphan branch. This supersedes the earlier proposal - the migration is done, not just proposed."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["graph-first-thread-evolution"],
+      "gold_entry_ids": ["01KD848F5AH9YT0AAQSQZ58R6K", "01KFJJYFW4QZDQQDGAKVHSFMRC"],
       "test_cmd": "grep -qi 'baseline graph' DATA_ACCESS.md && grep -qi 'ThreadSnapshot.*removed\\|removed.*ThreadSnapshot' DATA_ACCESS.md && grep -qi 'current\\|now' DATA_ACCESS.md"
     },
     {
@@ -271,25 +108,8 @@
       "category": "temporal_reasoning",
       "title": "Describe current (not old) branch storage model",
       "problem_statement": "The thread storage architecture's handling of branches has changed. An old model was replaced.\n\nWrite a file called BRANCH_MODEL.md with:\n1. The CURRENT model for how branches relate to thread storage\n2. What the OLD model was (that was replaced)\n3. How entries are associated with branches now\n\nIMPORTANT: The old model used separate repos/branches as storage dimensions. The new model is different. Describe the CURRENT one.",
-      "seed_threads": [
-        {
-          "thread_id": "dashboard-branch-ui-alignment",
-          "entries": [
-            {
-              "entry_id": "01KHM502HM2YY91JTQHV5AY8G3",
-              "title": "Plan: Update watercooler-site for orphan branch architecture",
-              "timestamp": "2026-02-16T21:16:43Z",
-              "body": "Current architecture: Threads live in separate -threads repos and branches are separate storage dimensions with git branch-based discovery."
-            },
-            {
-              "entry_id": "01KHN8GH2YVCSCG4CQMRATBSH4",
-              "title": "Plan: Align Dashboard UI with Orphan Branch Architecture",
-              "timestamp": "2026-02-17T07:37:22Z",
-              "body": "Architecture update: Branches are no longer a data storage dimension but a code_branch filter tag on entries in the orphan branch. All entries live on the single watercooler/threads orphan branch. The code_branch field is metadata that can be used for filtering, not a separate storage location. This supersedes the separate-repo branch model."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["dashboard-branch-ui-alignment"],
+      "gold_entry_ids": ["01KHM502HM2YY91JTQHV5AY8G3", "01KHN8GH2YVCSCG4CQMRATBSH4"],
       "test_cmd": "grep -qi 'code_branch' BRANCH_MODEL.md && grep -qi 'orphan' BRANCH_MODEL.md && grep -qi 'filter\\|tag\\|metadata' BRANCH_MODEL.md"
     },
     {
@@ -297,30 +117,8 @@
       "category": "cross_thread_synthesis",
       "title": "Synthesize deploy + migration failure scenarios from two threads",
       "problem_statement": "When Vercel deployments trigger Prisma migrations, failures can occur from multiple causes documented across different project areas.\n\nWrite a file called DEPLOY_FAILURES.md that covers:\n1. What happens when a deployment triggers a P1002 advisory lock timeout (symptoms, resolution)\n2. What happens when a deployment triggers a P3009 failed migration (root cause, SQL fix)\n3. The recovery procedure for each\n\nYou need information from multiple project areas to answer completely. The P1002 issue is documented under Vercel operations, and the P3009 issue under Neon database operations.",
-      "seed_threads": [
-        {
-          "thread_id": "service-reference-vercel",
-          "entries": [
-            {
-              "entry_id": "01KEXYF20N51A34DBS8J0AMBAB",
-              "title": "Known Issue: Neon Advisory Lock Timeout During Deploy",
-              "timestamp": "2026-01-14T09:47:55Z",
-              "body": "Deployments occasionally fail during prisma migrate deploy with error P1002 (advisory lock timeout). Symptoms: Build log shows 'Timed out trying to acquire a postgres advisory lock', exit code 1, red deployment status. Resolution: Simply redeploy - this is a transient Neon/network issue. Methods: Vercel dashboard Redeploy button, git push empty commit, or vercel --prod CLI. Root Cause: See service-reference-neon thread for detailed analysis."
-            }
-          ]
-        },
-        {
-          "thread_id": "service-reference-neon",
-          "entries": [
-            {
-              "entry_id": "01KEXGPC0EWM1K338DE29Q2VK3",
-              "title": "Migration Fix Pattern: P3009 Failed Migration Recovery",
-              "timestamp": "2026-01-14T05:47:15Z",
-              "body": "Vercel preview deployment failed with Prisma P3009 error: migrate found failed migrations in the target database. Root Cause: Migration attempted to add columns that already existed from a prior db push. Fix Applied: Marked the failed migration as rolled back in _prisma_migrations table by setting finished_at and applied_steps_count. SQL: UPDATE _prisma_migrations SET finished_at = started_at + INTERVAL '1 second', applied_steps_count = 1, logs = 'Marked as applied' WHERE migration_name = '20260113000002_add_graph_columns' AND finished_at IS NULL."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["service-reference-vercel", "service-reference-neon"],
+      "gold_entry_ids": ["01KEXYF20N51A34DBS8J0AMBAB", "01KEXGPC0EWM1K338DE29Q2VK3"],
       "test_cmd": "grep -qi 'P1002' DEPLOY_FAILURES.md && grep -qi 'P3009' DEPLOY_FAILURES.md && grep -qi 'redeploy' DEPLOY_FAILURES.md && grep -qi '_prisma_migrations' DEPLOY_FAILURES.md"
     },
     {
@@ -328,30 +126,8 @@
       "category": "cross_thread_synthesis",
       "title": "Analyze Slack rebuild interaction with sync rate limits",
       "problem_statement": "The Slack integration has a rebuild feature, and there have been sync performance issues including rate limiting. These are documented in separate project areas.\n\nWrite a file called REBUILD_ANALYSIS.md that covers:\n1. What the Slack rebuild operation does and its known issues (collision protection, dual implementation)\n2. How the sync system was optimized to handle rate limits (what specific fix was applied)\n3. Whether a rebuild could trigger rate limit exhaustion and why/why not\n\nYou need information from multiple project areas to answer completely. Slack rebuild issues are under Slack UX, and rate limit fixes are under sync optimization.",
-      "seed_threads": [
-        {
-          "thread_id": "slack-ux-enhancement",
-          "entries": [
-            {
-              "entry_id": "01KEKHHDV3RW94013EVR934RTB",
-              "title": "Architecture Refactoring Plan: Block Kit Consolidation & Collision Protection",
-              "timestamp": "2026-01-10T08:49:37Z",
-              "body": "Phases 1-10 of original Slack UX Enhancement completed: branch selection UI, branch switch operation, rebuild trigger, migration. Critical Issues Identified: 1) Dual Block Kit Implementation - Python blocks.py and TypeScript slackOutbound.ts can drift. 2) No Collision Protection - multiple users can trigger rebuild simultaneously, no locking mechanism. 3) Rebuild operations trigger GitHub API calls for full thread re-fetch."
-            }
-          ]
-        },
-        {
-          "thread_id": "sync-performance-optimization",
-          "entries": [
-            {
-              "entry_id": "01KGEY1FDX6S2SS2GP67HKEMRV",
-              "title": "Closure: All Performance Optimizations Complete",
-              "timestamp": "2026-02-02T10:23:17Z",
-              "body": "All sync performance optimization phases complete. Rate Limit Fix: removed purge:true from webhook handler which was bypassing incremental sync, reducing API calls from 450 per entry to 0. Incremental Graph Sync: SHA-based change detection reduces sync time from 60s to less than 1s for unchanged repos. Parallelized multi-user sync with Promise.allSettled."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["slack-ux-enhancement", "sync-performance-optimization"],
+      "gold_entry_ids": ["01KEKHHDV3RW94013EVR934RTB", "01KGEY1FDX6S2SS2GP67HKEMRV"],
       "test_cmd": "grep -qi 'collision\\|locking\\|no.*protection' REBUILD_ANALYSIS.md && grep -qi 'purge.*true\\|450.*per entry\\|rate limit' REBUILD_ANALYSIS.md && grep -qi 'incremental\\|SHA' REBUILD_ANALYSIS.md"
     },
     {
@@ -359,30 +135,8 @@
       "category": "cross_thread_synthesis",
       "title": "Synthesize authentication and onboarding flow from two threads",
       "problem_statement": "New users go through an authentication and onboarding flow that spans OAuth login and repository setup. Issues were found and fixed across both areas.\n\nWrite a file called ONBOARDING.md that covers:\n1. What the OAuth authentication failure was and how it was fixed\n2. What onboarding improvements were deployed (P0 and P1 phases)\n3. Known remaining issues or workarounds\n\nYou need information from multiple project areas to answer completely. OAuth issues are documented under dashboard auth, and onboarding fixes under permissions streamlining.",
-      "seed_threads": [
-        {
-          "thread_id": "hosted-dashboard-with-oauth",
-          "entries": [
-            {
-              "entry_id": "01KAAAM6H53NB2KCBHMV284D19",
-              "title": "OAuth Fix: NextAuth v5 API Migration + Remaining Workarounds Analysis",
-              "timestamp": "2025-11-18T01:52:49Z",
-              "body": "Fixed the immediate OAuth failure (UnknownAction error) by migrating from custom routes to NextAuth v5 native signIn API. Root cause: NextAuth v5 removed the /api/auth/signin/{provider} GET endpoint that existed in v4. Our custom routes redirected to this non-existent endpoint. 189 lines of encoding/decoding workarounds remain from Cursor's iterations."
-            }
-          ]
-        },
-        {
-          "thread_id": "onboarding-streamlining-and-github-permissions",
-          "entries": [
-            {
-              "entry_id": "01KAQ5ZHRBTSQMTBPKX6TCS2JP",
-              "title": "Phases 1 & 2 Complete - All Blocking Work Deployed",
-              "timestamp": "2025-11-23T01:41:43Z",
-              "body": "All blocking and high-value onboarding work deployed to production. Phase 1 (P0): Fixed IterableList.origin errors, implemented HTTPS auto-provisioning via GitHub API, configured GIT_ASKPASS for automatic authentication, 103 tests passing. Phase 2 (P1): HTTP transport with SSE implemented, daemon management operational, multi-org support with UserOrganization model and auto-sync on login deployed to Vercel production."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["hosted-dashboard-with-oauth", "onboarding-streamlining-and-github-permissions"],
+      "gold_entry_ids": ["01KAAAM6H53NB2KCBHMV284D19", "01KAQ5ZHRBTSQMTBPKX6TCS2JP"],
       "test_cmd": "grep -qi 'OAuth\\|NextAuth' ONBOARDING.md && grep -qi 'HTTPS\\|GIT_ASKPASS' ONBOARDING.md && grep -qi 'multi.org\\|UserOrganization' ONBOARDING.md"
     },
     {
@@ -390,30 +144,8 @@
       "category": "cross_thread_synthesis",
       "title": "Explain how per-thread format enables efficient writes",
       "problem_statement": "The graph storage format was migrated from monolithic to per-thread, which enabled a new tiered write architecture. These are documented in separate project areas.\n\nWrite a file called WRITE_ARCHITECTURE.md that covers:\n1. What changed in the graph format (old monolithic vs new per-thread structure)\n2. How the per-thread format enables efficient metadata updates\n3. What specific file is updated for status/ball/priority changes\n4. Any limitations of the new approach\n\nYou need information from multiple project areas to answer completely. The format migration is documented under graph migration, and the write interface under unified writes.",
-      "seed_threads": [
-        {
-          "thread_id": "per-thread-graph-migration-transition",
-          "entries": [
-            {
-              "entry_id": "01KFC09K5WFBA25VAEMXH0KSCM",
-              "title": "Cross-reference: Per-thread format enables unified write interface",
-              "timestamp": "2026-01-19T20:49:15Z",
-              "body": "The per-thread graph format from this migration enables the tiered write architecture. Old format (monolithic): graph/baseline/nodes.jsonl (all threads, conflict-prone) and edges.jsonl (must rewrite entire file). New format (per-thread): graph/baseline/threads/<topic>/ with meta.json (single JSON, easy to update), entries.jsonl (append-only), edges.jsonl (per-thread). Direct GitHub API can now update meta.json for status/ball/priority without touching entries or risking conflicts with other threads."
-            }
-          ]
-        },
-        {
-          "thread_id": "unified-write-interface-architecture",
-          "entries": [
-            {
-              "entry_id": "01KFC8NBRT064A69XCX2HTAZ0A",
-              "title": "Implemented: Tier 1 metadata updates via direct GitHub",
-              "timestamp": "2026-01-19T23:15:29Z",
-              "body": "Fixed /api/dashboard/threads/update route to support per-thread graph format. Per-thread format detection: route checks for graph/baseline/threads/<topic>/meta.json first. Tier 1 metadata updates: status, ball, priority changes update only meta.json (1 file instead of full graph). Backward compatibility: falls back to monolithic format if per-thread not found. Rename limitation: returns 501 for rename in per-thread format (should use MCP)."
-            }
-          ]
-        }
-      ],
+      "gold_thread_ids": ["per-thread-graph-migration-transition", "unified-write-interface-architecture"],
+      "gold_entry_ids": ["01KFC09K5WFBA25VAEMXH0KSCM", "01KFC8NBRT064A69XCX2HTAZ0A"],
       "test_cmd": "grep -qi 'meta.json' WRITE_ARCHITECTURE.md && grep -qi 'per.thread' WRITE_ARCHITECTURE.md && grep -qi 'status\\|ball\\|priority' WRITE_ARCHITECTURE.md && grep -qi '501\\|rename\\|limitation' WRITE_ARCHITECTURE.md"
     }
   ]

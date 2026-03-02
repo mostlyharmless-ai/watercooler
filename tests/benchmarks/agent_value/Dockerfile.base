@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install watercooler-cloud as pip package (production-like).
+# The [bench] extra pulls in openhands-sdk.
+RUN pip install --no-cache-dir \
+    "watercooler-cloud[bench] @ git+https://github.com/mostlyharmless-ai/watercooler-cloud@feature/watercooler-benchmark"
+
+# Clone watercooler-site code at a pinned commit.
+# This is the project codebase that both agents will explore.
+ARG SITE_REPO=https://github.com/mostlyharmless-ai/watercooler-site.git
+ARG SITE_COMMIT=main
+RUN git clone --single-branch --depth=1 --branch "$SITE_COMMIT" "$SITE_REPO" /repo && \
+    rm -rf /repo/.git /repo/.next /repo/node_modules /repo/.env* /repo/.claude
+
+WORKDIR /repo
+ENV PYTHONPATH=/usr/local/lib/python3.12/site-packages
+CMD ["bash", "-lc", "sleep infinity"]

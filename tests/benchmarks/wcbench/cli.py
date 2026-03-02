@@ -45,6 +45,8 @@ def main() -> None:
   # Agent value track args
   parser.add_argument("--agent-value-tasks", type=str, default="tests/benchmarks/agent_value/tasks.json")
   parser.add_argument("--agent-value-only", nargs="+", default=None, help="Run only these agent_value task_ids")
+  parser.add_argument("--agent-value-image", type=str, default="wcbench-agent-base:wc-site-v1", help="Docker image for agent_value containers")
+  parser.add_argument("--agent-value-site-commit", type=str, default="main", help="watercooler-site commit/tag to pin")
 
   # Coordination track args
   parser.add_argument("--coordination-task-id", type=str, default="multi-hop-with-citations")
@@ -68,6 +70,8 @@ def main() -> None:
     wc_code_path=Path(args.wc_code_path) if args.wc_code_path else None,
     agent_value_tasks_path=Path(args.agent_value_tasks),
     agent_value_only_task_ids=args.agent_value_only,
+    agent_value_image=args.agent_value_image,
+    agent_value_site_commit=args.agent_value_site_commit,
     custom_tasks_path=Path(args.custom_tasks),
     custom_image_tag=args.custom_image_tag,
     custom_repo_dir=Path(args.custom_repo_dir),
