@@ -160,11 +160,13 @@ class LoggingConfig(BaseModel):
     max_bytes: int = Field(
         default=10485760,  # 10MB
         ge=0,
+        le=10_737_418_240,  # 10GB cap
         description="Maximum log file size in bytes",
     )
     backup_count: int = Field(
         default=5,
         ge=0,
+        le=100,
         description="Number of backup log files to keep",
     )
     disable_file: bool = Field(

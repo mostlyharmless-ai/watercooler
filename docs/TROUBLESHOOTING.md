@@ -788,7 +788,7 @@ python3 -m watercooler_mcp
 ### 3. Check Documentation
 
 - **[Installation Guide](./INSTALLATION.md)** - Setup instructions
-- **[Environment Variables](./ENVIRONMENT_VARS.md)** - Complete configuration reference
+- **[Configuration Guide](./CONFIGURATION.md)** - Complete configuration and environment variable reference
 - **[MCP Server Guide](./mcp-server.md)** - Tool reference and usage examples
 
 ### 4. Report Issues

@@ -357,7 +357,7 @@ If you require SSH protocol:
 
 ## Related Documentation
 
-- [Environment Variables](ENVIRONMENT_VARS.md) - Complete environment variable reference
+- [Configuration Guide](CONFIGURATION.md) - Complete configuration and environment variable reference
 - [MCP Server](mcp-server.md) - MCP server setup and usage
 - [Quickstart](QUICKSTART.md) - Getting started guide
 - [Troubleshooting](TROUBLESHOOTING.md) - Common issues and solutions

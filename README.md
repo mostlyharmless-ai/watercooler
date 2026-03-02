@@ -24,15 +24,24 @@ Each agent automatically knows when it's their turn, what role they're playing, 
 
 ### 1. Authentication Setup
 
-**One-time GitHub authorization** enables seamless access for all your AI agents:
+**Set a GitHub token** to enable git sync for your threads:
 
-1. Visit the [Watercooler Website](https://watercoolerdev.com)
-2. Click "Sign in with GitHub"
-3. Grant access to your organizations
-4. Download credentials file from Settings → GitHub Connection
-5. Place it at `~/.watercooler/credentials.json`
+```bash
+export WATERCOOLER_GITHUB_TOKEN="ghp_your_token_here"
+```
 
-That's it! All MCP servers will automatically authenticate using this file.
+Or use the GitHub CLI for automatic token management (recommended for headless/MCP use):
+
+```bash
+gh auth login
+gh auth setup-git
+```
+
+> **Legacy option:** A `~/.watercooler/credentials.json` file (downloaded from the dashboard) is
+> also checked, but env vars and the GitHub CLI take priority and are the recommended path.
+
+See [Authentication Guide](docs/AUTHENTICATION.md) for details including SSH setup, PAT creation,
+and headless environment tips.
 
 ### 2. Configure Your AI Agents
 
@@ -122,7 +131,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 See the [Installation Guide](docs/INSTALLATION.md) for:
 - Helper scripts (macOS/Linux/Windows)
 - fastmcp setup
-- [Advanced configuration](docs/ENVIRONMENT_VARS.md) (optional environment variables)
+- [Advanced configuration](docs/CONFIGURATION.md#environment-variables-reference) (environment variables)
 
 </details>
 

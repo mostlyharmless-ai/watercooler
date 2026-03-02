@@ -552,12 +552,12 @@ def get_memory_graph_config() -> Dict[str, Any]:
     .. deprecated::
         Memory backend config is now via environment variables.
         Use LLM_API_KEY, LLM_API_BASE, EMBEDDING_API_KEY, etc. directly.
-        See docs/ENVIRONMENT_VARS.md for complete list.
+        See the Environment Variables Reference in docs/CONFIGURATION.md for complete list.
     """
     warnings.warn(
         "get_memory_graph_config() is deprecated. "
         "Use environment variables (LLM_API_KEY, EMBEDDING_API_KEY, etc.) instead. "
-        "See docs/ENVIRONMENT_VARS.md",
+        "See the Environment Variables Reference in docs/CONFIGURATION.md",
         DeprecationWarning,
         stacklevel=2,
     )
@@ -623,7 +623,7 @@ def get_server_config(server_type: str) -> Dict[str, Any]:
 
     .. deprecated::
         Use environment variables directly (LLM_API_BASE, LLM_MODEL, etc.).
-        See docs/ENVIRONMENT_VARS.md for complete list.
+        See the Environment Variables Reference in docs/CONFIGURATION.md for complete list.
 
     Loads configuration with the following priority:
     1. Environment variables (SERVER_TYPE_SETTING, e.g., LLM_API_BASE)
@@ -645,7 +645,7 @@ def get_server_config(server_type: str) -> Dict[str, Any]:
     warnings.warn(
         f"get_server_config('{server_type}') is deprecated. "
         f"Use environment variables ({server_type.upper()}_API_BASE, etc.) directly. "
-        "See docs/ENVIRONMENT_VARS.md",
+        "See the Environment Variables Reference in docs/CONFIGURATION.md",
         DeprecationWarning,
         stacklevel=2,
     )

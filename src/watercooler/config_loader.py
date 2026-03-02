@@ -153,6 +153,7 @@ def _env_to_config_key(env_var: str) -> tuple[list[str], str]:
         # Common
         "WATERCOOLER_THREADS_PATTERN": (["common"], "threads_pattern"),
         "WATERCOOLER_TEMPLATES": (["common"], "templates_dir"),
+        "WATERCOOLER_THREADS_SUFFIX": (["common"], "threads_suffix"),
         # MCP core
         "WATERCOOLER_DIR": (["mcp"], "threads_dir"),
         "WATERCOOLER_THREADS_BASE": (["mcp"], "threads_base"),
@@ -167,7 +168,6 @@ def _env_to_config_key(env_var: str) -> tuple[list[str], str]:
         "WATERCOOLER_GIT_AUTHOR": (["mcp", "git"], "author"),
         "WATERCOOLER_GIT_EMAIL": (["mcp", "git"], "email"),
         "WATERCOOLER_GIT_SSH_KEY": (["mcp", "git"], "ssh_key"),
-        "WATERCOOLER_GIT_REPO": (["mcp", "git"], "repo"),
         # MCP sync
         "WATERCOOLER_ASYNC_SYNC": (["mcp", "sync"], "async_sync"),
         "WATERCOOLER_BATCH_WINDOW": (["mcp", "sync"], "batch_window"),
@@ -217,6 +217,7 @@ def _apply_env_overlay(config_dict: Dict[str, Any]) -> Dict[str, Any]:
     env_vars = [
         "WATERCOOLER_THREADS_PATTERN",
         "WATERCOOLER_TEMPLATES",
+        "WATERCOOLER_THREADS_SUFFIX",
         "WATERCOOLER_DIR",
         "WATERCOOLER_THREADS_BASE",
         "WATERCOOLER_AGENT",
@@ -229,13 +230,15 @@ def _apply_env_overlay(config_dict: Dict[str, Any]) -> Dict[str, Any]:
         "WATERCOOLER_GIT_AUTHOR",
         "WATERCOOLER_GIT_EMAIL",
         "WATERCOOLER_GIT_SSH_KEY",
-        "WATERCOOLER_GIT_REPO",
         "WATERCOOLER_ASYNC_SYNC",
         "WATERCOOLER_BATCH_WINDOW",
         "WATERCOOLER_SYNC_INTERVAL",
         "WATERCOOLER_SYNC_MAX_RETRIES",
+        "WATERCOOLER_SYNC_MAX_BACKOFF",
         "WATERCOOLER_LOG_LEVEL",
         "WATERCOOLER_LOG_DIR",
+        "WATERCOOLER_LOG_MAX_BYTES",
+        "WATERCOOLER_LOG_BACKUP_COUNT",
         "WATERCOOLER_LOG_DISABLE_FILE",
         "WATERCOOLER_VALIDATE_ON_WRITE",
         "WATERCOOLER_FAIL_ON_VIOLATION",
