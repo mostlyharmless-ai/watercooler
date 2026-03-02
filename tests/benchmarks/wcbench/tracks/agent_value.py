@@ -19,8 +19,10 @@ using the ``WATERCOOLER_DIR`` environment variable.
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
+import shutil
 import sys
 import time
 from dataclasses import dataclass, field
@@ -625,6 +627,12 @@ def run_agent_value_track(
   tasks_path.unlink(missing_ok=True)
   log.info("Removed answer key from agent filesystem: %s", tasks_path)
 
+  # Clean prior run logs so the agent can't grep DECISION.md from earlier runs.
+  for prior in glob.glob("/app/logs/wcbench-agent_value-*"):
+    if prior != str(layout.root):
+      shutil.rmtree(prior, ignore_errors=True)
+      log.info("Cleaned prior run artifacts: %s", prior)
+
   tasks = list(tasks_cfg.get("tasks", []))
   project_context = str(tasks_cfg.get("project_context", ""))
 
@@ -653,8 +661,8 @@ def run_agent_value_track(
 
     log.info("=== Agent value task: %s (%s) ===", task_id, category)
 
-    # ---- Seed threads on host ----
-    threads_dir = layout.artifacts_dir / "threads" / task_id
+    # ---- Seed threads outside /app (only reachable via MCP) ----
+    threads_dir = Path(f"/tmp/wc-threads/{task_id}")
     topics = _seed_threads(
       threads_dir, task,
       event_logger=event_logger,
@@ -662,8 +670,16 @@ def run_agent_value_track(
       task_id=task_id,
     )
 
-    # ---- Create workspace with project context ----
-    workspace_base = layout.artifacts_dir / "workspaces" / task_id
+    # Delete .md projections — they contain answer text in human-readable
+    # form. The MCP server reads only from graph JSON (meta.json,
+    # entries.jsonl, edges.jsonl). The .md files are write-only projections
+    # that must not exist where the agent could find them.
+    for md_file in threads_dir.rglob("*.md"):
+      md_file.unlink()
+    log.info("Stripped .md projections from %s", threads_dir)
+
+    # ---- Create workspace outside /app so agent starts clean ----
+    workspace_base = Path(f"/workspace/{task_id}")
     workspace_base.mkdir(parents=True, exist_ok=True)
 
     # Write project context as README so the agent has domain context
