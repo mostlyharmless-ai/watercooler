@@ -367,26 +367,37 @@ def _parse_timestamp(ts: str) -> Optional[datetime]:
 
 
 def _matches_keyword(node: dict[str, Any], query: str) -> tuple[bool, List[str]]:
-    """Check if node matches keyword query.
+    """Check if node matches keyword query using tokenized AND matching.
+
+    Multi-word queries are split on whitespace. ALL tokens must appear
+    in at least one searchable field for the node to match. Tokens may
+    match across different fields (e.g. token A in title, token B in body).
 
     Returns:
-        Tuple of (matches, list of matched field names)
+        Tuple of (matches, list of field names that contained tokens)
     """
-    if not query:
+    if not query or not query.strip():
         return True, []
 
-    query_lower = query.lower()
-    matched_fields = []
+    tokens = query.lower().split()
+    if not tokens:
+        return True, []
 
-    # Fields to search
     searchable_fields = ["title", "body", "summary", "topic"]
 
-    for field_name in searchable_fields:
-        value = node.get(field_name, "")
-        if value and query_lower in str(value).lower():
-            matched_fields.append(field_name)
+    field_hit_count: dict[str, int] = {}
 
-    return len(matched_fields) > 0, matched_fields
+    for token in tokens:
+        found_in_any_field = False
+        for field_name in searchable_fields:
+            value = node.get(field_name, "")
+            if value and token in str(value).lower():
+                found_in_any_field = True
+                field_hit_count[field_name] = field_hit_count.get(field_name, 0) + 1
+        if not found_in_any_field:
+            return False, []
+
+    return True, list(field_hit_count.keys())
 
 
 def _matches_time_range(
