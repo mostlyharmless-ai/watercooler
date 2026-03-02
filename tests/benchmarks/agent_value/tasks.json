@@ -99,7 +99,7 @@
       "category": "temporal_reasoning",
       "title": "Describe current (not old) dashboard data access approach",
       "problem_statement": "The way the dashboard accesses thread data has changed over time. An old approach was replaced with a new one.\n\nWrite a file called DATA_ACCESS.md with:\n1. The CURRENT approach for how the dashboard accesses thread data\n2. What the OLD approach was (that was replaced)\n3. What database table was removed in the transition\n\nIMPORTANT: Make sure you describe the CURRENT approach, not the old one. The old approach used a database table; the new one reads directly from files.",
-      "gold_thread_ids": ["graph-first-thread-evolution"],
+      "gold_thread_ids": ["rfe-graph-first-thread-parsing", "post-merge-cleanup-graph-first-consolidation"],
       "gold_entry_ids": ["01KD848F5AH9YT0AAQSQZ58R6K", "01KFJJYFW4QZDQQDGAKVHSFMRC"],
       "test_cmd": "grep -qi 'baseline graph' DATA_ACCESS.md && grep -qi 'ThreadSnapshot.*removed\\|removed.*ThreadSnapshot' DATA_ACCESS.md && grep -qi 'current\\|now' DATA_ACCESS.md"
     },
@@ -108,7 +108,7 @@
       "category": "temporal_reasoning",
       "title": "Describe current (not old) branch storage model",
       "problem_statement": "The thread storage architecture's handling of branches has changed. An old model was replaced.\n\nWrite a file called BRANCH_MODEL.md with:\n1. The CURRENT model for how branches relate to thread storage\n2. What the OLD model was (that was replaced)\n3. How entries are associated with branches now\n\nIMPORTANT: The old model used separate repos/branches as storage dimensions. The new model is different. Describe the CURRENT one.",
-      "gold_thread_ids": ["dashboard-branch-ui-alignment"],
+      "gold_thread_ids": ["orphan-branch-site-update", "dashboard-branch-ui-alignment"],
       "gold_entry_ids": ["01KHM502HM2YY91JTQHV5AY8G3", "01KHN8GH2YVCSCG4CQMRATBSH4"],
       "test_cmd": "grep -qi 'code_branch' BRANCH_MODEL.md && grep -qi 'orphan' BRANCH_MODEL.md && grep -qi 'filter\\|tag\\|metadata' BRANCH_MODEL.md"
     },
