@@ -1,3 +1,8 @@
+**DEPRECATED** — This is v1 guidance, retained for benchmark reproducibility.
+Current guidance is in `watercooler_usage.md`.
+
+---
+
 Spec: benchmark-guidance
 
 You have access to Watercooler read-only tools via `wc-*` commands.

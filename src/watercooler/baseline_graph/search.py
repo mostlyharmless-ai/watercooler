@@ -380,12 +380,10 @@ def _matches_keyword(node: dict[str, Any], query: str) -> tuple[bool, List[str]]
         return True, []
 
     tokens = query.lower().split()
-    if not tokens:
-        return True, []
 
     searchable_fields = ["title", "body", "summary", "topic"]
 
-    field_hit_count: dict[str, int] = {}
+    matched_fields: set[str] = set()
 
     for token in tokens:
         found_in_any_field = False
@@ -393,11 +391,11 @@ def _matches_keyword(node: dict[str, Any], query: str) -> tuple[bool, List[str]]
             value = node.get(field_name, "")
             if value and token in str(value).lower():
                 found_in_any_field = True
-                field_hit_count[field_name] = field_hit_count.get(field_name, 0) + 1
+                matched_fields.add(field_name)
         if not found_in_any_field:
             return False, []
 
-    return True, list(field_hit_count.keys())
+    return True, list(matched_fields)
 
 
 def _matches_time_range(
