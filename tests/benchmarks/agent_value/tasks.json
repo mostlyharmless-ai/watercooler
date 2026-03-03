@@ -116,16 +116,16 @@
       "task_id": "d1-cross-thread-deploy-migration-failure",
       "category": "cross_thread_synthesis",
       "title": "Synthesize deploy + migration failure scenarios from two threads",
-      "problem_statement": "When Vercel deployments trigger Prisma migrations, failures can occur from multiple causes documented across different project areas.\n\nWrite a file called DEPLOY_FAILURES.md that covers:\n1. What happens when a deployment triggers a P1002 advisory lock timeout (symptoms, resolution)\n2. What happens when a deployment triggers a P3009 failed migration (root cause, SQL fix)\n3. The recovery procedure for each\n\nYou need information from multiple project areas to answer completely. The P1002 issue is documented under Vercel operations, and the P3009 issue under Neon database operations.",
+      "problem_statement": "When Vercel deployments trigger Prisma migrations, failures can occur from multiple causes.\n\nWrite a file called DEPLOY_FAILURES.md that covers:\n1. What happens when a deployment triggers a P1002 advisory lock timeout (symptoms, resolution)\n2. What happens when a deployment triggers a P3009 failed migration (the specific migration name, root cause, SQL fix)\n3. The recovery procedure for each\n\nBoth failure modes have been encountered on this project. Find the specific details — don't write generic Prisma documentation.",
       "gold_thread_ids": ["service-reference-vercel", "service-reference-neon"],
       "gold_entry_ids": ["01KEXYF20N51A34DBS8J0AMBAB", "01KEXGPC0EWM1K338DE29Q2VK3"],
-      "test_cmd": "grep -qi 'P1002' DEPLOY_FAILURES.md && grep -qi 'P3009' DEPLOY_FAILURES.md && grep -qi 'redeploy' DEPLOY_FAILURES.md && grep -qi '_prisma_migrations' DEPLOY_FAILURES.md"
+      "test_cmd": "grep -qi 'P1002' DEPLOY_FAILURES.md && grep -qi 'P3009' DEPLOY_FAILURES.md && grep -qi 'redeploy' DEPLOY_FAILURES.md && grep -qi '20260113.*add_graph_columns\\|add_graph_columns' DEPLOY_FAILURES.md"
     },
     {
       "task_id": "d2-cross-thread-slack-rebuild-rate-limits",
       "category": "cross_thread_synthesis",
       "title": "Analyze Slack rebuild interaction with sync rate limits",
-      "problem_statement": "The Slack integration has a rebuild feature, and there have been sync performance issues including rate limiting. These are documented in separate project areas.\n\nWrite a file called REBUILD_ANALYSIS.md that covers:\n1. What the Slack rebuild operation does and its known issues (collision protection, dual implementation)\n2. How the sync system was optimized to handle rate limits (what specific fix was applied)\n3. Whether a rebuild could trigger rate limit exhaustion and why/why not\n\nYou need information from multiple project areas to answer completely. Slack rebuild issues are under Slack UX, and rate limit fixes are under sync optimization.",
+      "problem_statement": "The Slack integration has a rebuild feature, and there have been sync performance issues including rate limiting.\n\nWrite a file called REBUILD_ANALYSIS.md that covers:\n1. What the Slack rebuild operation does and its known issues (collision protection, dual implementation)\n2. How the sync system was optimized to handle rate limits (what specific fix was applied)\n3. Whether a rebuild could trigger rate limit exhaustion and why/why not\n\nBoth topics have been worked on in this project. Find the specific implementation details and numbers — don't speculate.",
       "gold_thread_ids": ["slack-ux-enhancement", "sync-performance-optimization"],
       "gold_entry_ids": ["01KEKHHDV3RW94013EVR934RTB", "01KGEY1FDX6S2SS2GP67HKEMRV"],
       "test_cmd": "grep -qi 'collision\\|locking\\|no.*protection' REBUILD_ANALYSIS.md && grep -qi 'purge.*true\\|450.*per entry\\|rate limit' REBUILD_ANALYSIS.md && grep -qi 'incremental\\|SHA' REBUILD_ANALYSIS.md"
@@ -134,7 +134,7 @@
       "task_id": "d3-cross-thread-oauth-onboarding",
       "category": "cross_thread_synthesis",
       "title": "Synthesize authentication and onboarding flow from two threads",
-      "problem_statement": "New users go through an authentication and onboarding flow that spans OAuth login and repository setup. Issues were found and fixed across both areas.\n\nWrite a file called ONBOARDING.md that covers:\n1. What the OAuth authentication failure was and how it was fixed\n2. What onboarding improvements were deployed (P0 and P1 phases)\n3. Known remaining issues or workarounds\n\nYou need information from multiple project areas to answer completely. OAuth issues are documented under dashboard auth, and onboarding fixes under permissions streamlining.",
+      "problem_statement": "New users go through an authentication and onboarding flow that spans OAuth login and repository setup. Issues were found and fixed across both areas.\n\nWrite a file called ONBOARDING.md that covers:\n1. What the OAuth authentication failure was and how it was fixed\n2. What onboarding improvements were deployed (P0 and P1 phases)\n3. Known remaining issues or workarounds\n\nBoth areas have been actively worked on in this project. Find the specific issues and fixes — don't speculate.",
       "gold_thread_ids": ["hosted-dashboard-with-oauth", "onboarding-streamlining-and-github-permissions"],
       "gold_entry_ids": ["01KAAAM6H53NB2KCBHMV284D19", "01KAQ5ZHRBTSQMTBPKX6TCS2JP"],
       "test_cmd": "grep -qi 'OAuth\\|NextAuth' ONBOARDING.md && grep -qi 'HTTPS\\|GIT_ASKPASS' ONBOARDING.md && grep -qi 'multi.org\\|UserOrganization' ONBOARDING.md"
@@ -143,7 +143,7 @@
       "task_id": "d4-cross-thread-per-thread-unified-write",
       "category": "cross_thread_synthesis",
       "title": "Explain how per-thread format enables efficient writes",
-      "problem_statement": "The graph storage format was migrated from monolithic to per-thread, which enabled a new tiered write architecture. These are documented in separate project areas.\n\nWrite a file called WRITE_ARCHITECTURE.md that covers:\n1. What changed in the graph format (old monolithic vs new per-thread structure)\n2. How the per-thread format enables efficient metadata updates\n3. What specific file is updated for status/ball/priority changes\n4. Any limitations of the new approach\n\nYou need information from multiple project areas to answer completely. The format migration is documented under graph migration, and the write interface under unified writes.",
+      "problem_statement": "The graph storage format was migrated from monolithic to per-thread, which enabled a new tiered write architecture.\n\nWrite a file called WRITE_ARCHITECTURE.md that covers:\n1. What changed in the graph format (old monolithic vs new per-thread structure)\n2. How the per-thread format enables efficient metadata updates\n3. What specific file is updated for status/ball/priority changes\n4. Any limitations of the new approach\n\nBoth changes have been made in this project. Find the specific design decisions and limitations — don't speculate.",
       "gold_thread_ids": ["per-thread-graph-migration-transition", "unified-write-interface-architecture"],
       "gold_entry_ids": ["01KFC09K5WFBA25VAEMXH0KSCM", "01KFC8NBRT064A69XCX2HTAZ0A"],
       "test_cmd": "grep -qi 'meta.json' WRITE_ARCHITECTURE.md && grep -qi 'per.thread' WRITE_ARCHITECTURE.md && grep -qi 'status\\|ball\\|priority' WRITE_ARCHITECTURE.md && grep -qi '501\\|rename\\|limitation' WRITE_ARCHITECTURE.md"

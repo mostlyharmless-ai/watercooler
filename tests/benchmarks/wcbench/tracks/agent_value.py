@@ -524,7 +524,7 @@ def run_agent_value_track(
   threads_clone_dir = layout.artifacts_dir / "threads-clone"
   _clone_orphan_threads(
     repo_url=cfg.agent_value_site_repo,
-    branch=cfg.agent_value_threads_branch,
+    branch=cfg.agent_value_threads_ref,
     dest=threads_clone_dir,
   )
 
