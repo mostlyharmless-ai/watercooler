@@ -531,7 +531,8 @@ def _write_report(
     calibration: dict[str, Any] | None,
 ) -> None:
     baseline = swe_modes.get("baseline")
-    assert baseline is not None
+    if baseline is None:
+        raise ValueError("baseline mode results are required for the report")
     lines: list[str] = [
         "# Watercooler Benchmark Report (Intent-Strict)",
         "",
