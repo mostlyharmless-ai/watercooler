@@ -60,8 +60,8 @@ bench = [
     "rapidfuzz>=3.10.1",
     "umap-learn>=0.5.6",
     # OpenHands SDK for agent_value track (requires Python 3.12+)
-    "openhands-sdk>=1.0",
-    "openhands-tools>=1.0",
+    "openhands-sdk>=1.0; python_version >= '3.12'",
+    "openhands-tools>=1.0; python_version >= '3.12'",
 ]
 mcp = [
     # All MCP deps (fastmcp, python-ulid) are already in [project].dependencies.

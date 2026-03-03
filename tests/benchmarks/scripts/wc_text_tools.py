@@ -350,30 +350,10 @@ class WcToolSession:
           return WcCommandResult(tool=tool, ok=False, output="Error: wc-t2-facts --all requires group_ids.")
 
         try:
-          from graphiti_core.edges import EntityEdge  # type: ignore[import-not-found]
-          import asyncio
-
-          graphiti = backend._create_graphiti_client()  # type: ignore[attr-defined]
-          sanitized_group_ids = [backend._sanitize_thread_id(gid) for gid in self.group_ids]  # type: ignore[attr-defined]
-
-          async def _fetch():
-            return await EntityEdge.get_by_group_ids(graphiti.driver, sanitized_group_ids, limit=50)
-
-          edges = asyncio.run(_fetch())
-          facts = []
-          for e in edges:
-            facts.append(
-              {
-                "uuid": getattr(e, "uuid", ""),
-                "fact": getattr(e, "fact", ""),
-                "content": getattr(e, "fact", ""),
-                "valid_at": getattr(e, "valid_at", None).isoformat() if getattr(e, "valid_at", None) else None,
-                "invalid_at": getattr(e, "invalid_at", None).isoformat() if getattr(e, "invalid_at", None) else None,
-                "created_at": getattr(e, "created_at", None).isoformat() if getattr(e, "created_at", None) else None,
-                "group_id": getattr(e, "group_id", None),
-                "score": 0.0,
-              }
-            )
+          facts = backend.get_edges_by_group_ids(
+            group_ids=list(self.group_ids),
+            limit=50,
+          )
         except Exception as e:
           return WcCommandResult(tool=tool, ok=False, output=f"Error: Graphiti edge enumeration failed: {e}")
       else:
