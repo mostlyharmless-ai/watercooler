@@ -1,0 +1,154 @@
+"""Tier ablation runner for memory_qa benchmark.
+
+Runs the memory_qa track at multiple tier ceilings (T1, T2, T3) and produces
+a per-category comparison table showing marginal value of each tier.
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+from tests.benchmarks.wcbench.config import RunConfig, WcTierCeiling
+from tests.benchmarks.wcbench.events import EventLogger
+from tests.benchmarks.wcbench.run_layout import RunLayout, make_run_layout
+from tests.benchmarks.wcbench.summary import RunSummary
+
+TIER_CEILINGS: list[WcTierCeiling] = ["T1", "T2", "T3"]
+
+
+def _group_by_category(summary: RunSummary) -> dict[str, dict[str, int]]:
+  """Group task results by category, returning {category: {passed, total}}."""
+  categories: dict[str, dict[str, int]] = {}
+  for t in summary.tasks:
+    cat = t.category or t.details.get("category", "") or "uncategorized"
+    if cat not in categories:
+      categories[cat] = {"passed": 0, "total": 0}
+    categories[cat]["total"] += 1
+    if t.ok:
+      categories[cat]["passed"] += 1
+  return categories
+
+
+def _write_comparison_table(
+  results: dict[str, dict[str, dict[str, int]]],
+  output_dir: Path,
+) -> Path:
+  """Write a TIER_ABLATION.md comparison table."""
+  # Collect all categories across tiers.
+  all_categories: set[str] = set()
+  for tier_results in results.values():
+    all_categories.update(tier_results.keys())
+
+  lines: list[str] = [
+    "## Tier Ablation Results",
+    "",
+    "| Category | " + " | ".join(TIER_CEILINGS) + " | Best tier | T3 vs T1 |",
+    "|" + "|".join(["---"] * (len(TIER_CEILINGS) + 3)) + "|",
+  ]
+
+  for cat in sorted(all_categories):
+    row: list[str] = [cat]
+    tier_pass_rates: dict[str, float] = {}
+    for tier in TIER_CEILINGS:
+      cat_data = results.get(tier, {}).get(cat, {"passed": 0, "total": 0})
+      passed = cat_data["passed"]
+      total = cat_data["total"]
+      row.append(f"{passed}/{total}")
+      tier_pass_rates[tier] = passed / total if total > 0 else 0.0
+
+    # Best tier: the first tier that achieves the highest pass rate.
+    best_rate = max(tier_pass_rates.values()) if tier_pass_rates else 0.0
+    best_tier = "—"
+    for tier in TIER_CEILINGS:
+      if tier_pass_rates.get(tier, 0.0) == best_rate and best_rate > 0:
+        best_tier = tier
+        # If later tiers tie, note with "+"
+        later = [t for t in TIER_CEILINGS if t != tier and tier_pass_rates.get(t, 0.0) == best_rate]
+        if later:
+          best_tier = f"{tier}+"
+        break
+    row.append(best_tier)
+
+    # T3 vs T1 delta.
+    t1_rate = tier_pass_rates.get("T1", 0.0)
+    t3_rate = tier_pass_rates.get("T3", 0.0)
+    delta = t3_rate - t1_rate
+    if delta > 0:
+      row.append(f"+{delta*100:.0f}%")
+    elif delta < 0:
+      row.append(f"{delta*100:.0f}%")
+    else:
+      row.append("0%")
+
+    lines.append("| " + " | ".join(row) + " |")
+
+  lines.append("")
+
+  # Overall summary.
+  lines.append("### Overall")
+  lines.append("")
+  for tier in TIER_CEILINGS:
+    total_passed = sum(cd["passed"] for cd in results.get(tier, {}).values())
+    total_tasks = sum(cd["total"] for cd in results.get(tier, {}).values())
+    lines.append(f"- **{tier}**: {total_passed}/{total_tasks} passed")
+  lines.append("")
+
+  out_path = output_dir / "TIER_ABLATION.md"
+  out_path.write_text("\n".join(lines), encoding="utf-8")
+  return out_path
+
+
+def run_tier_ablation(
+  base_cfg: RunConfig,
+  *,
+  output_root: Path | None = None,
+) -> Path:
+  """Run memory_qa at each tier ceiling and produce comparison table.
+
+  Args:
+    base_cfg: Base configuration. Must have track="memory_qa".
+    output_root: Override output directory. Defaults to base_cfg.output_root.
+
+  Returns:
+    Path to the generated TIER_ABLATION.md file.
+  """
+  if base_cfg.track != "memory_qa":
+    raise ValueError(f"tier_ablation requires track='memory_qa', got '{base_cfg.track}'")
+
+  root = output_root or base_cfg.output_root
+  ablation_dir = root / f"{base_cfg.run_id}-ablation"
+  ablation_dir.mkdir(parents=True, exist_ok=True)
+
+  results: dict[str, dict[str, dict[str, int]]] = {}
+
+  for ceiling in TIER_CEILINGS:
+    sub_run_id = f"{base_cfg.run_id}-{ceiling}"
+    cfg = replace(
+      base_cfg,
+      run_id=sub_run_id,
+      wc_tier_ceiling=ceiling,
+      output_root=root,
+    )
+    sub_layout = make_run_layout(root, sub_run_id)
+    summary = RunSummary(
+      run_id=sub_run_id,
+      track=cfg.track,
+      model=cfg.model,
+      mode=cfg.mode,
+      started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    )
+    event_logger = EventLogger(sub_layout.events_path)
+
+    from tests.benchmarks.wcbench.tracks.memory_qa import run_memory_qa_track
+
+    run_memory_qa_track(cfg, layout=sub_layout, event_logger=event_logger, run_summary=summary)
+
+    summary.elapsed_seconds = time.time()
+    summary.ended_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    summary.write_json(sub_layout.summary_path)
+
+    results[ceiling] = _group_by_category(summary)
+
+  return _write_comparison_table(results, ablation_dir)

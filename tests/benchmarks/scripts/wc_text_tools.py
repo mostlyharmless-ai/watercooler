@@ -213,12 +213,21 @@ class WcToolSession:
       return WcCommandResult(tool=tool, output=out, entry_ids=entry_ids, meta={"query": query})
 
     if tool == "wc-smart-query":
-      query = " ".join(argv[1:]).strip()
+      force_tier = None
+      rest = argv[1:]
+      if len(rest) >= 2 and rest[0] == "--force-tier":
+        force_tier = rest[1].strip().upper()
+        rest = rest[2:]
+      query = " ".join(rest).strip()
       if not query:
-        return WcCommandResult(tool=tool, ok=False, output='Usage: wc-smart-query "<query>"')
+        return WcCommandResult(
+          tool=tool,
+          ok=False,
+          output='Usage: wc-smart-query [--force-tier T1|T2|T3] "<query>"',
+        )
 
       # Enforce tier ceilings by selectively configuring orchestrator.
-      from watercooler_memory.tier_strategy import TierOrchestrator, load_tier_config
+      from watercooler_memory.tier_strategy import Tier, TierOrchestrator, load_tier_config
 
       max_tiers = {"T1": 1, "T2": 2, "T3": 3}[self.tier_ceiling]
       code_path = self.code_path if self.tier_ceiling in ("T2", "T3") else None
@@ -227,7 +236,17 @@ class WcToolSession:
       config.t3_enabled = self.tier_ceiling == "T3"
 
       orchestrator = TierOrchestrator(config)
-      result = orchestrator.query(query, group_ids=self.group_ids)
+      force = None
+      if force_tier:
+        mapping = {"T1": Tier.T1, "T2": Tier.T2, "T3": Tier.T3}
+        force = mapping.get(force_tier)
+        if force is None:
+          return WcCommandResult(
+            tool=tool,
+            ok=False,
+            output="Error: --force-tier must be one of T1, T2, T3.",
+          )
+      result = orchestrator.query(query, group_ids=self.group_ids, force_tier=force)
       out, entry_ids, meta = _format_smart_query(result, self.token_budget)
       return WcCommandResult(tool=tool, output=out, entry_ids=entry_ids, meta={"query": query, **meta})
 
@@ -272,14 +291,23 @@ class WcToolSession:
 
     if tool == "wc-t2-facts":
       # Usage:
-      #   wc-t2-facts --active-only --start-time <iso> --end-time <iso> "<query>"
+      #   wc-t2-facts [--all] [--active-only] [--start-time <iso>] [--end-time <iso>] "<query>"
+      #
+      # Notes:
+      # - Default behavior uses Graphiti semantic search (may return 0 if indices aren't built yet).
+      # - --all enumerates EntityEdge records for the selected group_ids (deterministic; used by memory_qa).
       active_only = False
+      list_all = False
       start_time = ""
       end_time = ""
       rest = argv[1:]
       i = 0
       while i < len(rest):
         a = rest[i]
+        if a == "--all":
+          list_all = True
+          i += 1
+          continue
         if a == "--active-only":
           active_only = True
           i += 1
@@ -317,16 +345,28 @@ class WcToolSession:
       if backend is None or isinstance(backend, dict):
         return WcCommandResult(tool=tool, ok=False, output=f"Error: Graphiti backend init failed: {backend}")
 
-      try:
-        facts = backend.search_memory_facts(
-          query=query,
-          group_ids=list(self.group_ids) if self.group_ids else None,
-          max_facts=15,
-          start_time=start_time,
-          end_time=end_time,
-        )
-      except Exception as e:
-        return WcCommandResult(tool=tool, ok=False, output=f"Error: Graphiti fact search failed: {e}")
+      if list_all:
+        if not self.group_ids:
+          return WcCommandResult(tool=tool, ok=False, output="Error: wc-t2-facts --all requires group_ids.")
+
+        try:
+          facts = backend.get_edges_by_group_ids(
+            group_ids=list(self.group_ids),
+            limit=50,
+          )
+        except Exception as e:
+          return WcCommandResult(tool=tool, ok=False, output=f"Error: Graphiti edge enumeration failed: {e}")
+      else:
+        try:
+          facts = backend.search_memory_facts(
+            query=query,
+            group_ids=list(self.group_ids) if self.group_ids else None,
+            max_facts=15,
+            start_time=start_time,
+            end_time=end_time,
+          )
+        except Exception as e:
+          return WcCommandResult(tool=tool, ok=False, output=f"Error: Graphiti fact search failed: {e}")
 
       # active_only filter: keep only currently-valid facts
       filtered = []

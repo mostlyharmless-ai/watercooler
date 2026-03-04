@@ -37,7 +37,36 @@ def write_report(layout: RunLayout, summary: RunSummary) -> None:
   lines.append(f"- **t2_stale_fact_rate**: `{derived.t2_stale_fact_rate}`")
   lines.append(f"- **t3_provenance_resolve_rate**: `{derived.t3_provenance_resolve_rate}`")
   lines.append(f"- **t3_source_id_coverage**: `{derived.t3_source_id_coverage}`")
+  lines.append(f"- **t3_multi_hop_quality_rate**: `{derived.t3_multi_hop_quality_rate}`")
   lines.append("")
+  lines.append("### Value metrics")
+  lines.append("")
+  lines.append(f"- **cross_thread_discovery_rate**: `{derived.cross_thread_discovery_rate}`")
+  lines.append(f"- **tier_preference_distribution**: `{derived.tier_preference_distribution}`")
+  lines.append(f"- **citation_accuracy**: `{derived.citation_accuracy}`")
+  lines.append(f"- **recall_at_k_mean**: `{derived.recall_at_k_mean}`")
+  lines.append(f"- **mrr_mean**: `{derived.mrr_mean}`")
+  lines.append(f"- **context_rehydration_efficiency_delta**: `{derived.context_rehydration_efficiency_delta}`")
+  lines.append(f"- **resolved_over_completed**: `{derived.resolved_over_completed}`")
+  lines.append(f"- **resolved_over_submitted**: `{derived.resolved_over_submitted}`")
+  lines.append("")
+
+  # Per-category summary
+  categories: dict[str, list] = {}
+  for t in summary.tasks:
+    cat = t.category or t.details.get("category", "") or ""
+    if cat:
+      categories.setdefault(cat, []).append(t)
+  if categories:
+    lines.append("### Per-category summary")
+    lines.append("")
+    for cat in sorted(categories):
+      cat_tasks = categories[cat]
+      passed = sum(1 for ct in cat_tasks if ct.ok)
+      total = len(cat_tasks)
+      lines.append(f"- **{cat}**: `{passed}/{total}` passed")
+    lines.append("")
+
   lines.append("### Per-task summary")
   lines.append("")
 

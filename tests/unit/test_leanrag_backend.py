@@ -594,9 +594,12 @@ class TestApplyConfigToEnv:
         # Set existing env vars (simulating user override)
         monkeypatch.setenv("DEEPSEEK_MODEL", "user-override-model")
         monkeypatch.setenv("GLM_BASE_URL", "https://user-override.com/v1")
-        # Clear others
+        # Clear others so config values apply (avoid bridge from standard → leanrag vars)
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("GLM_MODEL", raising=False)
+        monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
         # Patch _validate_config to skip LeanRAG installation checks
         monkeypatch.setattr(LeanRAGBackend, '_validate_config', lambda self: None)

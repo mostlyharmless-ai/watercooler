@@ -190,6 +190,7 @@ Available tools:
 Important:
 - You still must output EXACTLY ONE command inside a single ```bash``` code block per step.
 - When you use a wc tool, you will receive text back; then proceed with bash commands.
+- Do not submit without using at least one `wc-*` retrieval command.
 
 Recommended:
 - Early in the run (often as step 1), do one `wc-search` using 3–8 concrete keywords from the issue.
@@ -319,6 +320,7 @@ def run_agent(
     knowledge_context: str = "",
     wc_session=None,
     wc_guidance_text: str = "",
+    min_wc_commands: int = 0,
     workdir: str = "/testbed",
 ) -> dict[str, Any]:
     """Run the LLM agent loop.
@@ -402,8 +404,18 @@ def run_agent(
             })
             continue
 
-        # Allow SUBMIT either bare or inside the command block
+        # Allow SUBMIT either bare or inside the command block, but enforce WC
+        # retrieval minimum in tools modes so process metrics are meaningful.
         if cmd.strip().upper() == "SUBMIT":
+            if min_wc_commands > 0 and metrics["wc_commands"] < min_wc_commands:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Before SUBMIT you must run at least {min_wc_commands} wc-* retrieval command(s). "
+                        "Run a wc-search or wc-smart-query now."
+                    ),
+                })
+                continue
             log.info(f"  Agent submitted at step {metrics['steps']}")
             break
 
@@ -415,6 +427,21 @@ def run_agent(
         metrics["commands_seen"].add(cmd_lower)
 
         is_wc_cmd = cmd_lower.startswith("wc-")
+
+        if (
+            min_wc_commands > 0
+            and not is_wc_cmd
+            and metrics["wc_commands"] < min_wc_commands
+            and metrics["bash_commands"] >= 2
+        ):
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Run at least {min_wc_commands} wc-* retrieval command before continuing with more bash commands. "
+                    "Use wc-search or wc-smart-query."
+                ),
+            })
+            continue
 
         if is_wc_cmd:
             metrics["wc_commands"] += 1
@@ -605,6 +632,7 @@ def build_and_run_instance(
             knowledge_context=knowledge_context,
             wc_session=wc_session,
             wc_guidance_text=(wc_guidance_text if wc_mode == "tools_guided" else ""),
+            min_wc_commands=(1 if wc_mode in ("tools", "tools_guided") else 0),
         )
 
         result = {

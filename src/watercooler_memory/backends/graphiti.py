@@ -2430,6 +2430,59 @@ class GraphitiBackend(MemoryBackend):
         except Exception as e:
             raise BackendError(f"Failed to get entity edge '{uuid}': {e}") from e
 
+
+    def get_edges_by_group_ids(
+        self,
+        group_ids: list[str],
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Enumerate entity edges for the given group IDs.
+
+        Args:
+            group_ids: Raw group IDs (will be sanitized internally).
+            limit: Maximum edges to return.
+
+        Returns:
+            List of edge dicts with uuid, fact, valid_at, invalid_at, etc.
+
+        Raises:
+            BackendError: If edge enumeration fails.
+        """
+        try:
+            from graphiti_core.edges import EntityEdge  # type: ignore[import-not-found]
+        except ImportError as e:
+            raise BackendError(f"Graphiti edge import failed: {e}") from e
+
+        sanitized = [self._sanitize_thread_id(gid) for gid in group_ids]
+        graphiti = self._create_graphiti_client()
+
+        async def _fetch() -> list[Any]:
+            return await EntityEdge.get_by_group_ids(
+                graphiti.driver, sanitized, limit=limit
+            )
+
+        try:
+            edges = asyncio.run(_fetch())
+        except Exception as e:
+            raise BackendError(f"Graphiti edge enumeration failed: {e}") from e
+
+        results: list[dict[str, Any]] = []
+        for e in edges:
+            results.append({
+                "uuid": getattr(e, "uuid", ""),
+                "fact": getattr(e, "fact", ""),
+                "content": getattr(e, "fact", ""),
+                "valid_at": getattr(e, "valid_at", None).isoformat()
+                    if getattr(e, "valid_at", None) else None,
+                "invalid_at": getattr(e, "invalid_at", None).isoformat()
+                    if getattr(e, "invalid_at", None) else None,
+                "created_at": getattr(e, "created_at", None).isoformat()
+                    if getattr(e, "created_at", None) else None,
+                "group_id": getattr(e, "group_id", None),
+                "score": 0.0,
+            })
+        return results
+
     def search_memory_facts(
         self,
         query: str,

@@ -792,6 +792,14 @@ async def _search_graph_impl(
 
         # Search temporal fact edges — currently-active facts only
         watercooler_search(query="API key rotation", mode="facts", active_only=True)
+
+    Keyword Search Tips:
+        - Queries are tokenized by whitespace; ALL tokens must appear somewhere
+          in the entry's searchable fields (title, body, summary, topic).
+        - Use short queries (1-3 words) for best results: "long polling" not
+          "what notification mechanism was chosen".
+        - Single-word queries do substring matching: "auth" matches "authentication".
+        - For multi-concept tasks, run separate searches and synthesize results.
     """
     try:
         error, context = validation._require_context(code_path)

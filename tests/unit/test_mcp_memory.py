@@ -45,13 +45,15 @@ class TestLoadGraphitiConfig:
         assert config is None
 
     def test_load_config_missing_llm_api_key(self, monkeypatch, isolated_config):
-        """Test config loading fails gracefully without LLM_API_KEY (and no fallback)."""
+        """Test config loading fails gracefully without LLM_API_KEY for remote endpoint."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
         monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
+        monkeypatch.setenv("LLM_API_BASE", "https://api.openai.com/v1")  # Remote → key required
+        monkeypatch.setenv("EMBEDDING_API_BASE", "https://api.openai.com/v1")
         monkeypatch.delenv("LLM_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # Clear fallback too
-        cfg.reset()  # Force reload with new env vars
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        cfg.reset()
         result = memory.load_graphiti_config()
         assert result is None
 
@@ -604,13 +606,15 @@ class TestValidateMemoryPrerequisites:
         assert "WATERCOOLER_GRAPHITI_ENABLED" in error_dict["message"]
 
     def test_validate_prerequisites_missing_api_key(self, monkeypatch, isolated_config):
-        """Test validation fails gracefully without API key."""
+        """Test validation fails gracefully without API key for remote endpoint."""
         from watercooler.config_facade import config as cfg
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
+        monkeypatch.setenv("LLM_API_BASE", "https://api.openai.com/v1")  # Remote → key required
+        monkeypatch.setenv("EMBEDDING_API_BASE", "https://api.openai.com/v1")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("LLM_API_KEY", raising=False)
         monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
-        cfg.reset()  # Force reload with new env vars
+        cfg.reset()
 
         backend, error = memory.validate_memory_prerequisites("test_operation")
 

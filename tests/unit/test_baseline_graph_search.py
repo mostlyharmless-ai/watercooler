@@ -320,6 +320,50 @@ class TestHelperFunctions:
         matches, fields = _matches_keyword(node, "auth")
         assert matches is True
 
+    def test_matches_keyword_multi_word_same_field(self):
+        """Test multi-word query where all tokens appear in the same field."""
+        node = {"title": "Long polling notification mechanism", "body": "Details here"}
+        matches, fields = _matches_keyword(node, "long polling notification")
+        assert matches is True
+        assert "title" in fields
+
+    def test_matches_keyword_multi_word_cross_field(self):
+        """Test multi-word query where tokens span different fields."""
+        node = {"title": "Authentication setup", "body": "Uses OAuth2 flow with refresh tokens"}
+        matches, fields = _matches_keyword(node, "authentication OAuth2")
+        assert matches is True
+        assert "title" in fields
+        assert "body" in fields
+
+    def test_matches_keyword_multi_word_partial_miss(self):
+        """Test multi-word query where one token is missing — should not match."""
+        node = {"title": "Auth setup", "body": "Login flow"}
+        matches, fields = _matches_keyword(node, "auth database migration")
+        assert matches is False
+        assert fields == []
+
+    def test_matches_keyword_single_word_backward_compat(self):
+        """Test single-word query still does substring matching (backward compat)."""
+        node = {"title": "AUTHENTICATION"}
+        matches, fields = _matches_keyword(node, "auth")
+        assert matches is True
+        assert "title" in fields
+
+    def test_matches_keyword_multi_word_case_insensitive(self):
+        """Test multi-word query with mixed case tokens."""
+        node = {"title": "Advisory Lock Timeout", "body": "P1002 error during deploy"}
+        matches, fields = _matches_keyword(node, "Advisory P1002")
+        assert matches is True
+        assert "title" in fields
+        assert "body" in fields
+
+    def test_matches_keyword_whitespace_only(self):
+        """Test whitespace-only query treated as empty (matches everything)."""
+        node = {"title": "Anything"}
+        matches, fields = _matches_keyword(node, "   ")
+        assert matches is True
+        assert fields == []
+
     def test_matches_time_range_within(self):
         """Test time range matching when within range."""
         node = {"timestamp": "2025-01-15T10:00:00Z"}
