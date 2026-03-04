@@ -37,9 +37,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mostlyharmless-ai/watercooler-cloud"
-Repository = "https://github.com/mostlyharmless-ai/watercooler-cloud"
-Issues = "https://github.com/mostlyharmless-ai/watercooler-cloud/issues"
+Homepage = "https://github.com/mostlyharmless-ai/watercooler"
+Repository = "https://github.com/mostlyharmless-ai/watercooler"
+Issues = "https://github.com/mostlyharmless-ai/watercooler/issues"
 
 [project.optional-dependencies]
 dev = [

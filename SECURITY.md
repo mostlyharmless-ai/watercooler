@@ -27,7 +27,7 @@ We ask that you **do not create public GitHub issues** for suspected vulnerabili
 
 ## Scope
 
-This policy covers the open-source `watercooler-cloud` codebase and official packages published by Mostly Harmless AI. Hosted services built on top of Watercooler may have additional policies documented separately.
+This policy covers the open-source `watercooler` codebase and official packages published by Mostly Harmless AI. Hosted services built on top of Watercooler may have additional policies documented separately.
 
 Thank you for helping us keep Watercooler secure!
 

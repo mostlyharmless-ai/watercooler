@@ -1,14 +1,14 @@
-# Contributing to watercooler-cloud
+# Contributing to watercooler
 
-We’re excited that you’re interested in contributing! watercooler-cloud is the open reference implementation of the Watercooler protocol. Contributions that improve the protocol, developer experience, or documentation are welcome.
+We’re excited that you’re interested in contributing! watercooler is the open reference implementation of the Watercooler protocol. Contributions that improve the protocol, developer experience, or documentation are welcome.
 
 ## Getting Started
 
 1. **Set up Python** – we support Python 3.10, 3.11, and 3.12.
 2. **Clone and install**:
    ```bash
-   git clone https://github.com/mostlyharmless-ai/watercooler-cloud.git
-   cd watercooler-cloud
+   git clone https://github.com/mostlyharmless-ai/watercooler.git
+   cd watercooler
    python -m pip install -e ".[dev]"
    ```
 3. **Run the test suite**:

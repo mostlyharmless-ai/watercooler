@@ -1,201 +1,134 @@
-# watercooler-cloud
+# watercooler
 
-File-based collaboration protocol for agentic coding projects
+Git-native collaboration threads for human-AI coding teams.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/) [![MCP](https://img.shields.io/badge/MCP-enabled-green.svg)](https://modelcontextprotocol.io)
 
-[Installation](#quick-start) • [CLI Reference](docs/CLI_REFERENCE.md) • [Architecture](docs/ARCHITECTURE.md) • [Memory Backends](#memory-backends) • [Documentation](docs/README.md) • [Contributing](CONTRIBUTING.md)
+[Quick Start](#quick-start) • [Documentation](#documentation) • [Tools Reference](docs/TOOLS-REFERENCE.md) • [Architecture](dev_docs/ARCHITECTURE.md) • [Contributing](CONTRIBUTING.md)
+
+[![Watercooler Cloud](dev_docs/images/hero-banner.png)](https://www.watercoolerdev.com)
 
 ---
 
-[![Watercooler Cloud](docs/images/hero-banner.png)](https://www.watercoolerdev.com)
+## What is watercooler?
 
+Watercooler adds a lightweight collaboration layer to your existing code repo: threaded
+conversations, ball-passing coordination, and searchable project memory — all versioned
+in git alongside your code, no external service required.
 
 **Example workflow:**
 ```text
 Your Task → Claude plans → Codex implements → Claude reviews → State persists in Git
 ```
 
-Each agent automatically knows when it's their turn, what role they're playing, and what happened before.
+Each agent automatically knows when it's their turn, what role they're playing, and what
+happened before.
+
+### Core concepts
+
+| Concept | What it is |
+|---|---|
+| Thread | A named conversation channel tied to your code repo. Each thread has a `topic` slug, a status, and a ball. |
+| Entry | A single message posted to a thread. Every entry has an author, role, type, and timestamp. |
+| Ball | Whose turn it is to respond. `say` flips the ball to your counterpart; `ack` keeps it; `handoff` passes it to a named recipient. |
+| Agent identity | Who you are in a thread — e.g., `Claude Code`, `Codex`, or your name. Set via `agent_func` on write calls. |
+| `topic` | The slug identifier for a thread, e.g. `feature-auth`. Used in all tool calls; distinct from the display title. |
+| `code_path` | Path to your repo root (`"."` or absolute). Required on nearly every MCP tool call. |
+| `counterpart` | Who the ball flips to when you call `say`. Configured per-agent or per-call. |
+| `code_branch` | Git branch scoping. Thread reads are filtered to your current branch by default. |
+| `orphan branch` | The isolated git branch (`watercooler/threads`) where thread data lives, separate from your code history. |
+| `worktree` | A local checkout of the orphan branch at `~/.watercooler/worktrees/<repo>/`, created automatically on first write. |
+| `agent_func` | Structured identity for write tools: `"<platform>:<model>:<role>"` — e.g., `"Claude Code:sonnet-4:implementer"`. |
+
+### How watercooler compares
+
+| Aspect | Slack / Discord | GitHub Issues | Linear | Watercooler |
+|---|---|---|---|---|
+| Versioned with code | No | No | No | Yes |
+| Offline access | No | Limited | No | Yes |
+| Structured roles | No | No | No | Yes |
+| Ball ownership | No | Assignees | Assignees | Explicit |
+| AI-agent native | No | No | No | Yes |
+| Survives tool changes | No | Vendor lock-in | Vendor lock-in | Plain files |
 
 ---
 
-## Quick Start
+## Quick start
 
-### 1. Authentication Setup
-
-**Set a GitHub token** to enable git sync for your threads:
-
-```bash
-export WATERCOOLER_GITHUB_TOKEN="ghp_your_token_here"
-```
-
-Or use the GitHub CLI for automatic token management (recommended for headless/MCP use):
+### 1. Authenticate
 
 ```bash
 gh auth login
 gh auth setup-git
 ```
 
-> **Legacy option:** A `~/.watercooler/credentials.json` file (downloaded from the dashboard) is
-> also checked, but env vars and the GitHub CLI take priority and are the recommended path.
+For other methods (PAT, SSH, environment variable), see [AUTHENTICATION.md](docs/AUTHENTICATION.md).
 
-See [Authentication Guide](docs/AUTHENTICATION.md) for details including SSH setup, PAT creation,
-and headless environment tips.
+### 2. Connect your MCP client
 
-### 2. Configure Your AI Agents
+See [MCP-CLIENTS.md](docs/MCP-CLIENTS.md) for Claude Code, Codex, and Cursor.
+After connecting, call `watercooler_health` to verify the setup.
 
-**Minimal configuration** - once authenticated, setup is just command + args!
+### 3. Create your first thread
 
-<details open>
-<summary><b>Claude Code</b></summary>
+Most collaborators work entirely through their MCP client:
 
-Update `~/.claude.json`:
-
-```json
-    "watercooler-cloud": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/mostlyharmless-ai/watercooler-cloud@stable",
-        "watercooler-mcp"
-      ]
-    },
-
-```
-
-</details>
-
-<details>
-<summary><b>Codex</b></summary>
-
-Update `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.watercooler_cloud]
-command = "uvx"
-args = ["--from", "git+https://github.com/mostlyharmless-ai/watercooler-cloud@stable", "watercooler-mcp"]
-
-```
-
-</details>
-
-<details>
-<summary><b>Cursor</b></summary>
-
-Edit `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "watercooler-cloud": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/mostlyharmless-ai/watercooler-cloud@stable",
-        "watercooler-mcp"
-      ]
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><b>Claude Desktop</b></summary>
-
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
-
-```json
-{
-  "mcpServers": {
-    "watercooler-cloud": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/mostlyharmless-ai/watercooler-cloud@stable",
-        "watercooler-mcp"
-      ]
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><b>Other MCP Clients</b></summary>
-
-See the [Installation Guide](docs/INSTALLATION.md) for:
-- Helper scripts (macOS/Linux/Windows)
-- fastmcp setup
-- [Advanced configuration](docs/CONFIGURATION.md#environment-variables-reference) (environment variables)
-
-</details>
-
-### Create Your First Thread
-
-Most collaborators never touch the raw CLI anymore—we stay inside Codex, Claude,
-Cursor, etc., and let them call the MCP tools for us. A typical spin-up looks
-like this:
-
-1. **You → Codex:** “Start a thread called `feature-auth`, outline the auth
-   plan, and hand the ball to Claude.”
-2. **Codex:** Calls `watercooler_say` (with your `agent_func`) which creates
-   the thread, writes the entry, commits, and pushes via `run_with_sync`.
-3. **Claude:** Sees the ball, continues refining the plan in the same thread,
-   again using `watercooler_say` so git stays in sync.
-4. **Cursor/Codex:** Implements the feature, referencing the thread for context
-   and flipping the ball back when done.
-
-That’s the workflow we recommend because the MCP layer enforces formatting,
-git sync, commits, and identity footers automatically. If you do need
-to work manually (for example, repairing a thread offline), the legacy CLI is
-still available:
-
-```bash
-watercooler init-thread feature-auth --ball Claude
-watercooler say feature-auth \
-  --agent Claude \
-  --role planner \
-  --title "Authentication Design" \
-  --body "Proposing OAuth2 with JWT tokens"
-```
-
-See the [CLI Reference](docs/CLI_REFERENCE.md) for every flag if you go that
-route.
+1. **You → Codex:** "Start a thread called `feature-auth`, outline the plan, and hand the
+   ball to Claude."
+2. **Codex:** Calls `watercooler_say` — creates the thread, writes the entry, commits and
+   pushes.
+3. **Claude:** Sees the ball, continues the plan in the same thread.
+4. **Cursor/Codex:** Implements, posts a completion note, flips the ball back for review.
 
 ---
 
-## Example: Multi-Agent Collaboration
+## Documentation
 
-1. **You** ask Codex: “Plan the payments feature in the `feature-payment`
-   thread.” Codex hits `watercooler_say`, adds the plan entry, and the ball
-   flips to Claude.
-2. **Claude** (prompted by you) critiques the plan, calling the same MCP tool
-   so commits stay in sync. Ball now sits with Cursor.
-3. **Cursor/Codex** implements the feature, updates tests, and posts a
-   completion note via `watercooler_say`, flipping the ball to Claude for
-   review.
-4. **Claude** runs `watercooler_ack` to approve, then `watercooler_set_status`
-   to mark the thread `CLOSED` after merge.
+1. **[QUICKSTART.md](docs/QUICKSTART.md)** — Install, authenticate, connect your MCP
+   client, and post your first thread entry in under 10 minutes.
+2. **[AUTHENTICATION.md](docs/AUTHENTICATION.md)** — All authentication methods: GitHub
+   CLI, environment variable, credentials file, and SSH.
+3. **[MCP-CLIENTS.md](docs/MCP-CLIENTS.md)** — Connect Claude Code, Codex, or Cursor.
+   Each section is self-contained with copy-pasteable config.
+4. **[CONFIGURATION.md](docs/CONFIGURATION.md)** — Config and credentials files, key
+   settings, environment variable reference, and memory feature opt-in.
+5. **[TOOLS-REFERENCE.md](docs/TOOLS-REFERENCE.md)** — Unified reference for all CLI
+   commands and MCP tools, with safety annotations and worked examples.
+6. **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** — Setup flowchart and top 10 issues
+   with diagnosis and fix instructions.
 
-No manual git work, no hand-written metadata—each MCP call bundles the entry,
-ball movement, commit footers, and push.
+---
+
+## Quick command reference
+
+| Command | What it does |
+|---|---|
+| `watercooler init-thread <topic>` | Create a new thread |
+| `watercooler say <topic> --title "..." --body "..."` | Post an entry and flip the ball |
+| `watercooler ack <topic>` | Acknowledge without flipping the ball |
+| `watercooler list` | List all threads |
+| `watercooler config init` | Generate an annotated `config.toml` |
+
+For the full command list with all flags, see [TOOLS-REFERENCE.md](docs/TOOLS-REFERENCE.md).
+
+---
+
+## For AI agents
+
+The server exposes a `watercooler://instructions` MCP resource containing workflow
+guidance, ball mechanics, and required parameter formats.
 
 ---
 
 ## Contributing
 
 We welcome contributions! Please see:
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Guidelines and DCO requirements
-- **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** - Community standards
-- **[SECURITY.md](SECURITY.md)** - Security policy
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — Guidelines and DCO requirements
+- **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** — Community standards
+- **[SECURITY.md](SECURITY.md)** — Security policy
 
 ---
 
 ## License
 
-Apache 2.0 License - see [LICENSE](LICENSE)
+Apache 2.0 License — see [LICENSE](LICENSE)

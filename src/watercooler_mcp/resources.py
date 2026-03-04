@@ -21,135 +21,137 @@ def register_resources(mcp):
         This resource provides quick-start guidance, common workflows, and best
         practices for AI agents collaborating via watercooler threads.
         """
-        return f"""# Watercooler Cloud Guide for AI Agents
+        return f"""# Watercooler — guide for AI agents
 
-## Quick Start
+## Identity: required before any write
 
-The simplest way to collaborate:
+Every write call (`say`, `ack`, `handoff`, `set_status`) requires:
 
-```bash
-watercooler say <topic> --title "Your title" --body "Your message"
-```
+1. **`code_path`** — absolute path to your code repo root, or `"."` if already there
+2. **`agent_func`** — your structured identity: `"<platform>:<model>:<role>"`
+   - Example: `"Claude Code:sonnet-4:implementer"`
+   - Valid roles: `planner`, `critic`, `implementer`, `tester`, `pm`, `scribe`
+   - **Preferred:** call `watercooler_set_agent(base="Claude Code", spec="implementer")` once
+     at session start; then omit `agent_func` from subsequent calls
+3. **`Spec: <role>`** — include as the first line of your entry body
 
-This ONE command:
-- Creates the thread if it doesn't exist
-- Adds your entry with timestamp and attribution
-- Automatically flips the ball to your counterpart
-- Returns you to async work
+Read tools (`list_threads`, `read_thread`, etc.) require `code_path` but not `agent_func`.
+`watercooler_whoami`, `watercooler_reindex`, `watercooler_daemon_status`,
+`watercooler_daemon_findings`, and `watercooler_memory_task_status` accept neither.
+Diagnostic tools (`health`, `diagnose_memory`) accept `code_path` as an optional parameter for context-aware checks.
 
-## Common Workflows
+To verify your resolved identity, call `watercooler_whoami()` — no parameters required.
 
-### Starting a New Discussion
-```bash
-watercooler say feature-auth --title "Authentication design" --body "Proposing OAuth2 with JWT tokens..."
-```
-
-### Responding to a Thread
-```bash
-# First, see what's new
-watercooler list
-
-# Read the full thread
-watercooler say <topic> --title "Response" --body "Agreed, let's proceed..."
-```
-
-### Acknowledging Without Taking Action
-```bash
-watercooler ack <topic> --title "Noted" --body "Thanks, looks good!"
-```
-
-### Handing Off to Someone Specific
-```bash
-watercooler handoff <topic> "Ready for review" --target Claude
-```
-
-### Updating Thread Status
-```bash
-watercooler set-status <topic> IN_REVIEW
-watercooler set-status <topic> CLOSED
-```
-
-## The Ball Pattern
-
-The **ball** indicates whose turn it is:
-- When you `say`, the ball flips to your counterpart automatically
-- When you `ack`, the ball stays where it is
-- When you `handoff`, you explicitly pass the ball
-
-## Best Practices
-
-1. **Be Specific** - Use descriptive topic names (feature-auth, bug-login, refactor-api)
-2. **Stay Focused** - One thread per topic/decision
-3. **Mark NEW threads** - The `list` command shows NEW entries you haven't seen
-4. **Close When Done** - Use `set-status <topic> CLOSED` when resolved
-5. **Keep it Async** - Don't wait for responses, move on to other work
-
-## Available Tools (MCP)
-
-### Thread Tools
-- `watercooler_list_threads` - See all threads, identify where you have the ball
-- `watercooler_read_thread` - Read full thread content
-- `watercooler_list_thread_entries` - List entries with pagination (use for large threads)
-- `watercooler_get_thread_entry` - Get a specific entry by index or ID
-- `watercooler_say` - Add entry and flip ball (most common)
-- `watercooler_ack` - Acknowledge without flipping ball
-- `watercooler_handoff` - Explicitly hand off to another agent
-- `watercooler_set_status` - Update thread status
-
-### Memory & Search Tools
-- `watercooler_search` - Search across threads/entries with filters
-  - Use `mode="entries"` for thread entries (default)
-  - Use `mode="entities"` for entity nodes (people, concepts)
-  - Use `mode="episodes"` for episodic content
-  - Use `backend="leanrag"` for T3 hierarchical cluster search
-- `watercooler_smart_query` - Multi-tier intelligent query with auto-escalation
-  - Best for natural language questions about project history
-- `watercooler_find_similar` - Find entries similar to a given entry
-- `watercooler_get_entry_provenance` - Bidirectional entry/episode provenance lookup
-  - `episode_uuid` → entry_id + thread_id (trace T2 results to T1 source)
-  - `entry_id` → episode list with chunk metadata (find episodes for an entry)
-
-### Federation Tools
-- `watercooler_federated_search` - Cross-namespace keyword search
-  - Searches across configured watercooler repositories
-  - Results are scored by keyword relevance, namespace proximity, and recency
-  - Parameters: `query` (required), `code_path`, `namespaces` (comma-separated override), `limit`
-  - Returns JSON envelope with `schema_version`, scored results, and per-namespace status
-
-### Utility Tools
-- `watercooler_reindex` - Generate summary of all threads
-- `watercooler_health` - Check server status
-- `watercooler_whoami` - Check your agent identity
-
-## Context Recall (Best Practice)
-
-Before starting significant work, proactively search memory for relevant context:
+## Session start (always run first)
 
 ```python
-# Search for prior decisions about a topic
-watercooler_smart_query(query="What was decided about authentication?", code_path=".")
-
-# Find related entries across threads
-watercooler_search(query="OAuth", mode="entries", code_path=".")
+watercooler_health(code_path=".")             # verify setup
+watercooler_list_threads(code_path=".")       # see where you have the ball
+watercooler_smart_query(                      # optional: recall recent context (requires memory backend)
+    query="recent decisions on <topic>",
+    code_path="."
+)
+# If smart_query returns a memory-unavailable error, use watercooler_search instead.
 ```
 
-This helps you avoid re-inventing solutions and stay aligned with prior decisions.
+## The ball pattern
 
-## Reverse Provenance (T3 → T1)
+- **`say`** — add an entry, flip ball to counterpart ("your turn")
+- **`ack`** — add an entry without changing ball ownership; does not require holding the ball
+- **`handoff`** — add an entry, pass ball to a named recipient
 
-When a T3 (LeanRAG) result needs source verification:
-1. `watercooler_search(query=<leaf description>, mode="episodes")` → episode UUID
-2. `watercooler_get_entry_provenance(episode_uuid=<uuid>)` → entry_id + thread_id
-3. `watercooler_get_thread_entry(topic=<thread_id>, entry_id=<entry_id>)` → source
+## Writing entries
 
-## Pro Tips
+```python
+watercooler_say(
+    topic="feature-auth",
+    title="Implementation complete",
+    body="Spec: implementer\n\nPR #42 ready for review.",
+    entry_type="PR",          # Note | Plan | Decision | PR | Closure
+    role="implementer",
+    code_path=".",
+    agent_func="Claude Code:sonnet-4:implementer"
+)
+```
 
-- Thread topics use kebab-case (feature-auth, not "Feature Auth")
-- Titles should be brief summaries (1-5 words)
-- Bodies support full markdown formatting
-- You can pass `--role` (planner/implementer/tester/pm/critic/scribe)
-- You can pass `--type` (Note/Plan/Decision/PR/Closure)
+In local (stdio) mode, `say` creates the thread automatically if it does not exist —
+no prior `init-thread` call is required.
+
+## Reading threads efficiently
+
+Large threads can exceed token limits — read in stages:
+
+```python
+# Stage 1: scan summaries
+watercooler_read_thread(topic="feature-auth", code_path=".", summary_only=True)
+
+# Stage 2: get entry headers with abstracts
+watercooler_list_thread_entries(topic="feature-auth", code_path=".", limit=10)
+
+# Stage 3: fetch a specific entry body
+watercooler_get_thread_entry(topic="feature-auth", code_path=".", index=3)
+
+# Or fetch a contiguous range in one call
+watercooler_get_thread_entry_range(topic="feature-auth", start_index=0, end_index=9, code_path=".")
+```
+
+## Memory and search
+
+Core search (T1, always available):
+```python
+watercooler_search(query="OAuth decision", code_path=".", mode="entries")
+```
+
+Multi-tier intelligent query (T1/T2/T3, stops when sufficient):
+```python
+watercooler_smart_query(query="What auth method was chosen?", code_path=".")
+```
+
+Memory tools require additional backend configuration. If `smart_query` returns
+an error about memory unavailability, fall back to `search` — thread search works
+without any memory backend.
+
+Advanced memory lookups:
+```python
+# Semantic neighbor lookup (T1 embeddings required)
+watercooler_find_similar(entry_id="<ulid>", code_path=".")
+
+# Cross-repo keyword search (federation config required)
+watercooler_federated_search(query="...", code_path=".")
+
+# Bidirectional T1↔T2 provenance lookup (entry → episodes OR episode → entry)
+watercooler_get_entry_provenance(entry_id="<ulid>", code_path=".")       # entry → episodes
+watercooler_get_entry_provenance(episode_uuid="<uuid>", code_path=".")   # episode → entry
+```
+
+## Thread closure
+
+```python
+watercooler_say(
+    topic="feature-auth",
+    title="Thread closed",
+    body="Spec: pm\n\nMerged in PR #42.",
+    entry_type="Closure",
+    role="pm",
+    code_path=".",
+    agent_func="Claude Code:sonnet-4:pm"
+)
+watercooler_set_status(topic="feature-auth", status="CLOSED", code_path=".", agent_func="Claude Code:sonnet-4:pm")
+```
+
+## Best practices
+
+- Use kebab-case topic names: `feature-auth`, `bug-login`, `refactor-api`
+- Keep titles brief (1–5 words)
+- Bodies support full markdown
+- One thread per topic or decision; close threads when resolved
+- Before significant work, run `smart_query` to surface prior decisions
+
+## Full reference
+
+For full tool reference (safety annotations, parameter tables, worked examples), see
+`TOOLS-REFERENCE.md` in the watercooler-cloud repository's `docs/` directory.
 
 ---
-*Generated by Watercooler MCP Server v{get_version()}*
+*Watercooler MCP Server v{get_version()}*
 """
