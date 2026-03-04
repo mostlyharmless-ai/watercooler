@@ -40,16 +40,43 @@ happened before.
 | `worktree` | A local checkout of the orphan branch at `~/.watercooler/worktrees/<repo>/`, created automatically on first write. |
 | `agent_func` | Structured identity for write tools: `"<platform>:<model>:<role>"` — e.g., `"Claude Code:sonnet-4:implementer"`. |
 
-### How watercooler compares
+### Where watercooler sits
 
-| Aspect | Slack / Discord | GitHub Issues | Linear | Watercooler |
-|---|---|---|---|---|
-| Versioned with code | No | No | No | Yes |
-| Offline access | No | Limited | No | Yes |
-| Structured roles | No | No | No | Yes |
-| Ball ownership | No | Assignees | Assignees | Explicit |
-| AI-agent native | No | No | No | Yes |
-| Survives tool changes | No | Vendor lock-in | Vendor lock-in | Plain files |
+Watercooler is the durable reasoning layer between agent execution and your software lifecycle artifacts.
+
+```text
+┌──────────────────────────────────────────────┐
+│        SOFTWARE DEVELOPMENT LIFECYCLE       │
+│  Repos • Branches • PRs • CI/CD • Reviews   │
+└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│        HUMAN + AGENT COLLABORATION          │
+│  Devs • Code Review • Approval • Governance │
+└──────────────────────────────────────────────┘
+════════════════════════════════════════════════
+                 WATERCOOLER
+        VERSIONED REASONING LAYER
+════════════════════════════════════════════════
+  • Structured reasoning graph
+  • Why behind the code
+  • Shared across agents
+  • Merge-aware reasoning branches
+  • Deterministic replay
+  • Full decision provenance
+════════════════════════════════════════════════
+┌──────────────────────────────────────────────┐
+│           CODING AGENT RUNTIME              │
+│  Planning • File Edits • Tests • Tool Calls │
+└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│      LLM RUNTIME (Per-Agent Scratchpad)     │
+│  Context Window • Temporary Chain of Thought│
+│  Isolated • Ephemeral • Not Shared          │
+└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│           MODELS & COMPUTE INFRA            │
+└──────────────────────────────────────────────┘
+```
 
 ---
 
