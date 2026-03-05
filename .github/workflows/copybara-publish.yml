@@ -99,7 +99,8 @@ jobs:
             -e COPYBARA_CONFIG="copy.bara.sky" \
             -e COPYBARA_WORKFLOW="default" \
             -e COPYBARA_OPTIONS="${COPYBARA_OPTIONS_VAL}" \
-            olivr/copybara:20230129
+            olivr/copybara:20230129 \
+            copybara
 
       - name: Clean up credentials
         if: always()
