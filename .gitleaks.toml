@@ -1,0 +1,24 @@
+# Gitleaks configuration for watercooler-cloud
+# Used by copybara-dry-run.yml to scan for secrets before syncing to public repo.
+# Extends the default ruleset; allowlist below suppresses false positives from
+# local tooling directories that are never synced to the public repo.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Local tooling and build artifacts (not in Copybara allowlist)"
+paths = [
+    # Python virtual environment
+    '''.venv''',
+    # Compiled bytecode
+    '''__pycache__''',
+    # Mypy type-check cache
+    '''.mypy_cache''',
+    # Serena LSP cache (binary pickle files)
+    '''.serena''',
+    # Pytest cache
+    '''.pytest_cache''',
+    # External submodule forks (private; excluded from Copybara allowlist)
+    '''external''',
+]

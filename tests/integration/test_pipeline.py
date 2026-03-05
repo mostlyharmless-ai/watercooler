@@ -159,7 +159,7 @@ class TestRedaction:
 
     def test_redact_api_key_env_var(self):
         """Test redacting API key from env var format."""
-        text = "Error: DEEPSEEK_API_KEY=sk-abc123xyz789 is invalid"
+        text = "Error: DEEPSEEK_API_KEY=sk-abc123xyz789 is invalid"  # gitleaks:allow
         redacted = _redact_sensitive(text)
         assert "sk-abc123xyz789" not in redacted
         assert "DEEPSEEK_API_KEY" in redacted
@@ -326,7 +326,7 @@ class TestExtendedRedaction:
 
     def test_redact_x_api_key_header(self):
         """Test redacting X-API-Key headers."""
-        text = "X-API-Key: abcd1234567890abcdef"
+        text = "X-API-Key: abcd1234567890abcdef"  # gitleaks:allow
         redacted = _redact_sensitive(text)
         assert "abcd1234567890abcdef" not in redacted
         assert "X-API-Key" in redacted
@@ -348,9 +348,9 @@ class TestExtendedRedaction:
 
     def test_redact_aws_key(self):
         """Test redacting AWS access keys."""
-        text = "AWS Key: AKIAIOSFODNN7EXAMPLE"
+        text = "AWS Key: AKIAIOSFODNN7EXAMPLE"  # gitleaks:allow
         redacted = _redact_sensitive(text)
-        assert "AKIAIOSFODNN7EXAMPLE" not in redacted
+        assert "AKIAIOSFODNN7EXAMPLE" not in redacted  # gitleaks:allow
         assert "[REDACTED_AWS_KEY]" in redacted
 
 
