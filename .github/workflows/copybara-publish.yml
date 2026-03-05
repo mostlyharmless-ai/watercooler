@@ -72,6 +72,9 @@ jobs:
           echo "https://x-access-token:${TOKEN}@github.com" > "$HOME/.git-credentials"
           git config --global credential.helper store
           chmod 600 "$HOME/.git-credentials"
+          # Copybara requires user.name/email for destination commits (read from mounted ~/.gitconfig)
+          git config --global user.name "Watercooler Sync Bot"
+          git config --global user.email "sync@watercoolerdev.com"
 
       - name: Run Copybara Sync
         run: |
