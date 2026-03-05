@@ -18,6 +18,7 @@ class TaskSummary:
   wc_entry_ids_returned: list[str] = field(default_factory=list)
   bash_commands: int = 0
   test_runs: int = 0
+  category: str = ""
   details: dict[str, Any] = field(default_factory=dict)
 
 

@@ -6,8 +6,8 @@ FastMCP server that exposes watercooler-cloud tools to AI agents through the Mod
 
 The Watercooler Cloud MCP server allows AI agents (like Claude, Codex, etc.) to naturally discover and use Watercooler Cloud tools without manual CLI commands. All tools are namespaced as `watercooler_*` for provider compatibility.
 
-**Current Status:** Production Ready (Phase 1A/1B/2A complete)
-**Version:** v0.0.1 + Phase 2A git sync
+**Current Status:** Production Ready
+**Version:** v0.2.6 (tracks latest stable release)
 
 ## Installation
 
@@ -109,7 +109,7 @@ WATERCOOLER_AGENT = "Codex"
 
 ## Environment Variables
 
-### WATERCOOLER_AGENT (Required)
+### WATERCOOLER_AGENT (Recommended)
 Your agent identity (e.g., "Claude", "Codex"). Set in MCP config.
 
 ### WATERCOOLER_DIR (Optional)
@@ -132,6 +132,9 @@ repository is needed.
 If you set `WATERCOOLER_DIR`, that path takes priority and the orphan branch
 worktree is skipped. Use the override sparingly — it's mainly useful for
 testing or debugging.
+
+**See also:** [Environment Variables Reference](CONFIGURATION.md#environment-variables-reference)
+for the complete list of env vars and their `config.toml` equivalents.
 
 ## Available Tools
 
@@ -268,13 +271,6 @@ Update thread status.
 - `topic` (str): Thread topic identifier
 - `status` (str): New status (e.g., "OPEN", "IN_REVIEW", "CLOSED", "BLOCKED")
 
-#### `watercooler_sync`
-Synchronize the local threads repository with its remote.
-
-**Parameters:**
-- `code_path` (str): Code repo root, same as other tools
-- `agent_func` (str): Optional agent identity for provenance
-
 #### `watercooler_reindex`
 Generate index summary of all threads.
 
@@ -320,6 +316,40 @@ watercooler_federated_search(
 ### Memory & Search Tools
 
 > Memory tools require the memory backend to be enabled in `config.toml`.
+
+#### `watercooler_smart_query`
+Multi-tier intelligent memory query with automatic tier escalation. **This is the recommended tool for most memory recall tasks** — it queries T1 (baseline), T2 (Graphiti), and T3 (LeanRAG) in order, stopping when sufficient results are found.
+
+**Parameters:**
+- `query` (str, required): Natural language query (e.g., "What authentication method was implemented?")
+- `code_path` (str): Path to code repository root
+- `threads_dir` (str): Explicit threads directory path (auto-resolved from `code_path` if empty)
+- `max_tiers` (int): Maximum tiers to query before stopping (default: 2, max: 3)
+- `force_tier` (str): Force query to a specific tier — `"T1"`, `"T2"`, or `"T3"` (disables escalation)
+- `group_ids` (list[str]): Optional project group IDs to filter results
+
+**Returns:** JSON with:
+- `query`: Original query text
+- `result_count`: Total evidence items found
+- `tiers_queried`: List of tiers queried (e.g., `["T1", "T2"]`)
+- `primary_tier`: Tier that provided the best results
+- `escalation_reason`: Why escalation occurred (if applicable)
+- `sufficient`: Whether results met sufficiency criteria
+- `evidence`: List of evidence items with `tier`, `id`, `content`, `score`, `name`, `provenance`, `metadata`
+
+**Prerequisites:**
+- T1: threads_dir with `.graph/nodes.jsonl` (always available)
+- T2: `memory.backend = "graphiti"` + FalkorDB running
+- T3: `LEANRAG_PATH` set (or `memory.leanrag.path` in config.toml) + `memory.tiers.t3_enabled = true`
+
+**Example:**
+```python
+watercooler_smart_query(
+    query="What error handling patterns were used in the auth module?",
+    code_path=".",
+    max_tiers=2
+)
+```
 
 #### `watercooler_search`
 Unified search across threads, entities, episodes, and temporal facts. Routes to the
@@ -393,6 +423,179 @@ watercooler_get_entry_provenance(entry_id="01AUTH001")
 No LLM API keys required — uses only the local entry-episode index file.
 See `docs/SEMANTIC_BRIDGE.md` for the full T3 → T2 → T1 reverse provenance pattern.
 
+### Graph Management Tools
+
+Tools for managing the baseline graph (T1 — JSONL knowledge graph).
+
+#### `watercooler_baseline_graph_stats`
+Get entry/thread counts and status breakdown for the baseline graph. Useful for understanding scope before enrichment or migration.
+
+**Parameters:**
+- `code_path` (str): Path to code repository root
+
+**Returns:** JSON with thread counts, entry counts, and status breakdown.
+
+#### `watercooler_baseline_sync_status`
+Check whether each thread's baseline graph is up to date with the thread data. Does **not** check FalkorDB or memory tier health — use `watercooler_diagnose_memory` for that.
+
+**Parameters:**
+- `code_path` (str): Path to code repository root
+
+**Returns:** JSON health report with per-thread sync status (`synced`, `stale`, `error`, `pending`) and recommendations.
+
+#### `watercooler_graph_enrich`
+Generate or regenerate summaries and embeddings in the baseline graph.
+
+**Parameters:**
+- `code_path` (str): Path to code repository root
+- `summaries` (bool): Generate entry summaries (default: `true`)
+- `embeddings` (bool): Generate embeddings (default: `true`)
+- `thread_summaries` (bool): Regenerate thread-level summaries (default: `false`)
+- `mode` (str): Processing mode — `"missing"` (default, safe), `"selective"` (specific topics), `"all"` (global refresh)
+- `topics` (str): Comma-separated topic list (required for `"selective"` mode)
+- `batch_size` (int): Items to process before writing (default: 10)
+- `dry_run` (bool): Preview what would be processed without making changes
+
+**Returns:** JSON with counts: `processed`, `generated`, `skipped`, `errors`.
+
+#### `watercooler_graph_project`
+Generate markdown files from graph data. The graph is the source of truth; this tool creates derived `.md` projections.
+
+**Parameters:**
+- `code_path` (str): Path to code repository root
+- `mode` (str): `"missing"` (default), `"selective"`, or `"all"` (requires `overwrite=true`)
+- `topics` (str): Comma-separated topic list (for `"selective"` mode)
+- `overwrite` (bool): Allow overwriting existing markdown (required for `mode="all"`)
+- `dry_run` (bool): Preview without writing
+
+#### `watercooler_graph_recover`
+Returns instructions for graph recovery. Recovery from `.md` files is an extraordinary operation that has been moved to `scripts/recover_baseline_graph.py`. In normal operation, restore from git history instead (`git checkout <commit> -- graph/`).
+
+#### `watercooler_find_similar`
+Find thread entries semantically similar to a given entry (requires embeddings).
+
+**Parameters:**
+- `entry_id` (str): Source entry ULID
+- `code_path` (str): Path to code repository root
+- `limit` (int): Max results (default: 10)
+
+#### `watercooler_access_stats`
+Get thread access and read statistics for a repository.
+
+**Parameters:**
+- `code_path` (str): Path to code repository root
+
+#### `watercooler_get_entity_edge`
+Get a specific entity relationship (edge) by UUID from the Graphiti knowledge graph. Useful for inspecting temporal relationships between entities.
+
+**Parameters:**
+- `uuid` (str, required): Edge UUID to retrieve
+- `code_path` (str): Path to code repository root
+- `group_id` (str): Project group ID (derived from `code_path` if empty)
+
+**Returns:** JSON with edge details: `uuid`, `fact`, `source_node_uuid`, `target_node_uuid`, `valid_at`, `invalid_at`, `created_at`, `group_id`.
+
+**Prerequisites:** Graphiti backend enabled + FalkorDB running.
+
+#### `watercooler_clear_graph_group`
+**Destructive operation.** Clear all Graphiti episodes for a project group. Use for cleanup or resetting before re-migration. Requires `confirm = true`.
+
+**Parameters:**
+- `group_id` (str, required): Project group ID (e.g., `"watercooler_cloud"`)
+- `code_path` (str): Path to code repository root
+- `confirm` (bool): Must be `true` to execute deletion (safety guard)
+
+**Returns:** JSON with `success`, `removed` (count of deleted episodes), `group_id`, `message`.
+
+**Warning:** In the unified model, all threads share one `group_id`. Clearing it removes ALL episodes for the project from FalkorDB. This cannot be undone.
+
+#### `watercooler_leanrag_run_pipeline`
+Run the LeanRAG hierarchical clustering pipeline on Graphiti episodes. Extracts chunks, generates BGE-M3 embeddings, clusters semantically similar content, and stores summaries back to the graph.
+
+**Parameters:**
+- `group_id` (str): Thread/topic group ID (derived from `code_path` if empty)
+- `code_path` (str): Path to code repository root (required for bulk runs)
+- `start_date` / `end_date` (str): ISO 8601 date range filter for episodes
+- `dry_run` (bool): Preview without executing (default: `false`)
+- `incremental` (bool): Use incremental update when saved cluster state exists; `false` forces full rebuild (default: `true`)
+
+**Prerequisites:** `memory.tiers.t3_enabled = true` + `LEANRAG_PATH` set.
+
+### Daemon Tools
+
+Background daemons run periodic checks when `[mcp.daemons] enabled = true`.
+
+#### `watercooler_daemon_status`
+Check status and health for all registered daemons (or a specific one).
+
+**Parameters:**
+- `daemon` (str): Optional daemon name. Empty returns all daemons.
+
+**Returns:** JSON with status, last run time, interval, and error/findings counts.
+
+#### `watercooler_daemon_findings`
+Query findings produced by background daemons with optional filters.
+
+**Parameters:**
+- `daemon` (str): Filter by daemon name (empty = all daemons)
+- `severity` (str): Filter by severity — `"info"`, `"warning"`, `"error"`
+- `category` (str): Filter by category (e.g., `"missing_status"`, `"stale_thread"`)
+- `topic` (str): Filter by thread topic
+- `limit` (int): Max findings to return (default: 50, max: 500)
+- `unacknowledged_only` (bool): Only return unacknowledged findings
+
+**Returns:** JSON with `count` and `findings[]` in reverse-chronological order.
+
+### Migration / Admin Tools
+
+Tools for migrating thread history to memory backends and managing the task queue.
+
+#### `watercooler_migration_preflight`
+Check prerequisites before migrating thread entries to a memory backend.
+
+**Parameters:**
+- `code_path` (str): Path to code repository root
+- `backend` (str): Target backend — `"graphiti"` (default) or `"leanrag"`
+
+**Returns:** JSON preflight check results including service availability and entry counts.
+
+#### `watercooler_migrate_to_memory_backend`
+Migrate thread entries from the baseline graph to Graphiti (T2) or LeanRAG (T3). Entries are chunked for aligned boundaries with the memory backend. Supports resumable checkpoints.
+
+**Parameters:**
+- `code_path` (str): Path to code repository root
+- `backend` (str): Target backend — `"graphiti"` (default) or `"leanrag"`
+- `dry_run` (bool): Preview without executing (default: `true`)
+- `topics` (str): Comma-separated topic list to migrate (empty = all)
+- `skip_closed` (bool): Skip closed threads (default: `false`)
+- `resume` (bool): Resume from checkpoint if available (default: `true`)
+- `force_new_migration` (bool): Ignore checkpoint backend mismatch (default: `false`)
+- `chunk_max_tokens` (int): Max tokens per chunk (default: 768)
+- `chunk_overlap` (int): Token overlap between chunks (default: 64)
+- `rechunk` (bool): Re-migrate entries previously indexed as single episodes (default: `false`)
+
+**Returns:** JSON migration results with counts and any errors.
+
+#### `watercooler_memory_task_status`
+Check memory queue health, poll task status, or trigger recovery for the async memory task queue.
+
+**Parameters:**
+- `task_id` (str): Optional task ID to check. Empty = queue summary.
+- `recover` (bool): Reset stale `"running"` tasks back to `"pending"` (default: `false`)
+- `retry_dead_letters` (bool): Move dead-letter tasks back to the queue (default: `false`)
+
+**Prerequisites:** Requires `memory.queue_enabled = true` in `config.toml`.
+
+#### `watercooler_bulk_index`
+Bulk-index thread entries from the baseline graph into a memory backend. Used for initial population or incremental updates.
+
+**Parameters:**
+- `code_path` (str): Path to code repository root
+- `backend` (str): Target backend — `"graphiti"`, `"leanrag"`, or `"auto"` (default)
+- `topics` (str): Comma-separated topic list (empty = all)
+- `since` (str): ISO 8601 timestamp — only index entries modified after this time
+- `dry_run` (bool): Preview without writing (default: `false`)
+
 ### Git Sync
 
 Write operations follow a `lock → pull → write → commit → push` flow on the
@@ -415,7 +618,13 @@ current worktree and sync status.
 Every tool call must include:
 
 - `code_path` -- points to the code repository root (e.g., `"."`). The server resolves repo/branch/commit from this path.
-- `agent_func` -- required on write operations; format `<platform>:<model>:<role>` (e.g., `"Cursor:Composer 1:implementer"`).
+- `agent_func` -- required on write operations (`say`, `ack`, `handoff`, `set_status`). Format: `<platform>:<model>:<role>`.
+  - `platform`: IDE or client name (e.g., `Claude Code`, `Cursor`, `Codex`)
+  - `model`: Specific model variant (e.g., `sonnet-4`, `Composer 1`)
+  - `role`: Agent role — one of `planner`, `critic`, `implementer`, `tester`, `pm`, `scribe`
+  - Example: `"Claude Code:sonnet-4:implementer"`
+
+  Read-only tools (`list_threads`, `read_thread`, `search`, `smart_query`, `health`, etc.) do not require `agent_func`.
 
 ## Usage Examples
 

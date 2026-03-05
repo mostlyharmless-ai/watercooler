@@ -310,12 +310,12 @@ llama_server = true
 
 # Generate LLM summaries for entries on write
 # Requires LLM service (llama-server on port 8000)
-# Env: WATERCOOLER_GRAPH_SUMMARIES
+# TOML-only — no env var override for this field
 generate_summaries = true
 
 # Generate embedding vectors for entries on write
 # Requires embedding service (llama-server on port 8080)
-# Env: WATERCOOLER_GRAPH_EMBEDDINGS
+# TOML-only — no env var override for this field
 generate_embeddings = true
 
 # Use extractive summaries only (no LLM calls, faster but less semantic)
@@ -342,7 +342,7 @@ generate_embeddings = true
 
 # Check service availability before generation (skip gracefully if unavailable)
 # When true, summary/embedding generation will only proceed if services respond
-# Env: WATERCOOLER_GRAPH_AUTO_DETECT
+# TOML-only — no env var override for this field
 auto_detect_services = true
 
 # Auto-start LLM/embedding services if unavailable
@@ -851,7 +851,7 @@ auto_detect_services = true
 # Priority chain (highest first):
 #   Environment variables > Backend-specific TOML > Shared TOML > Defaults
 #
-# See docs/ENVIRONMENT_VARS.md for complete documentation.
+# See docs/CONFIGURATION.md#environment-variables-reference for complete documentation.
 # =============================================================================
 
 
@@ -887,9 +887,6 @@ auto_detect_services = true
 # mcp.logging.disable_file       WATERCOOLER_LOG_DISABLE_FILE
 # mcp.service_provision.models   WATERCOOLER_AUTO_PROVISION_MODELS
 # mcp.service_provision.llama_server WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER
-# mcp.graph.generate_summaries   WATERCOOLER_GRAPH_SUMMARIES
-# mcp.graph.generate_embeddings  WATERCOOLER_GRAPH_EMBEDDINGS
-# mcp.graph.auto_detect_services WATERCOOLER_GRAPH_AUTO_DETECT
 # mcp.graph.auto_start_services  WATERCOOLER_AUTO_START_SERVICES
 # mcp.graph.embedding_divergence_threshold WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD
 # validation.on_write            WATERCOOLER_VALIDATE_ON_WRITE

@@ -40,11 +40,13 @@ class TestGraphitiMemoryIntegration:
         config = memory.load_graphiti_config()
         assert config is None
 
-        # Test with enabled but no API keys (and no fallback)
+        # Test with enabled but no API keys (remote endpoint → key required)
         monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
+        monkeypatch.setenv("LLM_API_BASE", "https://api.openai.com/v1")
+        monkeypatch.setenv("EMBEDDING_API_BASE", "https://api.openai.com/v1")
         monkeypatch.delenv("LLM_API_KEY", raising=False)
         monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # Clear fallback too
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         cfg.reset()
         config = memory.load_graphiti_config()
         assert config is None

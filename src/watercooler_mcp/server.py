@@ -336,9 +336,9 @@ Examples:
 Environment variables:
   WATERCOOLER_DIR              Path to threads directory
   WATERCOOLER_AGENT            Default agent identity
-  WATERCOOLER_TRANSPORT        Transport type (stdio or http)
-  WATERCOOLER_HOST             HTTP host (default: 127.0.0.1)
-  WATERCOOLER_PORT             HTTP port (default: 8765)
+  WATERCOOLER_MCP_TRANSPORT    Transport type (stdio or http)
+  WATERCOOLER_MCP_HOST         HTTP host (default: 127.0.0.1)
+  WATERCOOLER_MCP_PORT         HTTP port (default: 3000)
 """
     )
     parser.add_argument(

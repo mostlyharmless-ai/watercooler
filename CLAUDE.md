@@ -414,8 +414,10 @@ Each Watercooler entry includes:
 
 Update these files as needed:
 - `docs/QUICKSTART.md` - Getting started guide
+- `docs/AUTHENTICATION.md` - Authentication and credential setup
 - `docs/CONFIGURATION.md` - Configuration reference
-- `docs/mcp-server.md` - MCP tool reference
+- `docs/MCP-CLIENTS.md` - MCP client setup (Claude Code, Codex, Cursor)
+- `docs/TOOLS-REFERENCE.md` - MCP tool and CLI command reference
 - `docs/TROUBLESHOOTING.md` - Common issues
 - `README.md` - Project overview
 
