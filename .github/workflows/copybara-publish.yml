@@ -85,7 +85,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/usr/src/app" \
             -w /usr/src/app \
             olivr/copybara:20230129 \
-            copybara copy.bara.sky default $EXTRA_FLAGS
+            copybara $EXTRA_FLAGS copy.bara.sky default
 
       - name: Clean up credentials
         if: always()
