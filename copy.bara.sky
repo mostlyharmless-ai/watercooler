@@ -133,7 +133,7 @@ core.workflow(
         ),
         # --- Strip two-line internal comment from ci.yml (references LeanRAG/graphiti extras) ---
         core.replace(
-            before = "      # Note: Using graphiti instead of memory to avoid private LeanRAG dependency\n"
+            before = "      # Note: Using graphiti instead of memory to avoid private LeanRAG dependency\n" +
                      "      # LeanRAG tests are skipped anyway (integration_leanrag_llm marker)\n",
             after  = "",
             paths  = glob([".github/workflows/ci.yml"]),
@@ -152,8 +152,8 @@ core.workflow(
         # would leave the third line ("  # all tests pass before code reaches stable.\n")
         # verbatim in the public repo, still disclosing the internal flow.
         core.replace(
-            before = "  # Note: No test job - code is already validated on staging before tagging.\n"
-                     "  # Running tests here would be redundant. The staging branch CI ensures\n"
+            before = "  # Note: No test job - code is already validated on staging before tagging.\n" +
+                     "  # Running tests here would be redundant. The staging branch CI ensures\n" +
                      "  # all tests pass before code reaches stable.\n",
             after  = "",
             paths  = glob([".github/workflows/release.yml"]),
