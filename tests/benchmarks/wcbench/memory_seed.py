@@ -41,12 +41,22 @@ def _parse_ts(ts: str) -> datetime:
   if not ts:
     return _utcnow()
   try:
-    # Accept Z suffix.
-    if ts.endswith("Z"):
-      ts = ts[:-1] + "+00:00"
-    return datetime.fromisoformat(ts)
+    return _parse_ts_strict(ts)
   except Exception:
     return _utcnow()
+
+
+def _parse_ts_strict(ts: str) -> datetime:
+  """Parse an ISO8601 timestamp or raise ValueError."""
+  raw = (ts or "").strip()
+  if not raw:
+    raise ValueError("timestamp is empty")
+  if raw.endswith("Z"):
+    raw = raw[:-1] + "+00:00"
+  try:
+    return datetime.fromisoformat(raw)
+  except Exception as exc:
+    raise ValueError(f"invalid timestamp: {ts}") from exc
 
 
 _FACT_PREFIX_RE = re.compile(r"^\s*Fact:\s*", re.IGNORECASE)
@@ -149,20 +159,12 @@ def _validate_seed_entries(entries: list[SeededEntry]) -> None:
     if not (e.body or "").strip():
       raise ValueError(f"Seed entry {e.entry_id} has empty body")
     if e.timestamp:
-      parsed = _parse_ts(e.timestamp)
-      if parsed == _utcnow():
-        # _parse_ts falls back to utcnow on parse failure; if the original
-        # timestamp was non-empty and we got utcnow back, it's likely invalid.
-        # Double-check by attempting a direct parse.
-        try:
-          ts = e.timestamp
-          if ts.endswith("Z"):
-            ts = ts[:-1] + "+00:00"
-          datetime.fromisoformat(ts)
-        except Exception:
-          raise ValueError(
-            f"Seed entry {e.entry_id} has invalid timestamp: {e.timestamp}"
-          )
+      try:
+        _parse_ts_strict(e.timestamp)
+      except ValueError as exc:
+        raise ValueError(
+          f"Seed entry {e.entry_id} has invalid timestamp: {e.timestamp}"
+        ) from exc
 
 
 def seed_into_graphiti(

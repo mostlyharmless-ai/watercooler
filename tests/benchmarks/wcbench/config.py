@@ -47,10 +47,10 @@ class RunConfig:
   agent_value_tasks_path: Optional[Path] = None
   agent_value_only_task_ids: Optional[Sequence[str]] = None
   agent_value_site_repo: str = "https://github.com/mostlyharmless-ai/watercooler-site.git"
-  agent_value_site_commit: str = "main"
   # Git ref for the orphan branch clone.  Accepts a branch name or tag.
   # Pin to a tag for reproducible runs; bump when thread data evolves.
   agent_value_threads_ref: str = "agent-value-bench/v1"
+  # Pin an image/tag to control the exact watercooler-site code under /repo.
   agent_value_image: str = "wcbench-agent-base:wc-site-v1"
 
   # Output
