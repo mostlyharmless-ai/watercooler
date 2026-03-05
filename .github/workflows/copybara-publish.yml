@@ -11,6 +11,10 @@ on:
         description: 'Pass --force to Copybara (use after rollback or re-bootstrap)'
         type: boolean
         default: false
+      last_rev:
+        description: 'Origin SHA for --last-rev bootstrap (bypasses GitOrigin-RevId check without --force)'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -71,13 +75,17 @@ jobs:
 
       - name: Run Copybara Sync
         run: |
-          # On first run there is no GitOrigin-RevId label in the destination.
-          # --force       : proceed even without a prior label in destination commits
-          # --init-history: initialise history from scratch (required for first import)
-          # Both flags are needed together for a clean bootstrap.
+          # Bootstrap flags (workflow_dispatch only):
+          # --force               : proceed even without a prior GitOrigin-RevId label in destination
+          # --last-rev <sha>      : provide origin baseline explicitly (bypasses GitOrigin-RevId check)
+          # For first-time bootstrap pass last_rev=<initial-origin-sha> (the oldest stable commit).
           EXTRA_FLAGS=""
           if [ "${{ inputs.force_bootstrap }}" = "true" ]; then
-            EXTRA_FLAGS="--force --init-history"
+            EXTRA_FLAGS="--force"
+          fi
+          LAST_REV="${{ inputs.last_rev }}"
+          if [ -n "$LAST_REV" ]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --last-rev $LAST_REV"
           fi
           docker run --rm \
             -v "$HOME/.git-credentials:/root/.git-credentials:ro" \
@@ -85,7 +93,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/usr/src/app" \
             -w /usr/src/app \
             olivr/copybara:20230129 \
-            copybara $EXTRA_FLAGS copy.bara.sky default
+            copybara copy.bara.sky default $EXTRA_FLAGS
 
       - name: Clean up credentials
         if: always()
