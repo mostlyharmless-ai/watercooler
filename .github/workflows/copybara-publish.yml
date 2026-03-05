@@ -75,26 +75,31 @@ jobs:
 
       - name: Run Copybara Sync
         run: |
+          # The olivr/copybara wrapper script passes flags through env vars, NOT CLI args:
+          #   java -jar copybara.jar $COPYBARA_OPTIONS $COPYBARA_SUBCOMMAND $COPYBARA_CONFIG ...
+          # Any args appended after the image name are silently ignored by the wrapper.
+          #
           # Bootstrap flags (workflow_dispatch only):
           # --force               : proceed even without a prior GitOrigin-RevId label in destination
           # --last-rev <sha>      : provide origin baseline explicitly (bypasses GitOrigin-RevId check)
-          # For first-time bootstrap pass last_rev=<initial-origin-sha> (the oldest stable commit).
-          EXTRA_FLAGS=""
+          # For first-time bootstrap pass last_rev=<initial-origin-sha> (oldest stable commit).
+          COPYBARA_OPTIONS_VAL=""
           if [ "${{ inputs.force_bootstrap }}" = "true" ]; then
-            EXTRA_FLAGS="--force"
+            COPYBARA_OPTIONS_VAL="--force"
           fi
           LAST_REV="${{ inputs.last_rev }}"
           if [ -n "$LAST_REV" ]; then
-            # Use --last-rev=VALUE form (equals sign) to avoid any positional arg parsing ambiguity
-            EXTRA_FLAGS="$EXTRA_FLAGS --last-rev=${LAST_REV}"
+            COPYBARA_OPTIONS_VAL="${COPYBARA_OPTIONS_VAL} --last-rev ${LAST_REV}"
           fi
           docker run --rm \
             -v "$HOME/.git-credentials:/root/.git-credentials:ro" \
             -v "$HOME/.gitconfig:/root/.gitconfig:ro" \
             -v "$GITHUB_WORKSPACE:/usr/src/app" \
             -w /usr/src/app \
-            olivr/copybara:20230129 \
-            copybara $EXTRA_FLAGS copy.bara.sky default
+            -e COPYBARA_CONFIG="copy.bara.sky" \
+            -e COPYBARA_WORKFLOW="default" \
+            -e COPYBARA_OPTIONS="${COPYBARA_OPTIONS_VAL}" \
+            olivr/copybara:20230129
 
       - name: Clean up credentials
         if: always()
