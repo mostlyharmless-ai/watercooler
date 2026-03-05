@@ -24,9 +24,10 @@ jobs:
         run: python3 scripts/validate-copybara-allowlist.py
 
       - name: Scan for secrets in files that will be synced
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/gitleaks/gitleaks/main/scripts/install.sh \
+            | sh -s -- -b /usr/local/bin v8.18.4
+          gitleaks detect --source . --exit-code 1
 
       - name: Confirm pyproject.public.toml is updated when pyproject.toml changes
         # Only meaningful on pull_request where github.base_ref is set.
