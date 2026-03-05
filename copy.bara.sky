@@ -132,12 +132,16 @@ core.workflow(
             paths  = glob([".github/workflows/ci.yml"]),
         ),
         # --- Strip two-line internal comment from ci.yml (references LeanRAG/graphiti extras) ---
-        core.replace(
-            before = "      # Note: Using graphiti instead of memory to avoid private LeanRAG dependency\n" +
-                     "      # LeanRAG tests are skipped anyway (integration_leanrag_llm marker)\n",
-            after  = "",
-            paths  = glob([".github/workflows/ci.yml"]),
-        ),
+        # ignore_noop = True: comment may be absent in some origin snapshots (e.g. first-run
+        # bootstrap with --last-rev pointing to a commit predating this comment).
+        core.transform([
+            core.replace(
+                before = "      # Note: Using graphiti instead of memory to avoid private LeanRAG dependency\n" +
+                         "      # LeanRAG tests are skipped anyway (integration_leanrag_llm marker)\n",
+                after  = "",
+                paths  = glob([".github/workflows/ci.yml"]),
+            ),
+        ], ignore_noop = True),
         # --- Strip internal `staging` branch from ci.yml workflow triggers ---
         # Public repo has no `staging` branch; publishing this trigger leaks internal branch naming.
         core.replace(
@@ -151,13 +155,17 @@ core.workflow(
         # All three lines of the comment must be covered; stripping only the first two
         # would leave the third line ("  # all tests pass before code reaches stable.\n")
         # verbatim in the public repo, still disclosing the internal flow.
-        core.replace(
-            before = "  # Note: No test job - code is already validated on staging before tagging.\n" +
-                     "  # Running tests here would be redundant. The staging branch CI ensures\n" +
-                     "  # all tests pass before code reaches stable.\n",
-            after  = "",
-            paths  = glob([".github/workflows/release.yml"]),
-        ),
+        # ignore_noop = True: same reason as the ci.yml comment above — may be absent in
+        # some origin snapshots during bootstrap with an older --last-rev baseline.
+        core.transform([
+            core.replace(
+                before = "  # Note: No test job - code is already validated on staging before tagging.\n" +
+                         "  # Running tests here would be redundant. The staging branch CI ensures\n" +
+                         "  # all tests pass before code reaches stable.\n",
+                after  = "",
+                paths  = glob([".github/workflows/release.yml"]),
+            ),
+        ], ignore_noop = True),
 
         # --- Fix install-mcp.sh: sentinel check and user messages use public package name ---
         # The sentinel `grep -q "watercooler-cloud" pyproject.toml` would fail for public users
