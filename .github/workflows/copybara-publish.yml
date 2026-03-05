@@ -71,9 +71,13 @@ jobs:
 
       - name: Run Copybara Sync
         run: |
-          FORCE_FLAG=""
+          # On first run there is no GitOrigin-RevId label in the destination.
+          # --force       : proceed even without a prior label in destination commits
+          # --init-history: initialise history from scratch (required for first import)
+          # Both flags are needed together for a clean bootstrap.
+          EXTRA_FLAGS=""
           if [ "${{ inputs.force_bootstrap }}" = "true" ]; then
-            FORCE_FLAG="--force"
+            EXTRA_FLAGS="--force --init-history"
           fi
           docker run --rm \
             -v "$HOME/.git-credentials:/root/.git-credentials:ro" \
@@ -81,7 +85,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/usr/src/app" \
             -w /usr/src/app \
             olivr/copybara:20230129 \
-            copybara copy.bara.sky default $FORCE_FLAG
+            copybara copy.bara.sky default $EXTRA_FLAGS
 
       - name: Clean up credentials
         if: always()
