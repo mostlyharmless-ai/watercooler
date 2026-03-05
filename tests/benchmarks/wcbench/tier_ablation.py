@@ -5,15 +5,16 @@ a per-category comparison table showing marginal value of each tier.
 """
 from __future__ import annotations
 
+import json
+import logging
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 from tests.benchmarks.wcbench.config import RunConfig, WcTierCeiling
-from tests.benchmarks.wcbench.events import EventLogger
-from tests.benchmarks.wcbench.run_layout import RunLayout, make_run_layout
-from tests.benchmarks.wcbench.summary import RunSummary
+from tests.benchmarks.wcbench.orchestrator import run_wcbench
+from tests.benchmarks.wcbench.run_layout import make_run_layout
+from tests.benchmarks.wcbench.summary import RunSummary, TaskSummary
 
 TIER_CEILINGS: list[WcTierCeiling] = ["T1", "T2", "T3"]
 
@@ -131,23 +132,46 @@ def run_tier_ablation(
       wc_tier_ceiling=ceiling,
       output_root=root,
     )
+    try:
+      run_wcbench(cfg)
+    except Exception:
+      logging.getLogger(__name__).error("Tier %s run failed for %s", ceiling, sub_run_id, exc_info=True)
+      raise
     sub_layout = make_run_layout(root, sub_run_id)
+    try:
+      raw_summary = json.loads(sub_layout.summary_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+      raise FileNotFoundError(
+        f"Tier {ceiling} run {sub_run_id} did not produce a summary file at {sub_layout.summary_path}"
+      )
     summary = RunSummary(
-      run_id=sub_run_id,
-      track=cfg.track,
-      model=cfg.model,
-      mode=cfg.mode,
-      started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+      run_id=str(raw_summary.get("run_id", sub_run_id)),
+      track=str(raw_summary.get("track", cfg.track)),
+      model=str(raw_summary.get("model", cfg.model)),
+      mode=str(raw_summary.get("mode", cfg.mode)),
+      started_at=str(raw_summary.get("started_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))),
+      ended_at=str(raw_summary.get("ended_at", "")) or None,
+      elapsed_seconds=float(raw_summary.get("elapsed_seconds", 0.0) or 0.0),
+      tasks=[],
     )
-    event_logger = EventLogger(sub_layout.events_path)
-
-    from tests.benchmarks.wcbench.tracks.memory_qa import run_memory_qa_track
-
-    run_memory_qa_track(cfg, layout=sub_layout, event_logger=event_logger, run_summary=summary)
-
-    summary.elapsed_seconds = time.time()
-    summary.ended_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    summary.write_json(sub_layout.summary_path)
+    for task in list(raw_summary.get("tasks", [])):
+      task_dict = dict(task) if isinstance(task, dict) else {}
+      summary.tasks.append(
+        TaskSummary(
+          task_id=str(task_dict.get("task_id", "")),
+          ok=bool(task_dict.get("ok", False)),
+          mode=str(task_dict.get("mode", "")),
+          cost=float(task_dict.get("cost", 0.0) or 0.0),
+          steps=int(task_dict.get("steps", 0) or 0),
+          wc_commands=int(task_dict.get("wc_commands", 0) or 0),
+          wc_tools_used=dict(task_dict.get("wc_tools_used", {}) or {}),
+          wc_entry_ids_returned=list(task_dict.get("wc_entry_ids_returned", []) or []),
+          bash_commands=int(task_dict.get("bash_commands", 0) or 0),
+          test_runs=int(task_dict.get("test_runs", 0) or 0),
+          category=str(task_dict.get("category", "")),
+          details=dict(task_dict.get("details", {}) or {}),
+        )
+      )
 
     results[ceiling] = _group_by_category(summary)
 

@@ -5,6 +5,9 @@
 # that the harness bind-mounts the orphan branch thread data into the tools
 # container at runtime.
 #
+# Runtime reproducibility is controlled by the image tag you pass via
+# `--agent-value-image` in wcbench.
+#
 # The build script clones watercooler-site on the HOST (where Git credentials
 # are available) and stages a Docker build context with:
 #   wc-cloud-src/  — watercooler-cloud source (for pip install)

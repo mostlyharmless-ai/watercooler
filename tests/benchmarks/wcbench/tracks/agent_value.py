@@ -12,7 +12,8 @@ For each task we run two paired agent sessions in **separate Docker containers**
   1. **baseline** -- agent has bash + file editor only; no thread data
   2. **tools**    -- same agent + watercooler MCP server; thread graph at /data/threads
 
-Both containers use the same image (``wcbench-agent-base:wc-site-v1``).
+Both containers use the same image (``wcbench-agent-base:wc-site-v1`` by default).
+To make runs reproducible, pin ``--agent-value-image`` to an immutable image tag.
 After the agent finishes we exec ``test_cmd`` *inside the same container*
 to get a deterministic pass/fail.  Results go to ``COMPARISON.md`` and
 ``pair_results.json``.
@@ -28,6 +29,7 @@ import logging
 import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -111,10 +113,9 @@ def _clone_orphan_threads(
     Path to the cloned directory.
   """
   if dest.exists():
-    log.info("Orphan branch clone already exists: %s", dest)
-    return dest
-
-  dest.mkdir(parents=True, exist_ok=True)
+    log.info("Removing existing orphan branch clone for fresh run: %s", dest)
+    shutil.rmtree(dest)
+  dest.parent.mkdir(parents=True, exist_ok=True)
   log.info("Cloning orphan branch %s from %s -> %s", branch, repo_url, dest)
   subprocess.run(
     [
@@ -165,12 +166,34 @@ def _exec_in_container(
   timeout: int = 300,
 ) -> tuple[int, str]:
   """Execute a command in a running container. Returns (exit_code, output)."""
-  try:
-    result = container.exec_run(
+  def _run_exec() -> Any:
+    return container.exec_run(
       ["bash", "-c", cmd],
       workdir=workdir,
       demux=True,
     )
+
+  try:
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(_run_exec)
+    try:
+      result = future.result(timeout=timeout)
+    except FutureTimeoutError:
+      try:
+        container.kill()
+      except Exception:
+        pass
+      # Join the worker thread so it doesn't leak after container kill.
+      executor.shutdown(wait=True)
+      return (
+        124,
+        (
+          f"exec_in_container timeout after {timeout}s "
+          f"(workdir={workdir}, cmd={cmd[:200]!r})"
+        ),
+      )
+    finally:
+      executor.shutdown(wait=False)
     stdout = result.output[0].decode("utf-8", errors="replace") if result.output[0] else ""
     stderr = result.output[1].decode("utf-8", errors="replace") if result.output[1] else ""
     output = stdout
@@ -302,6 +325,8 @@ def _run_one_in_container(
     exit_code, runner_output = _exec_in_container(
       container, runner_cmd, workdir="/repo", timeout=600,
     )
+    if exit_code == 124:
+      result["status"] = "timeout"
     log.info("  [%s] container_runner exit=%d", mode, exit_code)
     if exit_code != 0:
       log.warning("  [%s] container_runner failed:\n%s", mode, runner_output[:2000])
@@ -354,6 +379,8 @@ def _run_one_in_container(
       "test_cmd": test_cmd,
       "test_output": test_output[:4000],
       "agent_status": result.get("status", "unknown"),
+      "runner_exit_code": exit_code if "exit_code" in locals() else -1,
+      "runner_output": runner_output[:4000] if "runner_output" in locals() else "",
       "paired_with": f"{task_id}:{'baseline' if mode == 'tools' else 'tools'}",
     },
   )
@@ -490,6 +517,7 @@ def run_agent_value_track(
 
   Architecture:
     - Both containers use the same image with watercooler-site code at /repo.
+      Reproducibility is image-tag based (pin cfg.agent_value_image).
     - The harness clones the orphan branch (thread history) once per run.
     - Baseline containers: /repo (code) only.
     - Tools containers: /repo (code) + /data/threads (orphan branch, ro).
