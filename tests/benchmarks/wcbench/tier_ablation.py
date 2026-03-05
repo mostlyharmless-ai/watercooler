@@ -6,6 +6,7 @@ a per-category comparison table showing marginal value of each tier.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -131,9 +132,18 @@ def run_tier_ablation(
       wc_tier_ceiling=ceiling,
       output_root=root,
     )
-    run_wcbench(cfg)
+    try:
+      run_wcbench(cfg)
+    except Exception:
+      logging.getLogger(__name__).error("Tier %s run failed for %s", ceiling, sub_run_id, exc_info=True)
+      raise
     sub_layout = make_run_layout(root, sub_run_id)
-    raw_summary = json.loads(sub_layout.summary_path.read_text(encoding="utf-8"))
+    try:
+      raw_summary = json.loads(sub_layout.summary_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+      raise FileNotFoundError(
+        f"Tier {ceiling} run {sub_run_id} did not produce a summary file at {sub_layout.summary_path}"
+      )
     summary = RunSummary(
       run_id=str(raw_summary.get("run_id", sub_run_id)),
       track=str(raw_summary.get("track", cfg.track)),

@@ -179,11 +179,12 @@ def _exec_in_container(
     try:
       result = future.result(timeout=timeout)
     except FutureTimeoutError:
-      future.cancel()
       try:
         container.kill()
       except Exception:
         pass
+      # Join the worker thread so it doesn't leak after container kill.
+      executor.shutdown(wait=True)
       return (
         124,
         (
@@ -192,7 +193,7 @@ def _exec_in_container(
         ),
       )
     finally:
-      executor.shutdown(wait=False, cancel_futures=True)
+      executor.shutdown(wait=False)
     stdout = result.output[0].decode("utf-8", errors="replace") if result.output[0] else ""
     stderr = result.output[1].decode("utf-8", errors="replace") if result.output[1] else ""
     output = stdout
