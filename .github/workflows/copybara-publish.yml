@@ -1,0 +1,101 @@
+# .github/workflows/copybara-publish.yml
+# Syncs watercooler-cloud@stable → mostlyharmless-ai/watercooler@main on each push to stable.
+name: Copybara Publish
+
+on:
+  push:
+    branches: [stable]
+  workflow_dispatch:
+    inputs:
+      force_bootstrap:
+        description: 'Pass --force to Copybara (use after rollback or re-bootstrap)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write  # required for gh issue create in failure alerting step
+
+concurrency:
+  group: copybara-publish
+  # false = queue; GitHub allows at most ONE pending run alongside a running one.
+  # If 3+ pushes arrive rapidly, only the most-recent queued run will execute
+  # after the current one completes — intermediate pushes are collapsed.
+  # This is accepted: public@main always reflects the latest stable state.
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Guard against -dev version on stable
+        run: |
+          # Use tomllib (Python 3.11+ stdlib; tomli backport for 3.10) for reliable TOML parsing.
+          # sed-based extraction is fragile: fails on single-quoted or unquoted TOML values.
+          VERSION=$(python3 -c "
+          try:
+              import tomllib
+          except ImportError:
+              import tomli as tomllib
+          with open('pyproject.public.toml', 'rb') as f:
+              d = tomllib.load(f)
+          print(d['project']['version'])
+          ")
+          if echo "$VERSION" | grep -q "\-dev"; then
+            echo "ERROR: stable branch contains a -dev version ($VERSION). Aborting sync."
+            exit 1
+          fi
+          echo "Version $VERSION is a release version. Proceeding."
+
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.COPYBARA_APP_ID }}
+          private-key: ${{ secrets.COPYBARA_APP_PRIVATE_KEY }}
+          owner: mostlyharmless-ai
+          repositories: "watercooler-cloud,watercooler"
+
+      - name: Configure git credentials for Copybara
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # Write credentials to file — avoids token appearing in process args or shell history
+          echo "https://x-access-token:${TOKEN}@github.com" > "$HOME/.git-credentials"
+          git config --global credential.helper store
+          chmod 600 "$HOME/.git-credentials"
+
+      - name: Run Copybara Sync
+        run: |
+          FORCE_FLAG=""
+          if [ "${{ inputs.force_bootstrap }}" = "true" ]; then
+            FORCE_FLAG="--force"
+          fi
+          docker run --rm \
+            -v "$HOME/.git-credentials:/root/.git-credentials:ro" \
+            -v "$HOME/.gitconfig:/root/.gitconfig:ro" \
+            -v "$GITHUB_WORKSPACE:/usr/src/app" \
+            -w /usr/src/app \
+            olivr/copybara:1.2.5 \
+            copybara copy.bara.sky default $FORCE_FLAG
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f "$HOME/.git-credentials"
+
+      - name: Notify on failure
+        # This step IS the failure alerting mechanism. The `issues: write` permission in the
+        # workflow's `permissions:` block (above) enables this step. No additional hardening
+        # task is needed — failure alerting is fully implemented here.
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --repo mostlyharmless-ai/watercooler-cloud \
+            --title "Copybara publish failed at ${{ github.sha }}" \
+            --body "Automated sync to public repo failed. [View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"

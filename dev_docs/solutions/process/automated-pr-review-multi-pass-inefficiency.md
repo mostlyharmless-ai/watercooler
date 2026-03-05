@@ -8,7 +8,10 @@ tags:
   - review-bot
   - process-efficiency
 date_solved: "2026-02-26"
-pr_number: 255
+updated: "2026-03-04"
+pr_numbers:
+  - 255
+  - 285
 review_rounds: 8
 symptom: "Bot re-raised previously-decided items across ~8 review rounds, treating each pass as stateless"
 root_cause: "Review agent runs on each push with no memory of prior decisions or declined findings"
@@ -128,7 +131,40 @@ Add these four lines to the review agent prompt in `compound-engineering.local.m
    ISSUE_CANDIDATE (with suggested title), not repeated as a review comment.
 ```
 
+## Review Bot Prompt Correctness Scoping (PR #285 addendum)
+
+The above patterns address re-raising decided items. A separate problem emerged in PR #285
+(documentation-only PR): the review bot produced philosophical commentary, process suggestions,
+and hypothetical improvements that added noise without catching actual bugs.
+
+For a **pre-launch project with no production users**, the signal-to-noise ratio matters more
+than exhaustive style enforcement. Applied to `.github/workflows/claude-code-review.yml`:
+
+```yaml
+# Scoped prompt (applied after PR #285 experience)
+Review this PR for correctness bugs only.
+Focus on: wrong flags/parameters, broken commands, incorrect API behavior, broken links.
+Skip: style preferences, process suggestions, commentary on project maturity,
+philosophical guidance about documentation philosophy, compliments.
+Be terse.
+```
+
+The key principle: match review scope to project phase. Greenfield / pre-launch projects
+benefit from correctness-focused review. Exhaustive style enforcement has lower ROI until
+the codebase stabilizes and user patterns emerge.
+
+For documentation PRs specifically, "correctness" means:
+- Command examples that actually work
+- Parameter tables that match implementation
+- Config keys that match schema
+- Links that resolve
+
+It does NOT mean: opinionated word choices, section ordering preferences, or whether
+the project is "ready for users."
+
 ## Related
 
 - `dev_docs/solutions/logic-errors/federation-phase1-code-review-fixes.md` — PR #190 had 14 review rounds with similar pattern; pre-dates this solution
+- `dev_docs/solutions/process/pr-branch-discipline-push-hygiene.md` — sub-PR anti-pattern + push hygiene from PR #285
+- `dev_docs/solutions/docs/documentation-source-verification-pattern.md` — source verification pattern from PR #285
 - Issues filed from PR #255: #258, #259, #260, #261

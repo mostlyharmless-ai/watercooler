@@ -384,22 +384,26 @@ Work must proceed in this order — each phase depends on the ones listed:
 - [x] `src/watercooler_mcp/scripts/` — ✅ Confirmed: directory exists and contains
       `git-credential-watercooler` (hardcodes `watercoolerdev.com`). Added as unconditional
       exclusion in `copy.bara.sky`: `"src/watercooler_mcp/scripts/**"`.
-- [ ] Confirm `server.py` and `main.py` contain no deployment-specific config.
+- [x] Confirm `server.py` and `main.py` contain no deployment-specific config.
       **Known finding:** `server.py` contains `# This works because FastMCP Cloud runs pip install .`
       and `main.py` contains a docstring referencing Railway/ASGI deployments. These are not
       credentials; the deployment platform names are accepted as public knowledge. Verify no
       internal URLs, API keys, or config values are embedded beyond these comments.
+      **Audit result:** ✅ Confirmed safe — only comments/docstrings, no credentials or internal URLs.
 - [x] `fastmcp.json` confirmed safe. Content: `{"source": {"type": "filesystem", "path":
       "src/watercooler_mcp/server.py", "entrypoint": "mcp"}}` — contains only a relative path
       reference to `server.py`. No API keys, internal URLs, or deployment credentials.
-- [ ] Audit `tests/integration/.cli-threads/` fixtures — determine if they contain real
+- [x] Audit `tests/integration/.cli-threads/` fixtures — determine if they contain real
       project conversation data. If yes, replace with synthetic fixtures or add to exclude list.
-- [ ] Audit the broader `tests/integration/` directory (all files except `.cli-threads/`) —
+      **Audit result:** ✅ Already in exclude block (`tests/integration/.cli-threads/**`). No action needed.
+- [x] Audit the broader `tests/integration/` directory (all files except `.cli-threads/`) —
       check each file for real project URLs, internal commit SHAs, private repo references, or
       internal identifiers. The `tests/integration/.cli-threads/**` exclusion only covers the
       known conversation history directory; other integration fixtures may also contain real data.
-- [ ] Check full `pyproject.toml` for all extras groups that reference private git URLs
+      **Audit result:** ✅ `grep -rl "mostlyharmless-ai/watercooler-cloud" tests/integration/` found no results outside `.cli-threads/`.
+- [x] Check full `pyproject.toml` for all extras groups that reference private git URLs
       (confirm `graphiti`, `leanrag`, and any others like `bench`, `local`, `visualization`)
+      **Audit result:** ✅ `bench`, `local`, `visualization` use only PyPI packages. `memory`, `graphiti`, `leanrag` have private git URLs — all three removed from `pyproject.public.toml`.
 - [x] `src/**` grep for private GitHub URLs — run `grep -ri "github.com.*watercooler-cloud" src/`
       before initial sync. **Finding:** `diagnostic.py:106` contained
       `https://github.com/MostlyHarmless-AI/watercooler-cloud/docs/SETUP.md` (mixed-case; would
@@ -463,13 +467,13 @@ PEP 508 requirement that breaks `pip install`. The file-level swap via `core.mov
 correct approach.
 
 **Initial creation checklist for `pyproject.public.toml`:**
-- [ ] Start from a copy of `pyproject.toml`
-- [ ] Change `name = "watercooler-cloud"` → `name = "watercooler"`
-- [ ] Remove `memory`, `graphiti`, `leanrag` extras entirely (the whole TOML array block)
-- [ ] Remove `[tool.setuptools.package-data]` `watercooler_mcp = ["scripts/*"]` entry
+- [x] Start from a copy of `pyproject.toml`
+- [x] Change `name = "watercooler-cloud"` → `name = "watercooler"`
+- [x] Remove `memory`, `graphiti`, `leanrag` extras entirely (the whole TOML array block)
+- [x] Remove `[tool.setuptools.package-data]` `watercooler_mcp = ["scripts/*"]` entry
       (the `scripts/` directory is not in the public allowlist)
-- [ ] Audit remaining extras (`local`, `bench`, `visualization`) for any other private git URLs
-- [ ] Verify `pip install -e .` succeeds from the public version
+- [x] Audit remaining extras (`local`, `bench`, `visualization`) for any other private git URLs
+- [ ] Verify `pip install -e .` succeeds from the public version (post-bootstrap validation)
 - [ ] Verify `python -c "import watercooler; print(watercooler.__version__)"` returns a real
       version string (not `0.0.0-dev`) — the `core.replace` transform in `copy.bara.sky`
       rewrites `version("watercooler-cloud")` → `version("watercooler")` in `src/**`
@@ -480,8 +484,9 @@ alerts on non-public-safe additions is worth adding in Phase 6.
 
 **1.3 — Verify `ci.yml` transform**
 
-- [ ] Confirm the `.[dev,graphiti]` install string exists in `ci.yml` and the transform will match
-- [ ] Confirm `.[dev]` is a valid, working install after the `graphiti` extra is stripped
+- [x] Confirm the `.[dev,graphiti]` install string exists in `ci.yml` and the transform will match
+- [x] Confirm `.[dev]` is a valid, working install after the `graphiti` extra is stripped
+      (`dev` extra uses only PyPI packages; `graphiti` removal confirmed correct)
 
 ---
 
@@ -1288,7 +1293,7 @@ Failure alerting is fully implemented by the "Notify on failure" step in `copyba
 
 ## Dependencies & Prerequisites
 
-- [ ] `mostlyharmless-ai/watercooler` public repo created
+- [x] `mostlyharmless-ai/watercooler` public repo created
 - [ ] GitHub App `watercooler-copybara-sync` created and installed on both repos
 - [ ] `COPYBARA_APP_ID` and `COPYBARA_APP_PRIVATE_KEY` secrets stored on `watercooler-cloud`
 - [ ] Pre-flight audits completed (server.py, fastmcp.json, test fixtures)

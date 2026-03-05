@@ -1,0 +1,119 @@
+# Cache bust: 2026-01-20-01
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "watercooler"
+version = "0.2.6-dev"
+description = "File-based collaboration protocol for agentic coding projects"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Mostly Harmless AI", email = "hello@watercoolerdev.com"}
+]
+dependencies = [
+    "fastmcp>=2.0,<3",  # pin until fastmcp 3.x migration (#189)
+    "python-ulid>=2.0",
+    "GitPython>=3.1.0",
+    "pydantic>=2.0",
+    "tomli>=2.0;python_version<'3.11'",
+    "tomlkit>=0.12",
+    # HTTP server dependencies (required for Railway deployment)
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    # Dropping 3.9; project requires 3.10+ due to PEP 604 usage
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/mostlyharmless-ai/watercooler"
+Repository = "https://github.com/mostlyharmless-ai/watercooler"
+Issues = "https://github.com/mostlyharmless-ai/watercooler/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "mypy>=1.0",
+    "jsonschema>=4.0",
+    "tqdm>=4.0",
+]
+bench = [
+    # Benchmark runners (SWE-bench + custom harnesses)
+    "litellm>=1.0",
+    "docker>=7.0",
+    "datasets>=2.0",
+    "swebench>=1.0,<2",
+    # LeanRAG T3 corpus building — heavy transitive deps (numba via umap-learn).
+    # Not needed for production memory backends; only for building T3 corpus artifacts.
+    "jieba>=0.42.1",
+    "rapidfuzz>=3.10.1",
+    "umap-learn>=0.5.6",
+    # OpenHands SDK for agent_value track (requires Python 3.12+)
+    "openhands-sdk>=1.0,<2; python_version >= '3.12'",
+    "openhands-tools>=1.0,<2; python_version >= '3.12'",
+]
+mcp = [
+    # All MCP deps (fastmcp, python-ulid) are already in [project].dependencies.
+    # This extras group is kept as a valid install target (pip install .[mcp])
+    # but carries no additional packages.
+]
+http = [
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+]
+# Baseline graph module - LLM-based summarization for knowledge graphs
+# Usage: pip install watercooler[baseline]
+baseline = [
+    "httpx>=0.25",
+]
+# Local model support - downloads GGUF models, llama-server binary auto-downloaded at runtime
+# Usage: pip install watercooler[local]
+local = [
+    "huggingface_hub>=0.20",
+    "httpx>=0.25",
+]
+# Interactive graph visualization for baseline graphs (scripts/visualize_graph.py)
+visualization = [
+    "pyvis>=0.3.0",
+    "networkx>=3.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+watercooler = ["py.typed", "templates/*.md", "templates/*.toml"]
+watercooler_memory = ["py.typed"]
+
+[project.scripts]
+watercooler = "watercooler.cli:main"
+watercooler-mcp = "watercooler_mcp.server:main"
+
+[tool.pytest.ini_options]
+norecursedirs = [
+    "tests/benchmarks/custom/repo",
+]
+markers = [
+    "http: marks tests as requiring HTTP facade dependencies (deselect with '-m \"not http\"')",
+    "integration: marks tests as integration tests requiring real git repositories (run with '-m integration')",
+    "integration_falkor: marks tests requiring real FalkorDB connection (run with '-m integration_falkor')",
+    "integration_leanrag_llm: marks tests requiring LeanRAG with LLM APIs (DeepSeek, GLM embeddings)",
+    "integration_graphiti: marks tests requiring Graphiti backend with API key (run with '-m integration_graphiti')",
+    "benchmark: marks tests as performance benchmarks (run with '-m benchmark')",
+    "integration_cooperbench: marks tests requiring CooperBench + Docker + API key (run with '-m integration_cooperbench')",
+    "needs_embedding: marks tests requiring live embedding service (llama-server:8080)",
+    "network: marks tests requiring network access (deselect with '-m \"not network\"')",
+    "slow: marks tests as slow running (deselect with '-m \"not slow\"')",
+    "e2e: marks tests as end-to-end tests with fixture data (run with '-m e2e')",
+]
