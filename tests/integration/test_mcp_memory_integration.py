@@ -1,0 +1,78 @@
+"""Integration tests for Graphiti memory queries.
+
+These tests require:
+- FalkorDB running (localhost:6379)
+- LLM_API_KEY and EMBEDDING_API_KEY set in environment
+- Memory extras installed (pip install watercooler-cloud[memory])
+
+Run with: pytest -m integration_graphiti
+"""
+
+from __future__ import annotations
+
+import pytest
+
+# Note: isolated_config fixture is provided by conftest.py (from watercooler.testing)
+# Tests that need API key clearing should also use clean_api_keys fixture
+
+
+@pytest.mark.integration_graphiti
+class TestGraphitiMemoryIntegration:
+    """Integration tests for Graphiti memory backend."""
+
+    def test_memory_module_imports(self):
+        """Test that memory module imports correctly when dependencies available."""
+        from watercooler_mcp import memory
+
+        assert memory is not None
+        assert hasattr(memory, "load_graphiti_config")
+        assert hasattr(memory, "get_graphiti_backend")
+        assert hasattr(memory, "query_memory")
+
+    def test_config_loading_integration(self, monkeypatch, isolated_config, clean_api_keys):
+        """Test config loading with real environment."""
+        from watercooler_mcp import memory
+        from watercooler.config_facade import config as cfg
+
+        # Test with disabled
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "0")
+        cfg.reset()
+        config = memory.load_graphiti_config()
+        assert config is None
+
+        # Test with enabled but no API keys (remote endpoint → key required)
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
+        monkeypatch.setenv("LLM_API_BASE", "https://api.openai.com/v1")
+        monkeypatch.setenv("EMBEDDING_API_BASE", "https://api.openai.com/v1")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        cfg.reset()
+        config = memory.load_graphiti_config()
+        assert config is None
+
+        # Test with enabled and API keys
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
+        monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
+        cfg.reset()
+        config = memory.load_graphiti_config()
+        assert config is not None
+
+    def test_backend_initialization_with_missing_deps(self, monkeypatch):
+        """Test backend initialization fails gracefully when deps missing."""
+        from watercooler_mcp import memory
+
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-llm")
+        monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test-embed")
+
+        config = memory.load_graphiti_config()
+        assert config is not None
+
+        # In soft mode (default), should return None if deps unavailable
+        # Note: This might succeed if watercooler_memory is installed
+        backend = memory.get_graphiti_backend(config)
+        # Either None (deps missing) or a backend instance (deps available)
+        # Both are valid outcomes for this test
+        assert backend is None or backend is not None

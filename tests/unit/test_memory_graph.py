@@ -1,0 +1,424 @@
+"""Tests for watercooler_memory module."""
+
+import json
+import pytest
+from pathlib import Path
+
+from watercooler_memory import (
+    MemoryGraph,
+    GraphConfig,
+    ThreadNode,
+    EntryNode,
+    ChunkNode,
+    Edge,
+    EdgeType,
+    parse_thread_to_nodes,
+    chunk_text,
+    ChunkerConfig,
+)
+from watercooler_memory.leanrag_export import export_to_leanrag, entry_to_leanrag_document
+from watercooler_memory.pipeline.config import PipelineConfig
+
+
+@pytest.fixture
+def sample_thread_content():
+    """Sample thread markdown for testing."""
+    return """# test-thread — Thread
+
+Status: OPEN
+Ball: Claude (user)
+
+---
+
+Entry: Claude (user) 2025-01-01T12:00:00Z
+Role: planner
+Type: Plan
+Title: Initial planning
+
+This is the first entry with a plan for the project.
+We need to implement several features.
+
+---
+
+Entry: Cursor (user) 2025-01-01T13:00:00Z
+Role: implementer
+Type: Note
+Title: Implementation started
+
+Started implementing the first feature.
+Making good progress.
+
+---
+"""
+
+
+@pytest.fixture
+def sample_thread_file(tmp_path, sample_thread_content):
+    """Create a sample thread file with graph data."""
+    from watercooler.baseline_graph import storage
+
+    threads_dir = tmp_path / ".watercooler"
+    threads_dir.mkdir()
+    thread_file = threads_dir / "test-thread.md"
+    thread_file.write_text(sample_thread_content)
+
+    # Write graph data matching the markdown content
+    graph_dir = storage.ensure_graph_dir(threads_dir)
+    thread_dir = storage.ensure_thread_graph_dir(graph_dir, "test-thread")
+    storage.atomic_write_json(thread_dir / "meta.json", {
+        "id": "thread:test-thread",
+        "topic": "test-thread",
+        "title": "test-thread — Thread",
+        "status": "OPEN",
+        "ball": "Claude (user)",
+        "last_updated": "2025-01-01T13:00:00Z",
+    })
+    storage.atomic_write_jsonl(thread_dir / "entries.jsonl", [
+        {
+            "id": "entry:test-thread:0",
+            "entry_id": "test-thread:0",
+            "agent": "Claude (user)",
+            "role": "planner",
+            "entry_type": "Plan",
+            "title": "Initial planning",
+            "timestamp": "2025-01-01T12:00:00Z",
+            "body": "This is the first entry with a plan for the project.\nWe need to implement several features.",
+            "index": 0,
+        },
+        {
+            "id": "entry:test-thread:1",
+            "entry_id": "test-thread:1",
+            "agent": "Cursor (user)",
+            "role": "implementer",
+            "entry_type": "Note",
+            "title": "Implementation started",
+            "timestamp": "2025-01-01T13:00:00Z",
+            "body": "Started implementing the first feature.\nMaking good progress.",
+            "index": 1,
+        },
+    ])
+    return thread_file
+
+
+class TestSchema:
+    """Test schema dataclasses."""
+
+    def test_thread_node_creation(self):
+        """Test ThreadNode can be created."""
+        node = ThreadNode(
+            thread_id="test-thread",
+            title="Test Thread",
+            status="OPEN",
+            ball="Claude (user)",
+            created_at="2025-01-01T12:00:00Z",
+            updated_at="2025-01-01T13:00:00Z",
+        )
+        assert node.thread_id == "test-thread"
+        assert node.node_id == "thread:test-thread"
+        assert node.event_time == "2025-01-01T12:00:00Z"
+
+    def test_entry_node_creation(self):
+        """Test EntryNode can be created."""
+        node = EntryNode(
+            entry_id="test-entry-001",
+            thread_id="test-thread",
+            index=0,
+            agent="Claude (user)",
+            role="planner",
+            entry_type="Note",
+            title="Test Entry",
+            timestamp="2025-01-01T12:00:00Z",
+            body="Test body content",
+        )
+        assert node.entry_id == "test-entry-001"
+        assert node.node_id == "entry:test-entry-001"
+        assert node.event_time == "2025-01-01T12:00:00Z"
+
+    def test_chunk_node_creation(self):
+        """Test ChunkNode can be created."""
+        node = ChunkNode(
+            chunk_id="abc123",
+            entry_id="test-entry-001",
+            thread_id="test-thread",
+            index=0,
+            text="Chunk text content",
+            token_count=4,
+        )
+        assert node.chunk_id == "abc123"
+        assert node.node_id == "chunk:abc123"
+
+    def test_edge_creation(self):
+        """Test Edge can be created with factory methods."""
+        edge = Edge.contains("thread:test", "entry:001")
+        assert edge.edge_type == EdgeType.CONTAINS
+        assert edge.source_id == "thread:test"
+        assert edge.target_id == "entry:001"
+
+        edge2 = Edge.follows("entry:001", "entry:002")
+        assert edge2.edge_type == EdgeType.FOLLOWS
+
+
+class TestParser:
+    """Test thread parsing."""
+
+    def test_parse_thread_to_nodes(self, sample_thread_file):
+        """Test parsing a thread from graph into nodes."""
+        threads_dir = sample_thread_file.parent
+        thread, entries, edges = parse_thread_to_nodes(threads_dir, "test-thread")
+
+        assert thread.thread_id == "test-thread"
+        assert thread.status == "OPEN"
+        assert thread.ball == "Claude (user)"
+        assert len(entries) == 2
+        assert len(edges) >= 2  # CONTAINS edges
+
+    def test_parse_entries_have_correct_metadata(self, sample_thread_file):
+        """Test that parsed entries have correct metadata."""
+        threads_dir = sample_thread_file.parent
+        thread, entries, _ = parse_thread_to_nodes(threads_dir, "test-thread")
+
+        first_entry = entries[0]
+        assert first_entry.agent == "Claude (user)"
+        assert first_entry.role == "planner"
+        assert first_entry.entry_type == "Plan"
+        assert first_entry.title == "Initial planning"
+
+        second_entry = entries[1]
+        assert second_entry.agent == "Cursor (user)"
+        assert second_entry.role == "implementer"
+
+
+class TestChunker:
+    """Test text chunking."""
+
+    def test_chunker_defaults_768_64(self):
+        """Test that chunker defaults to 768 tokens / 64 overlap.
+
+        These defaults balance comprehensiveness vs 'lost in the middle' issues
+        per GraphRAG literature (see MEMORY_INTEGRATION_ROADMAP.md).
+        """
+        from watercooler_memory.chunker import DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP
+
+        # Verify module-level constants
+        assert DEFAULT_MAX_TOKENS == 768, f"Expected DEFAULT_MAX_TOKENS=768, got {DEFAULT_MAX_TOKENS}"
+        assert DEFAULT_OVERLAP == 64, f"Expected DEFAULT_OVERLAP=64, got {DEFAULT_OVERLAP}"
+
+        # Verify ChunkerConfig defaults match
+        config = ChunkerConfig()
+        assert config.max_tokens == 768, f"Expected ChunkerConfig.max_tokens=768, got {config.max_tokens}"
+        assert config.overlap == 64, f"Expected ChunkerConfig.overlap=64, got {config.overlap}"
+
+    def test_chunk_short_text(self):
+        """Test that short text returns single chunk."""
+        text = "This is a short text."
+        chunks = chunk_text(text)
+        assert len(chunks) == 1
+        assert chunks[0][0] == text
+
+    def test_chunk_empty_text(self):
+        """Test that empty text returns empty list."""
+        chunks = chunk_text("")
+        assert chunks == []
+
+    def test_chunk_long_text(self):
+        """Test that long text is split into multiple chunks."""
+        # Create text longer than default max_tokens (768)
+        long_text = "This is a test sentence. " * 500
+        config = ChunkerConfig(max_tokens=100)
+        chunks = chunk_text(long_text, config)
+        assert len(chunks) > 1
+
+
+class TestMemoryGraph:
+    """Test MemoryGraph class."""
+
+    def test_empty_graph(self):
+        """Test empty graph initialization."""
+        graph = MemoryGraph()
+        stats = graph.stats()
+        assert stats["threads"] == 0
+        assert stats["entries"] == 0
+        assert stats["chunks"] == 0
+
+    def test_add_thread(self, sample_thread_file):
+        """Test adding a thread to the graph."""
+        graph = MemoryGraph()
+        threads_dir = sample_thread_file.parent
+        thread = graph.add_thread(threads_dir, "test-thread")
+
+        assert thread.thread_id == "test-thread"
+        assert len(graph.threads) == 1
+        assert len(graph.entries) == 2
+
+    def test_chunk_entries(self, sample_thread_file):
+        """Test chunking all entries in graph."""
+        graph = MemoryGraph()
+        threads_dir = sample_thread_file.parent
+        graph.add_thread(threads_dir, "test-thread")
+        chunks = graph.chunk_all_entries()
+
+        assert len(chunks) >= 2  # At least one chunk per entry
+        assert len(graph.chunks) >= 2
+
+    def test_build_no_api(self, sample_thread_file):
+        """Test building graph without API calls."""
+        config = GraphConfig(
+            generate_summaries=False,
+            generate_embeddings=False,
+        )
+        graph = MemoryGraph(config)
+        graph.build(sample_thread_file.parent)
+
+        stats = graph.stats()
+        assert stats["threads"] == 1
+        assert stats["entries"] == 2
+        assert stats["chunks"] >= 2
+
+    def test_to_dict(self, sample_thread_file):
+        """Test graph serialization to dict."""
+        config = GraphConfig(
+            generate_summaries=False,
+            generate_embeddings=False,
+        )
+        graph = MemoryGraph(config)
+        graph.build(sample_thread_file.parent)
+
+        data = graph.to_dict()
+        assert "threads" in data
+        assert "entries" in data
+        assert "chunks" in data
+        assert "edges" in data
+        assert "edges" in data  # hyperedges removed
+
+    def test_save_and_load(self, sample_thread_file, tmp_path):
+        """Test saving and loading graph."""
+        config = GraphConfig(
+            generate_summaries=False,
+            generate_embeddings=False,
+        )
+        graph = MemoryGraph(config)
+        graph.build(sample_thread_file.parent)
+
+        output_path = tmp_path / "graph.json"
+        graph.save(output_path)
+
+        loaded = MemoryGraph.load(output_path)
+        assert len(loaded.threads) == len(graph.threads)
+        assert len(loaded.entries) == len(graph.entries)
+
+
+class TestLeanRAGExport:
+    """Test LeanRAG export functionality."""
+
+    def test_entry_to_leanrag_document(self):
+        """Test converting entry to LeanRAG document."""
+        entry = EntryNode(
+            entry_id="test-001",
+            thread_id="test-thread",
+            index=0,
+            agent="Claude",
+            role="planner",
+            entry_type="Note",
+            title="Test",
+            timestamp="2025-01-01T12:00:00Z",
+            body="Test body",
+        )
+        chunks = [
+            ChunkNode(
+                chunk_id="chunk-001",
+                entry_id="test-001",
+                thread_id="test-thread",
+                index=0,
+                text="Test body",
+                token_count=2,
+            )
+        ]
+
+        doc = entry_to_leanrag_document(entry, chunks)
+
+        assert doc["doc_id"] == "test-001"
+        assert doc["title"] == "Test"
+        assert doc["content"] == "Test body"
+        assert len(doc["chunks"]) == 1
+        assert doc["metadata"]["thread_id"] == "test-thread"
+        assert doc["metadata"]["agent"] == "Claude"
+
+    def test_export_to_leanrag(self, sample_thread_file, tmp_path):
+        """Test full LeanRAG export."""
+        config = GraphConfig(
+            generate_summaries=False,
+            generate_embeddings=False,
+        )
+        graph = MemoryGraph(config)
+        graph.build(sample_thread_file.parent)
+
+        export_dir = tmp_path / "leanrag_export"
+        manifest = export_to_leanrag(graph, export_dir, include_embeddings=False)
+
+        assert (export_dir / "documents.json").exists()
+        assert (export_dir / "threads.json").exists()
+        assert (export_dir / "manifest.json").exists()
+
+        assert manifest["statistics"]["documents"] == 2
+        assert manifest["statistics"]["threads"] == 1
+
+
+class TestPipelineConfig:
+    """Test pipeline configuration defaults."""
+
+    def test_pipeline_config_chunking_defaults_768_64(self):
+        """Test that PipelineConfig defaults to 768 tokens / 64 overlap.
+
+        These defaults balance comprehensiveness vs 'lost in the middle' issues
+        per GraphRAG literature (see MEMORY_INTEGRATION_ROADMAP.md).
+        """
+        config = PipelineConfig()
+        assert config.max_tokens == 768, f"Expected PipelineConfig.max_tokens=768, got {config.max_tokens}"
+        assert config.overlap_tokens == 64, f"Expected PipelineConfig.overlap_tokens=64, got {config.overlap_tokens}"
+
+
+class TestEmbeddingConfig:
+    """Test embedding configuration defaults and standardization."""
+
+    def test_embedding_defaults_standardized(self, monkeypatch, isolated_config):
+        """Test that embedding defaults match the standardized configuration.
+
+        Standard env vars (per MEMORY_INTEGRATION_ROADMAP.md):
+        - EMBEDDING_API_BASE=http://localhost:8080/v1
+        - EMBEDDING_MODEL=bge-m3
+        - EMBEDDING_DIM=1024
+        """
+        for k in ("EMBEDDING_API_BASE", "EMBEDDING_MODEL", "EMBEDDING_DIM", "GLM_MODEL", "GLM_EMBEDDING_MODEL"):
+            monkeypatch.delenv(k, raising=False)
+        from watercooler.config_facade import config as cfg
+        cfg.reset()
+
+        from watercooler_memory.embeddings import (
+            DEFAULT_API_BASE,
+            DEFAULT_MODEL,
+            EmbeddingConfig,
+        )
+
+        # Check module-level defaults
+        assert DEFAULT_API_BASE == "http://localhost:8080/v1", f"Expected DEFAULT_API_BASE='http://localhost:8080/v1', got '{DEFAULT_API_BASE}'"
+        assert DEFAULT_MODEL == "bge-m3", f"Expected DEFAULT_MODEL='bge-m3', got '{DEFAULT_MODEL}'"
+
+        # Check EmbeddingConfig defaults
+        config = EmbeddingConfig()
+        assert config.api_base == "http://localhost:8080/v1"
+        assert config.model == "bge-m3"
+
+    def test_pipeline_embedding_config_defaults(self, monkeypatch, isolated_config):
+        """Test that pipeline EmbeddingConfig defaults are standardized."""
+        for k in ("EMBEDDING_API_BASE", "EMBEDDING_MODEL", "EMBEDDING_DIM", "GLM_MODEL", "GLM_EMBEDDING_MODEL"):
+            monkeypatch.delenv(k, raising=False)
+        from watercooler.config_facade import config as cfg
+        cfg.reset()
+
+        from watercooler_memory.pipeline.config import EmbeddingConfig as PipelineEmbeddingConfig
+
+        config = PipelineEmbeddingConfig()
+        # Note: base_url comes from get_embedding_api_base() which defaults to localhost:8080/v1
+        assert config.embedding_dim == 1024, f"Expected embedding_dim=1024, got {config.embedding_dim}"
+        # Model name should use EMBEDDING_MODEL env var, defaulting to bge-m3
+        assert config.model == "bge-m3", f"Expected model='bge-m3', got '{config.model}'"

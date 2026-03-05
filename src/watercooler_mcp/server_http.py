@@ -1,0 +1,324 @@
+"""HTTP server module for hosted MCP deployment.
+
+This module provides an HTTP-based entry point for the Watercooler MCP server,
+designed for deployment as:
+- Vercel serverless function (Python runtime)
+- Standalone HTTP service (Railway, Fly.io, etc.)
+- Docker container
+
+The HTTP server integrates:
+- FastMCP with HTTP transport
+- Token-based authentication (via auth.py)
+- Response caching (via cache.py)
+- Request context extraction
+
+Environment variables:
+- WATERCOOLER_MCP_TRANSPORT: Set to "http" to enable HTTP mode
+- WATERCOOLER_MCP_HOST: HTTP host (default: "0.0.0.0")
+- WATERCOOLER_MCP_PORT: HTTP port (default: 8080)
+- WATERCOOLER_AUTH_MODE: "local" or "hosted"
+- See auth.py and cache.py for additional env vars
+
+Deployment Options:
+
+1. Standalone HTTP Server:
+   ```bash
+   WATERCOOLER_MCP_TRANSPORT=http python -m watercooler_mcp
+   ```
+
+2. Vercel Serverless (api/mcp.py):
+   ```python
+   from watercooler_mcp.server_http import app
+   # Vercel auto-discovers FastAPI/Starlette apps
+   ```
+
+3. Docker:
+   ```dockerfile
+   CMD ["python", "-m", "watercooler_mcp.server_http"]
+   ```
+
+Usage from clients:
+    POST /mcp
+    Content-Type: application/json
+    X-User-ID: user_123
+
+    {"method": "tools/call", "params": {"name": "watercooler_say", ...}}
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+
+logger = logging.getLogger(__name__)
+
+
+def check_http_dependencies() -> bool:
+    """Check if HTTP dependencies are installed.
+
+    The HTTP server requires the [http] extra:
+        pip install watercooler-cloud[http]
+
+    Returns:
+        True if dependencies are available
+    """
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def create_http_app():
+    """Create FastAPI application wrapping the MCP server.
+
+    This function creates a FastAPI app that:
+    1. Exposes the FastMCP server via HTTP
+    2. Adds authentication middleware
+    3. Adds caching headers
+    4. Provides health check endpoints
+
+    Returns:
+        FastAPI application instance
+    """
+    if not check_http_dependencies():
+        raise ImportError(
+            "HTTP dependencies not installed. "
+            "Install with: pip install watercooler-cloud[http]"
+        )
+
+    from fastapi import FastAPI, Request, Response
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse
+
+    from .auth import extract_request_context, is_hosted_mode, get_github_token
+    from .cache import cache
+    from .context import HttpRequestContext, set_http_context
+
+    # Import the main MCP server
+    from .server import mcp
+
+    # Get the MCP HTTP app FIRST so we can use its lifespan
+    # FastMCP requires the parent app to use http_app().lifespan for proper
+    # task group initialization (see https://gofastmcp.com/deployment/asgi)
+    # Use stateless_http=True and json_response=True for simple JSON-RPC
+    # without SSE/sessions (compatible with mcpClient.ts)
+    mcp_asgi = mcp.http_app(
+        path="/",
+        stateless_http=True,
+        json_response=True,
+    )
+
+    # Create FastAPI wrapper with MCP's lifespan
+    # This ensures the MCP task group is properly initialized
+    app = FastAPI(
+        title="Watercooler MCP HTTP Server",
+        description="HTTP interface for Watercooler MCP tools",
+        version="1.0.0",
+        lifespan=mcp_asgi.lifespan,
+    )
+
+    # Get HTTP config from unified config system
+    def _get_http_config() -> tuple[str, int, int]:
+        """Get HTTP config (cors_origins, max_request_size, request_timeout)."""
+        cors = os.getenv("WATERCOOLER_CORS_ORIGINS", "")
+        max_size_str = os.getenv("WATERCOOLER_MAX_REQUEST_SIZE", "")
+        timeout_str = os.getenv("WATERCOOLER_REQUEST_TIMEOUT", "")
+
+        # Fall back to TOML config
+        try:
+            from watercooler.config_facade import config
+            http_cfg = config.full().mcp.http
+
+            if not cors:
+                cors = http_cfg.cors_origins
+            if not max_size_str:
+                max_size_str = str(http_cfg.max_request_size)
+            if not timeout_str:
+                timeout_str = str(http_cfg.request_timeout)
+        except ImportError:
+            pass
+
+        # Apply defaults
+        max_size = int(max_size_str) if max_size_str else 1024 * 1024
+        timeout = int(timeout_str) if timeout_str else 30
+
+        return cors, max_size, timeout
+
+    cors_origins_config, MAX_REQUEST_SIZE, REQUEST_TIMEOUT = _get_http_config()
+
+    # Configure CORS for browser-based clients
+    # Security: When allow_credentials=True, origins must be explicit (not "*")
+    if cors_origins_config and cors_origins_config != "*":
+        # Explicit origins configured - safe to use credentials
+        cors_origins = [o.strip() for o in cors_origins_config.split(",") if o.strip()]
+        allow_credentials = True
+    else:
+        # No explicit origins or wildcard - disable credentials for security
+        # This prevents CORS credential leakage vulnerabilities
+        cors_origins = ["*"]
+        allow_credentials = False
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=allow_credentials,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["X-User-ID", "X-Repo", "X-Branch", "Content-Type", "Authorization"],
+    )
+
+    @app.get("/health")
+    async def health_check():
+        """Health check endpoint for load balancers."""
+        return {
+            "status": "healthy",
+            "mode": "hosted" if is_hosted_mode() else "local",
+            "cache": cache.stats() if hasattr(cache, "stats") else {"backend": "unknown"},
+        }
+
+    @app.get("/")
+    async def root():
+        """Root endpoint with API information."""
+        return {
+            "service": "Watercooler MCP HTTP Server",
+            "version": "1.0.0",
+            "endpoints": {
+                "/health": "Health check",
+                "/mcp": "MCP protocol endpoint (POST)",
+            },
+            "auth_mode": "hosted" if is_hosted_mode() else "local",
+        }
+
+    @app.middleware("http")
+    async def add_request_context(request: Request, call_next):
+        """Middleware to extract and validate request context."""
+        import asyncio
+
+        # Check content length to prevent memory exhaustion
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > MAX_REQUEST_SIZE:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": f"Request too large. Maximum size is {MAX_REQUEST_SIZE} bytes."
+                },
+            )
+
+        # Extract context from headers
+        headers = dict(request.headers)
+        query_params = dict(request.query_params)
+        ctx = extract_request_context(headers, query_params)
+
+        # Store context in request state
+        request.state.user_id = ctx.user_id
+        request.state.repo = ctx.repo
+        request.state.branch = ctx.branch
+
+        # For hosted mode, validate user has token and set context variable
+        if is_hosted_mode() and request.url.path.startswith("/mcp"):
+            if not ctx.user_id:
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "X-User-ID header required in hosted mode"},
+                )
+            token_info = get_github_token(ctx.user_id)
+            if not token_info:
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": "No GitHub token found for user"},
+                )
+            # Store token in request state for MCP tools to use
+            request.state.github_token = token_info.token
+
+            # Set context variable for MCP tools to access
+            # This bridges the gap between HTTP middleware and MCP tool execution
+            set_http_context(HttpRequestContext(
+                user_id=ctx.user_id,
+                repo=headers.get("X-Repo") or headers.get("x-repo"),
+                branch=headers.get("X-Branch") or headers.get("x-branch"),
+                github_token=token_info.token,
+            ))
+
+        # Apply request timeout to prevent hanging requests
+        try:
+            response = await asyncio.wait_for(
+                call_next(request),
+                timeout=REQUEST_TIMEOUT,
+            )
+            return response
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                status_code=504,
+                content={"error": f"Request timed out after {REQUEST_TIMEOUT} seconds"},
+            )
+
+    # Mount the FastMCP app at /mcp
+    # mcp_asgi was created earlier to get its lifespan
+    app.mount("/mcp", mcp_asgi)
+    logger.info("Mounted FastMCP HTTP app at /mcp")
+
+    return app
+
+
+# Create app instance for import
+# This allows deployment platforms to auto-discover the app:
+#   from watercooler_mcp.server_http import app
+try:
+    app = create_http_app()
+except ImportError:
+    app = None
+
+
+def run_http_server(
+    host: str = "0.0.0.0",
+    port: int = 8080,
+    reload: bool = False,
+) -> None:
+    """Run the HTTP server.
+
+    Args:
+        host: Host to bind to (default: 0.0.0.0)
+        port: Port to bind to (default: 8080)
+        reload: Enable auto-reload for development
+    """
+    if not check_http_dependencies():
+        print(
+            "HTTP dependencies not installed.\n"
+            "Install with: pip install watercooler-cloud[http]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    import uvicorn
+
+    print(f"Starting Watercooler MCP HTTP Server on http://{host}:{port}", file=sys.stderr)
+    print(f"Health check: http://{host}:{port}/health", file=sys.stderr)
+    print(f"API docs: http://{host}:{port}/docs", file=sys.stderr)
+
+    uvicorn.run(
+        "watercooler_mcp.server_http:app",
+        host=host,
+        port=port,
+        reload=reload,
+    )
+
+
+def main():
+    """Entry point for running HTTP server directly.
+
+    Usage:
+        python -m watercooler_mcp.server_http
+    """
+    from .config import get_mcp_transport_config
+
+    config = get_mcp_transport_config()
+    run_http_server(
+        host=config["host"],
+        port=config["port"],
+    )
+
+
+if __name__ == "__main__":
+    main()

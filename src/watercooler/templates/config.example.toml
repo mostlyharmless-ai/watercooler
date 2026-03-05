@@ -1,0 +1,971 @@
+# =============================================================================
+# Watercooler Configuration
+# =============================================================================
+#
+# Copy this file to:
+#   - ~/.watercooler/config.toml      (user defaults)
+#   - <project>/.watercooler/config.toml  (project overrides)
+#
+# Project settings override user settings on a per-key basis.
+# Environment variables override both (see mapping below).
+#
+# All settings shown here are defaults - uncomment and modify as needed.
+# =============================================================================
+
+# Config schema version (do not change)
+version = 1
+
+
+# =============================================================================
+# COMMON SETTINGS
+# Shared between MCP server and Dashboard
+# =============================================================================
+[common]
+
+# Threads repo URL pattern
+# Placeholders: {org} = GitHub org, {repo} = code repo name, {namespace} = full path
+# Env: WATERCOOLER_THREADS_PATTERN
+# Default is HTTPS (works with credential helpers/tokens without SSH agent):
+# threads_pattern = "https://github.com/{org}/{repo}-threads.git"
+# For SSH, use: threads_pattern = "git@github.com:{org}/{repo}-threads.git"
+
+# Simple suffix mode (alternative to pattern)
+# threads_suffix = "-threads"
+
+# Templates directory (empty = use bundled templates)
+# Env: WATERCOOLER_TEMPLATES
+# templates_dir = ""
+
+
+# =============================================================================
+# MCP SERVER SETTINGS
+# Configuration for watercooler-cloud MCP server
+# =============================================================================
+[mcp]
+
+# Transport mode: "stdio" (default) or "http"
+# Env: WATERCOOLER_MCP_TRANSPORT
+# transport = "stdio"
+
+# HTTP server settings (only used when transport = "http")
+# Env: WATERCOOLER_MCP_HOST, WATERCOOLER_MCP_PORT
+# host = "127.0.0.1"
+# port = 3000
+
+# Default agent name (when not detected from client)
+# Env: WATERCOOLER_AGENT
+# default_agent = "Agent"
+
+# User tag appended to agent name (e.g., "(caleb)")
+# Env: WATERCOOLER_AGENT_TAG
+# agent_tag = ""
+
+# Auto-create matching threads branches when code branch is new
+# Env: WATERCOOLER_AUTO_BRANCH
+# auto_branch = true
+
+# Auto-provision (create) threads repos if missing
+# Env: WATERCOOLER_AUTO_PROVISION
+# auto_provision = true
+
+# Explicit threads directory (empty = auto-discover from code repo)
+# Env: WATERCOOLER_DIR
+# threads_dir = ""
+
+# Base directory for threads repos (empty = parent of code repo)
+# Env: WATERCOOLER_THREADS_BASE
+# threads_base = ""
+
+
+# -----------------------------------------------------------------------------
+# Agent-Specific Overrides
+# Each agent platform can have custom settings
+# -----------------------------------------------------------------------------
+[mcp.agents.claude-code]
+name = "Claude Code"
+default_spec = "implementer-code"
+
+[mcp.agents.cursor]
+name = "Cursor"
+default_spec = "implementer-code"
+
+[mcp.agents.codex]
+name = "Codex"
+default_spec = "planner-architecture"
+
+[mcp.agents.gemini]
+name = "Gemini"
+default_spec = "general-purpose"
+
+# Add custom agents:
+# [mcp.agents.my-custom-agent]
+# name = "My Agent"
+# default_spec = "implementer-code"
+
+
+# -----------------------------------------------------------------------------
+# Git Settings
+# Author info and SSH configuration for threads commits
+# -----------------------------------------------------------------------------
+[mcp.git]
+
+# Git commit author (empty = use agent name)
+# Env: WATERCOOLER_GIT_AUTHOR
+# author = ""
+
+# Git commit email
+# Env: WATERCOOLER_GIT_EMAIL
+# email = "mcp@watercooler.dev"
+
+# Path to SSH private key (empty = use system default)
+# Env: WATERCOOLER_GIT_SSH_KEY
+# ssh_key = ""
+
+
+# -----------------------------------------------------------------------------
+# Sync Settings
+# Git sync behavior and batching
+# -----------------------------------------------------------------------------
+[mcp.sync]
+
+# Enable async git operations
+# Env: WATERCOOLER_ASYNC_SYNC
+# async = true
+
+# Seconds to batch commits before pushing
+# Env: WATERCOOLER_BATCH_WINDOW
+# batch_window = 5.0
+
+# Maximum delay before forcing push (seconds)
+# max_delay = 30.0
+
+# Maximum entries per batch commit
+# max_batch_size = 50
+
+# Maximum retry attempts for failed operations
+# Env: WATERCOOLER_SYNC_MAX_RETRIES
+# max_retries = 5
+
+# Maximum backoff delay in seconds
+# Env: WATERCOOLER_SYNC_MAX_BACKOFF
+# max_backoff = 300.0
+
+# Background sync interval (seconds)
+# Env: WATERCOOLER_SYNC_INTERVAL
+# interval = 30.0
+
+# Seconds before considering sync stale
+# stale_threshold = 60.0
+
+
+# -----------------------------------------------------------------------------
+# Slack Integration Settings
+# Env overrides: WATERCOOLER_SLACK_WEBHOOK, WATERCOOLER_SLACK_BOT_TOKEN,
+#                WATERCOOLER_SLACK_APP_TOKEN, WATERCOOLER_SLACK_CHANNEL,
+#                WATERCOOLER_SLACK_CHANNEL_PREFIX
+# -----------------------------------------------------------------------------
+[mcp.slack]
+
+# Slack incoming webhook URL for notifications
+# Env: WATERCOOLER_SLACK_WEBHOOK
+# webhook_url = ""
+
+# Slack bot token (xoxb-...) for rich interactions
+# Env: WATERCOOLER_SLACK_BOT_TOKEN
+# bot_token = ""
+
+# Slack app token (xapp-...) for socket mode
+# Env: WATERCOOLER_SLACK_APP_TOKEN
+# app_token = ""
+
+# Default Slack channel for notifications
+# Env: WATERCOOLER_SLACK_CHANNEL
+# default_channel = ""
+
+# Prefix for auto-created channels (e.g., "wc-" → "wc-feature-auth")
+# Env: WATERCOOLER_SLACK_CHANNEL_PREFIX
+# channel_prefix = ""
+
+# Notification triggers (when to send Slack notifications)
+# notify_on_say = true
+# notify_on_ball_flip = true
+# notify_on_status_change = true
+# notify_on_handoff = true
+
+
+# -----------------------------------------------------------------------------
+# HTTP Transport Settings
+# Only used when transport = "http"
+# Env overrides: WATERCOOLER_CORS_ORIGINS, WATERCOOLER_MAX_REQUEST_SIZE,
+#                WATERCOOLER_REQUEST_TIMEOUT
+# -----------------------------------------------------------------------------
+[mcp.http]
+
+# CORS allowed origins (comma-separated)
+# Empty = allow all origins (no credentials)
+# Explicit = allow credentials for those origins
+# Env: WATERCOOLER_CORS_ORIGINS
+# cors_origins = ""
+
+# Maximum request body size in bytes (default 1MB)
+# Env: WATERCOOLER_MAX_REQUEST_SIZE
+# max_request_size = 1048576
+
+# Request timeout in seconds
+# Env: WATERCOOLER_REQUEST_TIMEOUT
+# request_timeout = 30
+
+
+# -----------------------------------------------------------------------------
+# Cache Settings
+# Env overrides: WATERCOOLER_CACHE_BACKEND, WATERCOOLER_CACHE_TTL,
+#                WATERCOOLER_CACHE_MAX_ENTRIES, WATERCOOLER_CACHE_API_URL
+# -----------------------------------------------------------------------------
+[mcp.cache]
+
+# Cache backend: "memory" (local) or "database" (hosted)
+# Env: WATERCOOLER_CACHE_BACKEND
+# backend = "memory"
+
+# Default TTL in seconds
+# Env: WATERCOOLER_CACHE_TTL
+# default_ttl = 300.0
+
+# Maximum entries in memory cache before LRU eviction
+# Env: WATERCOOLER_CACHE_MAX_ENTRIES
+# max_entries = 10000
+
+# Database cache API URL (only used when backend = "database")
+# Env: WATERCOOLER_CACHE_API_URL
+# api_url = ""
+
+
+# -----------------------------------------------------------------------------
+# Hosted Service Settings
+# Integration with watercooler.dev hosted services
+# Note: API keys/secrets must be set via env vars for security
+# -----------------------------------------------------------------------------
+[mcp.hosted]
+
+# Watercooler hosted API URL
+# Env: WATERCOOLER_TOKEN_API_URL
+# api_url = ""
+
+# Note: WATERCOOLER_INTERNAL_SECRET must be set via env var (not TOML)
+
+
+# -----------------------------------------------------------------------------
+# Logging Settings
+# -----------------------------------------------------------------------------
+[mcp.logging]
+
+# Log level: DEBUG, INFO, WARNING, ERROR
+# Env: WATERCOOLER_LOG_LEVEL
+# level = "INFO"
+
+# Log directory (empty = ~/.watercooler/logs)
+# Env: WATERCOOLER_LOG_DIR
+# dir = ""
+
+# Maximum log file size in bytes (default 10MB)
+# Env: WATERCOOLER_LOG_MAX_BYTES
+# max_bytes = 10485760
+
+# Number of backup log files to keep
+# Env: WATERCOOLER_LOG_BACKUP_COUNT
+# backup_count = 5
+
+# Disable file logging (stderr only)
+# Env: WATERCOOLER_LOG_DISABLE_FILE
+# disable_file = false
+
+
+# -----------------------------------------------------------------------------
+# Service Auto-Provisioning
+# Controls automatic download of binaries and models
+#
+# SECURITY NOTE: Auto-downloading executables (llama_server) fetches binaries
+# from GitHub releases. Checksums are verified when available. Set to false
+# and install manually if this is a concern for your environment.
+# -----------------------------------------------------------------------------
+[mcp.service_provision]
+
+# Auto-download GGUF models from HuggingFace when needed
+# Env: WATERCOOLER_AUTO_PROVISION_MODELS
+# Models are data files (not executables) - lower security risk
+models = true
+
+# Auto-download llama-server binary from GitHub releases when needed
+# Env: WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER
+# Downloads executable from: https://github.com/ggml-org/llama.cpp/releases
+# Checksum verification: Set WATERCOOLER_LLAMA_SERVER_VERIFY=strict for mandatory
+llama_server = true
+
+
+# -----------------------------------------------------------------------------
+# Graph Settings
+# Baseline graph construction with summaries and embeddings for semantic search
+# -----------------------------------------------------------------------------
+[mcp.graph]
+
+# Generate LLM summaries for entries on write
+# Requires LLM service (llama-server on port 8000)
+# TOML-only — no env var override for this field
+generate_summaries = true
+
+# Generate embedding vectors for entries on write
+# Requires embedding service (llama-server on port 8080)
+# TOML-only — no env var override for this field
+generate_embeddings = true
+
+# Use extractive summaries only (no LLM calls, faster but less semantic)
+# Env: WATERCOOLER_GRAPH_EXTRACTIVE
+# prefer_extractive = false
+
+# LLM service endpoint for summarization
+# Env: BASELINE_GRAPH_API_BASE or LLM_API_BASE
+# Default: llama-server on port 8000
+# summarizer_api_base = "http://localhost:8000/v1"
+
+# LLM model for summarization
+# Env: BASELINE_GRAPH_MODEL or LLM_MODEL
+# summarizer_model = "llama3.2:3b"
+
+# Embedding service endpoint
+# Env: EMBEDDING_API_BASE
+# Default: llama-server on port 8080
+# embedding_api_base = "http://localhost:8080/v1"
+
+# Embedding model
+# Env: EMBEDDING_MODEL
+# embedding_model = "bge-m3"
+
+# Check service availability before generation (skip gracefully if unavailable)
+# When true, summary/embedding generation will only proceed if services respond
+# TOML-only — no env var override for this field
+auto_detect_services = true
+
+# Auto-start LLM/embedding services if unavailable
+# When true, will auto-start llama-server for localhost endpoints
+# Env: WATERCOOLER_AUTO_START_SERVICES
+# auto_start_services = false
+
+# Embedding divergence threshold for thread summary regeneration
+# When a new entry's embedding similarity to the previous entry falls below
+# this threshold, it indicates a significant topic shift ("arc change") and
+# triggers automatic thread summary regeneration.
+#
+# Values interpretation (threshold = similarity must fall BELOW to trigger):
+#   1.0 = triggers on almost any change (maximum sensitivity)
+#   0.6 = moderate threshold (default - recommended)
+#   0.4 = only major topic shifts trigger (low sensitivity)
+#   0.0 = never triggers based on divergence alone
+#
+# Set lower (0.4-0.5) to reduce summary churn, higher (0.7-0.8) for more
+# responsive updates when topics shift within a thread.
+# Env: WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD
+# embedding_divergence_threshold = 0.6
+
+
+# =============================================================================
+# DASHBOARD SETTINGS
+# Configuration for watercooler-site dashboard
+# =============================================================================
+[dashboard]
+
+# Pre-select this repo on dashboard load
+# default_repo = ""
+
+# Default branch for new selections
+# default_branch = "main"
+
+# Polling intervals (seconds) based on tab visibility
+# poll_interval_active = 15    # Tab is focused
+# poll_interval_moderate = 30  # Tab is visible but not focused
+# poll_interval_idle = 60      # Tab is hidden/backgrounded
+
+# UI preferences
+# expand_threads_by_default = false
+# show_closed_threads = false
+
+
+# =============================================================================
+# PROTOCOL VALIDATION
+# Enforce Watercooler conventions and catch drift early
+# =============================================================================
+[validation]
+
+# When to validate
+# Env: WATERCOOLER_VALIDATE_ON_WRITE
+# on_write = true
+# on_commit = true
+
+# Fail on violation (true = error, false = warn only)
+# Env: WATERCOOLER_FAIL_ON_VIOLATION
+# fail_on_violation = false
+
+# What to validate
+# check_branch_pairing = true
+# check_commit_footers = true
+# check_entry_format = true
+# check_status_values = true
+
+
+# -----------------------------------------------------------------------------
+# Entry Format Validation
+# -----------------------------------------------------------------------------
+[validation.entry]
+
+# Require agent/role/type metadata in entries
+# require_metadata = true
+
+# Valid entry roles
+# allowed_roles = ["planner", "critic", "implementer", "tester", "pm", "scribe"]
+
+# Valid entry types
+# allowed_types = ["Note", "Plan", "Decision", "PR", "Closure"]
+
+# Require Spec: field in entry body
+# require_spec_field = true
+
+
+# -----------------------------------------------------------------------------
+# Commit Footer Validation
+# -----------------------------------------------------------------------------
+[validation.commit]
+
+# Require commit footers in threads commits
+# require_footers = true
+
+# Required footer fields
+# required_footer_fields = [
+#     "Code-Repo",
+#     "Code-Branch",
+#     "Code-Commit",
+#     "Watercooler-Entry-ID",
+# ]
+
+
+# =============================================================================
+# MEMORY BACKEND CONFIGURATION
+# Single source of truth for LLM and embedding settings across memory backends
+# =============================================================================
+[memory]
+
+# Enable memory backends globally
+# Env: WATERCOOLER_MEMORY_DISABLED (inverted: "1" = disabled)
+# enabled = true
+
+# Default memory backend: "graphiti", "leanrag", or "null"
+# Env: WATERCOOLER_MEMORY_BACKEND
+# backend = "graphiti"
+
+
+# -----------------------------------------------------------------------------
+# LLM Service Configuration (shared across backends)
+# Env overrides: LLM_API_KEY, LLM_API_BASE, LLM_MODEL, LLM_TIMEOUT, LLM_MAX_TOKENS
+#
+# The default configuration uses llama-server (llama.cpp) for local LLM inference.
+# Watercooler auto-starts llama-server on port 8000 if a localhost endpoint is
+# configured and the service isn't already running.
+#
+# For OpenAI or other cloud providers, set api_base accordingly and store
+# your API key in credentials.toml (see ~/.watercooler/credentials.toml).
+# Cloud endpoints are NOT auto-started - they're assumed to be managed externally.
+#
+# NOTE: API keys belong in credentials.toml, NOT here. This keeps secrets
+# separate from configuration (which can be version-controlled).
+# See the credentials.example.toml template for the proper format.
+# -----------------------------------------------------------------------------
+[memory.llm]
+
+# LLM API base URL
+# Env: LLM_API_BASE
+# Default: llama-server on port 8000
+# For OpenAI: "https://api.openai.com/v1"
+# api_base = "http://localhost:8000/v1"
+
+# LLM model name
+# Env: LLM_MODEL
+#
+# For llama-server: model from GGUF registry
+#   Recommended for summarization: qwen3:1.7b (fast, auto /no_think)
+#   Alternatives: qwen2.5:3b (quality), llama3.2:3b (balanced)
+# For OpenAI: gpt-4o-mini, gpt-4o, etc.
+#
+# model = "qwen3:1.7b"
+#
+# .............................................................................
+# PROVIDER EXAMPLES - Uncomment ONE api_base + model pair to switch providers
+# API keys go in credentials.toml under the matching provider section
+# .............................................................................
+#
+# --- OpenAI gpt-4o-mini (fast, reliable, low cost) ---
+# api_base = "https://api.openai.com/v1"
+# model = "gpt-4o-mini"  # $0.15/$0.60 per 1M tokens
+#
+# --- OpenAI gpt-4o (highest quality) ---
+# api_base = "https://api.openai.com/v1"
+# model = "gpt-4o"  # $2.50/$10 per 1M tokens
+#
+# --- DeepSeek (very cheap) ---
+# api_base = "https://api.deepseek.com/v1"
+# model = "deepseek-chat"  # ~$0.14/$0.28 per 1M tokens
+#
+# --- Anthropic Claude 3 Haiku (quality alternative) ---
+# api_base = "https://api.anthropic.com/v1"
+# model = "claude-3-haiku-20240307"  # $0.25/$1.25 per 1M tokens
+#
+# --- Groq (free tier, very fast inference) ---
+# api_base = "https://api.groq.com/openai/v1"
+# model = "llama-3.1-8b-instant"  # Free tier available
+#
+# --- Together.ai (many model options) ---
+# api_base = "https://api.together.xyz/v1"
+# model = "meta-llama/Llama-3.1-8B-Instruct"  # Pay-per-use
+#
+# --- Local llama-server (free, requires GPU) ---
+# api_base = "http://localhost:8000/v1"
+# model = "qwen3:1.7b"  # Fast, auto /no_think prefix
+#
+# --- Local llama-server (higher quality) ---
+# api_base = "http://localhost:8000/v1"
+# model = "qwen2.5:3b"  # Higher quality, slightly slower
+#
+# .............................................................................
+
+# Request timeout in seconds
+# Env: LLM_TIMEOUT
+# timeout = 60.0
+
+# Maximum tokens for LLM response
+# Env: LLM_MAX_TOKENS
+# max_tokens = 512
+
+# -----------------------------------------------------------------------------
+# Prompt Configuration
+# Model-aware prompting with auto-detection for optimal results
+# -----------------------------------------------------------------------------
+
+# System prompt for chat-style LLMs (empty = auto-detect based on model)
+# Env: LLM_SYSTEM_PROMPT
+#
+# Auto-detection by model family:
+#   - Qwen3: empty (uses /no_think prefix instead)
+#   - Qwen2.5, Llama, others: "You summarize technical entries concisely with relevant tags."
+#
+# Override only if you need custom behavior for your model.
+# system_prompt = ""
+
+# Prefix added to user prompt (empty = auto-detect based on model)
+# Env: LLM_PROMPT_PREFIX
+#
+# Auto-detection by model family:
+#   - Qwen3: "/no_think " (disables thinking mode for direct output)
+#   - Others: empty (not needed)
+#
+# Override only if auto-detection doesn't work for your model.
+# prompt_prefix = ""
+
+# Summary instruction for entry summarization
+# Env: LLM_SUMMARY_PROMPT
+#
+# This is the core instruction. Entry context (title, type, content) is
+# appended automatically along with any few-shot example.
+#
+# summary_prompt = "Summarize this entry in 1-2 sentences, then add relevant tags."
+
+# Thread summary instruction
+# Env: LLM_THREAD_SUMMARY_PROMPT
+#
+# Template format with placeholders:
+#   {title} - Thread title
+#   {entries} - Bullet list of entry summaries (tags already stripped)
+#
+# NOTE: Do NOT ask for tags in this prompt. The code automatically:
+#   1. Extracts tags from each entry summary
+#   2. Strips tags from entries before passing to LLM
+#   3. Aggregates all unique tags and appends them to the thread summary
+#
+# Simple format (title and entries appended automatically):
+# thread_summary_prompt = "Summarize this development thread in 2-3 sentences."
+#
+# Template format (full control over structure):
+# thread_summary_prompt = """Summarize this development thread in 2-3 sentences. Focus on the main topic, key decisions, and outcomes. Do NOT include tags in your response.
+#
+# Thread: {title}
+#
+# Entry summaries:
+# {entries}
+#
+# Summary:"""
+
+# Few-shot example for format compliance (recommended for tags output)
+#
+# Providing an example significantly improves output format consistency,
+# especially for smaller models. The example shows how to structure the
+# summary and format tags.
+#
+# summary_example_input = "Implemented OAuth2 authentication with JWT tokens. Added refresh token rotation and secure cookie storage."
+# summary_example_output = "OAuth2 authentication implemented with JWT tokens, refresh rotation, and secure cookie storage.\ntags: #authentication #OAuth2 #JWT #security"
+
+
+# -----------------------------------------------------------------------------
+# Embedding Service Configuration (shared across backends)
+# Env overrides: EMBEDDING_API_KEY, EMBEDDING_API_BASE, EMBEDDING_MODEL, EMBEDDING_DIM,
+#                EMBEDDING_TIMEOUT, EMBEDDING_BATCH_SIZE
+#
+# IMPORTANT: Graphiti requires BATCH embeddings (multiple strings per API call).
+# The native llama-server binary with proper flags handles this correctly.
+# Watercooler auto-starts llama-server with these flags when available:
+#   llama-server --embedding --parallel 8 -c 8192 -b 4096 -ub 4096
+#
+# Manual startup (if auto-start fails):
+#   llama-server --model ~/.watercooler/models/bge-m3-q8_0.gguf \
+#     --host localhost --port 8080 --embedding \
+#     --parallel 8 -c 8192 -b 4096 -ub 4096
+#
+# Installing llama-server:
+#   - Build from source: https://github.com/ggml-org/llama.cpp
+#   - Or download release: https://github.com/ggml-org/llama.cpp/releases
+#   - Watercooler will auto-download if not found
+# NOTE: API keys belong in credentials.toml, NOT here. This keeps secrets
+# separate from configuration (which can be version-controlled).
+# -----------------------------------------------------------------------------
+[memory.embedding]
+
+# Embedding API base URL
+# Env: EMBEDDING_API_BASE
+# Default: llama-server on port 8080
+# For OpenAI embeddings: "https://api.openai.com/v1"
+# api_base = "http://localhost:8080/v1"
+
+# Embedding model name
+# Env: EMBEDDING_MODEL
+# model = "bge-m3"
+#
+# .............................................................................
+# PROVIDER EXAMPLES - Uncomment ONE api_base + model + dim set to switch
+# API keys go in credentials.toml under the matching provider section
+# .............................................................................
+#
+# --- OpenAI text-embedding-3-small (cheap, good quality) ---
+# api_base = "https://api.openai.com/v1"
+# model = "text-embedding-3-small"  # $0.02 per 1M tokens
+# dim = 1536
+#
+# --- OpenAI text-embedding-3-large (higher quality) ---
+# api_base = "https://api.openai.com/v1"
+# model = "text-embedding-3-large"  # $0.13 per 1M tokens
+# dim = 3072
+#
+# --- Voyage AI voyage-3-lite (optimized for search) ---
+# api_base = "https://api.voyageai.com/v1"
+# model = "voyage-3-lite"  # $0.02 per 1M tokens
+# dim = 512
+#
+# --- Cohere embed-english-v3 (free tier available) ---
+# api_base = "https://api.cohere.ai/v1"
+# model = "embed-english-v3.0"
+# dim = 1024
+#
+# --- Local llama-server bge-m3 (free, requires GPU) ---
+# api_base = "http://localhost:8080/v1"
+# model = "bge-m3"
+# dim = 1024
+#
+# --- Local llama-server nomic-embed-text (smaller, faster) ---
+# api_base = "http://localhost:8080/v1"
+# model = "nomic-embed-text:latest"
+# dim = 768
+#
+# .............................................................................
+
+# Embedding vector dimension
+# Env: EMBEDDING_DIM
+# dim = 1024
+
+# Request timeout in seconds
+# Env: EMBEDDING_TIMEOUT
+# timeout = 60.0
+
+# Batch size for embedding requests
+# Env: EMBEDDING_BATCH_SIZE
+# Higher values improve throughput but increase memory usage
+# batch_size = 32
+
+# Context window size for embedding server (tokens)
+# Env: EMBEDDING_CONTEXT_SIZE
+# Default matches bge-m3 max context (8192). Reduce to save VRAM if needed.
+# context_size = 8192
+
+
+# -----------------------------------------------------------------------------
+# Database Configuration (FalkorDB)
+# Env overrides: FALKORDB_HOST, FALKORDB_PORT, FALKORDB_PASSWORD
+# -----------------------------------------------------------------------------
+[memory.database]
+
+# FalkorDB host
+# Env: FALKORDB_HOST
+# host = "localhost"
+
+# FalkorDB port
+# Env: FALKORDB_PORT
+# port = 6379
+
+# FalkorDB password (optional)
+# Env: FALKORDB_PASSWORD
+# password = ""
+
+
+# -----------------------------------------------------------------------------
+# Graphiti-Specific Settings
+# These override shared settings above when using the Graphiti backend
+#
+# IMPORTANT: Graphiti uses LLM for entity extraction, relation finding, and
+# fact deduplication. This requires a capable model (gpt-4o-mini or better).
+# The shared [memory.llm] and [memory.embedding] settings are used by default,
+# but you can override them here if Graphiti needs different models than
+# the baseline graph (e.g., OpenAI for Graphiti, local for baseline graph).
+# -----------------------------------------------------------------------------
+[memory.graphiti]
+
+# Reranker algorithm for hybrid search
+# Options: rrf (default, fastest), mmr, cross_encoder, node_distance, episode_mentions
+# Env: WATERCOOLER_GRAPHITI_RERANKER
+# reranker = "rrf"
+
+# Track entry-episode mappings for provenance
+# track_entry_episodes = true
+
+# Override LLM settings for Graphiti only (empty = use shared [memory.llm])
+# Use this when Graphiti needs a more capable model than the baseline graph.
+# API keys: Store in credentials.toml under the provider section (e.g., [openai])
+# llm_api_base = "https://api.openai.com/v1"
+# llm_model = "gpt-4o-mini"
+
+# Override embedding settings for Graphiti only (empty = use shared [memory.embedding])
+# Use this when Graphiti needs a different embedding model than the baseline graph.
+# API keys: Store in credentials.toml under the provider section
+# embedding_api_base = "https://api.openai.com/v1"
+# embedding_model = "text-embedding-3-small"
+
+# Chunking settings for entry sync
+# When enabled, long entries are split into chunks before indexing to Graphiti.
+# Each chunk becomes a separate episode linked via previous_episode_uuids.
+# This improves retrieval by avoiding "lost in the middle" issues with long text.
+#
+# Enable/disable chunking during sync
+# Env: WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC
+# chunk_on_sync = true
+#
+# Maximum tokens per chunk (768 balances comprehensiveness vs retrieval quality)
+# Env: WATERCOOLER_GRAPHITI_CHUNK_MAX_TOKENS
+# chunk_max_tokens = 768
+#
+# Token overlap between chunks for context continuity
+# Env: WATERCOOLER_GRAPHITI_CHUNK_OVERLAP
+# chunk_overlap = 64
+
+
+# -----------------------------------------------------------------------------
+# LeanRAG-Specific Settings
+# These override shared settings above when using the LeanRAG backend
+#
+# IMPORTANT: LeanRAG uses LLM for triple extraction and summary generation.
+# This requires a capable model (gpt-4o-mini or better).
+# The shared [memory.llm] and [memory.embedding] settings are used by default,
+# but you can override them here if LeanRAG needs different models.
+# -----------------------------------------------------------------------------
+[memory.leanrag]
+
+# Max parallel workers for graph building
+# max_workers = 8
+
+# Override LLM settings for LeanRAG only (empty = use shared [memory.llm])
+# Use this when LeanRAG needs a more capable model than the baseline graph.
+# API keys: Store in credentials.toml under the provider section (e.g., [openai])
+# llm_api_base = "https://api.openai.com/v1"
+# llm_model = "gpt-4o-mini"
+
+# Override embedding settings for LeanRAG only (empty = use shared [memory.embedding])
+# Use this when LeanRAG needs a different embedding model than the baseline graph.
+# API keys: Store in credentials.toml under the provider section
+# embedding_api_base = "https://api.openai.com/v1"
+# embedding_model = "text-embedding-3-small"
+
+
+# =============================================================================
+# MEMORY BACKEND QUICK START
+# =============================================================================
+#
+# To enable Graphiti memory backend with llama-server (recommended):
+#
+#   Option 1 - TOML config (recommended):
+#     [memory]
+#     enabled = true
+#     backend = "graphiti"
+#
+#     [memory.llm]
+#     api_base = "http://localhost:8000/v1"  # llama-server (completion mode)
+#     model = "qwen3:30b"  # or llama3.2:3b for smaller footprint
+#
+#     [memory.embedding]
+#     api_base = "http://localhost:8080/v1"  # llama-server (embedding mode)
+#     model = "bge-m3"  # from GGUF registry
+#
+#   Option 2 - Environment variables:
+#     WATERCOOLER_MEMORY_BACKEND=graphiti
+#     LLM_API_BASE=http://localhost:8000/v1
+#     LLM_MODEL=qwen3:30b
+#     EMBEDDING_API_BASE=http://localhost:8080/v1
+#     EMBEDDING_MODEL=bge-m3
+#
+# For llama-server (default local setup):
+#   - LLM: http://localhost:8000/v1 (completion mode)
+#   - Embedding: http://localhost:8080/v1 (embedding mode with batch support)
+#   - Models are auto-downloaded from HuggingFace GGUF files
+#   - llama-server binary is auto-downloaded if not found
+#
+# For OpenAI (cloud):
+#   # In config.toml:
+#   [memory.llm]
+#   api_base = "https://api.openai.com/v1"
+#   model = "gpt-4o-mini"
+#
+#   [memory.embedding]
+#   api_base = "https://api.openai.com/v1"
+#   model = "text-embedding-3-small"
+#
+#   # In credentials.toml (separate file for secrets):
+#   [openai]
+#   api_key = "<your-openai-key>"
+#
+#   # Or use environment variable:
+#   export OPENAI_API_KEY="<your-openai-key>"
+#
+# To disable all memory backends (e.g., for CI):
+#   WATERCOOLER_MEMORY_DISABLED=1
+#
+# Priority chain (highest first):
+#   Environment variables > Backend-specific TOML > Shared TOML > Defaults
+#
+# See docs/CONFIGURATION.md#environment-variables-reference for complete documentation.
+# =============================================================================
+
+
+# =============================================================================
+# ENVIRONMENT VARIABLE REFERENCE
+# =============================================================================
+#
+# Config Key                     Environment Variable
+# ---------------------------    --------------------------------
+# common.threads_pattern         WATERCOOLER_THREADS_PATTERN
+# common.templates_dir           WATERCOOLER_TEMPLATES
+# mcp.transport                  WATERCOOLER_MCP_TRANSPORT
+# mcp.host                       WATERCOOLER_MCP_HOST
+# mcp.port                       WATERCOOLER_MCP_PORT
+# mcp.default_agent              WATERCOOLER_AGENT
+# mcp.agent_tag                  WATERCOOLER_AGENT_TAG
+# mcp.auto_branch                WATERCOOLER_AUTO_BRANCH
+# mcp.auto_provision             WATERCOOLER_AUTO_PROVISION
+# mcp.threads_dir                WATERCOOLER_DIR
+# mcp.threads_base               WATERCOOLER_THREADS_BASE
+# mcp.git.author                 WATERCOOLER_GIT_AUTHOR
+# mcp.git.email                  WATERCOOLER_GIT_EMAIL
+# mcp.git.ssh_key                WATERCOOLER_GIT_SSH_KEY
+# mcp.sync.async                 WATERCOOLER_ASYNC_SYNC
+# mcp.sync.batch_window          WATERCOOLER_BATCH_WINDOW
+# mcp.sync.interval              WATERCOOLER_SYNC_INTERVAL
+# mcp.sync.max_retries           WATERCOOLER_SYNC_MAX_RETRIES
+# mcp.sync.max_backoff           WATERCOOLER_SYNC_MAX_BACKOFF
+# mcp.logging.level              WATERCOOLER_LOG_LEVEL
+# mcp.logging.dir                WATERCOOLER_LOG_DIR
+# mcp.logging.max_bytes          WATERCOOLER_LOG_MAX_BYTES
+# mcp.logging.backup_count       WATERCOOLER_LOG_BACKUP_COUNT
+# mcp.logging.disable_file       WATERCOOLER_LOG_DISABLE_FILE
+# mcp.service_provision.models   WATERCOOLER_AUTO_PROVISION_MODELS
+# mcp.service_provision.llama_server WATERCOOLER_AUTO_PROVISION_LLAMA_SERVER
+# mcp.graph.auto_start_services  WATERCOOLER_AUTO_START_SERVICES
+# mcp.graph.embedding_divergence_threshold WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD
+# validation.on_write            WATERCOOLER_VALIDATE_ON_WRITE
+# validation.fail_on_violation   WATERCOOLER_FAIL_ON_VIOLATION
+#
+# Slack integration:
+# mcp.slack.webhook_url          WATERCOOLER_SLACK_WEBHOOK
+# mcp.slack.bot_token            WATERCOOLER_SLACK_BOT_TOKEN
+# mcp.slack.app_token            WATERCOOLER_SLACK_APP_TOKEN
+# mcp.slack.default_channel      WATERCOOLER_SLACK_CHANNEL
+# mcp.slack.channel_prefix       WATERCOOLER_SLACK_CHANNEL_PREFIX
+#
+# Memory backend configuration:
+# memory.enabled                 WATERCOOLER_MEMORY_DISABLED (inverted)
+# memory.backend                 WATERCOOLER_MEMORY_BACKEND
+#                                WATERCOOLER_GRAPHITI_ENABLED (legacy, use backend instead)
+# memory.llm.api_base            LLM_API_BASE
+# memory.llm.model               LLM_MODEL
+# memory.llm.timeout             LLM_TIMEOUT
+# memory.llm.max_tokens          LLM_MAX_TOKENS
+# memory.llm.system_prompt        LLM_SYSTEM_PROMPT
+# memory.llm.prompt_prefix         LLM_PROMPT_PREFIX
+# memory.llm.summary_prompt        LLM_SUMMARY_PROMPT
+# memory.llm.thread_summary_prompt LLM_THREAD_SUMMARY_PROMPT
+# memory.embedding.api_base      EMBEDDING_API_BASE
+# memory.embedding.model         EMBEDDING_MODEL
+# memory.embedding.dim           EMBEDDING_DIM
+# memory.embedding.timeout       EMBEDDING_TIMEOUT
+# memory.embedding.batch_size    EMBEDDING_BATCH_SIZE
+# memory.embedding.context_size  EMBEDDING_CONTEXT_SIZE
+# memory.database.host           FALKORDB_HOST
+# memory.database.port           FALKORDB_PORT
+# memory.database.password       FALKORDB_PASSWORD
+# memory.graphiti.reranker       WATERCOOLER_GRAPHITI_RERANKER
+# memory.graphiti.chunk_on_sync  WATERCOOLER_GRAPHITI_CHUNK_ON_SYNC
+# memory.graphiti.chunk_max_tokens WATERCOOLER_GRAPHITI_CHUNK_MAX_TOKENS
+# memory.graphiti.chunk_overlap  WATERCOOLER_GRAPHITI_CHUNK_OVERLAP
+#
+# Priority (highest first): CLI args > Env vars > Project config > User config > Defaults
+# =============================================================================
+
+
+# =============================================================================
+# FEDERATION SETTINGS
+# Cross-namespace search across configured watercooler repositories
+# =============================================================================
+[federation]
+
+# Enable federation features
+# Env: WATERCOOLER_FEDERATION_ENABLED
+# enabled = false
+
+# Per-namespace search timeout in seconds
+# namespace_timeout = 0.4
+
+# Hard cap on namespaces per query (1-20)
+# max_namespaces = 5
+
+# Total wall-clock budget for all namespace searches combined
+# max_total_timeout = 2.0
+
+# --- Namespace definitions ---
+# Each [federation.namespaces.<id>] defines a searchable namespace.
+# The namespace <id> is a short name used for identification in results.
+#
+# [federation.namespaces.site]
+# code_path = "/home/user/projects/watercooler-site"
+# deny_topics = ["internal-hiring"]
+
+# --- Access control ---
+# Per-primary allowlists: which secondaries can this primary query?
+# Default: closed (no entry = no remote access)
+#
+# [federation.access]
+# allowlists = { "cloud" = ["site"] }
+
+# --- Scoring parameters ---
+# [federation.scoring]
+# local_weight = 1.0
+# wide_weight = 0.55
+# recency_floor = 0.7
+# recency_half_life_days = 60.0

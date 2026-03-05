@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mostlyharmless.ai/schemas/watercooler/watercooler_thread.schema.json",
+  "title": "WatercoolerThread",
+  "description": "Structured representation of a Watercooler thread with header metadata and entries",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Thread identifier (derived from filename, e.g., 'feature-auth')"
+    },
+    "title": {
+      "type": "string",
+      "description": "Thread title (from # header or filename)"
+    },
+    "status": {
+      "type": "string",
+      "description": "Thread status",
+      "enum": ["OPEN", "IN_REVIEW", "BLOCKED", "CLOSED", "MERGED", "RESOLVED", "ABANDONED", "OBSOLETE"]
+    },
+    "ball": {
+      "type": "string",
+      "description": "Ball owner (who's turn it is, e.g., 'Claude (user)')"
+    },
+    "topic": {
+      "type": "string",
+      "description": "Thread topic slug (e.g., 'feature-auth')"
+    },
+    "original_topic": {
+      "type": ["string", "null"],
+      "description": "Original thread name if renamed (preserves history)"
+    },
+    "created": {
+      "type": "string",
+      "description": "Creation timestamp (ISO 8601)",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "priority": {
+      "type": ["string", "null"],
+      "description": "Priority level",
+      "enum": ["P0", "P1", "P2", "P3", "P4", "P5", null]
+    },
+    "entries": {
+      "type": "array",
+      "description": "Thread entries in chronological order",
+      "items": {
+        "$ref": "thread_entry.schema.json"
+      }
+    }
+  },
+  "required": ["id", "title", "status", "ball", "topic", "created", "entries"],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "id": "feature-auth",
+      "title": "feature-auth — Thread",
+      "status": "OPEN",
+      "ball": "Claude (user)",
+      "topic": "feature-auth",
+      "original_topic": null,
+      "created": "2025-11-05T01:42:12Z",
+      "priority": "P2",
+      "entries": []
+    }
+  ]
+}

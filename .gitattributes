@@ -1,0 +1,11 @@
+# Watercooler merge strategies for multi-user collaboration
+
+# Thread files use union merge - preserves entries from both branches
+# Safe because watercooler protocol enforces append-only entries
+.watercooler/*.md merge=union
+watercooler/*.md merge=union
+
+# Index files use "ours" merge - regenerated after merge anyway
+# Prevents conflicts on generated files
+.watercooler/index.md merge=ours
+watercooler/index.md merge=ours
