@@ -39,9 +39,14 @@ class WcToolAdapter:
         "returned",
         "total",
         "stale_count",
+        "tiers_queried",
+        "primary_tier",
+        "result_count",
         "t3_results",
         "t3_with_source",
+        "top_evidence",
         "provenance_available",
+        "query",
       ):
         if k in meta:
           meta_payload[k] = meta.get(k)

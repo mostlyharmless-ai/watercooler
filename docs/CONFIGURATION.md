@@ -1,515 +1,235 @@
-# Configuration Guide
+# Configuration
 
-This guide explains how to configure Watercooler using TOML configuration files.
+## Minimum viable config
 
-## Overview
+Most users only need these settings. Create `~/.watercooler/config.toml` with:
 
-Watercooler supports configuration through:
-1. **TOML config files** (recommended for persistent settings)
-2. **Environment variables** (for overrides and CI/CD)
-3. **CLI arguments** (for one-off commands)
+```toml
+# ~/.watercooler/config.toml
+version = 1                       # schema version; do not modify
 
-**No configuration is required to get started.** Watercooler works out-of-box with sensible defaults.
-
-## Configuration Precedence
-
-Settings are applied in this order (later sources override earlier):
-
-```
-Built-in defaults → User config → Project config → Environment variables → CLI args
+[mcp]
+default_agent = "Claude Code"     # your MCP client name (usually auto-detected)
+agent_tag = "(yourname)"          # optional: appended to agent name in thread entries
 ```
 
-| Source | Location | Scope |
-|--------|----------|-------|
-| Built-in defaults | Hardcoded | All projects |
-| User config | `~/.watercooler/config.toml` | All projects for this user |
-| Project config | `.watercooler/config.toml` | This project only |
-| Environment variables | Shell/process env | Current session |
-| CLI arguments | Command line | Current command |
+Generate an annotated version with `watercooler config init --user`.
 
-## Quick Start
+---
 
-### 1. Initialize Configuration
+## Config vs credentials
+
+| File | What it stores | Safe to commit? |
+|---|---|---|
+| `~/.watercooler/config.toml` | Behavior and preferences | Yes |
+| `~/.watercooler/credentials.toml` | Secrets (tokens, API keys) | Never |
+
+Both files are TOML. The config file is also supported at project level:
+`.watercooler/config.toml` (inside your repo, for per-project overrides).
+
+---
+
+## Config commands
+
+**Initialize config from template:**
 
 ```bash
-# Create user config (recommended for personal settings)
-watercooler config init
-
-# Or create project config (for team-shared settings)
-watercooler config init --project
+watercooler config init --user      # creates ~/.watercooler/config.toml
+watercooler config init --project   # creates .watercooler/config.toml in current dir
 ```
 
-### 2. View Current Configuration
+Pass `--force` to overwrite an existing file.
+
+**Show resolved config** (merged user + project + env vars):
 
 ```bash
-# Show resolved config (all sources merged)
 watercooler config show
-
-# Show as JSON
-watercooler config show --json
-
-# Show config file locations
-watercooler config show --sources
+watercooler config show --json                    # machine-readable output
+watercooler config show --sources                 # show which file each key came from
+watercooler config show --project-path /path/to/repo   # check config for another project
 ```
 
-### 3. Validate Configuration
+**Validate config** (check for errors or warnings):
 
 ```bash
-# Check for errors
 watercooler config validate
+watercooler config validate --strict    # treat warnings as errors
 ```
 
-## Config File Locations
+---
 
-### User Config (`~/.watercooler/config.toml`)
+## Key settings by category
 
-Personal settings that apply to all your projects:
+### `[common]` — thread location
 
-```toml
-# ~/.watercooler/config.toml
+| Key | Default | Description |
+|---|---|---|
+| `templates_dir` | (bundled) | Custom templates directory |
+| `threads_suffix` | `"-threads"` | **Legacy.** Suffix for a separate threads repo. Silently ignored in the default orphan-branch setup — only needed when migrating from the old model. |
+| `threads_pattern` | (derived) | **Legacy.** Full URL pattern for a separate threads repo. Silently ignored unless `threads_suffix` is also set. |
 
-[mcp]
-default_agent = "Claude Code"
-agent_tag = "yourname"
+### `[mcp]` — server and identity
 
-[mcp.git]
-author = "Your Name"
-email = "you@example.com"
+| Key | Default | Description |
+|---|---|---|
+| `default_agent` | `"Agent"` | Agent name shown in thread entries |
+| `agent_tag` | `""` | Short tag appended to agent name, e.g. `"(alice)"` |
+| `threads_dir` | (auto) | Explicit threads directory; leave empty for auto-discovery |
+| `transport` | `"stdio"` | Transport mode: `stdio` (local) or `http` |
+| `auto_branch` | `true` | Auto-create threads branches for new code branches |
 
-[mcp.logging]
-level = "INFO"
-```
+### `[mcp.git]` — commit identity
 
-### Project Config (`.watercooler/config.toml`)
+Controls the git author for thread commits:
 
-Team-shared settings checked into the repository:
-
-```toml
-# .watercooler/config.toml
-
-[mcp.sync]
-interval = 60.0
-
-[validation]
-fail_on_violation = true
-```
-
-## Configuration Reference
-
-### `[common]` Section
-
-Shared settings for MCP and Dashboard:
-
-```toml
-[common]
-# Custom templates directory (empty = use bundled)
-templates_dir = ""
-```
-
-### `[mcp]` Section
-
-MCP server settings:
-
-```toml
-[mcp]
-# Transport mode: "stdio" or "http"
-transport = "stdio"
-
-# HTTP settings (only used when transport = "http")
-host = "127.0.0.1"
-port = 3000
-
-# Agent identity
-default_agent = "Agent"
-agent_tag = ""
-
-# Explicit threads directory (empty = auto-discover via orphan branch worktree)
-threads_dir = ""
-```
-
-### `[mcp.git]` Section
-
-Git commit settings:
+| Key | Default | Description |
+|---|---|---|
+| `author` | `""` (uses agent name) | Git commit author name |
+| `email` | `"mcp@watercooler.dev"` | Git commit email |
+| `ssh_key` | `""` | Path to SSH private key (empty = use default ssh-agent) |
 
 ```toml
 [mcp.git]
-author = ""                    # Empty = use agent name
-email = "mcp@watercooler.dev"
-ssh_key = ""                   # Path to SSH key (empty = default)
+author = "Claude Code"
+email = "claude@example.com"
+# ssh_key = "~/.ssh/id_ed25519"   # optional; omit to use ssh-agent default
 ```
 
-### `[mcp.sync]` Section
+### `[memory]` — enhanced search features
 
-Git sync behavior:
+Enable persistent memory and semantic search across sessions (optional):
 
 ```toml
-[mcp.sync]
-max_retries = 5        # Retry attempts for failed push (rebase + retry)
-max_backoff = 300.0    # Maximum backoff delay (seconds)
+[memory]
+backend = "graphiti"   # or "leanrag" for local-only setup
 ```
 
-### `[mcp.logging]` Section
+See [Memory backend](#memory-backend) below for full setup instructions.
 
-Logging settings:
+---
+
+## Memory backend
+
+Watercooler's baseline features work with zero additional configuration. The memory
+backend is an optional upgrade that adds persistent memory and semantic search across
+sessions.
+
+To enable:
 
 ```toml
-[mcp.logging]
-level = "INFO"              # DEBUG, INFO, WARNING, ERROR
-dir = ""                    # Log directory (empty = ~/.watercooler/logs)
-max_bytes = 10485760        # 10MB per log file
-backup_count = 5            # Number of backup files
-disable_file = false        # Disable file logging (stderr only)
+[memory]
+backend = "graphiti"     # cloud LLM provider (OpenAI, Anthropic, etc.)
+# or
+backend = "leanrag"      # local-only, no external API required
 ```
 
-### `[mcp.agents]` Section
-
-Agent-specific overrides:
+Credentials for LLM and embedding providers go in `~/.watercooler/credentials.toml`,
+using a provider-named section:
 
 ```toml
-[mcp.agents.claude-code]
-name = "Claude Code"
-default_spec = "implementer-code"
-
-[mcp.agents.cursor]
-name = "Cursor"
-default_spec = "implementer-code"
-
-[mcp.agents.codex]
-name = "Codex"
-default_spec = "planner-architecture"
-```
-
-### `[validation]` Section
-
-Protocol validation settings:
-
-```toml
-[validation]
-on_write = true              # Validate on write operations
-on_commit = true             # Validate on commit
-fail_on_violation = false    # Fail vs warn on violation
-check_commit_footers = true  # Validate commit footers
-check_entry_format = true    # Validate entry format
-```
-
-> **Note:** Removed config keys (e.g., `check_branch_pairing` from pre-orphan-branch versions) are
-> silently ignored — no config file changes needed after upgrading.
-
-### `[baseline_graph]` Section
-
-Settings for the baseline graph module (free-tier knowledge graph generation):
-
-```toml
-[baseline_graph]
-prefer_extractive = false    # Force extractive mode (skip LLM)
-
-[baseline_graph.llm]
-api_base = "http://localhost:8000/v1"   # llama-server default
-model = "qwen3:1.7b"                    # Recommended for summarization
-api_key = "local"                       # Local server doesn't require key
-timeout = 30.0                          # Request timeout (seconds)
-max_tokens = 256                        # Max response tokens
-
-# Prompt configuration (auto-detected from model if empty)
-# system_prompt = ""          # Empty = auto-detect by model family
-# prompt_prefix = ""          # Empty = auto-detect (e.g., /no_think for Qwen3)
-
-# Few-shot example for format compliance (optional)
-# summary_example_input = "Implemented OAuth2 authentication..."
-# summary_example_output = "OAuth2 authentication implemented...\ntags: #auth #OAuth2"
-
-[baseline_graph.extractive]
-max_chars = 200              # Max chars for extractive summary
-include_headers = true       # Include markdown headers
-max_headers = 3              # Max headers to include
-```
-
-**Recommended models:** `qwen3:1.7b` (fast, auto `/no_think`), `qwen2.5:3b` (quality), `llama3.2:3b` (balanced).
-
-See [Baseline Graph Documentation](baseline-graph.md) for full usage guide.
-
-### `[federation]` Section
-
-Cross-namespace federated search settings:
-
-```toml
-[federation]
-enabled = false              # Enable federation features
-namespace_timeout = 0.4      # Per-namespace search timeout (seconds, max 30)
-max_namespaces = 5           # Max secondary namespaces (primary doesn't count)
-max_total_timeout = 2.0      # Total wall-clock budget for all searches (max 60s)
-
-[federation.scoring]
-local_weight = 1.0           # Weight for primary namespace results (max 10.0)
-wide_weight = 0.55           # Weight for secondary namespace results (max 10.0)
-recency_half_life_days = 60  # Half-life for recency decay (days)
-recency_floor = 0.7          # Minimum recency multiplier
-
-[federation.access]
-# Allowlist: which primary namespaces can search which secondaries
-# Format: { "primary-ns-id" = ["secondary-1", "secondary-2"] }
-# allowlists = {}
-
-# Per-namespace configuration
-# [federation.namespaces.my-other-repo]
-# code_path = "/home/user/my-other-repo"
-# deny_topics = ["secret-planning"]
-```
-
-> **Note:** Federation is feature-gated. Set `federation.enabled = true` to activate.
-> See [MCP Server Reference](mcp-server.md) for `watercooler_federated_search` tool docs.
-
-## Migrating from Environment Variables
-
-If you're currently using environment variables, you can migrate to config files:
-
-### Before (Environment Variables)
-
-```bash
-export WATERCOOLER_AGENT="Claude Code"
-export WATERCOOLER_GIT_AUTHOR="Your Name"
-export WATERCOOLER_GIT_EMAIL="you@example.com"
-export WATERCOOLER_LOG_LEVEL="DEBUG"
-```
-
-### After (Config File)
-
-```toml
-# ~/.watercooler/config.toml
-
-[mcp]
-default_agent = "Claude Code"
-
-[mcp.git]
-author = "Your Name"
-email = "you@example.com"
-
-[mcp.logging]
-level = "DEBUG"
-```
-
-### Environment Variable Mapping
-
-| Environment Variable | Config Path |
-|---------------------|-------------|
-| `WATERCOOLER_AGENT` | `mcp.default_agent` |
-| `WATERCOOLER_AGENT_TAG` | `mcp.agent_tag` |
-| `WATERCOOLER_DIR` | `mcp.threads_dir` |
-| `WATERCOOLER_GIT_AUTHOR` | `mcp.git.author` |
-| `WATERCOOLER_GIT_EMAIL` | `mcp.git.email` |
-| `WATERCOOLER_GIT_SSH_KEY` | `mcp.git.ssh_key` |
-| `WATERCOOLER_SYNC_INTERVAL` | `mcp.sync.interval` |
-| `WATERCOOLER_LOG_LEVEL` | `mcp.logging.level` |
-| `WATERCOOLER_LOG_DIR` | `mcp.logging.dir` |
-
-**Note:** Environment variables still work and override config file values.
-
-## Credentials vs Configuration
-
-Watercooler separates **credentials** (secrets) from **configuration** (settings):
-
-| File | Purpose | Permissions | Git |
-|------|---------|-------------|-----|
-| `~/.watercooler/config.toml` | Settings (api_base, model, etc.) | Normal | Can commit |
-| `~/.watercooler/credentials.toml` | Secrets (API keys, tokens) | 0600 | **Never commit** |
-
-### Why Separate Files?
-
-1. **Security**: Different access patterns - credentials need 0600 permissions
-2. **Version control**: Config can be shared in repos; credentials cannot
-3. **Environment parity**: Same config across dev/prod, different credentials
-4. **Intuitive**: "I have an OpenAI key" vs "I have an LLM key"
-
-### API Key Storage
-
-Store API keys in `credentials.toml` by **provider name**:
-
-```toml
-# ~/.watercooler/credentials.toml
-
-[github]
-token = "ghp_xxxxxxxxxxxx"
-ssh_key = "~/.ssh/id_ed25519"
-
 [openai]
-api_key = "sk-proj-..."
+api_key = "sk-..."
 
+# or for Anthropic:
 [anthropic]
 api_key = "sk-ant-..."
-
-[groq]
-api_key = "gsk_..."
-
-[voyage]
-api_key = "vg-..."
-
-[google]
-api_key = "AIza..."
-
-[dashboard]
-session_secret = "your-secret-key"
 ```
 
-The system auto-detects which provider to use based on `api_base` in config.toml.
+The model and endpoint are set in `config.toml` under `[memory.llm]` and `[memory.embedding]`
+(see `watercooler config init --user` for an annotated template). Supported providers:
+`openai`, `anthropic`, `groq`, `voyage`, `google`.
 
-### API Key Resolution Priority
+For a local (no-API) setup, point both `api_base` fields at a local `llama-server`
+or `ollama` endpoint.
 
-When resolving API keys for LLM or embedding services:
+---
 
-```
-1. Env var (highest):     LLM_API_KEY / EMBEDDING_API_KEY
-2. Provider-specific env: OPENAI_API_KEY (auto-detected from api_base)
-3. Provider credentials:  [openai].api_key in credentials.toml
-4. Empty string (lowest): Local servers often don't need keys
-```
+## Environment variable reference
 
-**Security:** Credentials files are automatically set to mode 0600 (owner read/write only).
+Environment variables override all config file settings. Format: set in shell or pass
+to the MCP server's `env` block in your client config.
 
-**Never commit credentials to version control.** The `.watercooler/credentials.toml` pattern is already in `.gitignore`.
+### Thread and agent settings
 
-## Best Practices
+| Env var | TOML equivalent | Default | Description |
+|---|---|---|---|
+| `WATERCOOLER_AGENT` | `mcp.default_agent` | `"Agent"` | Agent name in thread entries |
+| `WATERCOOLER_AGENT_TAG` | `mcp.agent_tag` | `""` | Tag appended to agent name |
+| `WATERCOOLER_DIR` | `mcp.threads_dir` | (auto) | Explicit threads directory path |
+| `WATERCOOLER_THREADS_BASE` | `mcp.threads_base` | (auto) | Base directory for threads repos |
+| `WATERCOOLER_THREADS_PATTERN` | `common.threads_pattern` | (derived) | Full URL pattern for threads repo |
+| `WATERCOOLER_AUTO_BRANCH` | `mcp.auto_branch` | `true` | Auto-create threads branches |
+| `WATERCOOLER_AUTO_PROVISION` | `mcp.auto_provision` | `true` | Auto-create threads repos |
+| `WATERCOOLER_CODE_REPO` | — | (auto) | Override code repo detection |
 
-### User Config vs Project Config
+### Git commit identity
 
-| Setting Type | Where to Put It |
-|--------------|-----------------|
-| Personal identity (name, email) | User config |
-| Personal preferences (log level) | User config |
-| Team standards (validation rules) | Project config |
-| Repo-specific settings (sync interval, log level) | Project config |
-| Secrets and tokens | Credentials file or env vars |
+| Env var | TOML equivalent | Default | Description |
+|---|---|---|---|
+| `WATERCOOLER_GIT_AUTHOR` | `mcp.git.author` | `""` (uses agent name) | Git commit author name |
+| `WATERCOOLER_GIT_EMAIL` | `mcp.git.email` | `"mcp@watercooler.dev"` | Git commit email |
+| `WATERCOOLER_GIT_SSH_KEY` | `mcp.git.ssh_key` | `""` | Path to SSH private key |
 
-### CI/CD Environments
+### Authentication
 
-For CI/CD, prefer environment variables over config files:
+| Env var | TOML equivalent | Default | Description |
+|---|---|---|---|
+| `GITHUB_TOKEN` | — | — | GitHub token for git operations (or `GH_TOKEN`) |
+| `GH_TOKEN` | — | — | Alternative to `GITHUB_TOKEN`; same precedence |
+| `WATERCOOLER_AUTH_MODE` | — | `"local"` | Auth mode for hosted deployments |
+| `WATERCOOLER_TOKEN_API_URL` | — | — | Token API URL (hosted mode only) |
+| `WATERCOOLER_TOKEN_API_KEY` | — | — | Token API key (hosted mode only) |
 
-```yaml
-# GitHub Actions example
-env:
-  WATERCOOLER_LOG_LEVEL: "DEBUG"
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-```
+### Memory and search
 
-### Multi-Project Setup
+| Env var | TOML equivalent | Default | Description |
+|---|---|---|---|
+| `WATERCOOLER_MEMORY_BACKEND` | `memory.backend` | (disabled) | Memory backend: `graphiti` or `leanrag` |
+| `WATERCOOLER_MEMORY_QUEUE` | `memory.queue_enabled` | `false` | Enable async memory indexing |
+| `WATERCOOLER_MEMORY_DISABLED` | — | — | Set to `1` to disable memory even if configured |
+| `LLM_API_KEY` | `memory.llm.api_key` | — | LLM provider API key |
+| `LLM_API_BASE` | `memory.llm.api_base` | — | LLM endpoint URL |
+| `LLM_MODEL` | `memory.llm.model` | — | LLM model name |
+| `EMBEDDING_API_KEY` | `memory.embedding.api_key` | — | Embedding provider API key |
+| `EMBEDDING_API_BASE` | `memory.embedding.api_base` | — | Embedding endpoint URL |
+| `EMBEDDING_MODEL` | `memory.embedding.model` | — | Embedding model name |
+| `EMBEDDING_DIM` | `memory.embedding.dim` | — | Embedding dimension |
 
-Each project's threads live on its own `watercooler/threads` orphan branch. No
-extra configuration is needed — threads are automatically scoped to the code
-repository. Just pass `code_path` pointing to each project root.
+### MCP server
 
-## Troubleshooting
+| Env var | TOML equivalent | Default | Description |
+|---|---|---|---|
+| `WATERCOOLER_MCP_TRANSPORT` | `mcp.transport` | `"stdio"` | Transport: `stdio` or `http` |
+| `WATERCOOLER_MCP_HOST` | `mcp.host` | `"127.0.0.1"` | HTTP mode: bind address |
+| `WATERCOOLER_MCP_PORT` | `mcp.port` | `3000` | HTTP mode: port |
 
-### Config Not Loading
+### Logging
 
-1. Check file location: `watercooler config show --sources`
-2. Validate syntax: `watercooler config validate`
-3. Check for TOML errors in output
+| Env var | Default | Description |
+|---|---|---|
+| `WATERCOOLER_LOG_LEVEL` | `"INFO"` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `WATERCOOLER_LOG_DIR` | `~/.watercooler/logs/` | Log file directory |
+| `WATERCOOLER_LOG_DISABLE_FILE` | `false` | Set to `1` to disable file logging |
 
-### Environment Override Not Working
+---
 
-Environment variables override config files. If a setting isn't taking effect:
+## Precedence rules
 
-1. Check for typos in the variable name
-2. Verify the variable is exported: `echo $WATERCOOLER_LOG_LEVEL`
-3. Restart your shell/IDE after changes
+Later sources override earlier ones, on a per-key basis:
 
-### Permission Errors on Credentials
+1. Built-in defaults
+2. User config: `~/.watercooler/config.toml`
+3. Project config: `<project>/.watercooler/config.toml`
+4. Environment variables
 
-Credentials files must have secure permissions:
+To see the resolved value and source of each key, run `watercooler config show --sources`.
 
-```bash
-chmod 600 ~/.watercooler/credentials.toml
-```
+---
 
-## Programmatic Configuration (Python API)
+## Tier label glossary
 
-For developers building on Watercooler, use the unified `config_facade` module:
-
-### Basic Usage
-
-```python
-from watercooler.config_facade import config
-
-# Path resolution (lightweight, stdlib-only)
-threads_dir = config.paths.threads_dir
-templates_dir = config.paths.templates_dir
-
-# Full config (lazy-loads TOML + Pydantic)
-cfg = config.full()
-log_level = cfg.mcp.logging.level
-
-# Environment variables with type coercion
-level = config.env.get("WATERCOOLER_LOG_LEVEL", "INFO")
-debug = config.env.get_bool("DEBUG", False)
-port = config.env.get_int("WATERCOOLER_PORT", 8080)
-timeout = config.env.get_float("TIMEOUT", 30.0)
-
-# Runtime context (for MCP server)
-ctx = config.context(code_root="/path/to/repo")
-print(ctx.code_branch)
-print(ctx.threads_repo_url)
-
-# Credentials
-token = config.get_github_token()
-```
-
-### Environment Variable Helpers
-
-The `config.env` class provides type-safe access:
-
-| Method | Description | Example |
-|--------|-------------|---------|
-| `get(key, default)` | String value | `config.env.get("MY_VAR", "default")` |
-| `get_bool(key, default)` | Boolean (1/true/yes/on) | `config.env.get_bool("DEBUG", False)` |
-| `get_int(key, default)` | Integer | `config.env.get_int("PORT", 8080)` |
-| `get_float(key, default)` | Float | `config.env.get_float("TIMEOUT", 30.0)` |
-| `get_path(key, default)` | Path with ~ expansion | `config.env.get_path("DATA_DIR")` |
-
-### Testing Support
-
-Reset cached state for test isolation:
-
-```python
-def test_something():
-    config.reset()  # Clear cached config
-    # ... test code ...
-    config.reset()  # Clean up
-```
-
-For more advanced testing utilities, see `watercooler.testing`:
-
-```python
-from watercooler.testing import temp_config, mock_env_vars
-
-# Temporarily override configuration
-with temp_config(threads_dir=Path("/tmp/test-threads")):
-    assert config.paths.threads_dir == Path("/tmp/test-threads")
-
-# Temporarily set environment variables
-with mock_env_vars(WATERCOOLER_LOG_LEVEL="DEBUG"):
-    assert config.env.get("WATERCOOLER_LOG_LEVEL") == "DEBUG"
-```
-
-### Architecture
-
-The config facade provides a single entry point while maintaining:
-
-- **Lazy loading**: Config components loaded only when accessed
-- **Thread-safe**: Uses locks in underlying modules
-- **Backward compatible**: Old imports continue working
-- **Testable**: Easy reset for test isolation
-
-**Module hierarchy:**
-```
-config_facade.py    → Unified entry point
-├── path_resolver.py   → Git-aware path discovery
-├── config_loader.py   → TOML loading + Pydantic validation
-├── config_schema.py   → Pydantic models
-├── credentials.py     → Credential management
-└── testing.py         → Test utilities
-```
-
-## See Also
-
-- [Environment Variables Reference](ENVIRONMENT_VARS.md) - All environment variables
-- [Installation Guide](INSTALLATION.md) - Getting started
-- [MCP Server Reference](mcp-server.md) - MCP tool documentation
+| Label | What it adds |
+|---|---|
+| T1 — Baseline | Thread graph, zero config, included with all installs. `say`, `ack`, `handoff`, `list`, `search` all work at T1. |
+| T2 — Semantic memory | Persistent memory and semantic search across sessions. Requires memory backend configuration. |
+| T3 — Hierarchical memory | Summarized context and full semantic graph with community detection. Requires T2 setup plus additional resources. |

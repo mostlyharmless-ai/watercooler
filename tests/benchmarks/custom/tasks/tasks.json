@@ -65,6 +65,132 @@
           "entry_type": "Decision",
           "body": "Spec: planner-architecture\n\nThe required output format for `get_region_retention_policy()` is:\n\n`REGION=<region>;RETENTION_DAYS=<days>`\n\n`get_region_retention_policy_citations()` must return the entry IDs that justify the facts used."
         }
+      ],
+      "citation_required": true,
+      "citation_gold_ids": [
+        "01KJBJCZTGNXJ18ABNC2MF8EGW",
+        "01KJBJCZTGNXJ18ABNC2MF8EGX"
+      ]
+    },
+    {
+      "task_id": "cross-thread-policy-discovery",
+      "type": "context_discovery",
+      "title": "Discover policy across thread boundaries",
+      "max_steps": 25,
+      "cost_limit": 0.35,
+      "problem_statement": "Implement `custom_bench_app.policy.get_policy_code()` so tests pass.\n\nImportant:\n- The active policy code lives in a Watercooler thread topic that is NOT the default topic for this task.\n- You should discover the right topic first (smart-query preferred), then read the relevant entry.\n- A stale code exists in the default thread and must not be used.\n\nConstraints:\n- Minimal change\n- Do not modify tests\n",
+      "test_command": "pytest -q tests/test_policy.py",
+      "threads_seed_topic": "custom-bench-org-knowledge",
+      "threads_seed_entries": [
+        {
+          "title": "Deprecated policy code",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\nDeprecated code (do not use): `WCCLOUD-POLICY-OLD-0000`."
+        }
+      ],
+      "additional_seed_threads": [
+        {
+          "topic": "compliance-policy-updates",
+          "entries": [
+            {
+              "entry_id": "01KVC00000000000000000001",
+              "title": "Active policy code 2026",
+              "role": "planner",
+              "entry_type": "Decision",
+              "body": "Spec: planner-architecture\n\nCurrent policy code: `WCCLOUD-POLICY-Z7Y4-8C2F`."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "task_id": "rehydration-completeness-after-reset",
+      "type": "context_rehydration",
+      "title": "Rehydrate full context after reset",
+      "problem_statement": "You will complete this task in two phases.\n\nGoal: implement both `get_region_retention_policy()` and `get_region_retention_policy_citations()` so tests pass.\n\nPhase 1:\n- Gather the required facts and output format from Watercooler.\n- Do NOT modify files.\n- Write one wc-say note containing: region, retention days, required output format, and citation IDs.\n- Then respond with SUBMIT.\n\nPhase 2:\n- Start from clean repo state.\n- Rehydrate context from your Phase 1 handoff note and decisions.\n- Implement the fix and run tests.\n\nConstraints:\n- Minimal change\n- Do not modify tests\n",
+      "test_command": "pytest -q tests/test_decision_trace.py",
+      "wc_allow_write": true,
+      "threads_seed_topic": "custom-bench-org-knowledge",
+      "threads_seed_entries": [
+        {
+          "entry_id": "01KVC00000000000000000002",
+          "title": "Decision: region for retention policy",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\nThe retention policy region is `us-west-2`."
+        },
+        {
+          "entry_id": "01KVC00000000000000000003",
+          "title": "Decision: retention days for region policy",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\nThe retention period is `30` days."
+        },
+        {
+          "entry_id": "01KVC00000000000000000004",
+          "title": "Decision: required output format",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\n`get_region_retention_policy()` must return `REGION=<region>;RETENTION_DAYS=<days>` and citations must include the two fact entry IDs."
+        }
+      ],
+      "citation_required": true,
+      "citation_gold_ids": [
+        "01KVC00000000000000000002",
+        "01KVC00000000000000000003"
+      ],
+      "phases": [
+        {
+          "phase_id": "capture_handoff_note",
+          "max_steps": 12,
+          "cost_limit": 0.18,
+          "reset_repo_after": true
+        },
+        {
+          "phase_id": "rehydrate_and_apply_fix",
+          "max_steps": 22,
+          "cost_limit": 0.30,
+          "reset_repo_after": false
+        }
+      ]
+    },
+    {
+      "task_id": "distilled-knowledge-citation-required",
+      "type": "distilled_knowledge",
+      "title": "Use distilled policy facts with exact citations",
+      "max_steps": 25,
+      "cost_limit": 0.35,
+      "problem_statement": "Implement `custom_bench_app.decision_trace.get_region_retention_policy()` and `get_region_retention_policy_citations()` so tests pass.\n\nImportant:\n- A Watercooler summary note exists, but you must cite source decision IDs for factual claims.\n- Do not rely on uncited summaries.\n\nConstraints:\n- Minimal change\n- Do not modify tests\n",
+      "test_command": "pytest -q tests/test_decision_trace.py",
+      "threads_seed_topic": "custom-bench-org-knowledge",
+      "threads_seed_entries": [
+        {
+          "entry_id": "01KVC00000000000000000005",
+          "title": "Decision: region",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\nRegion is `us-west-2`."
+        },
+        {
+          "entry_id": "01KVC00000000000000000006",
+          "title": "Decision: retention days",
+          "role": "planner",
+          "entry_type": "Decision",
+          "body": "Spec: planner-architecture\n\nRetention period is `30`."
+        },
+        {
+          "entry_id": "01KVC00000000000000000007",
+          "title": "Summary: region and retention",
+          "role": "planner",
+          "entry_type": "Note",
+          "body": "Spec: planner-architecture\n\nSummary: `REGION=us-west-2;RETENTION_DAYS=30`. Use source decision IDs for citations."
+        }
+      ],
+      "citation_required": true,
+      "citation_gold_ids": [
+        "01KVC00000000000000000005",
+        "01KVC00000000000000000006"
       ]
     },
     {

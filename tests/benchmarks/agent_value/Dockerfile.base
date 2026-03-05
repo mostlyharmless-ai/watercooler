@@ -1,0 +1,17 @@
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install watercooler-cloud from local source (staged by build script).
+# The [bench] extra pulls in openhands-sdk.
+COPY wc-cloud-src/ /tmp/wc-cloud/
+RUN pip install --no-cache-dir "/tmp/wc-cloud[bench]" && rm -rf /tmp/wc-cloud
+
+# Project codebase (watercooler-site, cloned by build script on the host
+# where Git credentials are available).
+COPY wc-site/ /repo/
+
+WORKDIR /repo
+ENV PYTHONPATH=/usr/local/lib/python3.12/site-packages
+CMD ["bash", "-lc", "sleep infinity"]

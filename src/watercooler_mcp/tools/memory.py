@@ -322,6 +322,18 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
                     diagnostics["llm_api_key_format"] = f"unusual format: {llm_key[:10]}..."
             # Legacy field check (for backwards compatibility awareness)
             diagnostics["openai_key_set"] = bool(config.openai_api_key)  # Deprecated field
+            # FalkorDB connection (T2 uses FalkorDB just like T3)
+            # "localhost"/6379 are the actual FalkorDB defaults, not "(not set)" sentinels
+            diagnostics["falkordb_host"] = config.falkordb_host or "localhost"
+            diagnostics["falkordb_port"] = (
+                config.falkordb_port if config.falkordb_port is not None else 6379
+            )
+            # config attribute is "database"; surfaced as "graph_name" for parity with T3
+            diagnostics["graph_name"] = config.database or "watercooler"
+            # Embedding config (T2 uses embeddings for entity extraction)
+            diagnostics["embedding_model"] = config.embedding_model or "(not set)"
+            diagnostics["embedding_api_base"] = config.embedding_api_base or "(not set)"
+            diagnostics["embedding_api_key_set"] = bool(config.embedding_api_key)
         else:
             diagnostics["config_issue"] = (
                 "Graphiti not enabled. Either set WATERCOOLER_GRAPHITI_ENABLED=1, "
@@ -372,9 +384,10 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
                     Path(leanrag_cfg.leanrag_path).exists() if leanrag_cfg.leanrag_path else False
                 )
                 t3["work_dir"] = str(leanrag_cfg.work_dir) if leanrag_cfg.work_dir else "(none)"
-                t3["falkordb_host"] = leanrag_cfg.falkordb_host or "(not set)"
+                t3["graph_name"] = leanrag_cfg.work_dir.name if leanrag_cfg.work_dir else "(not set)"
+                t3["falkordb_host"] = leanrag_cfg.falkordb_host or "localhost"
                 t3["falkordb_port"] = (
-                    leanrag_cfg.falkordb_port if leanrag_cfg.falkordb_port is not None else "(not set)"
+                    leanrag_cfg.falkordb_port if leanrag_cfg.falkordb_port is not None else 6379
                 )
                 t3["llm_api_key_set"] = bool(leanrag_cfg.llm_api_key)
                 t3["llm_api_base"] = leanrag_cfg.llm_api_base or "(not set)"

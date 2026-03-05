@@ -58,7 +58,7 @@ Or use standard GitHub environment variables (`GITHUB_TOKEN` or `GH_TOKEN`).
 - CI/CD: Use GitHub Actions secrets or environment-specific tokens
 
 **Advanced configuration:**
-For fine-grained control, see [Environment Variables Reference](ENVIRONMENT_VARS.md) to customize:
+For fine-grained control, see [Environment Variables Reference](CONFIGURATION.md#environment-variables-reference) to customize:
 - Agent identity (`WATERCOOLER_AGENT`)
 - Thread directory override (`WATERCOOLER_DIR`)
 - Git authorship (`WATERCOOLER_GIT_AUTHOR`, `WATERCOOLER_GIT_EMAIL`)
@@ -148,7 +148,7 @@ See [WATERCOOLER_SETUP.md](../.github/WATERCOOLER_SETUP.md) for the detailed set
 
 ## Additional Resources
 
-- **[Environment Variables](ENVIRONMENT_VARS.md)** - Advanced configuration reference
+- **[Environment Variables](CONFIGURATION.md#environment-variables-reference)** - Advanced configuration reference
 - **[MCP Server Guide](mcp-server.md)** - Tool reference and parameters
 - **[Troubleshooting](TROUBLESHOOTING.md)** - Common issues and solutions
 

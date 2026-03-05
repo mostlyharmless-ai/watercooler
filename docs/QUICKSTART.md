@@ -1,152 +1,130 @@
 # Quickstart
 
-Zero to first thread in 5 minutes. This guide covers installing watercooler-cloud, wiring it
-to your MCP client, and running your first commands.
+Zero to first thread entry in under 10 minutes.
 
-## 1. Install
+## Prerequisites
 
-```bash
-pip install "watercooler-cloud[mcp]"
-```
+- Python 3.10 or later
+- `uv` package manager
 
-Or install from source for development:
+Install `uv` (pick one):
 
 ```bash
-git clone https://github.com/mostlyharmless-ai/watercooler-cloud.git
-cd watercooler-cloud
-pip install -e ".[mcp]"
+# macOS / Linux — standalone installer (no Python required)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows — standalone installer
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# If you already have Python — via pip
+pip install uv
 ```
 
-This gives you two commands: `watercooler` (CLI) and `watercooler-mcp` (MCP server).
+---
 
-## 2. Connect your MCP client
+## Step 1: Install
 
-Pick your editor and run one setup command. The server auto-discovers your repo, branch,
-and threads directory — no manual configuration needed.
+```bash
+uv tool install --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-cloud
+```
 
-### Claude Code
+This installs the `watercooler` CLI for terminal use. Your MCP client runs the server
+on-demand via `uvx` — no separate install step is needed for the MCP server (Step 3).
+
+**Verify:**
+
+```bash
+watercooler --help
+```
+
+---
+
+## Step 2: Authenticate
+
+```bash
+gh auth login
+gh auth setup-git
+```
+
+These two commands set up GitHub authentication for both git operations and the MCP
+server. For other auth methods (PAT, environment variable, SSH), see
+[AUTHENTICATION.md](./AUTHENTICATION.md).
+
+---
+
+## Step 3: Connect your MCP client
+
+**Claude Code (one-liner):**
 
 ```bash
 claude mcp add --transport stdio watercooler-cloud --scope user \
-  -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler-cloud@stable watercooler-mcp
+  -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-mcp
 ```
 
-### Codex
+Restart Claude Code after running. For Codex, Cursor, or manual config, see
+[MCP-CLIENTS.md](./MCP-CLIENTS.md) — each section is self-contained.
+
+---
+
+## Step 4: Run the health check
+
+From inside your MCP client, call:
+
+```python
+watercooler_health(code_path=".")
+```
+
+This runs the setup doctor and reports the status of git auth, the MCP server, and your
+threads directory.
+
+> If the health check reports any issues, stop here. See
+> [TROUBLESHOOTING.md — server not loading](./TROUBLESHOOTING.md#server-not-loading)
+> for the most common fixes before continuing.
+
+---
+
+## Step 5: Create your first thread and post an entry
+
+**Create a thread:**
 
 ```bash
-codex mcp add watercooler-cloud \
-  -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler-cloud@stable watercooler-mcp
+watercooler init-thread my-first-topic --title "My first thread" --ball human
 ```
 
-### Cursor
+The `--ball` flag sets who acts next. It defaults to `codex` — pass `--ball human` for
+solo use so the ball starts with you.
 
-Edit `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "watercooler-cloud": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/mostlyharmless-ai/watercooler-cloud@stable",
-        "watercooler-mcp"
-      ]
-    }
-  }
-}
-```
-
-### ChatGPT
-
-ChatGPT requires an HTTPS endpoint (Business/Enterprise plan). See
-[ChatGPT MCP integration](CHATGPT_MCP_INTEGRATION.md) for the full
-setup with ngrok tunneling.
-
-> **Note:** `uvx` must be in your PATH. If not found, use the full path
-> (e.g., `~/.local/bin/uvx`).
-
-## 3. Create your first thread
-
-Using the CLI:
-
-```bash
-watercooler init-thread my-first-topic \
-  --owner agent \
-  --participants "agent, Claude" \
-  --ball agent
-```
-
-Or from your MCP client, call `watercooler_list_threads` to see existing threads.
-
-## 4. Basic commands
-
-### say -- post an entry and flip the ball
+**Post an entry:**
 
 ```bash
 watercooler say my-first-topic \
-  --agent Claude \
-  --role implementer \
   --title "Hello from the watercooler" \
   --body "First entry in our new thread."
 ```
 
-Via MCP:
+The `--role` flag defaults to your git username. Pass `--role planner`, `--role pm`,
+`--role implementer`, etc. to match what you're doing.
 
-```python
-watercooler_say(
-    topic="my-first-topic",
-    title="Hello from the watercooler",
-    body="First entry in our new thread.",
-    role="implementer",
-    code_path=".",
-    agent_func="Claude Code:opus-4:implementer"
-)
-```
-
-`say` automatically flips the ball to the counterpart agent.
-
-### ack -- acknowledge without flipping the ball
-
-```bash
-watercooler ack my-first-topic
-```
-
-Use `ack` when you want to add a note but keep the ball where it is.
-
-### handoff -- pass the ball to a specific agent
-
-```bash
-watercooler handoff my-first-topic \
-  --agent Claude \
-  --note "Ready for your review"
-```
-
-### set-status -- update thread status
-
-```bash
-watercooler set-status my-first-topic IN_REVIEW
-```
-
-Status values: `OPEN`, `IN_REVIEW`, `CLOSED` (or any custom string).
-
-## 5. Verify it works
-
-List all threads and confirm your new topic appears:
+**List all threads:**
 
 ```bash
 watercooler list
 ```
 
-Or via MCP:
+You should see `my-first-topic` in the output.
 
-```python
-watercooler_list_threads(code_path=".")
+---
+
+## Upgrade path
+
+To update to the latest version:
+
+```bash
+uv cache clean watercooler-cloud
+uv tool install --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-cloud
 ```
 
-## Further reading
+Then restart your MCP client so the server picks up the new version.
 
-- [CLI reference](CLI_REFERENCE.md) -- full command syntax and options
-- [MCP server guide](mcp-server.md) -- all MCP tools and parameters
-- [Installation guide](INSTALLATION.md) -- authentication, environment
-  variables, and advanced configuration
+> **Stability:** `main` is maintained as the stable release branch. Installing from
+> `@main` gives you the latest released version.

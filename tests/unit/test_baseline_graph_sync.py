@@ -679,8 +679,10 @@ def test_should_not_update_summary_regular_note():
 # ============================================================================
 
 
-def test_embedding_config_defaults():
+def test_embedding_config_defaults(monkeypatch, isolated_config):
     """Test EmbeddingConfig has sensible defaults."""
+    for k in ("EMBEDDING_MODEL", "EMBEDDING_API_BASE", "GLM_MODEL", "GLM_EMBEDDING_MODEL"):
+        monkeypatch.delenv(k, raising=False)
     config = EmbeddingConfig()
 
     assert config.api_base == "http://localhost:8080/v1"

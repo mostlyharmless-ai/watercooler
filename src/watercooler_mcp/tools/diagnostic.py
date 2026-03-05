@@ -103,7 +103,7 @@ def _get_service_gap_instructions(service_status: dict) -> list[str]:
         instructions.insert(0, "")
         instructions.insert(1, "Service Setup Instructions:")
         instructions.append("")
-        instructions.append("  For full setup guide: https://github.com/MostlyHarmless-AI/watercooler-cloud/docs/SETUP.md")
+        instructions.append("  For full setup guide: https://github.com/mostlyharmless-ai/watercooler/blob/main/docs/SETUP.md")
 
     return instructions
 

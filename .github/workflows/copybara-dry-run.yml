@@ -1,0 +1,73 @@
+# .github/workflows/copybara-dry-run.yml
+name: Copybara Allowlist Validation
+
+on:
+  pull_request:
+    branches: [stable]
+  # Also run on direct pushes to stable (belt-and-suspenders if branch protection is bypassed).
+  # Branch protection requiring PR + this check as a required status is the primary gate;
+  # this trigger ensures validation still fires even if protection is temporarily relaxed.
+  push:
+    branches: [stable]
+
+jobs:
+  validate-allowlist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history required so git diff origin/<base> resolves correctly.
+          # Default shallow clone (depth: 1) causes "bad revision" errors on the diff steps.
+          fetch-depth: 0
+
+      - name: Validate copy.bara.sky allowlist
+        run: python3 scripts/validate-copybara-allowlist.py
+
+      - name: Scan for secrets in files that will be synced
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          # --no-git scans working tree files only (not git history).
+          # We care about what would be synced now, not historical commits.
+          # .gitleaks.toml suppresses false positives from local tooling dirs
+          # (.venv, __pycache__, .mypy_cache, .serena) that aren't in the allowlist.
+          ./gitleaks detect --no-git --source . --exit-code 1
+          rm -f gitleaks
+
+      - name: Confirm pyproject.public.toml is updated when pyproject.toml changes
+        # Only meaningful on pull_request where github.base_ref is set.
+        # On push events (direct-to-stable), github.base_ref is empty and the diff would fail.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          TOML_CHANGED=$(git diff "origin/$BASE_REF" -- pyproject.toml | wc -l)
+          PUBLIC_CHANGED=$(git diff "origin/$BASE_REF" -- pyproject.public.toml | wc -l)
+          if [ "$TOML_CHANGED" -gt 0 ] && [ "$PUBLIC_CHANGED" -eq 0 ]; then
+            echo "ERROR: pyproject.toml changed but pyproject.public.toml was not updated."
+            echo "Update pyproject.public.toml to strip any new private dependencies before merging."
+            exit 1
+          fi
+
+      - name: Scan pyproject.public.toml for private git dependency URLs
+        run: |
+          # Match "git+https://github.com/mostlyharmless-ai/" — private pip dep pattern.
+          # Do NOT match bare "mostlyharmless-ai/" which also appears in [project.urls]
+          # (Homepage, Repository) and is safe to publish.
+          if grep -q "git+https://github.com/mostlyharmless-ai/" pyproject.public.toml; then
+            echo "ERROR: pyproject.public.toml contains private git dependency URLs:"
+            grep "git+https://github.com/mostlyharmless-ai/" pyproject.public.toml
+            exit 1
+          fi
+          echo "pyproject.public.toml: no private git dependency URLs found."
+
+      - name: Scan src/ for private GitHub URLs
+        run: |
+          # The URL transform only covers tests/schemas/docs — not src/. Any hardcoded
+          # github.com/..../watercooler-cloud URL in src/** would be published verbatim.
+          # Case-insensitive: catches MostlyHarmless-AI/watercooler-cloud (mixed case).
+          if grep -ri "github\.com[^\"']*watercooler-cloud" src/; then
+            echo "ERROR: Private repo URL found in src/**. Fix at source or add a src/** transform."
+            exit 1
+          fi
+          echo "src/: no private GitHub URLs found."

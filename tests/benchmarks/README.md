@@ -3,6 +3,29 @@
 Benchmark code lives in this repository because it is primarily intended to
 validate Watercooler’s behavior and value claims.
 
+### Benchmark contract (intent-strict)
+
+The canonical benchmark question is:
+**does Watercooler improve process efficiency over a baseline agent on identical tasks?**
+
+Contract:
+- Primary headline metrics come from a **paired SWE-bench subset matrix**:
+  - modes: `baseline`, `inject`, `tools`, `tools_guided`
+  - all modes run on the exact same `instance_ids`
+  - report baseline values + per-mode deltas for:
+    - `cost_per_resolved` (primary)
+    - `steps_per_resolved` (primary)
+    - `duplicate_command_rate` (primary)
+    - `retrieval_to_action_proxy_rate` (primary)
+    - `resolve_rate` (secondary outcome)
+- Coordination-under-overlap remains a **secondary** A/B signal
+  (`baseline` vs `tools_guided`), not the primary efficacy headline.
+- `memory_qa` remains a **semantic correctness gate** for T2/T3 behavior, not
+  an efficacy headline.
+
+Legacy "phase" framing and CooperBench-first narratives are intentionally
+de-emphasized in favor of this matrix.
+
 ### What belongs in git
 
 - **Runner / harness code**: `tests/benchmarks/**`
@@ -70,6 +93,70 @@ python3 -m tests.benchmarks.wcbench \
   --run-id wcbench-swebench-baseline \
   --swebench-instance-ids sympy__sympy-20590
 ```
+
+#### Canonical matrix runner (paired deltas)
+
+Use this as the top-level benchmark entrypoint:
+
+```bash
+python3 tests/benchmarks/scripts/run_full_benchmark.py \
+  --model minimax/MiniMax-M2.5 \
+  --dataset SWE-bench/SWE-bench_Lite \
+  --split test \
+  --instance-ids sympy__sympy-20590 django__django-11019 \
+  --swebench-wc-pack tests/benchmarks/fixtures/knowledge-packs/swe-lite-pack \
+  --wc-tier-ceiling T3
+```
+
+Outputs:
+- `logs/benchmark-<ts>/BENCHMARK_REPORT.md` (paired baseline-vs-WC deltas)
+- `logs/benchmark-<ts>/benchmark_results.json` (machine-readable matrix)
+- `logs/benchmark-<ts>/benchmark-*/` run folders per mode/track
+
+#### Calibrated subset workflow (recommended)
+
+When baseline resolves `0`, some per-resolved efficiency deltas are undefined.
+Use calibration mode to choose a reproducible 8-12 instance subset from prior
+baseline evidence:
+
+```bash
+python3 tests/benchmarks/scripts/run_full_benchmark.py \
+  --calibrate \
+  --calibrate-size 8 \
+  --calibrate-min-baseline-resolved 2 \
+  --model minimax/MiniMax-M2.5 \
+  --dataset SWE-bench/SWE-bench_Lite \
+  --split test \
+  --swebench-wc-pack logs/knowledge-packs \
+  --output-dir logs/benchmark-intent-calibrated-<ts>
+```
+
+Calibration writes:
+- `calibration_selected_instances.json` with selected IDs and candidate stats
+- the standard report/JSON outputs for the selected matrix run
+
+### How to read the report in practical terms
+
+`BENCHMARK_REPORT.md` now includes:
+- **Task context**: each instance ID with short issue summary and tags
+- **Practical interpretation**: plain-language explanation of what deltas imply
+  for engineering effort and workflow behavior
+- **Confidence/caveats**: sample-size and baseline-floor limitations
+
+Interpretation guide:
+- `cost_per_resolved`: lower means less spend per successful fix
+- `steps_per_resolved`: lower means less agent effort per successful fix
+- `duplicate_command_rate`: lower means less command rework/looping
+- `retrieval_to_action_proxy_rate`: higher means WC retrieval more often turns
+  into concrete edits/tests
+
+### Headline-ready run criteria
+
+Treat a run as headline-ready when all are true:
+- baseline resolves >0 tasks
+- tools/tools_guided show non-zero `wc_commands`
+- retrieval-to-action is populated for tool modes
+- report includes task context + practical interpretation + caveats
 
 #### Coordination-under-overlap track (CooperBench-like subset)
 

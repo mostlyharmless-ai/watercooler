@@ -1,0 +1,215 @@
+# copy.bara.sky
+# Publishes watercooler-cloud@stable → mostlyharmless-ai/watercooler@main
+#
+# SECURITY: This file is NOT in the sync allowlist (it reveals the private repo URL).
+# It lives only in the private repo.
+
+core.workflow(
+    name = "default",
+    origin = git.origin(
+        url = "https://github.com/mostlyharmless-ai/watercooler-cloud.git",
+        ref = "stable",
+    ),
+    destination = git.destination(
+        url = "https://github.com/mostlyharmless-ai/watercooler.git",
+        push = "main",
+    ),
+    origin_files = glob(
+        [
+            # Core library & MCP server
+            "src/**",
+            # Tests (see exclude below)
+            "tests/**",
+            # User-facing documentation
+            "docs/**",
+            # JSON schemas
+            "schemas/**",
+            # User-facing scripts only (4 confirmed scripts)
+            "scripts/install-mcp.sh",
+            "scripts/install-mcp.ps1",
+            "scripts/mcp-server-daemon.sh",
+            "scripts/git-credential-watercooler",
+            # Public CI workflows only (2 files)
+            ".github/workflows/ci.yml",
+            ".github/workflows/release.yml",
+            # Root config & community files
+            # NOTE: pyproject.toml is NOT in the allowlist — see pyproject.public.toml below.
+            # The sanitized public version is maintained as a separate file and renamed by transform.
+            "pyproject.public.toml",  # maintained in private repo; moved to pyproject.toml in dest
+            "README.md",
+            "LICENSE",
+            "SECURITY.md",
+            "CONTRIBUTING.md",
+            "CODE_OF_CONDUCT.md",
+            "fastmcp.json",  # confirmed safe: only contains relative path to server.py
+            ".gitignore",
+            ".gitattributes",
+            ".python-version",
+            ".tool-versions",
+            # Server entry points (pure import shims, audited safe)
+            "server.py",
+            "main.py",
+        ],
+        exclude = [
+            # Internal benchmark fixtures
+            "tests/benchmarks/**",
+            # Real conversation history stored as integration test fixtures
+            "tests/integration/.cli-threads/**",
+            # Root-level cli-threads fixture dir (thread-style conversation data)
+            "tests/.cli-threads/**",
+            # LeanRAG test artifacts (JSON graph data from test runs)
+            "tests/test_artifacts/**",
+            # Package-internal scripts directory — excluded because:
+            # (a) src/watercooler_mcp/scripts/git-credential-watercooler is identical
+            #     to the user-facing root scripts/git-credential-watercooler (which IS
+            #     published). Publishing both would create a duplicate.
+            # (b) This directory is a package deployment artifact, not user documentation.
+            # The root scripts/ copy is the canonical user-facing version.
+            "src/watercooler_mcp/scripts/**",
+            # Private memory backend implementations (graphiti, leanrag).
+            # The memory/graphiti/leanrag extras are removed from pyproject.public.toml,
+            # but the module would still ship via src/** without this exclusion.
+            # Excluded until the memory backends are ready for open-source release.
+            "src/watercooler_memory/**",
+            # Real internal project thread captured as a test fixture — not synthetic.
+            # Contains: real developer identity, real internal topic, implementation details.
+            # Entire directory excluded until all files are replaced with synthetic data.
+            "tests/fixtures/threads/**",
+            # Transient test output directory — excluded to prevent test-run artifacts
+            # (e.g. alpha.md stubs) from accumulating in the public repo over time.
+            "tests/tmp_threads/**",
+        ],
+    ),
+    authoring = authoring.overwrite("Watercooler Sync Bot <sync@watercoolerdev.com>"),
+    mode = "SQUASH",
+    transformations = [
+        # --- Replace private pyproject.toml with sanitized public version ---
+        # pyproject.toml is NOT in origin_files; pyproject.public.toml is.
+        # This move renames it to pyproject.toml in the destination.
+        # Doing this via core.move avoids string-replacement inside TOML quoted values,
+        # which would produce invalid PEP 508 requirements.
+        core.move("pyproject.public.toml", "pyproject.toml"),
+
+        # --- Fix runtime package name lookups in src/ ---
+        # importlib.metadata.version("watercooler-cloud") raises PackageNotFoundError on
+        # public builds where the distribution is named "watercooler". Without this transform,
+        # `watercooler --version` and the MCP /version endpoint would report "0.0.0-dev".
+        # Affects: src/watercooler/__init__.py, src/watercooler_mcp/__init__.py
+        core.replace(
+            before = 'version("watercooler-cloud")',
+            after  = 'version("watercooler")',
+            paths  = glob(["src/**"]),
+        ),
+        # config.py get_version() tries a list of dist names; update the private name.
+        # Affects: src/watercooler_mcp/config.py get_version()
+        core.replace(
+            before = '("watercooler-cloud", "watercooler-mcp")',
+            after  = '("watercooler", "watercooler-mcp")',
+            paths  = glob(["src/**"]),
+        ),
+
+        # --- Rewrite private repo URL in test/schema/doc references ---
+        # tests/unit/test_dual_stream_sufficiency.py and test_mcp_entry_tools.py embed
+        # "mostlyharmless-ai/watercooler-cloud"; public users should see the public repo URL.
+        core.replace(
+            before = "mostlyharmless-ai/watercooler-cloud",
+            after  = "mostlyharmless-ai/watercooler",
+            paths  = glob(["tests/**", "schemas/**", "docs/**"]),
+        ),
+
+        # --- NOTE: bare package name rename deferred ---
+        # Replacing "watercooler-cloud" → "watercooler" in schemas/**, docs/**, and other
+        # non-src locations is a branding/full-rename decision deferred to a later milestone.
+        # The transforms above handle the two cases that ARE required for the metadata rename:
+        #   (a) importlib.metadata.version() lookups in src/** (correctness requirement)
+        #   (b) private GitHub repo URLs in tests/schemas/docs (security requirement)
+        # A bare string replace across docs would be part of the full-rename PR.
+
+        # --- Fix CI install command: drop [graphiti] extra (private dep) ---
+        core.replace(
+            before = '".[dev,graphiti]"',
+            after  = '".[dev]"',
+            paths  = glob([".github/workflows/ci.yml"]),
+        ),
+        # --- Strip two-line internal comment from ci.yml (references LeanRAG/graphiti extras) ---
+        core.replace(
+            before = "      # Note: Using graphiti instead of memory to avoid private LeanRAG dependency\n"
+                     "      # LeanRAG tests are skipped anyway (integration_leanrag_llm marker)\n",
+            after  = "",
+            paths  = glob([".github/workflows/ci.yml"]),
+        ),
+        # --- Strip internal `staging` branch from ci.yml workflow triggers ---
+        # Public repo has no `staging` branch; publishing this trigger leaks internal branch naming.
+        core.replace(
+            before = "branches: [ main, staging ]",
+            after  = "branches: [ main ]",
+            paths  = glob([".github/workflows/ci.yml"]),
+        ),
+
+        # --- Strip internal release process comment from release.yml ---
+        # Comment discloses the staging→stable→tag internal release flow.
+        # All three lines of the comment must be covered; stripping only the first two
+        # would leave the third line ("  # all tests pass before code reaches stable.\n")
+        # verbatim in the public repo, still disclosing the internal flow.
+        core.replace(
+            before = "  # Note: No test job - code is already validated on staging before tagging.\n"
+                     "  # Running tests here would be redundant. The staging branch CI ensures\n"
+                     "  # all tests pass before code reaches stable.\n",
+            after  = "",
+            paths  = glob([".github/workflows/release.yml"]),
+        ),
+
+        # --- Fix install-mcp.sh: sentinel check and user messages use public package name ---
+        # The sentinel `grep -q "watercooler-cloud" pyproject.toml` would fail for public users
+        # because the public pyproject.toml (from pyproject.public.toml) has name="watercooler".
+        # Use the full `name = "watercooler"` field match instead of the bare substring "watercooler"
+        # to avoid a false-positive on private-repo checkouts where pyproject.toml also contains
+        # the word "watercooler" (as a prefix of "watercooler-cloud").
+        # The ^ anchor ensures we match the actual TOML key line, not a comment such as
+        # "# name = "watercooler" is the public package name" which would also satisfy an
+        # unanchored grep and cause a false-positive on any repo with such a comment.
+        core.replace(
+            before = 'grep -q "watercooler-cloud" pyproject.toml',
+            after  = "grep -q '^name = \"watercooler\"' pyproject.toml",
+            paths  = glob(["scripts/install-mcp.sh"]),
+        ),
+        core.replace(
+            before = 'error "This script must be run from the watercooler-cloud directory"',
+            after  = 'error "This script must be run from the watercooler directory"',
+            paths  = glob(["scripts/install-mcp.sh"]),
+        ),
+        core.replace(
+            before = "watercooler-cloud[mcp]",
+            after  = "watercooler[mcp]",
+            paths  = glob(["scripts/install-mcp.sh", "scripts/install-mcp.ps1"]),
+        ),
+        # --- Fix install-mcp.ps1: MCP server name and user-visible messages ---
+        # Line 89: server name argument passed to `claude mcp add` — functional, not just cosmetic.
+        # Lines 71, 77, 119: user-facing error/info messages referencing private package name.
+        core.replace(
+            before = '"watercooler-cloud",',
+            after  = '"watercooler",',
+            paths  = glob(["scripts/install-mcp.ps1"]),
+        ),
+        core.replace(
+            before = "Run this script from the watercooler-cloud repository root.",
+            after  = "Run this script from the watercooler repository root.",
+            paths  = glob(["scripts/install-mcp.ps1"]),
+        ),
+        core.replace(
+            before = "Installing watercooler-cloud with MCP extras (editable).",
+            after  = "Installing watercooler with MCP extras (editable).",
+            paths  = glob(["scripts/install-mcp.ps1"]),
+        ),
+        core.replace(
+            before = "verify the watercooler-cloud server.",
+            after  = "verify the watercooler server.",
+            paths  = glob(["scripts/install-mcp.ps1"]),
+        ),
+
+        # --- Fixed public commit message (no squash_notes = no author identity leak) ---
+        metadata.replace_message(
+            "Watercooler release sync\n\nPublished from watercooler-cloud@stable.\n"
+        ),
+    ],
+)

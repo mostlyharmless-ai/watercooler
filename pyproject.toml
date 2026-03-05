@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "watercooler-cloud"
-version = "0.2.5"
+version = "0.2.6-dev"
 description = "File-based collaboration protocol for agentic coding projects"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,9 +37,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mostlyharmless-ai/watercooler-cloud"
-Repository = "https://github.com/mostlyharmless-ai/watercooler-cloud"
-Issues = "https://github.com/mostlyharmless-ai/watercooler-cloud/issues"
+Homepage = "https://github.com/mostlyharmless-ai/watercooler"
+Repository = "https://github.com/mostlyharmless-ai/watercooler"
+Issues = "https://github.com/mostlyharmless-ai/watercooler/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -59,6 +59,9 @@ bench = [
     "jieba>=0.42.1",
     "rapidfuzz>=3.10.1",
     "umap-learn>=0.5.6",
+    # OpenHands SDK for agent_value track (requires Python 3.12+)
+    "openhands-sdk>=1.0,<2; python_version >= '3.12'",
+    "openhands-tools>=1.0,<2; python_version >= '3.12'",
 ]
 mcp = [
     # All MCP deps (fastmcp, python-ulid) are already in [project].dependencies.

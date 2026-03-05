@@ -380,7 +380,7 @@ class TestPipelineConfig:
 class TestEmbeddingConfig:
     """Test embedding configuration defaults and standardization."""
 
-    def test_embedding_defaults_standardized(self):
+    def test_embedding_defaults_standardized(self, monkeypatch, isolated_config):
         """Test that embedding defaults match the standardized configuration.
 
         Standard env vars (per MEMORY_INTEGRATION_ROADMAP.md):
@@ -388,6 +388,11 @@ class TestEmbeddingConfig:
         - EMBEDDING_MODEL=bge-m3
         - EMBEDDING_DIM=1024
         """
+        for k in ("EMBEDDING_API_BASE", "EMBEDDING_MODEL", "EMBEDDING_DIM", "GLM_MODEL", "GLM_EMBEDDING_MODEL"):
+            monkeypatch.delenv(k, raising=False)
+        from watercooler.config_facade import config as cfg
+        cfg.reset()
+
         from watercooler_memory.embeddings import (
             DEFAULT_API_BASE,
             DEFAULT_MODEL,
@@ -403,8 +408,13 @@ class TestEmbeddingConfig:
         assert config.api_base == "http://localhost:8080/v1"
         assert config.model == "bge-m3"
 
-    def test_pipeline_embedding_config_defaults(self):
+    def test_pipeline_embedding_config_defaults(self, monkeypatch, isolated_config):
         """Test that pipeline EmbeddingConfig defaults are standardized."""
+        for k in ("EMBEDDING_API_BASE", "EMBEDDING_MODEL", "EMBEDDING_DIM", "GLM_MODEL", "GLM_EMBEDDING_MODEL"):
+            monkeypatch.delenv(k, raising=False)
+        from watercooler.config_facade import config as cfg
+        cfg.reset()
+
         from watercooler_memory.pipeline.config import EmbeddingConfig as PipelineEmbeddingConfig
 
         config = PipelineEmbeddingConfig()

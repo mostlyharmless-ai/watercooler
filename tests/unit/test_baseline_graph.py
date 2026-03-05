@@ -125,8 +125,11 @@ class TestSummarizerConfig:
         assert summarizer_config.api_base == "http://localhost:8000/v1"  # llama-server port
         assert summarizer_config.model == "qwen3:1.7b"
 
-    def test_from_env(self):
+    def test_from_env(self, monkeypatch, isolated_config):
         """Test creating config from environment variables."""
+        # Clear LLM_* so BASELINE_GRAPH_* (legacy) is used; isolated_config avoids TOML.
+        for k in ("LLM_API_BASE", "LLM_MODEL", "LLM_API_KEY"):
+            monkeypatch.delenv(k, raising=False)
         env_vars = {
             "BASELINE_GRAPH_API_BASE": "http://env:9090/v1",
             "BASELINE_GRAPH_MODEL": "env-model",
