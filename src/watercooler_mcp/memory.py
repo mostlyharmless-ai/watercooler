@@ -35,13 +35,26 @@ from watercooler.path_resolver import derive_group_id
 try:
     from watercooler_memory.backends.graphiti import GraphitiConfig, _derive_database_name
 except ImportError:
-    # If backend not installed, define minimal config for type hints
+    # If backend not installed, define a stub that matches all fields used by
+    # load_graphiti_config() so the function can construct and return a config
+    # object on public installations (backend calls will not succeed without
+    # the private watercooler_memory package).
     from dataclasses import dataclass
+    from typing import Optional as _Opt
     @dataclass
     class GraphitiConfig:  # type: ignore
-        """Minimal config stub when backend unavailable."""
-        openai_api_key: str
+        """Config stub when watercooler_memory backend is not installed."""
+        llm_api_key: str = ""
+        llm_api_base: _Opt[str] = None
+        llm_model: str = ""
+        embedding_api_key: str = ""
+        embedding_api_base: _Opt[str] = None
+        embedding_model: str = ""
+        falkordb_host: str = "localhost"
+        falkordb_port: int = 6379
+        falkordb_password: _Opt[str] = None
         reranker: str = "rrf"
+        database: str = ""
 
     def _derive_database_name(code_path: Path | str | None) -> str:
         """Fallback database name derivation using unified function."""
