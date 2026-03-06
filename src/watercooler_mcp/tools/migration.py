@@ -26,10 +26,34 @@ from watercooler.baseline_graph.writer import (
     get_thread_from_graph as _get_thread_from_graph,
     get_entries_for_thread as _get_entries_for_thread,
 )
-from watercooler_memory.backends import TransientError, BackendError
-from watercooler_memory.backends.graphiti import _derive_database_name
-from watercooler_memory.chunker import chunk_entry, ChunkerConfig, ChunkNode
-from watercooler_memory.schema import EntryNode
+try:
+    from watercooler_memory.backends import TransientError, BackendError
+    from watercooler_memory.backends.graphiti import _derive_database_name
+    from watercooler_memory.chunker import chunk_entry, ChunkerConfig, ChunkNode
+    from watercooler_memory.schema import EntryNode
+except ImportError:
+    # watercooler_memory is an optional private dependency; the migration tool
+    # will raise a clear error at call time if these are unavailable.
+    class TransientError(Exception):  # type: ignore[no-redef]
+        pass
+
+    class BackendError(Exception):  # type: ignore[no-redef]
+        pass
+
+    def _derive_database_name(*args, **kwargs):  # type: ignore[no-redef]
+        raise ImportError("watercooler_memory is required for migration")
+
+    def chunk_entry(*args, **kwargs):  # type: ignore[no-redef]
+        raise ImportError("watercooler_memory is required for migration")
+
+    class ChunkerConfig:  # type: ignore[no-redef]
+        pass
+
+    class ChunkNode:  # type: ignore[no-redef]
+        pass
+
+    class EntryNode:  # type: ignore[no-redef]
+        pass
 
 logger = logging.getLogger(__name__)
 
