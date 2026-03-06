@@ -86,6 +86,11 @@ core.workflow(
             # that only exists in the private repo.
             "tests/unit/test_check_memory_config.py",
             "tests/unit/test_index_graphiti.py",
+            # Tests for the migration tool: require watercooler_memory at runtime
+            # (the tool raises ImportError when watercooler_memory is absent).
+            # These test private-only migration functionality.
+            "tests/unit/test_migration_tool.py",
+            "tests/integration/test_memory_integration_phase1.py",
         ],
     ),
     authoring = authoring.overwrite("Watercooler Sync Bot <sync@watercoolerdev.com>"),
