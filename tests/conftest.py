@@ -30,6 +30,29 @@ __all__ = [
 ]
 
 
+import importlib.util as _importlib_util
+
+
+def pytest_ignore_collect(collection_path, config):  # type: ignore[override]
+    """Skip test files that import unavailable optional modules at collection time.
+
+    Prevents ModuleNotFoundError collection failures on installations without
+    the optional private watercooler_memory package (e.g. the public release).
+    The check is content-based so new memory test files are handled automatically.
+    """
+    if collection_path.suffix != ".py":
+        return None
+    if _importlib_util.find_spec("watercooler_memory") is not None:
+        return None  # package is available — collect everything normally
+    try:
+        content = collection_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if "watercooler_memory" in content:
+        return True  # skip: would fail with ModuleNotFoundError at import time
+    return None
+
+
 def pytest_sessionstart(session):  # type: ignore[override]
     root = Path(__file__).resolve().parents[1]
     src = root / "src"
