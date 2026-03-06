@@ -81,6 +81,11 @@ core.workflow(
             # Issue-ranker skill tests — depend on scripts in .claude/skills/issue-ranker/
             # which are not part of the public package and not in the Copybara allowlist.
             "tests/test_issue_ranker_*.py",
+            # Tests for private scripts not in the Copybara allowlist.
+            # These test internal tooling (check-memory-config.py, index_graphiti.py)
+            # that only exists in the private repo.
+            "tests/unit/test_check_memory_config.py",
+            "tests/unit/test_index_graphiti.py",
         ],
     ),
     authoring = authoring.overwrite("Watercooler Sync Bot <sync@watercoolerdev.com>"),
