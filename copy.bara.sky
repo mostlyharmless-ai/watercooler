@@ -78,6 +78,9 @@ core.workflow(
             # Transient test output directory — excluded to prevent test-run artifacts
             # (e.g. alpha.md stubs) from accumulating in the public repo over time.
             "tests/tmp_threads/**",
+            # Issue-ranker skill tests — depend on scripts in .claude/skills/issue-ranker/
+            # which are not part of the public package and not in the Copybara allowlist.
+            "tests/test_issue_ranker_*.py",
         ],
     ),
     authoring = authoring.overwrite("Watercooler Sync Bot <sync@watercoolerdev.com>"),
