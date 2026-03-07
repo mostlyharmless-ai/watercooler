@@ -39,6 +39,7 @@ from .github_api import (
     GitHubAPIError,
     GitHubConflictError,
 )
+from .config import ORPHAN_BRANCH_NAME
 from .observability import log_debug, log_error, log_warning
 
 # Graph file paths (monolithic format - deprecated, kept for backward compatibility)
@@ -238,7 +239,7 @@ def _get_github_client() -> tuple[str | None, GitHubClient | None]:
     client = GitHubClient(
         token=http_ctx.github_token,
         repo=threads_repo,
-        branch=http_ctx.effective_branch,
+        branch=ORPHAN_BRANCH_NAME,
     )
     return (None, client)
 
