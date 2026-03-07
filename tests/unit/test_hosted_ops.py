@@ -6,11 +6,54 @@ thread creation, and per-thread format handling.
 
 import pytest
 
+from watercooler_mcp.config import ORPHAN_BRANCH_NAME
+from watercooler_mcp.context import HttpRequestContext, set_http_context
 from watercooler_mcp.hosted_ops import (
+    _get_github_client,
     _reconstruct_markdown_from_graph,
     _validate_topic,
     _get_per_thread_paths,
 )
+
+
+class TestGetGithubClient:
+    """Tests for _get_github_client targeting the orphan branch."""
+
+    def test_uses_orphan_branch_not_effective_branch(self):
+        """Client must use ORPHAN_BRANCH_NAME even when branch header is set."""
+        ctx = HttpRequestContext(
+            user_id="u1",
+            repo="org/repo",
+            branch="feature/xyz",
+            github_token="ghp_test",
+        )
+        token = set_http_context(ctx)
+        try:
+            error, client = _get_github_client()
+            assert error is None
+            assert client is not None
+            assert client.branch == ORPHAN_BRANCH_NAME
+            assert client.branch != "feature/xyz"
+        finally:
+            set_http_context(HttpRequestContext(user_id=""))  # reset
+
+    def test_uses_orphan_branch_when_no_header(self):
+        """Client must use ORPHAN_BRANCH_NAME, not default 'main', when branch is None."""
+        ctx = HttpRequestContext(
+            user_id="u1",
+            repo="org/repo",
+            branch=None,
+            github_token="ghp_test",
+        )
+        token = set_http_context(ctx)
+        try:
+            error, client = _get_github_client()
+            assert error is None
+            assert client is not None
+            assert client.branch == ORPHAN_BRANCH_NAME
+            assert client.branch != "main"
+        finally:
+            set_http_context(HttpRequestContext(user_id=""))  # reset
 
 
 class TestReconstructMarkdownFromGraph:
