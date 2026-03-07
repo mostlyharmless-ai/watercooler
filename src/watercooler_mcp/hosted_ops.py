@@ -883,6 +883,7 @@ def _build_per_thread_graph_data(
     entry_title: str | None = None,
     body: str | None = None,
     timestamp: str | None = None,
+    code_branch: str | None = None,
 ) -> tuple[dict, list[dict], list[dict]]:
     """Build per-thread graph data structures.
 
@@ -903,6 +904,7 @@ def _build_per_thread_graph_data(
         entry_title: Entry title (required if entry_id provided)
         body: Entry body (required if entry_id provided)
         timestamp: Entry timestamp (required if entry_id provided)
+        code_branch: Code branch this entry was created in context of
 
     Returns:
         Tuple of (meta, entries, edges)
@@ -940,6 +942,8 @@ def _build_per_thread_graph_data(
                 "body": body,
                 "timestamp": timestamp,
             }
+            if code_branch:
+                entry_node["code_branch"] = code_branch
             entries.append(entry_node)
 
             # Add CONTAINS edge (thread -> entry)
@@ -1618,6 +1622,7 @@ def say_hosted(
     entry_type: str = "Note",
     entry_id: Optional[str] = None,
     create_if_missing: bool = True,
+    code_branch: Optional[str] = None,
 ) -> tuple[str | None, dict]:
     """Add an entry to a thread using GitHub API.
 
@@ -1688,6 +1693,11 @@ def say_hosted(
         # Thread title: use existing title if present, otherwise derive from topic
         # (NOT the entry title - that's a separate field)
         thread_title = meta.get("title", topic) if meta else topic
+        # Resolve code_branch: explicit param > HTTP context > None
+        effective_code_branch = code_branch
+        if not effective_code_branch and http_ctx:
+            effective_code_branch = http_ctx.effective_branch
+
         new_meta, new_entries, new_edges = _build_per_thread_graph_data(
             topic=topic,
             status=status,
@@ -1703,6 +1713,7 @@ def say_hosted(
             entry_title=title,
             body=body,
             timestamp=timestamp,
+            code_branch=effective_code_branch,
         )
 
         # Write to per-thread format
@@ -1842,6 +1853,7 @@ def ack_hosted(
     title: str = "Ack",
     body: str = "Acknowledged",
     entry_id: Optional[str] = None,
+    code_branch: Optional[str] = None,
 ) -> tuple[str | None, dict]:
     """Acknowledge a thread without flipping the ball (per-thread format only).
 
@@ -1875,6 +1887,12 @@ def ack_hosted(
         status = meta.get("status", "OPEN")
         ball = meta.get("ball", "Agent")  # Ball stays the same for ack
 
+        # Resolve code_branch: explicit param > HTTP context > None
+        http_ctx = get_http_context()
+        effective_code_branch = code_branch
+        if not effective_code_branch and http_ctx:
+            effective_code_branch = http_ctx.effective_branch
+
         # Build updated graph data with ack entry (ball unchanged)
         new_meta, new_entries, new_edges = _build_per_thread_graph_data(
             topic=topic,
@@ -1891,6 +1909,7 @@ def ack_hosted(
             entry_title=title,
             body=body,
             timestamp=timestamp,
+            code_branch=effective_code_branch,
         )
 
         # Write to per-thread format
@@ -1935,6 +1954,7 @@ def handoff_hosted(
     target_agent: Optional[str] = None,
     note: str = "",
     entry_id: Optional[str] = None,
+    code_branch: Optional[str] = None,
 ) -> tuple[str | None, dict]:
     """Hand off the ball to another agent (per-thread format only).
 
@@ -1968,6 +1988,12 @@ def handoff_hosted(
         status = meta.get("status", "OPEN")
         new_ball = target_agent or "Agent"  # Default to "Agent" if not specified
 
+        # Resolve code_branch: explicit param > HTTP context > None
+        http_ctx_local = get_http_context()
+        effective_code_branch = code_branch
+        if not effective_code_branch and http_ctx_local:
+            effective_code_branch = http_ctx_local.effective_branch
+
         # Build updated graph data
         if note:
             # Add handoff entry
@@ -1986,6 +2012,7 @@ def handoff_hosted(
                 entry_title=f"Handoff to {new_ball}",
                 body=note,
                 timestamp=timestamp,
+                code_branch=effective_code_branch,
             )
         else:
             # Just update ball, no entry
