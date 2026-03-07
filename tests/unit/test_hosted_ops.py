@@ -7,7 +7,7 @@ thread creation, and per-thread format handling.
 import pytest
 
 from watercooler_mcp.config import ORPHAN_BRANCH_NAME
-from watercooler_mcp.context import HttpRequestContext, set_http_context
+from watercooler_mcp.context import HttpRequestContext, set_http_context, clear_http_context
 from watercooler_mcp.hosted_ops import (
     _get_github_client,
     _reconstruct_markdown_from_graph,
@@ -27,7 +27,7 @@ class TestGetGithubClient:
             branch="feature/xyz",
             github_token="ghp_test",
         )
-        token = set_http_context(ctx)
+        set_http_context(ctx)
         try:
             error, client = _get_github_client()
             assert error is None
@@ -35,7 +35,7 @@ class TestGetGithubClient:
             assert client.branch == ORPHAN_BRANCH_NAME
             assert client.branch != "feature/xyz"
         finally:
-            set_http_context(HttpRequestContext(user_id=""))  # reset
+            clear_http_context()
 
     def test_uses_orphan_branch_when_no_header(self):
         """Client must use ORPHAN_BRANCH_NAME, not default 'main', when branch is None."""
@@ -45,7 +45,7 @@ class TestGetGithubClient:
             branch=None,
             github_token="ghp_test",
         )
-        token = set_http_context(ctx)
+        set_http_context(ctx)
         try:
             error, client = _get_github_client()
             assert error is None
@@ -53,7 +53,7 @@ class TestGetGithubClient:
             assert client.branch == ORPHAN_BRANCH_NAME
             assert client.branch != "main"
         finally:
-            set_http_context(HttpRequestContext(user_id=""))  # reset
+            clear_http_context()
 
 
 class TestReconstructMarkdownFromGraph:
