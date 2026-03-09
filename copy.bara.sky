@@ -249,6 +249,12 @@ core.workflow(
             paths  = glob([".claude/skills/**"]),
         ),
 
+        # --- Relocate skills from .claude/skills/ to skills/ in public repo ---
+        # Private repo keeps .claude/skills/ convention; public consumers see skills/
+        # at the repo root. Must run after the MCP server name rewrite above so that
+        # the replace's path glob (.claude/skills/**) still matches.
+        core.move(".claude/skills", "skills"),
+
         # --- Fixed public commit message (no squash_notes = no author identity leak) ---
         metadata.replace_message(
             "Watercooler release sync\n\nPublished from watercooler-cloud@stable.\n"
