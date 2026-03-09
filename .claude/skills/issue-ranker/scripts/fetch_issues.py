@@ -89,6 +89,9 @@ def fetch_issues(limit: int = 200) -> list[dict]:
   return normalized
 
 
+PRIORITY_LABELS = {"priority:now", "priority:next", "priority:soon", "priority:backlog"}
+
+
 def main() -> None:
   parser = argparse.ArgumentParser(
     description="Fetch open GitHub issues as structured JSON"
@@ -96,10 +99,31 @@ def main() -> None:
   parser.add_argument(
     "--limit", type=int, default=200, help="Max issues to fetch (default: 200)"
   )
+  parser.add_argument(
+    "--only-unlabeled",
+    action="store_true",
+    help=(
+      "Return only issues without any priority:* label. "
+      "Used in incremental re-ranking to focus scoring on new issues. "
+      "Note: analyze_relationships.py still needs the full list — use the "
+      "default fetch (without this flag) for /tmp/wc_issues.json."
+    ),
+  )
   args = parser.parse_args()
 
   try:
     issues = fetch_issues(limit=args.limit)
+    if args.only_unlabeled:
+      before = len(issues)
+      issues = [
+        issue for issue in issues
+        if not any(lbl in PRIORITY_LABELS for lbl in issue.get("labels", []))
+      ]
+      print(
+        f"# --only-unlabeled: {len(issues)} unlabeled issues "
+        f"(filtered from {before} total)",
+        file=sys.stderr,
+      )
     print(json.dumps(issues, indent=2))
     print(f"# Fetched {len(issues)} open issues", file=sys.stderr)
     if len(issues) == args.limit:
