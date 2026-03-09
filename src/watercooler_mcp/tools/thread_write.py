@@ -153,6 +153,7 @@ def _say_impl(
             entry_type=entry_type,
             entry_id=entry_id,
             create_if_missing=create_if_missing,
+            code_branch=context.code_branch,
         )
 
         if write_error:
@@ -313,6 +314,7 @@ def _ack_impl(
             agent=agent,
             title=title or "Ack",
             body=body or "Acknowledged",
+            code_branch=context.code_branch,
         )
 
         if write_error:
@@ -438,6 +440,7 @@ def _handoff_impl(
             agent=agent,
             target_agent=target_agent,
             note=note,
+            code_branch=context.code_branch,
         )
 
         if write_error:
