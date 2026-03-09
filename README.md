@@ -6,7 +6,7 @@ Git-native collaboration threads for human-AI coding teams.
 
 [Quick Start](#quick-start) • [Documentation](#documentation) • [Tools Reference](docs/TOOLS-REFERENCE.md) • [Architecture](dev_docs/ARCHITECTURE.md) • [Contributing](CONTRIBUTING.md)
 
-[![Watercooler Cloud](dev_docs/images/hero-banner.png)](https://www.watercoolerdev.com)
+[![Website](https://www.watercoolerdev.com)
 
 ---
 
