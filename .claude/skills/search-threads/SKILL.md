@@ -44,23 +44,36 @@ Parse these filters from arguments:
    ToolSearch: select:mcp__watercooler-cloud__watercooler_search
    ```
 
-3. **Execute search** with parsed query and filters. Only include filter keys
-   that were explicitly parsed from the arguments — omit `filters` entirely
-   if none were parsed:
+3. **Execute search** with parsed query and filters. Pass each filter as its
+   own named parameter — omit any filter param that was not explicitly parsed
+   from the arguments. Do NOT use a `filters={}` dict (no such parameter exists):
    ```
    # Example: only role was given
    mcp__watercooler-cloud__watercooler_search(
-     query="config", mode="entries", filters={"role": "planner"}
+     query="config", mode="entries", role="planner"
    )
    # Example: multiple filters
    mcp__watercooler-cloud__watercooler_search(
-     query="", mode="entries", filters={"role": "planner", "type": "Decision"}
+     query="", mode="entries", role="planner", entry_type="Decision"
+   )
+   # Example: thread + status filters
+   mcp__watercooler-cloud__watercooler_search(
+     query="", mode="entries", thread_topic="mcp-migration", thread_status="OPEN"
    )
    # Example: no filters, just query text
    mcp__watercooler-cloud__watercooler_search(
      query="config migration", mode="entries"
    )
    ```
+
+   Filter parameter mapping:
+   - `role:X` → `role="X"`
+   - `type:X` → `entry_type="X"`
+   - `thread:X` → `thread_topic="X"`
+   - `status:X` → `thread_status="X"`
+   - `agent:X` → `agent="X"`
+   - `after:DATE` → `start_time="DATE"`
+   - `before:DATE` → `end_time="DATE"`
 
 4. **Present results**:
    - Show matching entries with context
