@@ -52,13 +52,13 @@ core.workflow(
             # User-facing Claude Code skills (Tier A: watercooler-aware, T1-safe or T2 with fallback)
             # Excluded: issue-ranker (project-specific label taxonomy), remember (T2-primary),
             #           mcp-branch (dev workflow), watercooler-tool-audit (MCP dev tooling),
-            #           serena-init (plugin-specific), humanizer/pdf-to-md/ship/pydantic-hardener (generic, not watercooler-specific)
+            #           serena-init (plugin-specific), humanizer/pdf-to-md/ship/pydantic-hardener (generic, not watercooler-specific),
+            #           fetch-papers (project-specific, not for public release)
             ".claude/skills/recall/**",
             ".claude/skills/search-threads/**",
             ".claude/skills/threads/**",
             ".claude/skills/find-related/**",
             ".claude/skills/watercooler-health/**",
-            ".claude/skills/fetch-papers/**",
         ],
         exclude = [
             # Internal benchmark fixtures
@@ -248,6 +248,12 @@ core.workflow(
             after  = "mcp__watercooler__",
             paths  = glob([".claude/skills/**"]),
         ),
+
+        # --- Relocate skills from .claude/skills/ to skills/ in public repo ---
+        # Private repo keeps .claude/skills/ convention; public consumers see skills/
+        # at the repo root. Must run after the MCP server name rewrite above so that
+        # the replace's path glob (.claude/skills/**) still matches.
+        core.move(".claude/skills", "skills"),
 
         # --- Fixed public commit message (no squash_notes = no author identity leak) ---
         metadata.replace_message(
