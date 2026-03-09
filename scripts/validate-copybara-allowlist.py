@@ -21,6 +21,13 @@ PERMITTED_SUBTREES = {
     "tests/**",
     "docs/**",
     "schemas/**",
+    # Tier A public skills — explicitly approved for sync.
+    # .claude/skills/ is otherwise blocked by FORBIDDEN_PREFIXES (.claude/).
+    ".claude/skills/recall/**",
+    ".claude/skills/search-threads/**",
+    ".claude/skills/threads/**",
+    ".claude/skills/find-related/**",
+    ".claude/skills/watercooler-health/**",
 }
 
 FORBIDDEN_EXACT = {
@@ -213,6 +220,9 @@ def check(includes: list[str], excludes: list[str]) -> bool:
                 ok = False
         for prefix in FORBIDDEN_PREFIXES:
             if p == prefix or p.startswith(prefix) or p == prefix.rstrip("/"):
+                if p in PERMITTED_SUBTREES:
+                    # Explicitly whitelisted in PERMITTED_SUBTREES — skip.
+                    continue
                 print(f"ERROR: Forbidden prefix '{p}' matches forbidden '{prefix}'")
                 ok = False
         # Enforce that only the 4 approved scripts are allowed as exact scripts/ paths.
