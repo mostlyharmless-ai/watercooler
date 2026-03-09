@@ -273,3 +273,4 @@ gold.validate-gold.json
 *__*.cooperbench-*.json
 external/wcbench-corpora/
 docs/watercooler-planning/
+gitleaks

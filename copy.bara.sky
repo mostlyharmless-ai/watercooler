@@ -54,7 +54,6 @@ core.workflow(
             #           mcp-branch (dev workflow), watercooler-tool-audit (MCP dev tooling),
             #           serena-init (plugin-specific), humanizer/pdf-to-md/ship/pydantic-hardener (generic, not watercooler-specific)
             ".claude/skills/recall/**",
-            ".claude/skills/ask-memory/**",
             ".claude/skills/search-threads/**",
             ".claude/skills/threads/**",
             ".claude/skills/find-related/**",
