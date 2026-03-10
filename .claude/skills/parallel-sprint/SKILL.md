@@ -90,14 +90,35 @@ When reasoning about issue content:
 
 ```
 If $ARGUMENTS == "--audit":
-  Read .sprint/wc_sprint_<repo-slug>_*.json (most recent by mtime from .sprint/)
-  Display the summary table from the manifest
+  MANIFEST=$(ls -1 .sprint/wc_sprint_*.json 2>/dev/null | sort | tail -1)
+  If no manifest found: emit "parallel-sprint: no sprint manifests found in .sprint/" and exit 0
+  Read $MANIFEST; display the summary table
   Exit — no Discovery or Execution phases run
+  (Filename sort is used — not filesystem mtime — because mtime is reset by git
+   checkout, NFS mounts, and rsync. Filenames embed a UTC timestamp and sort reliably.)
 
 If $ARGUMENTS matches a collection ID pattern (C01, C02, C03, ...):
-  Skip Discovery. Load collection from .sprint/tmp/ps_collections.json if present.
-  If ps_collections.json is not present, run Discovery first, then auto-select.
-  Jump directly to Step 6 (Preflight gate).
+  If .sprint/tmp/ps_collections.json exists and contains $ARGUMENTS:
+    Skip Discovery. Load the collection and jump directly to Step 6 (Preflight gate).
+  Else if .sprint/tmp/ps_collections.json exists but does NOT contain $ARGUMENTS:
+    Exit with error (do NOT call AskUserQuestion):
+      "parallel-sprint: collection $ARGUMENTS not found.
+       Available: C01 (Theme A), C02 (Theme B), ...
+       Re-run with the correct collection ID."
+  Else (ps_collections.json is absent):
+    Run full Discovery (Steps 2–5) to generate ps_collections.json.
+    If $ARGUMENTS is found in the freshly generated collections:
+      Jump directly to Step 6 (Preflight gate).
+    Else:
+      Exit with error (do NOT call AskUserQuestion):
+        "parallel-sprint: collection $ARGUMENTS not found after Discovery.
+         Available: C01 (Theme A), C02 (Theme B), ...
+         Re-run with the correct collection ID."
+
+  NOTE: Collection IDs (C01, C02, ...) are assigned fresh each Discovery run based on
+  LLM cluster naming. They are NOT stable across sessions. To use a collection ID
+  non-interactively, either (a) pass it in the same session as Discovery, or (b) use
+  --audit to find the collection ID from a prior sprint manifest.
 ```
 
 This makes the skill agent-invocable without a human gate.
@@ -123,7 +144,7 @@ gh api graphql \
   -F owner="$OWNER" -F repo="$REPO" \
   -f query='query($owner:String!,$repo:String!){
     repository(owner:$owner,name:$repo){
-      pullRequests(first:100,states:OPEN){
+      pullRequests(first:200,states:OPEN){
         nodes{
           number
           closingIssuesReferences(first:20){nodes{number}}
@@ -141,15 +162,29 @@ python3 "$(git rev-parse --show-toplevel)/.claude/skills/parallel-sprint/scripts
 Fetch eligible issues:
 
 ```bash
-LABEL_ARG=""
-if [ -n "$ARGUMENTS" ] && echo "$ARGUMENTS" | grep -qvE '^(C[0-9]+|--audit)$'; then
-  LABEL_ARG="--label $ARGUMENTS"
+# Validate $ARGUMENTS before any shell expansion
+if [ -n "$ARGUMENTS" ]; then
+  if ! echo "$ARGUMENTS" | grep -qE '^[a-zA-Z0-9_/:-]{1,100}$'; then
+    echo "parallel-sprint: invalid argument '$ARGUMENTS' — only alphanumeric, -, _, :, / allowed" >&2
+    exit 1
+  fi
 fi
 
-python3 "$(git rev-parse --show-toplevel)/.claude/skills/parallel-sprint/scripts/fetch_issues.py" \
-  --pr-map .sprint/tmp/ps_pr_map.json \
-  $LABEL_ARG \
-  > .sprint/tmp/ps_issues.json
+LABEL=""
+if [ -n "$ARGUMENTS" ] && ! echo "$ARGUMENTS" | grep -qE '^(C[0-9]+|--audit)$'; then
+  LABEL="$ARGUMENTS"
+fi
+
+if [ -n "$LABEL" ]; then
+  python3 "$(git rev-parse --show-toplevel)/.claude/skills/parallel-sprint/scripts/fetch_issues.py" \
+    --pr-map .sprint/tmp/ps_pr_map.json \
+    --label "$LABEL" \
+    > .sprint/tmp/ps_issues.json
+else
+  python3 "$(git rev-parse --show-toplevel)/.claude/skills/parallel-sprint/scripts/fetch_issues.py" \
+    --pr-map .sprint/tmp/ps_pr_map.json \
+    > .sprint/tmp/ps_issues.json
+fi
 ```
 
 If `ps_issues.json` contains zero issues, output:
@@ -280,44 +315,11 @@ Otherwise: `AskUserQuestion` — "Which collection would you like to execute? (C
 
 Parse the response. If unrecognized, re-prompt once then exit cleanly.
 
-### Step 7 — Write sprint manifest (before any worktree creation)
-
-Compute sprint ID and write manifest immediately upon selection:
-
-```bash
-SPRINT_TS=$(date -u +%Y%m%dT%H%M%S)
-SPRINT_ID="${COLLECTION_ID}_${SPRINT_TS}"
-MANIFEST=".sprint/wc_sprint_${REPO_SHORT}_${COLLECTION_ID}_${SPRINT_TS}.json"
-mkdir -p .sprint
-```
-
-Write `$MANIFEST`:
-```json
-{
-  "sprint_id": "<COLLECTION_ID>-<timestamp>",
-  "repo": "<org/repo>",
-  "started_at": "<iso8601>",
-  "collection": { "<collection JSON from ps_collections.json>" },
-  "worktrees": [
-    {
-      "issue": 210,
-      "branch": "parallel-sprint/210-remove-verbose-flag",
-      "worktree_path": ".worktrees/parallel-sprint-210-remove-verbose-flag",
-      "status": "pending",
-      "pr_url": null,
-      "failure_reason": null
-    }
-  ]
-}
-```
-
-This manifest is the recovery artifact. If the session dies mid-sprint, the user can run
-`/parallel-sprint --audit` to see which worktrees exist and which PRs were opened.
-
-### Step 8 — Preflight gate
+### Step 7 — Preflight gate
 
 All checks must pass before any worktree is created. Abort with a clear per-check message
-if any fails.
+if any fails. **The manifest is NOT written until after preflight passes** — this prevents
+stale manifests appearing in `--audit` after a preflight failure.
 
 ```bash
 # 1. GitHub auth
@@ -356,6 +358,40 @@ for each issue:
   [ ! -e ".worktrees/parallel-sprint-N-S" ] || \
     { echo "FAIL: worktree path .worktrees/parallel-sprint-N-S already exists"; exit 1; }
 ```
+
+### Step 8 — Write sprint manifest (after preflight passes)
+
+Compute sprint ID and write manifest only after all preflight checks succeed:
+
+```bash
+SPRINT_TS=$(date -u +%Y%m%dT%H%M%S)
+SPRINT_ID="${COLLECTION_ID}_${SPRINT_TS}"
+MANIFEST=".sprint/wc_sprint_${REPO_SHORT}_${COLLECTION_ID}_${SPRINT_TS}.json"
+mkdir -p .sprint
+```
+
+Write `$MANIFEST`:
+```json
+{
+  "sprint_id": "<COLLECTION_ID>-<timestamp>",
+  "repo": "<org/repo>",
+  "started_at": "<iso8601>",
+  "collection": { "<collection JSON from ps_collections.json>" },
+  "worktrees": [
+    {
+      "issue": 210,
+      "branch": "parallel-sprint/210-remove-verbose-flag",
+      "worktree_path": ".worktrees/parallel-sprint-210-remove-verbose-flag",
+      "status": "pending",
+      "pr_url": null,
+      "failure_reason": null
+    }
+  ]
+}
+```
+
+This manifest is the recovery artifact. If the session dies mid-sprint, the user can run
+`/parallel-sprint --audit` to see which worktrees exist and which PRs were opened.
 
 ### Step 9 — Create worktrees (sequential, before spawning)
 
@@ -462,7 +498,11 @@ STEPS:
 5. Verify: git branch --show-current
 6. Commit: git add <specific files> && git commit -s -m "fix(#<N>): <slug>"
 7. Push exactly once: git push -u origin parallel-sprint/<N>-<slug>
-8. Open PR: gh pr create --title "fix(#<N>): <title>" --body "Closes #<N>"
+8. Open PR (assign title to a variable first — never embed the raw title in a
+   shell command string, as issue titles are untrusted and may contain shell
+   metacharacters):
+   PR_TITLE="fix(#<N>): <title_with_double_quotes_escaped_as_backslash-quote>"
+   gh pr create --title "$PR_TITLE" --body "Closes #<N>"
 9. Write result:
    mkdir -p .sprint/tmp/sprint-<sprint_id>/issue-<N>
    printf '%s' '{"status":"pr_opened","issue":<N>,"pr_url":"<PR URL>","branch":"parallel-sprint/<N>-<slug>"}' \

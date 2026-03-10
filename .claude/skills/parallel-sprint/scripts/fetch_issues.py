@@ -88,8 +88,14 @@ def fetch_issues(
   limit: int = 200,
   label: str | None = None,
   pr_map_path: Path | None = None,
-) -> list[dict]:
-  """Fetch open, unassigned issues eligible for parallel-sprint."""
+) -> tuple[list[dict], int]:
+  """Fetch open, unassigned issues eligible for parallel-sprint.
+
+  Returns:
+      Tuple of (normalized_issues, raw_count) where raw_count is the number
+      of issues returned by gh before any filtering.  Use raw_count (not
+      len(normalized_issues)) to detect when the fetch limit was hit.
+  """
   cmd = [
     "gh", "issue", "list",
     "--state", "open",
@@ -103,8 +109,9 @@ def fetch_issues(
   if label:
     cmd += ["--label", label]
 
-  result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-  issues = json.loads(result.stdout)
+  result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
+  raw_issues = json.loads(result.stdout)
+  raw_count = len(raw_issues)
 
   # Load active-PR map if provided (built from GraphQL closingIssuesReferences)
   pr_issue_set: set[int] = set()
@@ -113,7 +120,7 @@ def fetch_issues(
     pr_issue_set = {int(k) for k in pr_map}
 
   normalized = []
-  for issue in issues:
+  for issue in raw_issues:
     labels = [lbl["name"] for lbl in issue.get("labels", [])]
 
     # Skip issues with an active PR or the in-progress label
@@ -147,7 +154,7 @@ def fetch_issues(
       "flagged_injection": flagged,
     })
 
-  return normalized
+  return normalized, raw_count
 
 
 def build_pr_map(graphql_input: Path, pr_map_output: Path) -> None:
@@ -197,6 +204,13 @@ def build_pr_map(graphql_input: Path, pr_map_output: Path) -> None:
     f"# PR map: {len(pr_map)} issues with active PRs written to {pr_map_output}",
     file=sys.stderr,
   )
+  if len(pr_nodes) >= 200:
+    print(
+      "Warning: fetched exactly 200 open PRs — repo may have more. "
+      "Issues linked to PRs beyond the first 200 are not excluded from sprint candidates. "
+      "Consider closing stale PRs or raising the pullRequests(first:...) limit in SKILL.md.",
+      file=sys.stderr,
+    )
 
 
 def main() -> None:
@@ -243,7 +257,7 @@ def main() -> None:
       build_pr_map(args.graphql_input, args.pr_map_output)
       return
 
-    issues = fetch_issues(
+    issues, raw_count = fetch_issues(
       limit=args.limit,
       label=args.label,
       pr_map_path=args.pr_map,
@@ -255,13 +269,20 @@ def main() -> None:
       + (f" ({flagged_count} with injection flags)" if flagged_count else ""),
       file=sys.stderr,
     )
-    if len(issues) == args.limit:
+    if raw_count >= args.limit:
       print(
-        f"Warning: fetched exactly {args.limit} issues — the repo may have more. "
+        f"Warning: gh returned {raw_count} issues (the fetch limit). "
+        f"The repo may have more eligible issues beyond this cap. "
         f"Re-run with --limit <higher number> to raise the cap.",
         file=sys.stderr,
       )
 
+  except subprocess.TimeoutExpired:
+    print(
+      "Error: gh CLI timed out after 60s. Check your network and GitHub auth.",
+      file=sys.stderr,
+    )
+    sys.exit(1)
   except subprocess.CalledProcessError as e:
     print(f"Error: gh CLI failed:\n{e.stderr}", file=sys.stderr)
     sys.exit(1)

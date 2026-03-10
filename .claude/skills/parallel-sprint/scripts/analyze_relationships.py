@@ -54,7 +54,8 @@ Dimension heuristics:
 
   Dependencies (high confidence — automatic):
     - "blocked by #N", "depends on #N", "requires #N", "after #N is merged" → blocked_by
-    - "blocks #N", "follow-up to #N" → blocks
+    - "follow-up to #N" → blocked_by (current issue depends on N being done first)
+    - "blocks #N" → blocks
     Score modifier: blocker of priority:now → +4; blocker of priority:next/soon → +2 (cap +6)
 
   Synergies (medium confidence — label-based):

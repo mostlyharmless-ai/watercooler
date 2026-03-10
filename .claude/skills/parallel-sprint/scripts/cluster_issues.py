@@ -131,22 +131,20 @@ def _detect_cycles(
   visited: set[int] = set()
   in_stack: set[int] = set()
 
-  def dfs(node: int, path: list[int]) -> bool:
+  def dfs(node: int, path: list[int]) -> None:
     if node in in_stack:
       cycle_start = path.index(node)
       cycle = path[cycle_start:] + [node]
       warnings.append("Cycle detected: " + " -> ".join(str(n) for n in cycle))
-      return True
+      return
     if node in visited:
-      return False
+      return
     visited.add(node)
     in_stack.add(node)
     for neighbour in dep_map.get(node, []):
       if neighbour in group_numbers:
-        if dfs(neighbour, path + [node]):
-          return True
+        dfs(neighbour, path + [node])
     in_stack.discard(node)
-    return False
 
   for num in sorted(group_numbers):
     if num not in visited:
@@ -226,11 +224,6 @@ def cluster_issues(
           intra_edges.append({"from": n, "to": blocks, "type": "blocks"})
 
     # Cross-group edges (edges leaving this group to other known issues)
-    # Determine other label membership for labelling cross_group references
-    num_to_labels: dict[int, list[str]] = {
-      n: [lbl for lbl in num_to_issue[n].get("labels", [])]
-      for n in all_nums
-    }
     cross_edges: list[dict] = []
     for n in sorted(group_set):
       for blocked in blocked_by_map.get(n, []):
