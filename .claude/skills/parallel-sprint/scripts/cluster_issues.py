@@ -72,19 +72,6 @@ from pathlib import Path
 # Match path-like tokens: foo/bar.py, src/watercooler/x.py, x.py, etc.
 _PATH_RE = re.compile(r"(?:[\w.-]+/)+[\w.-]+\.py\b|[\w.-]+\.py\b")
 
-# Module names to look for — derived from actual source directory names
-_MODULE_NAMES = [
-  "watercooler_mcp", "watercooler",
-  "agents", "cli", "commands", "config", "credentials",
-  "federation", "fs", "graphiti", "header", "leanrag",
-  "lock", "memory", "metadata", "observability", "path_resolver",
-  "server", "sync", "templates", "testing",
-]
-_MODULE_RE = re.compile(
-  r"\b(" + "|".join(re.escape(m) for m in _MODULE_NAMES) + r")\b",
-  re.IGNORECASE,
-)
-
 # Effort labels (size:S/M/L/XL, effort:S/M/L/XL, complexity:S/M/L/XL)
 _EFFORT_RE = re.compile(
   r"\b(?:size|effort|complexity):([SsMmLlXx]+)\b",
@@ -94,16 +81,10 @@ _EFFORT_RE = re.compile(
 def _extract_scope_hints(issue: dict) -> list[str]:
   text = f"{issue.get('title', '')} {issue.get('body', '')} "
   hints: list[str] = []
-  # Path-like mentions
   for m in _PATH_RE.finditer(text):
     path = m.group(0).strip()
     if path and path not in hints:
       hints.append(path)
-  # Module name mentions
-  for m in _MODULE_RE.finditer(text):
-    mod = m.group(1).lower()
-    if mod not in hints:
-      hints.append(mod)
   return hints[:20]  # cap per issue
 
 

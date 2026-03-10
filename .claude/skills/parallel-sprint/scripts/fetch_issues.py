@@ -26,6 +26,7 @@ Output fields (default mode):
 """
 
 import argparse
+import html
 import json
 import re
 import subprocess
@@ -140,7 +141,7 @@ def fetch_issues(
     normalized.append({
       "number": issue["number"],
       "title": issue["title"],
-      "body": full_body[:2000],
+      "body": html.escape(full_body[:2000]),  # pre-escaped for safe embedding in XML-like delimiters
       "labels": labels,
       "assignees": [a["login"] for a in issue.get("assignees", [])],
       "comment_count": len(issue.get("comments", [])),
@@ -193,7 +194,14 @@ def build_pr_map(graphql_input: Path, pr_map_output: Path) -> None:
   pr_map: dict[str, int] = {}
   for pr in pr_nodes:
     pr_num = pr.get("number")
-    closing = pr.get("closingIssuesReferences", {}).get("nodes", [])
+    closing_data = pr.get("closingIssuesReferences", {})
+    closing = closing_data.get("nodes", [])
+    if closing_data.get("pageInfo", {}).get("hasNextPage"):
+      print(
+        f"Warning: PR #{pr_num} links >20 issues; some may be missing from the "
+        "active-PR exclusion map. Check manually.",
+        file=sys.stderr,
+      )
     for issue_ref in closing:
       issue_num = issue_ref.get("number")
       if issue_num is not None and pr_num is not None:

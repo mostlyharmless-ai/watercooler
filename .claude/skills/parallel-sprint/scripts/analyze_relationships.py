@@ -211,15 +211,25 @@ def analyze_conflicts(issues: list[dict]) -> list[dict]:
   return conflicts
 
 
-def analyze_synergies(issues: list[dict]) -> list[dict]:
+def analyze_synergies(
+  issues: list[dict],
+  synergy_labels: list[str] | None = None,
+) -> list[dict]:
   """
   Group issues into synergy clusters by shared feature-area label.
   Only clusters with 2+ issues are included.
+
+  Args:
+      issues: List of issue dicts (from fetch_issues.py).
+      synergy_labels: Feature-area labels to cluster by. Defaults to SYNERGY_LABELS
+          (watercooler-cloud labels). Pass an empty list to disable synergy detection.
+          Pass a custom list to use repo-specific feature-area labels.
   """
+  labels_to_use = SYNERGY_LABELS if synergy_labels is None else synergy_labels
   label_to_issues: dict[str, list[int]] = defaultdict(list)
   for issue in issues:
     for label in issue.get("labels", []):
-      if label in SYNERGY_LABELS:
+      if label in labels_to_use:
         label_to_issues[label].append(issue["number"])
 
   synergies = []
@@ -356,6 +366,18 @@ def main() -> None:
     default=".sprint/tmp/ps_issues.json",
     help="Path to issues JSON (default: .sprint/tmp/ps_issues.json)",
   )
+  parser.add_argument(
+    "--synergy-labels",
+    nargs="*",
+    default=None,
+    metavar="LABEL",
+    help=(
+      "Feature-area labels for synergy clustering "
+      "(default: watercooler-cloud labels). "
+      "Pass an empty list (--synergy-labels) to disable. "
+      "Customize for non-watercooler repos."
+    ),
+  )
   args = parser.parse_args()
 
   try:
@@ -369,7 +391,7 @@ def main() -> None:
     sys.exit(1)
 
   blocks, blocked_by = analyze_dependencies(issues)
-  synergies = analyze_synergies(issues)
+  synergies = analyze_synergies(issues, synergy_labels=args.synergy_labels)
   conflicts = analyze_conflicts(issues)
   cross_refs = analyze_cross_references(issues)
   opportunities = analyze_opportunities(issues, synergies, blocks)
