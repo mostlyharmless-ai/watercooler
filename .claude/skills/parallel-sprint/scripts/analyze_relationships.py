@@ -78,28 +78,9 @@ import re
 import sys
 from collections import defaultdict
 
-
-# In body of issue A: "blocked by #B" → A blocked_by B, B blocks A
-BLOCKED_BY_PATTERNS = [
-    r"blocked?\s+by\s+#(\d+)",
-    r"depends?\s+on\s+#(\d+)",
-    r"requires?\s+#(\d+)\b",
-    r"after\s+#(\d+)\s+(?:is\s+)?(?:merged|closed|done|fixed|resolved|landed)",
-    r"needs?\s+#(\d+)\s+(?:to\s+be\s+)?(?:merged|closed|done|fixed|resolved)",
-    r"prerequisite[:\s]+#(\d+)",
-    r"follow[- ]?up\s+(?:to|from|on)\s+#(\d+)",
-]
-
-# In body of issue A: "blocks #B" → A blocks B
-BLOCKS_PATTERNS = [
-    r"\bblocks?\s+#(\d+)",
-    r"\bblocking\s+#(\d+)",
-]
-
-# In body of issue A: "fixes/closes #N" — used for conflict detection
-FIXES_CLOSES_PATTERNS = [
-    r"(?:fixes|closes|resolves)\s+#(\d+)",
-]
+# Shared dependency patterns — imported from _patterns.py to stay in sync with
+# fetch_issues.py. Each list has exactly one capturing group per pattern.
+from _patterns import BLOCKED_BY_PATTERNS, BLOCKS_PATTERNS, FIXES_CLOSES_PATTERNS
 
 # Any bare #NNN reference (for cross-reference map — informational only)
 ANY_ISSUE_REF = r"#(\d+)"

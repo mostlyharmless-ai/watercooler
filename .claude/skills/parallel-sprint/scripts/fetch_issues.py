@@ -33,23 +33,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-
-# ---------------------------------------------------------------------------
-# Dependency patterns (mirrored from analyze_relationships.py)
-# Extracted BEFORE body truncation so signals beyond 2000 chars are preserved.
-# ---------------------------------------------------------------------------
-_BLOCKED_BY_RE = re.compile(
-  r"blocked?\s+by\s+#(\d+)"
-  r"|depends?\s+on\s+#(\d+)"
-  r"|requires?\s+#(\d+)\b"
-  r"|after\s+#(\d+)\s+(?:is\s+)?(?:merged|closed|done|fixed|resolved|landed)"
-  r"|needs?\s+#(\d+)\s+(?:to\s+be\s+)?(?:merged|closed|done|fixed|resolved)"
-  r"|prerequisite[:\s]+#(\d+)"
-  r"|follow[- ]?up\s+(?:to|from|on)\s+#(\d+)",
-  re.IGNORECASE,
-)
-_BLOCKS_RE = re.compile(r"\bblocks?\s+#(\d+)|\bblocking\s+#(\d+)", re.IGNORECASE)
-_FIXES_RE = re.compile(r"(?:fixes|closes|resolves)\s+#(\d+)", re.IGNORECASE)
+# Shared dependency patterns — imported from _patterns.py to stay in sync with
+# analyze_relationships.py. Each list has one capturing group per pattern.
+# See _patterns.py for the rationale against combined alternation regexes.
+from _patterns import BLOCKED_BY_PATTERNS, BLOCKS_PATTERNS, FIXES_CLOSES_PATTERNS
 
 # ---------------------------------------------------------------------------
 # Prompt injection markers — flag for LLM awareness
@@ -68,16 +55,22 @@ INPROGRESS_LABEL = "in-progress"
 
 
 def _extract_dep_refs(text: str) -> dict[str, list[int]]:
+  """Extract issue references from all dependency patterns.
+
+  Each pattern list is iterated independently — adding, removing, or reordering
+  patterns does not affect extraction logic (no positional group indexing).
+  """
+  def _extract(patterns: list[str]) -> list[int]:
+    refs: set[int] = set()
+    for pattern in patterns:
+      for m in re.finditer(pattern, text, re.IGNORECASE):
+        refs.add(int(m.group(1)))
+    return sorted(refs)
+
   return {
-    "blocked_by_refs": sorted({
-      int(g) for m in _BLOCKED_BY_RE.finditer(text) for g in m.groups() if g
-    }),
-    "blocks_refs": sorted({
-      int(g) for m in _BLOCKS_RE.finditer(text) for g in m.groups() if g
-    }),
-    "fixes_refs": sorted({
-      int(g) for m in _FIXES_RE.finditer(text) for g in m.groups() if g
-    }),
+    "blocked_by_refs": _extract(BLOCKED_BY_PATTERNS),
+    "blocks_refs": _extract(BLOCKS_PATTERNS),
+    "fixes_refs": _extract(FIXES_CLOSES_PATTERNS),
   }
 
 
