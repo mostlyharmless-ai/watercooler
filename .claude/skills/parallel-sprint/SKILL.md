@@ -219,6 +219,10 @@ and exit.
 # in case Step 3 is ever run standalone.
 SKILL_ROOT="$(git rev-parse --show-toplevel)/.claude/skills/parallel-sprint/scripts"
 
+
+# IMPORTANT: redirect stdout only (> file). Do NOT use 2>&1 — these scripts
+# write human-readable stats to stderr intentionally. Mixing stderr into the
+# JSON output file corrupts it and causes JSONDecodeError downstream.
 python3 "$SKILL_ROOT/analyze_relationships.py" \
   --input .sprint/tmp/ps_issues.json \
   > .sprint/tmp/ps_relationships.json
