@@ -10,7 +10,6 @@ import os
 import re
 import sys
 import tempfile
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone
@@ -537,11 +536,6 @@ class GraphitiConfig:
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1024  # Vector dimension (must match your embedding model)
 
-    # Legacy fields (deprecated, use llm_* and embedding_* instead)
-    openai_api_key: str | None = None      # DEPRECATED: use llm_api_key
-    openai_api_base: str | None = None     # DEPRECATED: use llm_api_base
-    openai_model: str | None = None        # DEPRECATED: use llm_model
-
     # Search reranker algorithm (rrf, mmr, cross_encoder, node_distance, episode_mentions)
     # RRF (Reciprocal Rank Fusion) is fast and provides good results for most cases
     reranker: str = "rrf"
@@ -564,30 +558,10 @@ class GraphitiConfig:
     auto_save_index: bool = True
 
     def __post_init__(self):
-        """Set default index path if not provided and warn on deprecated fields."""
+        """Set default index path if not provided and set default values."""
         if self.entry_episode_index_path is None and self.track_entry_episodes:
             self.entry_episode_index_path = (
                 Path.home() / ".watercooler" / "graphiti" / "entry_episode_index.json"
-            )
-
-        # Emit deprecation warnings for legacy OpenAI-specific fields
-        if self.openai_api_key is not None:
-            warnings.warn(
-                "GraphitiConfig.openai_api_key is deprecated, use llm_api_key",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        if self.openai_api_base is not None:
-            warnings.warn(
-                "GraphitiConfig.openai_api_base is deprecated, use llm_api_base",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        if self.openai_model is not None:
-            warnings.warn(
-                "GraphitiConfig.openai_model is deprecated, use llm_model",
-                DeprecationWarning,
-                stacklevel=2,
             )
 
     @classmethod
@@ -839,16 +813,11 @@ class GraphitiBackend(MemoryBackend):
         logger.debug("_validate_config: graphiti_core available")
 
         # Validate LLM API key is set (required for Graphiti)
-        # Support legacy openai_api_key field for backwards compatibility
         if not self.config.llm_api_key:
-            if self.config.openai_api_key:
-                # Legacy fallback: use openai_api_key if llm_api_key not set
-                self.config.llm_api_key = self.config.openai_api_key
-            else:
-                raise ConfigError(
-                    "LLM_API_KEY is required for Graphiti. "
-                    "Set via environment variable or config."
-                )
+            raise ConfigError(
+                "LLM_API_KEY is required for Graphiti. "
+                "Set via environment variable or config."
+            )
 
         # Validate embedding API key is set (required for Graphiti)
         if not self.config.embedding_api_key:
@@ -856,14 +825,6 @@ class GraphitiBackend(MemoryBackend):
                 "EMBEDDING_API_KEY is required for Graphiti. "
                 "Set via environment variable or config."
             )
-
-        # Support legacy openai_api_base field
-        if not self.config.llm_api_base and self.config.openai_api_base:
-            self.config.llm_api_base = self.config.openai_api_base
-
-        # Support legacy openai_model field
-        if self.config.openai_model and self.config.llm_model == "gpt-4o-mini":
-            self.config.llm_model = self.config.openai_model
 
     def _init_entry_episode_index(self) -> None:
         """Initialize the entry-episode index if enabled."""

@@ -562,7 +562,6 @@ def create_graphiti_config(
     mock.llm_model = llm_model
     mock.embedding_model = embedding_model
     mock.database = database
-    mock.openai_api_key = None  # Deprecated field
     mock.llm_api_base = "http://localhost:8000/v1"
 
     return mock
