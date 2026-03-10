@@ -148,6 +148,8 @@ Detect repo owner/name and set up sprint state directory:
 
 ```bash
 mkdir -p .sprint/tmp
+# SKILL_ROOT must be an absolute path — defined once here and reused throughout.
+SKILL_ROOT="$(git rev-parse --show-toplevel)/.claude/skills/parallel-sprint/scripts"
 # Use Python for URL parsing — avoids pipe-zero-byte issue (CLAUDE.md: cmd|cmd may produce 0 bytes)
 # Bash parameter expansion (${var%%/*}, ${var##*/}) used for field splitting — no pipes.
 REPO_SLUG=$(python3 -c "
@@ -213,6 +215,8 @@ and exit.
 ### Step 3 — Build structural signals
 
 ```bash
+# $SKILL_ROOT is already set from Step 2. Redefine here as a safety net
+# in case Step 3 is ever run standalone.
 SKILL_ROOT="$(git rev-parse --show-toplevel)/.claude/skills/parallel-sprint/scripts"
 
 python3 "$SKILL_ROOT/analyze_relationships.py" \
