@@ -15,7 +15,7 @@ from textwrap import dedent
 
 import pytest
 
-from watercooler.thread_entries import ThreadEntry, parse_thread_entries
+from watercooler.thread_entries import ThreadEntry
 from watercooler_mcp.helpers import (
     _entry_header_payload,
     _entry_full_payload,
