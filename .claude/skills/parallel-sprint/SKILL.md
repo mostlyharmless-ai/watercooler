@@ -368,6 +368,45 @@ Otherwise: `AskUserQuestion` — "Which collection would you like to execute? (C
 
 Parse the response. If unrecognized, re-prompt once then exit cleanly.
 
+### Step 6.5 — Execution plan review (planning mode)
+
+Call `EnterPlanMode`.
+
+Present the full execution plan for the selected collection. Read the collection entry
+from `.sprint/tmp/ps_collections.json` and the relationship data from
+`.sprint/tmp/ps_relationships.json` to populate each field:
+
+```
+parallel-sprint — Execution Plan
+
+Collection: <ID> — <theme>
+Safety:     <Safe | Caution | Risky> — <risk_notes>
+Impact:     <level> — <rationale>
+
+Issues to implement (each in its own worktree):
+  #<N>  <title>  [effort: <S|M|L>]  → branch: parallel-sprint/<N>-<slug>
+  ...
+
+Dependency order (if any):
+  #<A> must land before #<B> (blocked_by relationship)
+  ... or "No dependencies within this collection."
+
+File overlap warnings (if any):
+  #<A> and #<B> share scope hints: <paths>
+  ... or "No file overlap detected."
+
+Agents to spawn: <count>
+Worktrees:      .worktrees/parallel-sprint-<N>-<slug>  (one per issue)
+Manifest:       .sprint/wc_sprint_<repo>_<ID>_<timestamp>.json
+```
+
+Ask: "Proceed with this execution plan? (yes / no / adjust)"
+
+- **yes** — call `ExitPlanMode` and continue to Step 7.
+- **no** — call `ExitPlanMode` and exit 0.
+- **adjust** — stay in plan mode, incorporate the user's changes to the collection
+  (e.g. drop an issue, reorder), update the display, and re-ask.
+
 ### Step 7 — Preflight gate
 
 All checks must pass before any worktree is created. Abort with a clear per-check message
