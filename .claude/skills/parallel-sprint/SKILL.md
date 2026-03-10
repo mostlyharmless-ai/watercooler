@@ -244,9 +244,37 @@ python3 "$SKILL_ROOT/cluster_issues.py" \
 Read `.sprint/tmp/ps_candidates.json` and `.sprint/tmp/ps_relationships.json`.
 Read `.sprint/tmp/ps_issues.json` for the full issue list.
 
+`ps_candidates.json` is a **dict**, not an array. Schema:
+
+```json
+{
+  "candidates": [
+    {
+      "label": "memory-tiers",
+      "issues": [
+        {"number": 210, "title": "...", "labels": [...], "effort_label": "M",
+         "scope_hints": ["src/watercooler/memory.py"], "flagged_injection": false}
+      ],
+      "dependency_edges": [{"from": 210, "to": 214}],
+      "cross_group_edges": [],
+      "has_cycle": false,
+      "cycle_warnings": [],
+      "hint_overlap_pairs": []
+    }
+  ],
+  "ungrouped": [{"number": 220, "title": "...", "labels": [...], ...}],
+  "cycle_warnings": [],
+  "stats": {"total_issues": 120, "grouped": 85, "ungrouped": 35, "candidate_count": 5}
+}
+```
+
+Access candidate groups via `data["candidates"]`. The `label` field is the feature-area
+label that anchors each cluster. `dependency_edges` and `cross_group_edges` are intra- and
+inter-cluster dependency pairs. `hint_overlap_pairs` lists issues sharing file-path scope hints.
+
 **Stage 1 — Propose cluster names (single prompt):**
 
-Send all issue titles + labels + `ps_candidates.json` label groups to the LLM.
+Send all issue titles + labels + `ps_candidates.json["candidates"]` label groups to the LLM.
 Ask the LLM to propose cluster names with 1-sentence descriptions. Include:
 > "You may define an 'Uncategorized' cluster for issues that genuinely don't belong
 > elsewhere. If >15% of issues land there, flag it as a signal to revisit the label set."
