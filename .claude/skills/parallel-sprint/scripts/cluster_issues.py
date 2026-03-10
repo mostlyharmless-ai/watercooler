@@ -347,7 +347,9 @@ def main() -> None:
     sys.exit(1)
 
   result = cluster_issues(issues, relationships, top_n=args.top_n)
-  print(json.dumps(result, indent=2))
+  # Output candidates array directly — not wrapped in a dict — so consumers can
+  # iterate it without confusion (dict iteration yields string keys, not objects).
+  print(json.dumps(result["candidates"], indent=2))
 
   s = result["stats"]
   print(
