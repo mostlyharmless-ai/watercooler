@@ -172,16 +172,8 @@ Build the active-PR map (single GraphQL call):
 ```bash
 gh api graphql \
   -F owner="$OWNER" -F repo="$REPO" \
-  -f query='query($owner:String!,$repo:String!){
-    repository(owner:$owner,name:$repo){
-      pullRequests(first:100,states:OPEN){
-        nodes{
-          number
-          closingIssuesReferences(first:20){nodes{number}pageInfo{hasNextPage}}
-        }
-      }
-    }
-  }' > .sprint/tmp/ps_pr_map_raw.json
+  -f query='query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){pullRequests(first:100,states:OPEN){nodes{number closingIssuesReferences(first:20){nodes{number}pageInfo{hasNextPage}}}}}}' \
+  > .sprint/tmp/ps_pr_map_raw.json
 
 python3 "$(git rev-parse --show-toplevel)/.claude/skills/parallel-sprint/scripts/fetch_issues.py" \
   --build-pr-map \
