@@ -499,19 +499,6 @@ class TestGraphitiConfigValidation:
         assert config.embedding_api_base is None  # OpenAI default
         assert config.embedding_model == "text-embedding-3-small"
 
-    def test_legacy_openai_fields_still_exist(self):
-        """Test that legacy openai_api_key fields still exist for backwards compat."""
-        config = GraphitiConfig(
-            llm_api_key="new-key",
-            embedding_api_key="embed-key",
-            openai_api_key="legacy-key",  # Legacy field
-            openai_api_base="http://legacy.api/v1",  # Legacy field
-            openai_model="legacy-model",  # Legacy field
-        )
-
-        assert config.openai_api_key == "legacy-key"
-        assert config.openai_api_base == "http://legacy.api/v1"
-        assert config.openai_model == "legacy-model"
 
 
 class TestGraphitiConfigMissingKeys:
@@ -550,22 +537,6 @@ class TestGraphitiConfigMissingKeys:
 
         assert "EMBEDDING_API_KEY" in str(exc_info.value)
 
-    def test_legacy_openai_key_fallback(self):
-        """Test that legacy openai_api_key is used as fallback for llm_api_key."""
-        config = GraphitiConfig(
-            embedding_api_key="embed-key",
-            openai_api_key="legacy-openai-key",  # Legacy fallback
-            # No llm_api_key
-        )
-
-        # Mock _ensure_graphiti_available to bypass neo4j import check
-        # and skip entry episode index init
-        with patch('watercooler_memory.backends.graphiti._ensure_graphiti_available'):
-            with patch.object(GraphitiBackend, '_init_entry_episode_index'):
-                backend = GraphitiBackend(config)
-
-        # Legacy key should be copied to llm_api_key
-        assert backend.config.llm_api_key == "legacy-openai-key"
 
 
 class TestNormalizeJsonResponse:
