@@ -205,11 +205,11 @@ def build_pr_map(graphql_input: Path, pr_map_output: Path) -> None:
     f"# PR map: {len(pr_map)} issues with active PRs written to {pr_map_output}",
     file=sys.stderr,
   )
-  if len(pr_nodes) >= 200:
+  if len(pr_nodes) >= 100:
     print(
-      "Warning: fetched exactly 200 open PRs — repo may have more. "
-      "Issues linked to PRs beyond the first 200 are not excluded from sprint candidates. "
-      "Consider closing stale PRs or raising the pullRequests(first:...) limit in SKILL.md.",
+      "Warning: fetched exactly 100 open PRs — repo may have more. "
+      "Issues linked to PRs beyond the first 100 are not excluded from sprint candidates. "
+      "Consider closing stale PRs (GitHub GraphQL caps pullRequests at first:100).",
       file=sys.stderr,
     )
 

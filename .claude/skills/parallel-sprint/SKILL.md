@@ -174,7 +174,7 @@ gh api graphql \
   -F owner="$OWNER" -F repo="$REPO" \
   -f query='query($owner:String!,$repo:String!){
     repository(owner:$owner,name:$repo){
-      pullRequests(first:200,states:OPEN){
+      pullRequests(first:100,states:OPEN){
         nodes{
           number
           closingIssuesReferences(first:20){nodes{number}pageInfo{hasNextPage}}
