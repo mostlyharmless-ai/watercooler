@@ -151,6 +151,70 @@ def fetch_issues(
   return normalized, raw_count
 
 
+_PR_MAP_QUERY = (
+  "query($owner:String!,$repo:String!){"
+  "repository(owner:$owner,name:$repo){"
+  "pullRequests(first:100,states:OPEN){"
+  "nodes{number closingIssuesReferences(first:20)"
+  "{nodes{number}pageInfo{hasNextPage}}}}}}"
+)
+
+
+def fetch_pr_map(owner: str, repo: str, pr_map_output: Path) -> None:
+  """Fetch open PRs via GraphQL and write the issue→PR map in one step.
+
+  Runs the gh api graphql call directly via subprocess (no shell quoting)
+  so the query string is never subject to shell interpretation.
+  """
+  result = subprocess.run(
+    [
+      "gh", "api", "graphql",
+      "-F", f"owner={owner}",
+      "-F", f"repo={repo}",
+      "-f", f"query={_PR_MAP_QUERY}",
+    ],
+    capture_output=True, text=True, check=True, timeout=60,
+  )
+  raw = json.loads(result.stdout)
+  pr_nodes = (
+    raw
+    .get("data", {})
+    .get("repository", {})
+    .get("pullRequests", {})
+    .get("nodes", [])
+  )
+
+  pr_map: dict[str, int] = {}
+  for pr in pr_nodes:
+    pr_num = pr.get("number")
+    closing_data = pr.get("closingIssuesReferences", {})
+    closing = closing_data.get("nodes", [])
+    if closing_data.get("pageInfo", {}).get("hasNextPage"):
+      print(
+        f"Warning: PR #{pr_num} links >20 issues; some may be missing from the "
+        "active-PR exclusion map. Check manually.",
+        file=sys.stderr,
+      )
+    for issue_ref in closing:
+      issue_num = issue_ref.get("number")
+      if issue_num is not None and pr_num is not None:
+        pr_map[str(issue_num)] = pr_num
+
+  pr_map_output.parent.mkdir(parents=True, exist_ok=True)
+  pr_map_output.write_text(json.dumps(pr_map, indent=2))
+  print(
+    f"# PR map: {len(pr_map)} issues with active PRs written to {pr_map_output}",
+    file=sys.stderr,
+  )
+  if len(pr_nodes) >= 100:
+    print(
+      "Warning: fetched exactly 100 open PRs — repo may have more. "
+      "Issues linked to PRs beyond the first 100 are not excluded from sprint candidates. "
+      "Consider closing stale PRs (GitHub GraphQL caps pullRequests at first:100).",
+      file=sys.stderr,
+    )
+
+
 def build_pr_map(graphql_input: Path, pr_map_output: Path) -> None:
   """
   Transform raw GraphQL closingIssuesReferences JSON into a flat map:
@@ -231,7 +295,15 @@ def main() -> None:
     help="Path to ps_pr_map.json; issues with active PRs are excluded",
   )
 
-  # PR-map build mode
+  # PR-map fetch mode (preferred — runs GraphQL via subprocess, no shell quoting)
+  parser.add_argument(
+    "--fetch-pr-map", action="store_true",
+    help="Fetch open PRs via GraphQL and write issue→PR map (requires --owner, --repo, --pr-map-output)",
+  )
+  parser.add_argument("--owner", type=str, default=None, help="GitHub repo owner")
+  parser.add_argument("--repo", type=str, default=None, help="GitHub repo name")
+
+  # PR-map build mode (legacy — transforms a pre-fetched GraphQL response)
   parser.add_argument(
     "--build-pr-map", action="store_true",
     help="Transform GraphQL closingIssuesReferences output into issue→PR map",
@@ -242,12 +314,22 @@ def main() -> None:
   )
   parser.add_argument(
     "--pr-map-output", type=Path, default=None, metavar="PATH",
-    help="Where to write the built PR map (required with --build-pr-map)",
+    help="Where to write the built PR map (required with --fetch-pr-map or --build-pr-map)",
   )
 
   args = parser.parse_args()
 
   try:
+    if args.fetch_pr_map:
+      if not args.owner or not args.repo or not args.pr_map_output:
+        print(
+          "Error: --fetch-pr-map requires --owner, --repo, and --pr-map-output",
+          file=sys.stderr,
+        )
+        sys.exit(1)
+      fetch_pr_map(args.owner, args.repo, args.pr_map_output)
+      return
+
     if args.build_pr_map:
       if not args.graphql_input or not args.pr_map_output:
         print(

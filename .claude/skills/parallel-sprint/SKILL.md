@@ -167,22 +167,12 @@ if ! echo "$REPO_SHORT" | grep -qE '^[a-zA-Z0-9_.-]{1,100}$'; then
 fi
 ```
 
-Build the active-PR map (single GraphQL call):
+Build the active-PR map (single Python call — no shell quoting of GraphQL):
 
 ```bash
-# Write query to file first — avoids shell quoting of the GraphQL string entirely.
-# Do NOT inline the query in the gh call; use -f query=@file instead.
-echo 'query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){pullRequests(first:100,states:OPEN){nodes{number closingIssuesReferences(first:20){nodes{number}pageInfo{hasNextPage}}}}}}' \
-  > .sprint/tmp/ps_pr_query.gql
-
-gh api graphql \
-  -F owner="$OWNER" -F repo="$REPO" \
-  -f query=@.sprint/tmp/ps_pr_query.gql \
-  > .sprint/tmp/ps_pr_map_raw.json
-
-python3 "$(git rev-parse --show-toplevel)/.claude/skills/parallel-sprint/scripts/fetch_issues.py" \
-  --build-pr-map \
-  --graphql-input .sprint/tmp/ps_pr_map_raw.json \
+python3 "$SKILL_ROOT/fetch_issues.py" \
+  --fetch-pr-map \
+  --owner "$OWNER" --repo "$REPO" \
   --pr-map-output .sprint/tmp/ps_pr_map.json
 ```
 
