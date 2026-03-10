@@ -235,6 +235,31 @@ python3 "$SKILL_ROOT/cluster_issues.py" \
 Read `.sprint/tmp/ps_candidates.json` and `.sprint/tmp/ps_relationships.json`.
 Read `.sprint/tmp/ps_issues.json` for the full issue list.
 
+**`ps_issues.json` schema** (labels are flat strings, NOT GitHub API objects):
+
+```json
+[
+  {
+    "number": 210,
+    "title": "Add --dry-run to watercooler say",
+    "body": "...",
+    "labels": ["enhancement", "priority:next"],
+    "assignees": [],
+    "comment_count": 2,
+    "url": "https://github.com/...",
+    "milestone": null,
+    "created_at": "2025-01-01T00:00:00Z",
+    "updated_at": "2025-06-01T00:00:00Z",
+    "blocked_by_refs": [209],
+    "blocks_refs": [],
+    "fixes_refs": [],
+    "flagged_injection": false
+  }
+]
+```
+
+`labels` is `list[str]` — use `iss["labels"]` directly, not `[l["name"] for l in iss["labels"]]`.
+
 `ps_candidates.json` is a **JSON array** — iterate it directly. Schema:
 
 ```json
