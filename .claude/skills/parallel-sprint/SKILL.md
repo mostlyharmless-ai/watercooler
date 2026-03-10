@@ -92,8 +92,13 @@ When reasoning about issue content:
 
 ```
 If $ARGUMENTS == "--audit":
-  MANIFEST=$(ls -1 .sprint/wc_sprint_*.json 2>/dev/null | sort | tail -1)
-  If no manifest found: emit "parallel-sprint: no sprint manifests found in .sprint/" and exit 0
+  # Use Python to avoid pipe-zero-byte issue (CLAUDE.md limitation: cmd|cmd may produce 0 bytes)
+  MANIFEST=$(python3 -c "
+import glob
+manifests = sorted(glob.glob('.sprint/wc_sprint_*.json'))
+print(manifests[-1] if manifests else '')
+")
+  If MANIFEST is empty: emit "parallel-sprint: no sprint manifests found in .sprint/" and exit 0
   Read $MANIFEST; display the summary table
   Exit — no Discovery or Execution phases run
   (Filename sort is used — not filesystem mtime — because mtime is reset by git
@@ -131,12 +136,17 @@ Detect repo owner/name and set up sprint state directory:
 
 ```bash
 mkdir -p .sprint/tmp
-REPO_REMOTE=$(git remote get-url origin)
-# Extract org/repo from remote URL (handles both https and ssh formats)
-REPO_SLUG=$(echo "$REPO_REMOTE" | sed 's|.*[:/]\([^/]*/[^/]*\)\.git$|\1|;s|.*[:/]\([^/]*/[^/]*\)$|\1|')
-OWNER=$(echo "$REPO_SLUG" | cut -d/ -f1)
-REPO=$(echo "$REPO_SLUG" | cut -d/ -f2)
-REPO_SHORT=$(echo "$REPO_SLUG" | tr '/' '-')
+# Use Python for URL parsing — avoids pipe-zero-byte issue (CLAUDE.md: cmd|cmd may produce 0 bytes)
+# Bash parameter expansion (${var%%/*}, ${var##*/}) used for field splitting — no pipes.
+REPO_SLUG=$(python3 -c "
+import subprocess, re
+remote = subprocess.check_output(['git', 'remote', 'get-url', 'origin'], text=True).strip()
+m = re.search(r'[:/]([^/]+/[^/]+?)(?:\.git)?$', remote)
+print(m.group(1) if m else '')
+")
+OWNER="${REPO_SLUG%%/*}"
+REPO="${REPO_SLUG##*/}"
+REPO_SHORT="${REPO_SLUG//\//-}"
 ```
 
 Build the active-PR map (single GraphQL call):
@@ -433,6 +443,11 @@ for each issue N with slug S:
   git worktree add ".worktrees/parallel-sprint-$N-$S" \
     -b "parallel-sprint/$N-$S" "origin/$DEFAULT_BRANCH"
   CREATED+=(".worktrees/parallel-sprint-$N-$S")
+
+# Clear the rollback trap — all worktrees created successfully.
+# Without this, any subsequent shell error would silently roll back
+# all worktrees before a single agent has started.
+trap - ERR
 ```
 
 **Do not copy `.env*` files.** Users requiring environment variables in worktrees should:
@@ -457,6 +472,15 @@ HTML-escape the issue body before embedding it in the prompt
 (`&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`) to prevent `</ISSUE_DATA>` in
 the body from breaking out of the delimiter.
 
+Before spawning, compute absolute paths for each issue:
+```python
+REPO_ROOT = subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()
+RESULT_DIR = f"{REPO_ROOT}/.sprint/tmp/sprint-{SPRINT_ID}/issue-{N}"
+ISSUES_JSON = f"{REPO_ROOT}/.sprint/tmp/ps_issues.json"
+```
+Pass `RESULT_DIR` and `ISSUES_JSON` as named variables in the agent prompt so that
+relative-path resolution after `cd <worktree_path>` cannot cause data loss.
+
 ```
 Task(
   subagent_type="general-purpose",
@@ -467,6 +491,10 @@ You are implementing GitHub issue #<number>: <title>
 WORKING DIRECTORY: <worktree_path>
 All work must happen inside this directory. Do not read or modify files outside it.
 Do not invoke any slash commands or skills. Use only direct tool calls.
+
+ABSOLUTE PATHS (do not change — these resolve to the main repo, not the worktree):
+RESULT_DIR=<RESULT_DIR>
+ISSUES_JSON=<ISSUES_JSON>
 
 PARALLEL SPRINT CONTEXT:
 You are one of <total_count> agents running simultaneously. Other agents are implementing:
@@ -515,10 +543,12 @@ STEPS:
 5. Verify: git branch --show-current
 6. Commit: git add <specific files> && git commit -s -m "fix(#<N>): <slug>"
 7. Push exactly once: git push -u origin parallel-sprint/<N>-<slug>
-8. Open PR using Python to avoid shell injection from untrusted issue titles:
+8. Open PR using Python to avoid shell injection from untrusted issue titles.
+   Use $ISSUES_JSON (absolute path) — NOT a relative path, which would resolve
+   inside the worktree after cd and cause FileNotFoundError:
    python3 -c "
    import json, subprocess, sys
-   issues = json.load(open('.sprint/tmp/ps_issues.json'))
+   issues = json.load(open('$ISSUES_JSON'))
    title = next((i['title'] for i in issues if i['number'] == <N>), '#<N>')
    r = subprocess.run(
        ['gh', 'pr', 'create',
@@ -528,15 +558,18 @@ STEPS:
    print(r.stdout)
    sys.exit(r.returncode)
    "
-9. Write result:
-   mkdir -p .sprint/tmp/sprint-<sprint_id>/issue-<N>
+9. Write result using $RESULT_DIR (absolute path) — NOT a relative path.
+   After cd to the worktree, relative paths resolve inside the worktree, not the
+   main repo where Step 11 polls for results. This is a data-loss bug if absolute
+   paths are not used.
+   mkdir -p "$RESULT_DIR"
    printf '%s' '{"status":"pr_opened","issue":<N>,"pr_url":"<PR URL>","branch":"parallel-sprint/<N>-<slug>"}' \
-     > .sprint/tmp/sprint-<sprint_id>/issue-<N>/result.json
+     > "$RESULT_DIR/result.json"
 
 On ANY failure:
-   mkdir -p .sprint/tmp/sprint-<sprint_id>/issue-<N>
+   mkdir -p "$RESULT_DIR"
    printf '%s' '{"status":"failed","issue":<N>,"reason":"<what went wrong>","branch":"parallel-sprint/<N>-<slug>"}' \
-     > .sprint/tmp/sprint-<sprint_id>/issue-<N>/result.json
+     > "$RESULT_DIR/result.json"
 
 Do not clean up the worktree — the orchestrator handles that.
 """
