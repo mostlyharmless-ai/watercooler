@@ -15,7 +15,11 @@ from unittest.mock import patch
 
 import pytest
 
-from watercooler.memory_config import _is_localhost_url, is_memory_queue_enabled
+from watercooler.memory_config import (
+    _is_localhost_url,
+    is_memory_queue_enabled,
+    resolve_database_config,
+)
 from watercooler_mcp import memory
 
 # Note: isolated_config fixture is provided by conftest.py (from watercooler.testing)
@@ -235,3 +239,50 @@ class TestIsMemoryQueueEnabled:
         full.memory.queue_enabled = False
         with patch("watercooler.memory_config.config.full", return_value=full):
             assert is_memory_queue_enabled() is False
+
+
+class TestResolveDatabaseConfigUsername:
+    """Tests for resolve_database_config() FALKORDB_USERNAME env var support."""
+
+    def test_env_var_takes_priority(self, monkeypatch, isolated_config):
+        """FALKORDB_USERNAME env var overrides TOML config value."""
+        from watercooler.config_facade import config as cfg
+        from watercooler.config_schema import MemoryDatabaseConfig
+
+        monkeypatch.setenv("FALKORDB_USERNAME", "env_user")
+        cfg.reset()
+
+        full = cfg.full()
+        full.memory.database = MemoryDatabaseConfig(username="toml_user")
+        with patch("watercooler.memory_config.config.full", return_value=full):
+            result = resolve_database_config()
+
+        assert result.username == "env_user"
+
+    def test_toml_fallback_when_env_absent(self, monkeypatch, isolated_config):
+        """Falls back to TOML config when FALKORDB_USERNAME is not set."""
+        from watercooler.config_facade import config as cfg
+        from watercooler.config_schema import MemoryDatabaseConfig
+
+        monkeypatch.delenv("FALKORDB_USERNAME", raising=False)
+        cfg.reset()
+
+        full = cfg.full()
+        full.memory.database = MemoryDatabaseConfig(username="toml_user")
+        with patch("watercooler.memory_config.config.full", return_value=full):
+            result = resolve_database_config()
+
+        assert result.username == "toml_user"
+
+    def test_default_username_is_empty(self, monkeypatch, isolated_config):
+        """Default username is empty string when no env var and no TOML override."""
+        from watercooler.config_facade import config as cfg
+
+        monkeypatch.delenv("FALKORDB_USERNAME", raising=False)
+        cfg.reset()
+
+        full = cfg.full()
+        with patch("watercooler.memory_config.config.full", return_value=full):
+            result = resolve_database_config()
+
+        assert result.username == ""

@@ -245,6 +245,10 @@ cloudflare-worker/.cache/
 # Scratch/notes file
 .scratch.txt
 
+# parallel-sprint runtime state (sprint manifests, worktrees)
+.sprint/
+.worktrees/
+
 # Test artifacts from backend integration tests
 tests/test-artifacts/
 tests/test_artifacts/

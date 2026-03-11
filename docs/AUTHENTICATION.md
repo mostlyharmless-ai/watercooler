@@ -46,7 +46,7 @@ gh auth setup-git
 gh auth status
 ```
 
-Look for `Logged in to github.com` and `Token scopes: repo`.
+Look for `Logged in to github.com` and `repo` among the listed token scopes.
 
 ---
 
@@ -113,7 +113,9 @@ python -c "import watercooler; import pathlib; print(pathlib.Path(watercooler.__
 watercooler config show
 ```
 
-If credentials are loaded, the output will include the configured GitHub user.
+Check that the output loads without errors and shows no missing-credential warnings.
+To confirm the token works end-to-end, run `watercooler_health` from your MCP client
+after completing setup.
 
 ---
 

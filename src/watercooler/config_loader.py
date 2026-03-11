@@ -198,9 +198,16 @@ def _env_to_config_key(env_var: str) -> tuple[list[str], str]:
         # Memory database
         "FALKORDB_HOST": (["memory", "database"], "host"),
         "FALKORDB_PORT": (["memory", "database"], "port"),
+        "FALKORDB_USERNAME": (["memory", "database"], "username"),
         "FALKORDB_PASSWORD": (["memory", "database"], "password"),
         # Graphiti-specific
         "WATERCOOLER_GRAPHITI_RERANKER": (["memory", "graphiti"], "reranker"),
+        "WATERCOOLER_GRAPHITI_PATH": (["memory", "graphiti"], "path"),
+        # Graph/MCP settings
+        "WATERCOOLER_AUTO_START_SERVICES": (["mcp", "graph"], "auto_start_services"),
+        "WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD": (["mcp", "graph"], "embedding_divergence_threshold"),
+        # Memory embedding extended
+        "EMBEDDING_TIMEOUT": (["memory", "embedding"], "timeout"),
     }
 
     return ENV_MAPPING.get(env_var, ([], env_var))
@@ -254,8 +261,13 @@ def _apply_env_overlay(config_dict: Dict[str, Any]) -> Dict[str, Any]:
         "EMBEDDING_DIM",
         "FALKORDB_HOST",
         "FALKORDB_PORT",
+        "FALKORDB_USERNAME",
         "FALKORDB_PASSWORD",
         "WATERCOOLER_GRAPHITI_RERANKER",
+        "WATERCOOLER_GRAPHITI_PATH",
+        "WATERCOOLER_AUTO_START_SERVICES",
+        "WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD",
+        "EMBEDDING_TIMEOUT",
     ]
 
     for env_var in env_vars:

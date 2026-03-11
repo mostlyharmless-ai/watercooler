@@ -193,37 +193,6 @@ def ensure_directory_structure(threads_dir: Path) -> list[Path]:
     return created
 
 
-def migrate_to_structured_layout(threads_dir: Path) -> list[tuple[Path, Path]]:
-    """Move root-level .md thread files into the threads/ subdirectory.
-
-    Idempotent and opt-in only. Does NOT move files that already live in
-    a category subdirectory.
-
-    Returns:
-        List of (old_path, new_path) for files that were moved.
-    """
-    ensure_directory_structure(threads_dir)
-    target = threads_dir / "threads"
-    moved: list[tuple[Path, Path]] = []
-
-    for p in sorted(threads_dir.glob("*.md")):
-        if not p.is_file():
-            continue
-        if p.name.startswith((".", "_")):
-            continue
-        dest = target / p.name
-        if dest.exists():
-            logger.warning("migrate_to_structured_layout: skipping '%s' — collision with '%s'", p, dest)
-            continue
-        try:
-            shutil.move(str(p), str(dest))
-            moved.append((p, dest))
-        except OSError as exc:
-            logger.error("migrate_to_structured_layout: failed to move '%s' → '%s': %s", p, dest, exc)
-
-    return moved
-
-
 # =============================================================================
 # Thread File Discovery
 # =============================================================================

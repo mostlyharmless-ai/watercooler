@@ -309,8 +309,8 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
         config = mem.load_graphiti_config(code_path=code_path if code_path else None)
         diagnostics["graphiti_enabled"] = config is not None
         if config:
-            # Check LLM API key (llm_api_key is the current field, openai_api_key is deprecated)
-            llm_key = config.llm_api_key or config.openai_api_key
+            # Check LLM API key
+            llm_key = config.llm_api_key
             diagnostics["llm_api_key_set"] = bool(llm_key)
             diagnostics["llm_api_base"] = config.llm_api_base or "https://api.openai.com/v1 (default)"
             diagnostics["llm_model"] = config.llm_model or "gpt-4o-mini (default)"
@@ -320,8 +320,6 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
                     diagnostics["llm_api_key_format"] = "valid (sk-...)"
                 else:
                     diagnostics["llm_api_key_format"] = f"unusual format: {llm_key[:10]}..."
-            # Legacy field check (for backwards compatibility awareness)
-            diagnostics["openai_key_set"] = bool(config.openai_api_key)  # Deprecated field
             # FalkorDB connection (T2 uses FalkorDB just like T3)
             # "localhost"/6379 are the actual FalkorDB defaults, not "(not set)" sentinels
             diagnostics["falkordb_host"] = config.falkordb_host or "localhost"

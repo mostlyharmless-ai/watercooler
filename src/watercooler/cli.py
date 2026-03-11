@@ -281,10 +281,6 @@ def main(argv: list[str] | None = None) -> None:
         )
         sys.exit(0)
 
-        if args.status:
-            _print_status(sync.get_async_status())
-        sys.exit(0)
-
     if args.cmd == "list":
         from pathlib import Path
         from .commands import list_threads

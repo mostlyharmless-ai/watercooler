@@ -94,65 +94,95 @@ Or switch your code branch to match where the thread was created.
 
 ---
 
-### "Ball is not mine" error
+### "Ball is not mine" or unexpected ball state
 
-**Symptom:** `watercooler_say` fails with a ball ownership error.
+**Symptom:** `watercooler_say` fails with a ball-ownership error, or the ball owner shown
+in the thread is not what you expected.
 
-**Cause:** The ball currently belongs to another agent; you can't `say` when it's not your
-turn.
+**Cause:** Ball state is metadata, not enforced — any agent can call `say` regardless of
+who holds the ball. Common reasons the ball shows an unexpected owner:
+- Another agent called `say` or `handoff` after you last read the thread state
+- Two agents wrote concurrently and the last write set the ball to an unexpected value
+- Client and server are on different versions — upgrade then restart your MCP client
 
 **Fix options:**
 
-1. Use `watercooler_ack` to post an entry without affecting the ball — `ack` is acknowledgement
-   only and does not require holding the ball.
-2. Ask the current ball holder to hand off:
+1. Use `watercooler_ack` to post an entry without affecting the ball — `ack` does not
+   require holding the ball.
+2. Ask the current ball holder to hand off to you explicitly:
    ```python
-   watercooler_handoff(topic="my-topic", code_path=".", agent_func="Claude Code:sonnet-4:pm")
+   watercooler_handoff(topic="my-topic", code_path=".", target_agent="your-name", agent_func="Claude Code:sonnet-4:pm")
    ```
+   The `target_agent` field names the recipient. Without it, the ball goes to the
+   caller's configured counterpart, which may not be you.
 3. Override with `set-ball` if the other agent is unavailable:
    ```bash
    watercooler set-ball my-topic codex
    ```
+4. Verify both CLI/server are current (`watercooler --version`) and restart the MCP
+   client after upgrades.
 
 ---
 
 ### Git sync conflict
 
-**Symptom:** Push fails with a rebase conflict, or `watercooler sync --status` shows a
-stuck queue.
+**Symptom:** A write fails with a git error, or an entry appears missing after two agents
+wrote to the same thread at the same time.
 
-**Cause:** Two agents wrote to the same thread concurrently and the rebase can't
-auto-resolve the conflict.
+**Cause:** Thread sync is handled automatically by the orphan branch worktree. On
+concurrent writes, the worktree attempts an automatic rebase. If it can't auto-resolve,
+the operation fails and the stash is preserved — no data is lost.
 
 **Fix:**
 
-```bash
-watercooler sync --status    # check what's queued
-watercooler sync --now       # force flush the queue
-```
+1. The uncommitted entry is preserved in the worktree stash at
+   `~/.watercooler/worktrees/<repo>/`. Re-run the write operation and it will retry.
 
-For a corrupted graph state, call `watercooler_graph_recover()` from your MCP client.
-This returns step-by-step recovery instructions (it does not modify data directly).
+2. For a corrupted graph state, restore from git history:
+   ```bash
+   git -C ~/.watercooler/worktrees/<repo> checkout <commit> -- graph/
+   ```
+   Or use the recovery script (requires the watercooler source tree — see
+   [Migration note](#migration-from-separate-threads-repository) for how to clone it):
+   ```bash
+   ./scripts/recover_baseline_graph.py /path/to/threads --mode stale
+   ```
+
+3. `watercooler_graph_recover()` from your MCP client returns instructions for the
+   recovery script and does not modify data directly.
 
 ---
 
 ### Memory backend connection failure
 
-**Symptom:** `watercooler_smart_query` returns an error, or `watercooler_health` reports
-a memory tier issue.
+**Symptom:** `watercooler_smart_query` returns an error or zero results, or
+`watercooler_health` reports a memory tier issue.
 
-**Cause:** The memory backend isn't configured, or the LLM/embedding endpoint is
-unreachable.
+**Cause:** `smart_query` runs across three tiers (T1, T2, T3). T1 (baseline graph) is
+on by default and requires no extra configuration — it just needs the baseline graph to
+have been built. T2 (episodic) and T3 (semantic) are opt-in and only active when
+explicitly configured. The error scenarios are:
 
-**Fix:** Check your memory config and verify the LLM endpoint is running:
+- **T1 not ready:** The baseline graph (`graph/baseline/nodes.jsonl`) doesn't exist yet.
+  Build it first: `watercooler baseline-graph build`
+- **T2/T3 endpoint unreachable:** T2 or T3 is configured (enabled via config or env var)
+  but the backing service (FalkorDB, embedding server) isn't running.
+- **`watercooler_memory` not installed:** The memory package wasn't included in the
+  install. Reinstall with the memory extra.
+
+> **Note:** T2/T3 not being configured is not an error — `smart_query` simply runs on
+> T1 only.
+
+**Fix:**
 
 ```bash
-watercooler config show | grep memory
+watercooler config show | grep memory   # check memory config
+watercooler baseline-graph build        # (re)build the T1 baseline graph if missing
 ```
 
-If memory isn't configured, core thread tools (`say`, `ack`, `list`, etc.) still work
-without it. See [CONFIGURATION.md — memory backend](./CONFIGURATION.md#memory-backend)
-to set it up.
+Core thread tools (`say`, `ack`, `list`, etc.) always work regardless of memory tier
+status. See [CONFIGURATION.md — memory backend](./CONFIGURATION.md#memory-backend) for
+T2/T3 setup.
 
 ---
 
@@ -171,8 +201,9 @@ watercooler config show --sources    # see which files were loaded
 watercooler config validate          # check for syntax errors
 ```
 
-Valid section names are `[common]` and `[mcp]`. Sections like `[threads]` or `[agent]`
-are not valid and will be silently ignored.
+Valid top-level section names are: `[common]`, `[mcp]`, `[dashboard]`, `[validation]`,
+`[memory]`, and `[federation]`. Any other section name (e.g. `[threads]` or `[agent]`)
+will be silently ignored by the Pydantic model.
 
 User config location: `~/.watercooler/config.toml`
 Project config location: `<project>/.watercooler/config.toml`
@@ -238,6 +269,13 @@ orphan branch (`watercooler/threads`) inside your code repo.
 
 **Fix:**
 
+> **Note:** The migration script is not included in the `uv tool install` package. You
+> need the watercooler source tree to run it:
+> ```bash
+> git clone https://github.com/mostlyharmless-ai/watercooler
+> cd watercooler
+> ```
+
 1. **Dry run** (default — shows what would be migrated without changing anything):
    ```bash
    python scripts/migrate_to_orphan_branch.py /path/to/code-repo /path/to/threads-repo
@@ -257,4 +295,3 @@ orphan branch (`watercooler/threads`) inside your code repo.
    `config.toml` — these are not needed with the orphan-branch model.
 
 5. **Archive the old repo** once migration is confirmed (the script does not delete it).
-

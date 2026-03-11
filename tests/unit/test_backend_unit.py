@@ -10,6 +10,7 @@ from watercooler_memory.backends import BackendError, TransientError
 from watercooler_memory.backends.graphiti import (
     GraphitiBackend, GraphitiConfig,
     _normalize_json_response, _get_list_item_model, _best_extra_match,
+    _get_graphiti_path,
     MAX_NORMALIZE_DEPTH,
 )
 from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
@@ -499,19 +500,6 @@ class TestGraphitiConfigValidation:
         assert config.embedding_api_base is None  # OpenAI default
         assert config.embedding_model == "text-embedding-3-small"
 
-    def test_legacy_openai_fields_still_exist(self):
-        """Test that legacy openai_api_key fields still exist for backwards compat."""
-        config = GraphitiConfig(
-            llm_api_key="new-key",
-            embedding_api_key="embed-key",
-            openai_api_key="legacy-key",  # Legacy field
-            openai_api_base="http://legacy.api/v1",  # Legacy field
-            openai_model="legacy-model",  # Legacy field
-        )
-
-        assert config.openai_api_key == "legacy-key"
-        assert config.openai_api_base == "http://legacy.api/v1"
-        assert config.openai_model == "legacy-model"
 
 
 class TestGraphitiConfigMissingKeys:
@@ -550,22 +538,6 @@ class TestGraphitiConfigMissingKeys:
 
         assert "EMBEDDING_API_KEY" in str(exc_info.value)
 
-    def test_legacy_openai_key_fallback(self):
-        """Test that legacy openai_api_key is used as fallback for llm_api_key."""
-        config = GraphitiConfig(
-            embedding_api_key="embed-key",
-            openai_api_key="legacy-openai-key",  # Legacy fallback
-            # No llm_api_key
-        )
-
-        # Mock _ensure_graphiti_available to bypass neo4j import check
-        # and skip entry episode index init
-        with patch('watercooler_memory.backends.graphiti._ensure_graphiti_available'):
-            with patch.object(GraphitiBackend, '_init_entry_episode_index'):
-                backend = GraphitiBackend(config)
-
-        # Legacy key should be copied to llm_api_key
-        assert backend.config.llm_api_key == "legacy-openai-key"
 
 
 class TestNormalizeJsonResponse:
@@ -907,3 +879,51 @@ class TestDictToListCoercionValidation:
         assert isinstance(result["items"], list)
         assert len(result["items"]) == 1
         assert result["items"][0]["name"] == "foo"
+
+
+class TestGetGraphitiPathConfigFallback:
+    """Tests for _get_graphiti_path() config fallback behavior."""
+
+    def test_env_var_takes_precedence(self, monkeypatch, tmp_path):
+        """WATERCOOLER_GRAPHITI_PATH env var is returned before config."""
+        env_path = str(tmp_path / "env-graphiti")
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_PATH", env_path)
+
+        with patch(
+            "watercooler_memory.backends.graphiti._is_graphiti_installed",
+            return_value=False,
+        ):
+            result = _get_graphiti_path()
+
+        assert result == Path(env_path)
+
+    def test_config_fallback_when_env_absent(self, monkeypatch, tmp_path):
+        """_get_graphiti_path() falls back to config.full().memory.graphiti.path."""
+        monkeypatch.delenv("WATERCOOLER_GRAPHITI_PATH", raising=False)
+
+        config_path = str(tmp_path / "config-graphiti")
+
+        mock_graphiti_cfg = Mock()
+        mock_graphiti_cfg.path = config_path
+
+        mock_memory_cfg = Mock()
+        mock_memory_cfg.graphiti = mock_graphiti_cfg
+
+        mock_cfg = Mock()
+        mock_cfg.memory = mock_memory_cfg
+
+        mock_config_obj = Mock()
+        mock_config_obj.full.return_value = mock_cfg
+
+        with patch(
+            "watercooler_memory.backends.graphiti._is_graphiti_installed",
+            return_value=False,
+        ):
+            # Patch the import inside the function
+            with patch.dict(
+                "sys.modules",
+                {"watercooler.config_facade": Mock(config=mock_config_obj)},
+            ):
+                result = _get_graphiti_path()
+
+        assert result == Path(config_path)

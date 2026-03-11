@@ -8,6 +8,11 @@ no cross-references between sections.
 After connecting, run `watercooler_health` from inside your client to verify the
 connection before starting any thread operations.
 
+If multiple people on your team use the same client type, set unique lowercase
+`agent_tag` values in `~/.watercooler/config.toml` so entry authors are distinguishable
+(for example `Codex (jay)` and `Codex (caleb)`). See
+[CONFIGURATION.md](./CONFIGURATION.md#team-identity-convention).
+
 ---
 
 ## Claude Code
@@ -125,4 +130,3 @@ Restart Cursor after saving.
 server internals.
 
 **Logs:** Cursor's Output panel → select `MCP` from the dropdown for server startup logs.
-
