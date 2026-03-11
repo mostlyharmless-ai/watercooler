@@ -471,7 +471,10 @@ class CompoundConfig(BaseModel):
     """Per-project opt-in for compound artifact generation.
 
     When ``enabled = true``, compound artifact generation is activated.
-    Runtime hooks are dispatched from the closure event path.
+    The ``generate_compound_artifacts()`` function in
+    ``watercooler_mcp.daemons.compound`` serves as the callable hook; callers
+    are responsible for dispatching it at the appropriate point (e.g. thread
+    closure). Full dispatch wiring is tracked in issue #214.
 
     Compound artifacts are visible workflow artifacts that imply a process
     step was completed. They require explicit opt-in per project.

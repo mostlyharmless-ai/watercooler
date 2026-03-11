@@ -100,7 +100,7 @@ class TestGenerateCompoundArtifacts:
       with caplog.at_level(logging.INFO):
         generate_compound_artifacts("test-topic", tmp_path)
 
-    assert "compound" not in caplog.text.lower() or "pending" not in caplog.text.lower()
+    assert caplog.text == ""
 
   def test_logs_when_enabled(self, tmp_path: Path):
     """Logs an info message when compound artifact generation is enabled."""
