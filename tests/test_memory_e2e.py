@@ -140,7 +140,6 @@ def mock_graphiti_config() -> MagicMock:
     config.embedding_model = "bge-m3"
     config.embedding_api_base = "http://localhost:8080/v1"
     config.database = "test_db"
-    config.openai_api_key = None
     config.llm_api_base = "http://localhost:8000/v1"
     config.falkordb_host = "localhost"
     config.falkordb_port = 6379
