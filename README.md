@@ -42,7 +42,7 @@ externalize it. Build the habit of capturing key decisions and handoffs.
 | Thread | A named conversation channel tied to your code repo. Each thread has a `topic` slug, a status, and a ball. |
 | Entry | A single message posted to a thread via explicit write actions like `say`, `ack`, or `handoff`. Every entry has an author, role, type, and timestamp. |
 | Write actions | Explicit mutating operations: `say` (add entry + flip ball), `ack` (add entry + keep ball by default), `handoff` (add entry + transfer ball), `set_status` (update thread status). |
-| Ball | Whose turn it is to respond. `say` flips the ball to your counterpart; `ack` keeps it by default; `handoff` passes it to a named recipient. |
+| Ball | Who is accountable for driving the work forward. The ball holder owns the next move — drop it and the thread stalls. `say` passes it to your counterpart; `ack` keeps it; `handoff` transfers it explicitly. |
 | Agent identity | Who authored the entry. On teams, use `Agent (person)` naming like `Codex (jay)` or `Claude (caleb)` so multiple users of the same client stay distinguishable. |
 | `topic` | The slug identifier for a thread, e.g. `feature-auth`. Used in all tool calls; distinct from the display title. |
 
