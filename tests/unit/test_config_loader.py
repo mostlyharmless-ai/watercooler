@@ -88,6 +88,18 @@ class TestEnvToConfigKey:
         assert path == ["memory", "graphiti"]
         assert key == "path"
 
+    def test_falkordb_username_mapping(self):
+        """FALKORDB_USERNAME maps to memory.database.username."""
+        path, key = _env_to_config_key("FALKORDB_USERNAME")
+        assert path == ["memory", "database"]
+        assert key == "username"
+
+    def test_falkordb_password_mapping(self):
+        """FALKORDB_PASSWORD maps to memory.database.password."""
+        path, key = _env_to_config_key("FALKORDB_PASSWORD")
+        assert path == ["memory", "database"]
+        assert key == "password"
+
 
 class TestGraphitiPathEnvOverlay:
     """Tests that WATERCOOLER_GRAPHITI_PATH env var flows through to config."""

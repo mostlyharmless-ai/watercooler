@@ -826,7 +826,7 @@ class EmbeddingServiceConfig(BaseModel):
 class MemoryDatabaseConfig(BaseModel):
     """Database (FalkorDB) configuration for memory backends.
 
-    Env overrides: FALKORDB_HOST, FALKORDB_PORT, FALKORDB_PASSWORD
+    Env overrides: FALKORDB_HOST, FALKORDB_PORT, FALKORDB_USERNAME, FALKORDB_PASSWORD
     """
 
     host: str = Field(

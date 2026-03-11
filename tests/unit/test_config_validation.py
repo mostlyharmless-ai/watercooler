@@ -398,6 +398,17 @@ class TestMemoryDatabaseConfig:
         config = MemoryDatabaseConfig()
         assert config.host == "localhost"
         assert config.port == 6379
+        assert config.username == ""
+
+    def test_username_default_is_empty_string(self):
+        """Test that username field defaults to empty string."""
+        config = MemoryDatabaseConfig()
+        assert config.username == ""
+
+    def test_username_can_be_set(self):
+        """Test that username field can be set explicitly."""
+        config = MemoryDatabaseConfig(username="myuser")
+        assert config.username == "myuser"
 
     def test_port_range(self):
         """Test port range validation (1-65535)."""

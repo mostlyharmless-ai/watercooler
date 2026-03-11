@@ -198,6 +198,7 @@ def _env_to_config_key(env_var: str) -> tuple[list[str], str]:
         # Memory database
         "FALKORDB_HOST": (["memory", "database"], "host"),
         "FALKORDB_PORT": (["memory", "database"], "port"),
+        "FALKORDB_USERNAME": (["memory", "database"], "username"),
         "FALKORDB_PASSWORD": (["memory", "database"], "password"),
         # Graphiti-specific
         "WATERCOOLER_GRAPHITI_RERANKER": (["memory", "graphiti"], "reranker"),
@@ -255,6 +256,7 @@ def _apply_env_overlay(config_dict: Dict[str, Any]) -> Dict[str, Any]:
         "EMBEDDING_DIM",
         "FALKORDB_HOST",
         "FALKORDB_PORT",
+        "FALKORDB_USERNAME",
         "FALKORDB_PASSWORD",
         "WATERCOOLER_GRAPHITI_RERANKER",
         "WATERCOOLER_GRAPHITI_PATH",
