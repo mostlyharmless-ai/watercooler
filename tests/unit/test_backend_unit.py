@@ -10,6 +10,7 @@ from watercooler_memory.backends import BackendError, TransientError
 from watercooler_memory.backends.graphiti import (
     GraphitiBackend, GraphitiConfig,
     _normalize_json_response, _get_list_item_model, _best_extra_match,
+    _get_graphiti_path,
     MAX_NORMALIZE_DEPTH,
 )
 from watercooler_memory.backends.leanrag import LeanRAGBackend, LeanRAGConfig
@@ -878,3 +879,56 @@ class TestDictToListCoercionValidation:
         assert isinstance(result["items"], list)
         assert len(result["items"]) == 1
         assert result["items"][0]["name"] == "foo"
+
+
+class TestGetGraphitiPathConfigFallback:
+    """Tests for _get_graphiti_path() config fallback behavior."""
+
+    def test_env_var_takes_precedence(self, monkeypatch, tmp_path):
+        """WATERCOOLER_GRAPHITI_PATH env var is returned before config."""
+        env_path = str(tmp_path / "env-graphiti")
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_PATH", env_path)
+
+        with patch(
+            "watercooler_memory.backends.graphiti._is_graphiti_installed",
+            return_value=False,
+        ):
+            result = _get_graphiti_path()
+
+        assert result == Path(env_path)
+
+    def test_config_fallback_when_env_absent(self, monkeypatch, tmp_path):
+        """_get_graphiti_path() falls back to config.full().memory.graphiti.path."""
+        monkeypatch.delenv("WATERCOOLER_GRAPHITI_PATH", raising=False)
+
+        config_path = str(tmp_path / "config-graphiti")
+
+        mock_graphiti_cfg = Mock()
+        mock_graphiti_cfg.path = config_path
+
+        mock_memory_cfg = Mock()
+        mock_memory_cfg.graphiti = mock_graphiti_cfg
+
+        mock_cfg = Mock()
+        mock_cfg.memory = mock_memory_cfg
+
+        mock_config_obj = Mock()
+        mock_config_obj.full.return_value = mock_cfg
+
+        with patch(
+            "watercooler_memory.backends.graphiti._is_graphiti_installed",
+            return_value=False,
+        ):
+            with patch(
+                "watercooler_memory.backends.graphiti.config",
+                mock_config_obj,
+                create=True,
+            ):
+                # Patch the import inside the function
+                with patch.dict(
+                    "sys.modules",
+                    {"watercooler.config_facade": Mock(config=mock_config_obj)},
+                ):
+                    result = _get_graphiti_path()
+
+        assert result == Path(config_path)

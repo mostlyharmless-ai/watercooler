@@ -11,6 +11,7 @@ from watercooler.config_schema import (
     DashboardConfig,
     EntryValidationConfig,
     GitConfig,
+    GraphitiBackendConfig,
     LoggingConfig,
     McpConfig,
     SyncConfig,
@@ -243,3 +244,17 @@ class TestWatercoolerConfig:
         # Version 2 should be accepted for forward compatibility
         config = WatercoolerConfig(version=2)
         assert config.version == 2
+
+
+class TestGraphitiBackendConfigPath:
+    """Tests for GraphitiBackendConfig.path field."""
+
+    def test_path_defaults_to_empty_string(self):
+        """GraphitiBackendConfig.path defaults to empty string."""
+        config = GraphitiBackendConfig()
+        assert config.path == ""
+
+    def test_path_accepts_custom_value(self):
+        """GraphitiBackendConfig.path accepts a custom path string."""
+        config = GraphitiBackendConfig(path="/opt/graphiti")
+        assert config.path == "/opt/graphiti"
