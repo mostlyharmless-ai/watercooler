@@ -700,7 +700,9 @@ def _get_embedding_divergence_threshold() -> float:
         cfg = config.full()
         return cfg.mcp.graph.embedding_divergence_threshold
     except Exception as e:
-        logger.debug(f"Could not load embedding_divergence_threshold from config: {e}")
+        logger.error(f"Failed to load config for embedding_divergence_threshold: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
 
     return 0.6  # Default
 

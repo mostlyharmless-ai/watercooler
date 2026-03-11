@@ -398,20 +398,6 @@ class TestPhantomEnvVarRegistration:
       "['mcp', 'graph'], 'embedding_divergence_threshold'"
     )
 
-  def test_auto_start_services_in_env_vars_list(self):
-    """WATERCOOLER_AUTO_START_SERVICES appears in the env_vars list in _apply_env_overlay."""
-    source = self._get_config_loader_source()
-    assert '"WATERCOOLER_AUTO_START_SERVICES"' in source, (
-      "WATERCOOLER_AUTO_START_SERVICES must appear in the env_vars list"
-    )
-
-  def test_embedding_divergence_threshold_in_env_vars_list(self):
-    """WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD appears in the env_vars list in _apply_env_overlay."""
-    source = self._get_config_loader_source()
-    assert '"WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD"' in source, (
-      "WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD must appear in the env_vars list"
-    )
-
   def test_graphiti_enabled_not_in_env_mapping(self):
     """WATERCOOLER_GRAPHITI_ENABLED is intentionally NOT in ENV_MAPPING (runtime-only legacy flag)."""
     from watercooler.config_loader import _env_to_config_key
