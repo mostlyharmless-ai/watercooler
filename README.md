@@ -57,37 +57,37 @@ externalize it. Build the habit of capturing key decisions and handoffs.
 Watercooler is the durable reasoning layer between agent execution and your software lifecycle artifacts.
 
 ```text
-┌──────────────────────────────────────────────┐
-│        SOFTWARE DEVELOPMENT LIFECYCLE        │
-│  Repos • Branches • PRs • CI/CD • Reviews    │
-└──────────────────────────────────────────────┘
-┌──────────────────────────────────────────────┐
-│        HUMAN + AGENT COLLABORATION           │
-│  Devs • Code Review • Approval • Governance  │
-└──────────────────────────────────────────────┘
-════════════════════════════════════════════════
-                 WATERCOOLER
-           VERSIONED REASONING LAYER
-════════════════════════════════════════════════
-         • Structured reasoning graph
-         • Why behind the code
-         • Shared across agents
-         • Merge-aware reasoning branches
-         • Deterministic replay
-         • Full decision provenance
-════════════════════════════════════════════════
-┌──────────────────────────────────────────────┐
-│           CODING AGENT RUNTIME               │
-│  Planning • File Edits • Tests • Tool Calls  │
-└──────────────────────────────────────────────┘
-┌──────────────────────────────────────────────┐
-│      LLM RUNTIME (Per-Agent Scratchpad)      │
-│  Context Window • Temporary Chain of Thought │
-│  Isolated • Ephemeral • Not Shared           │
-└──────────────────────────────────────────────┘
-┌──────────────────────────────────────────────┐
-│           MODELS & COMPUTE INFRA             │
-└──────────────────────────────────────────────┘
+                           ┌──────────────────────────────────────────────┐
+                           │        SOFTWARE DEVELOPMENT LIFECYCLE        │
+                           │  Repos • Branches • PRs • CI/CD • Reviews    │
+                           └──────────────────────────────────────────────┘
+                           ┌──────────────────────────────────────────────┐
+                           │        HUMAN + AGENT COLLABORATION           │
+                           │  Devs • Code Review • Approval • Governance  │
+                           └──────────────────────────────────────────────┘
+                           ════════════════════════════════════════════════
+                                          WATERCOOLER
+                                    VERSIONED REASONING LAYER
+                           ════════════════════════════════════════════════
+                                    • Structured reasoning graph
+                                    • Why behind the code
+                                    • Shared across agents
+                                    • Merge-aware reasoning branches
+                                    • Deterministic replay
+                                    • Full decision provenance
+                           ════════════════════════════════════════════════
+                           ┌──────────────────────────────────────────────┐
+                           │           CODING AGENT RUNTIME               │
+                           │  Planning • File Edits • Tests • Tool Calls  │
+                           └──────────────────────────────────────────────┘
+                           ┌──────────────────────────────────────────────┐
+                           │      LLM RUNTIME (Per-Agent Scratchpad)      │
+                           │  Context Window • Temporary Chain of Thought │
+                           │  Isolated • Ephemeral • Not Shared           │
+                           └──────────────────────────────────────────────┘
+                           ┌──────────────────────────────────────────────┐
+                           │           MODELS & COMPUTE INFRA             │
+                           └──────────────────────────────────────────────┘
 ```
 
 ### Why watercooler?
