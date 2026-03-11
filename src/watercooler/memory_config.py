@@ -661,7 +661,8 @@ def resolve_database_config() -> ResolvedDatabaseConfig:
     username = _env_username if _env_username is not None else mem.database.username
 
     # Resolve password
-    password = os.getenv("FALKORDB_PASSWORD") or mem.database.password
+    _env_password = os.getenv("FALKORDB_PASSWORD")
+    password = _env_password if _env_password is not None else mem.database.password
 
     return ResolvedDatabaseConfig(host=host, port=port, username=username, password=password)
 
