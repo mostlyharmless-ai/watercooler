@@ -82,6 +82,30 @@ class TestEnvToConfigKey:
         assert path == []
         assert key == "UNKNOWN_VAR"
 
+    def test_graphiti_path_mapping(self):
+        """WATERCOOLER_GRAPHITI_PATH maps to memory.graphiti.path."""
+        path, key = _env_to_config_key("WATERCOOLER_GRAPHITI_PATH")
+        assert path == ["memory", "graphiti"]
+        assert key == "path"
+
+
+class TestGraphitiPathEnvOverlay:
+    """Tests that WATERCOOLER_GRAPHITI_PATH env var flows through to config."""
+
+    def test_graphiti_path_env_var_sets_config(self, tmp_path, monkeypatch):
+        """Setting WATERCOOLER_GRAPHITI_PATH makes config.full().memory.graphiti.path match."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_PATH", "/opt/graphiti-dev")
+
+        import importlib
+        import watercooler.config_loader as cl
+        importlib.reload(cl)
+
+        config = cl.load_config()
+        assert config.memory.graphiti.path == "/opt/graphiti-dev"
+
 
 class TestConfigDirectories:
     """Tests for config directory functions."""

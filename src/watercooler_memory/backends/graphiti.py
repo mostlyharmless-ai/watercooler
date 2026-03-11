@@ -113,6 +113,17 @@ def _get_graphiti_path() -> Path | None:
     env_path = os.environ.get("WATERCOOLER_GRAPHITI_PATH")
     if env_path:
         return Path(env_path)
+
+    # Fall back to TOML config
+    try:
+        from watercooler.config_facade import config
+        cfg = config.full()
+        config_path = cfg.memory.graphiti.path
+        if config_path:
+            return Path(config_path)
+    except Exception as e:
+        logger.debug(f"Could not load graphiti path from config: {e}")
+
     return _DEFAULT_GRAPHITI_PATH
 
 

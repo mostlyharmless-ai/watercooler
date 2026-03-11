@@ -914,6 +914,12 @@ class GraphitiBackendConfig(BaseModel):
         ),
     )
 
+    # Path to Graphiti installation (for development submodule setups)
+    path: str = Field(
+        default="",
+        description="Path to Graphiti installation directory. Env override: WATERCOOLER_GRAPHITI_PATH",
+    )
+
 
 class LeanRAGBackendConfig(BaseModel):
     """LeanRAG-specific configuration overrides.

@@ -201,6 +201,7 @@ def _env_to_config_key(env_var: str) -> tuple[list[str], str]:
         "FALKORDB_PASSWORD": (["memory", "database"], "password"),
         # Graphiti-specific
         "WATERCOOLER_GRAPHITI_RERANKER": (["memory", "graphiti"], "reranker"),
+        "WATERCOOLER_GRAPHITI_PATH": (["memory", "graphiti"], "path"),
     }
 
     return ENV_MAPPING.get(env_var, ([], env_var))
@@ -256,6 +257,7 @@ def _apply_env_overlay(config_dict: Dict[str, Any]) -> Dict[str, Any]:
         "FALKORDB_PORT",
         "FALKORDB_PASSWORD",
         "WATERCOOLER_GRAPHITI_RERANKER",
+        "WATERCOOLER_GRAPHITI_PATH",
     ]
 
     for env_var in env_vars:
