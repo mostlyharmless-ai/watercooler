@@ -12,7 +12,7 @@ Unified reference for all CLI commands and MCP tools.
 |---|---|---|---|
 | `init-thread <topic>` | Create a new thread | `--title`, `--ball` (default: codex), `--status` | `watercooler init-thread feature-auth --title "Auth design"` |
 | `say <topic>` | Post an entry; flip ball to counterpart | `--title`, `--body`, `--role`, `--type`, `--agent`, `--ball`, `--status` | `watercooler say feature-auth --title "Ready" --body "Done with design."` |
-| `ack <topic>` | Post an entry; ball ownership unchanged | `--title`, `--body`, `--role`, `--type`, `--agent` | `watercooler ack feature-auth --title "Got it"` |
+| `ack <topic>` | Post an entry; ball ownership unchanged by default | `--title`, `--body`, `--role`, `--type`, `--agent`, `--ball` | `watercooler ack feature-auth --title "Got it"` |
 | `handoff <topic>` | Pass ball to counterpart; append note | `--note`, `--role` (default: pm), `--agent` | `watercooler handoff feature-auth --note "Ready for review"` |
 | `list` | List all threads | `--open-only`, `--closed`, `--threads-dir` | `watercooler list --open-only` |
 | `search <query>` | Search thread content | `--threads-dir` | `watercooler search "authentication flow"` |
@@ -26,7 +26,7 @@ Unified reference for all CLI commands and MCP tools.
 |---|---|---|
 | `set-status <topic> <status>` | Update thread status | `--threads-dir` |
 | `set-ball <topic> <ball>` | Transfer ball ownership | `--threads-dir` |
-| `sync` | Inspect or flush async git queue | `--code-path`, `--status` (show queue), `--now` (force push) | CLI-only; no `watercooler_sync` MCP tool |
+| `sync` | **Removed.** Prints a deprecation message and exits. Thread sync is now automatic via the orphan branch worktree. | — | — |
 | `reindex` | Rebuild thread index | `--threads-dir` |
 | `web-export` | Generate HTML index | — |
 | `unlock <topic>` | Clear advisory lock (debugging) | `--threads-dir` |
@@ -47,13 +47,20 @@ Run `watercooler <cmd> --help` for flag details.
 
 ## MCP tools
 
+These tools are called by your AI agent on your behalf — you describe what you want
+captured ("document the decision and hand off to review"), and the agent selects and
+invokes the appropriate tool. You can specify tools or parameters directly if you want
+fine-grained control, but you rarely need to.
+
 > **AI agents:** Before calling any tool, read the `watercooler://instructions` MCP
 > resource for workflow guidance and ball mechanics. Call it with no arguments.
 
 ### Required parameters
 
 Parameters vary by tool category. The table below describes **local stdio mode** (the
-standard new-user setup). In hosted mode, `code_path` is derived from request context.
+standard new-user setup). **Hosted mode** refers to a cloud deployment (e.g. via
+[watercoolerdev.com](https://www.watercoolerdev.com)) where `code_path` is derived from
+request context and some defaults differ — it is not the standard setup for new users.
 
 | Category | Tools | `code_path` | `agent_func` |
 |---|---|---|---|
@@ -65,11 +72,21 @@ standard new-user setup). In hosted mode, `code_path` is derived from request co
 `agent_func` format: `"<platform>:<model>:<role>"` — e.g., `"Claude Code:sonnet-4:implementer"`.
 Valid roles: `planner`, `critic`, `implementer`, `tester`, `pm`, `scribe`.
 
+Entry author display names come from your configured agent identity (see
+[CONFIGURATION.md](./CONFIGURATION.md)). For teams where multiple people use the same
+client type, use `Agent (person)` naming with lowercase tags such as `Codex (jay)` and
+`Codex (caleb)`.
+
 > Passing `code_path` to Utility / status tools will cause the call to fail. Diagnostic
 > tools (`watercooler_health`, `watercooler_diagnose_memory`) accept `code_path` as an
 > optional parameter for context-aware checks.
 
 ### Safety annotations
+
+> **Memory tiers:** T1 = baseline graph with summaries and embeddings; T2 = episodic
+> knowledge graph (requires FalkorDB + LLM config); T3 = semantic hierarchical index.
+> Most users start without any memory tier — core thread tools work without it. See
+> [CONFIGURATION.md — memory backend](./CONFIGURATION.md#memory-backend) to enable.
 
 | Tool | Safety | Prerequisites |
 |---|---|---|
@@ -118,6 +135,8 @@ List all threads with ball ownership and NEW markers. | Safety: read-only | Prer
 | `code_path` | string | yes | Path to code repo root |
 | `open_only` | bool | no | `true` = open threads only, `false` = closed only, omit = all |
 | `format` | string | no | `"markdown"` (default) |
+| `scan` | bool | no | Include per-entry summaries for every thread (default: false) |
+| `limit` | int | no | Max threads to return (default: 50) |
 
 **Example:**
 ```python
@@ -154,6 +173,7 @@ List entry headers with summaries; use for large threads before fetching full bo
 | `offset` | int | no | Zero-based entry offset (default: 0) |
 | `limit` | int | no | Max entries (default: all from offset) |
 | `format` | string | no | `"json"` (default) or `"markdown"` |
+| `code_branch` | string | no | Branch filter (default: current branch; pass `"*"` for all) |
 
 **Example:**
 ```python
@@ -193,6 +213,7 @@ Return a contiguous range of entries. | Safety: read-only | Prerequisites: none
 | `end_index` | int | no | Inclusive end index (default: last entry) |
 | `summary_only` | bool | no | Return summaries only (default: false) |
 | `format` | string | no | `"json"` (default) or `"markdown"` |
+| `code_branch` | string | no | Branch filter (default: current branch; pass `"*"` for all) |
 
 **Example:**
 ```python
@@ -202,6 +223,12 @@ watercooler_get_thread_entry_range(topic="feature-auth", code_path=".", start_in
 ---
 
 ### Thread write tools
+
+> Thread entries and status are updated only when a mutating write tool is called:
+> `watercooler_say`, `watercooler_ack`, `watercooler_handoff`, or
+> `watercooler_set_status`. Watercooler does not passively capture background agent
+> activity. Memory and graph tools (e.g. `watercooler_bulk_index`) are also mutating
+> but operate on the memory tier, not thread entries or ball state.
 
 ### `watercooler_say`
 Add an entry and flip the ball to your counterpart. | Safety: mutating | Prerequisites: none
@@ -241,11 +268,11 @@ Add an entry without flipping the ball. | Safety: mutating | Prerequisites: none
 | `code_path` | string | yes | Path to code repo root |
 | `agent_func` | string | yes | `"<platform>:<model>:<role>"` |
 | `title` | string | no | Entry title (default: "Ack") |
-| `body` | string | no | Entry content (default: "ack") |
+| `body` | string | no | Entry content (default: `"ack"` in local mode, `"Acknowledged"` in hosted mode) |
 
-> **Tip:** To attribute an entry to a specific role, include `Spec: <role>` as the first
-> line of the `body` field. Role tracking in thread history is achieved via the `Spec:`
-> marker, not a separate parameter.
+> **Tip:** `watercooler_ack` has no explicit `role` parameter (unlike `watercooler_say`).
+> Include `Spec: <role>` as the first line of `body` to make your specialization explicit
+> in the thread record — e.g. `body="Spec: implementer\n\nStarting implementation."`.
 
 **Example:**
 ```python
@@ -426,7 +453,7 @@ Unified search across entries, entities, episodes, and temporal facts. | Safety:
 |---|---|---|---|
 | `query` | string | yes | Search query |
 | `code_path` | string | yes | Path to code repo root |
-| `mode` | string | no | `entries` (default), `entities`, `episodes`, `facts`, `auto` |
+| `mode` | string | no | `"auto"` (default; resolves to `"entries"`), `"entries"`, `"entities"`, `"episodes"`, `"facts"` |
 | `limit` | int | no | Max results (default: 10) |
 | `semantic` | bool | no | Use embedding search (default: false) |
 
@@ -444,6 +471,9 @@ Find entries semantically similar to a given entry. | Safety: read-only | Prereq
 |---|---|---|---|
 | `entry_id` | string | yes | Source entry ULID |
 | `code_path` | string | yes | Path to code repo root |
+| `limit` | int | no | Max results (default: 5) |
+| `similarity_threshold` | float | no | Minimum cosine similarity, 0.0–1.0 (default: 0.5) |
+| `use_embeddings` | bool | no | Use embedding similarity (default: true) |
 
 ---
 
@@ -482,8 +512,8 @@ Look up an entity relationship edge from the T2 graph. | Safety: read-only | Pre
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `edge_id` | string | yes | Edge identifier |
-| `code_path` | string | yes | Path to code repo root |
+| `uuid` | string | yes | Edge UUID |
+| `code_path` | string | no | Path to code repo root |
 
 ---
 
@@ -526,6 +556,7 @@ Write derived markdown projections from the graph. | Safety: mutating but resuma
 |---|---|---|---|
 | `code_path` | string | yes | Path to code repo root |
 | `mode` | string | no | `missing` (default), `selective`, `all` |
+| `topics` | string | no | Comma-separated topics (required for `selective` mode) |
 | `overwrite` | bool | no | Required when `mode="all"` |
 | `dry_run` | bool | no | Preview without writing |
 
@@ -537,8 +568,12 @@ Index an entry or content into the T2 memory graph. | Safety: mutating | Prerequ
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `content` | string | yes | Text to index |
-| `code_path` | string | yes | Path to code repo root |
+| `group_id` | string | yes | Graph group ID for partitioning (e.g. `"watercooler_cloud"`) |
+| `code_path` | string | no | Path to code repo root |
 | `entry_id` | string | no | Entry ULID — when provided, deduplicates (skips if already indexed) |
+| `timestamp` | string | no | ISO 8601 timestamp (default: now) |
+| `title` | string | no | Episode title |
+| `source_description` | string | no | Description of the content source |
 
 ---
 
@@ -548,7 +583,8 @@ Bulk-index thread entries into memory. Idempotent with dedup. | Safety: mutating
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `code_path` | string | yes | Path to code repo root |
-| `topics` | string | no | Comma-separated topics to index (default: all) |
+| `threads` | string | no | Comma-separated thread topics to index (default: all) |
+| `backend` | string | no | Target backend: `"graphiti"` (default) or `"leanrag"` |
 
 ---
 
@@ -558,6 +594,10 @@ Run the T3 hierarchical indexing pipeline. | Safety: mutating | Prerequisites: T
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `code_path` | string | yes | Path to code repo root |
+| `start_date` | string | no | ISO 8601 start date filter |
+| `end_date` | string | no | ISO 8601 end date filter |
+| `dry_run` | bool | no | Preview without executing (default: false) |
+| `incremental` | bool | no | Use incremental update if cluster state exists (default: true) |
 
 ---
 
@@ -577,6 +617,8 @@ Migrate thread data to a memory backend. Defaults to dry run. | Safety: mutating
 |---|---|---|---|
 | `code_path` | string | yes | Path to code repo root |
 | `dry_run` | bool | no | Preview without migrating (default: true) |
+| `backend` | string | no | Target backend: `"graphiti"` (default) or `"leanrag"` |
+| `topics` | string | no | Comma-separated thread topics to migrate (default: all) |
 
 ---
 
@@ -601,14 +643,23 @@ watercooler_clear_graph_group(group_id="my-group", confirm=True, code_path=".")
 ### `watercooler_daemon_status`
 Check daemon health and configuration. | Safety: read-only | Prerequisites: daemon
 
-No parameters.
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `daemon` | string | no | Filter by daemon name (default: all) |
 
 ---
 
 ### `watercooler_daemon_findings`
 Retrieve findings reported by the background daemon. | Safety: read-only | Prerequisites: daemon
 
-No parameters.
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `daemon` | string | no | Filter by daemon name |
+| `severity` | string | no | Filter by severity level |
+| `category` | string | no | Filter by finding category |
+| `topic` | string | no | Filter by thread topic |
+| `limit` | int | no | Max results (default: 50) |
+| `unacknowledged_only` | bool | no | Return only unacknowledged findings (default: false) |
 
 ---
 

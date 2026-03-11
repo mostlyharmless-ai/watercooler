@@ -10,10 +10,31 @@ version = 1                       # schema version; do not modify
 
 [mcp]
 default_agent = "Claude Code"     # your MCP client name (usually auto-detected)
-agent_tag = "(yourname)"          # optional: appended to agent name in thread entries
+agent_tag = "(jay)"               # optional: appended to agent name in thread entries
 ```
 
 Generate an annotated version with `watercooler config init --user`.
+
+---
+
+## Team identity convention
+
+When multiple people use the same client type, set a unique lowercase `agent_tag` for
+each person so entries remain attributable.
+
+Examples:
+
+```toml
+[mcp]
+default_agent = "Codex"
+agent_tag = "(jay)"      # entry author shows as "Codex (jay)"
+```
+
+```toml
+[mcp]
+default_agent = "Codex"
+agent_tag = "(caleb)"    # entry author shows as "Codex (caleb)"
+```
 
 ---
 
@@ -45,7 +66,7 @@ Pass `--force` to overwrite an existing file.
 ```bash
 watercooler config show
 watercooler config show --json                    # machine-readable output
-watercooler config show --sources                 # show which file each key came from
+watercooler config show --sources                 # show which config files are active and loaded
 watercooler config show --project-path /path/to/repo   # check config for another project
 ```
 
@@ -73,7 +94,7 @@ watercooler config validate --strict    # treat warnings as errors
 | Key | Default | Description |
 |---|---|---|
 | `default_agent` | `"Agent"` | Agent name shown in thread entries |
-| `agent_tag` | `""` | Short tag appended to agent name, e.g. `"(alice)"` |
+| `agent_tag` | `""` | Short lowercase tag appended to agent name, e.g. `"(jay)"` |
 | `threads_dir` | (auto) | Explicit threads directory; leave empty for auto-discovery |
 | `transport` | `"stdio"` | Transport mode: `stdio` (local) or `http` |
 | `auto_branch` | `true` | Auto-create threads branches for new code branches |
@@ -184,13 +205,13 @@ to the MCP server's `env` block in your client config.
 
 | Env var | TOML equivalent | Default | Description |
 |---|---|---|---|
-| `WATERCOOLER_MEMORY_BACKEND` | `memory.backend` | (disabled) | Memory backend: `graphiti` or `leanrag` |
+| `WATERCOOLER_MEMORY_BACKEND` | `memory.backend` | `"graphiti"` | Memory backend: `graphiti`, `leanrag`, or `null` — T2/T3 won't activate without credentials/services regardless |
 | `WATERCOOLER_MEMORY_QUEUE` | `memory.queue_enabled` | `false` | Enable async memory indexing |
 | `WATERCOOLER_MEMORY_DISABLED` | — | — | Set to `1` to disable memory even if configured |
-| `LLM_API_KEY` | `memory.llm.api_key` | — | LLM provider API key |
+| `LLM_API_KEY` | — (use `credentials.toml`) | — | LLM provider API key — prefer `[openai].api_key` etc. in `credentials.toml` |
 | `LLM_API_BASE` | `memory.llm.api_base` | — | LLM endpoint URL |
 | `LLM_MODEL` | `memory.llm.model` | — | LLM model name |
-| `EMBEDDING_API_KEY` | `memory.embedding.api_key` | — | Embedding provider API key |
+| `EMBEDDING_API_KEY` | — (use `credentials.toml`) | — | Embedding provider API key — prefer `[openai].api_key` etc. in `credentials.toml` |
 | `EMBEDDING_API_BASE` | `memory.embedding.api_base` | — | Embedding endpoint URL |
 | `EMBEDDING_MODEL` | `memory.embedding.model` | — | Embedding model name |
 | `EMBEDDING_DIM` | `memory.embedding.dim` | — | Embedding dimension |
@@ -222,7 +243,7 @@ Later sources override earlier ones, on a per-key basis:
 3. Project config: `<project>/.watercooler/config.toml`
 4. Environment variables
 
-To see the resolved value and source of each key, run `watercooler config show --sources`.
+To see which config files are active and in what order, run `watercooler config show --sources`.
 
 ---
 

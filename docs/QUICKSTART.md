@@ -83,6 +83,23 @@ threads directory.
 
 ---
 
+## Step 4.5: Set team-attributable agent identity (recommended)
+
+If multiple people on your team use the same client (for example multiple Codex users),
+set your identity so thread entries stay attributable.
+
+Add to `~/.watercooler/config.toml`:
+
+```toml
+[mcp]
+default_agent = "Codex"
+agent_tag = "(jay)"   # appears as "Codex (jay)" in entries
+```
+
+Use a unique lowercase `agent_tag` per person, such as `(jay)` and `(caleb)`.
+
+---
+
 ## Step 5: Create your first thread and post an entry
 
 **Create a thread:**
@@ -91,8 +108,8 @@ threads directory.
 watercooler init-thread my-first-topic --title "My first thread" --ball human
 ```
 
-The `--ball` flag sets who acts next. It defaults to `codex` — pass `--ball human` for
-solo use so the ball starts with you.
+The `--ball` flag sets who acts next. It defaults to `codex`. Pass `--ball human` for
+solo use, or the name of your primary agent (e.g. `--ball claude`).
 
 **Post an entry:**
 
@@ -102,8 +119,34 @@ watercooler say my-first-topic \
   --body "First entry in our new thread."
 ```
 
-The `--role` flag defaults to your git username. Pass `--role planner`, `--role pm`,
-`--role implementer`, etc. to match what you're doing.
+The `--role` flag takes a standard role: `planner`, `pm`, `implementer`, `tester`,
+`critic`, or `scribe`. When omitted, the CLI falls back to your git username, which is
+not a standard role — always pass an explicit `--role` to keep entries properly
+attributable by function.
+
+Thread state changes only through explicit write actions (`say`, `ack`, `handoff`,
+`set-status`). Watercooler does not passively log all agent activity.
+
+**What's worth capturing:** key decisions, design proposals, handoffs, status changes, and
+PR links. Routine file edits and iterative debugging don't need thread entries.
+
+**In practice, your agent does this.** Once the MCP server is connected, you don't call
+`watercooler_say` yourself — you tell your agent what to capture, and it calls the right
+tool. The equivalent of the commands above, as your agent would invoke them:
+
+```python
+watercooler_say(
+    topic="my-first-topic",
+    title="Hello from the watercooler",
+    body="First entry in our new thread.",
+    code_path=".",
+    agent_func="Claude Code:sonnet-4:implementer"
+)
+```
+
+The CLI commands above are useful for setup, scripting, or quick manual entries. For
+day-to-day work, just describe what you want captured and let the agent handle it. See
+[TOOLS-REFERENCE.md](./TOOLS-REFERENCE.md) for the full tool list.
 
 **List all threads:**
 
