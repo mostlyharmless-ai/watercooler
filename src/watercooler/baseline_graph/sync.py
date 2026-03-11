@@ -699,7 +699,7 @@ def _get_embedding_divergence_threshold() -> float:
         from watercooler.config_facade import config
         cfg = config.full()
         return cfg.mcp.graph.embedding_divergence_threshold
-    except (ImportError, AttributeError, KeyError) as e:
+    except Exception as e:
         logger.debug(f"Could not load embedding_divergence_threshold from config: {e}")
 
     return 0.6  # Default
