@@ -18,14 +18,15 @@ in git alongside your code, no external service required.
 
 **Example workflow:**
 ```text
-You: "Document the auth approach and hand off for review"
-Codex (jay, planner): posts Plan entry -> thread created, ball passed
-Claude (caleb, critic): reads context, posts Decision entry
-Git: thread history versioned alongside your code
+Jay w/ Codex: "Let's share these ideas for the new team permissions model at the watercooler"
+   Codex (jay, planner): documents tradeoffs, posts proposal -> ball passed
+Caleb w/ Claude: [reads thread, responds with feedback...] 
+   Claude (caleb, critic): elaborates on proposal -> ack
+   Claude (caleb, critic): confirms design, posts Decision -> files GitHub issue
+Git: ideation and decision versioned alongside your code
 ```
 
 **You choose what to share. The agent writes it. Git keeps it.**
-**User-signaled, agent-authored, Git-persisted.**
 
 Watercooler does not passively record every agent interaction. You decide what should be
 communicated, and the agent writes the appropriate structured thread action so context,
@@ -41,52 +42,46 @@ externalize it. Build the habit of capturing key decisions and handoffs.
 | Thread | A named conversation channel tied to your code repo. Each thread has a `topic` slug, a status, and a ball. |
 | Entry | A single message posted to a thread via explicit write actions like `say`, `ack`, or `handoff`. Every entry has an author, role, type, and timestamp. |
 | Write actions | Explicit mutating operations: `say` (add entry + flip ball), `ack` (add entry + keep ball by default), `handoff` (add entry + transfer ball), `set_status` (update thread status). |
-| Ball | Whose turn it is to respond. `say` flips the ball to your counterpart; `ack` keeps it by default; `handoff` passes it to a named recipient. |
+| Ball | Who is accountable for driving the work forward. The ball holder owns the next move — drop it and the thread stalls. `say` passes it to your counterpart; `ack` keeps it; `handoff` transfers it explicitly. |
 | Agent identity | Who authored the entry. On teams, use `Agent (person)` naming like `Codex (jay)` or `Claude (caleb)` so multiple users of the same client stay distinguishable. |
 | `topic` | The slug identifier for a thread, e.g. `feature-auth`. Used in all tool calls; distinct from the display title. |
-| `code_path` | Path to your repo root (`"."` or absolute). Required on nearly every MCP tool call. |
-| `counterpart` | Who the ball flips to when you call `say`. Configured per-agent or per-call. |
-| `code_branch` | Git branch scoping. Thread reads are filtered to your current branch by default. |
-| `orphan branch` | The isolated git branch (`watercooler/threads`) where thread data lives, separate from your code history. |
-| `worktree` | A local checkout of the orphan branch at `~/.watercooler/worktrees/<repo>/`, created automatically on first write. |
-| `agent_func` | Structured identity for write tools: `"<platform>:<model>:<role>"` — e.g., `"Claude Code:sonnet-4:implementer"`. |
 
 ### Where watercooler sits
 
 Watercooler is the durable reasoning layer between agent execution and your software lifecycle artifacts.
 
 ```text
-┌──────────────────────────────────────────────┐
-│        SOFTWARE DEVELOPMENT LIFECYCLE        │
-│  Repos • Branches • PRs • CI/CD • Reviews    │
-└──────────────────────────────────────────────┘
-┌──────────────────────────────────────────────┐
-│        HUMAN + AGENT COLLABORATION           │
-│  Devs • Code Review • Approval • Governance  │
-└──────────────────────────────────────────────┘
-════════════════════════════════════════════════
-                 WATERCOOLER
-           VERSIONED REASONING LAYER
-════════════════════════════════════════════════
-         • Structured reasoning graph
-         • Why behind the code
-         • Shared across agents
-         • Merge-aware reasoning branches
-         • Deterministic replay
-         • Full decision provenance
-════════════════════════════════════════════════
-┌──────────────────────────────────────────────┐
-│           CODING AGENT RUNTIME               │
-│  Planning • File Edits • Tests • Tool Calls  │
-└──────────────────────────────────────────────┘
-┌──────────────────────────────────────────────┐
-│      LLM RUNTIME (Per-Agent Scratchpad)      │
-│  Context Window • Temporary Chain of Thought │
-│  Isolated • Ephemeral • Not Shared           │
-└──────────────────────────────────────────────┘
-┌──────────────────────────────────────────────┐
-│           MODELS & COMPUTE INFRA             │
-└──────────────────────────────────────────────┘
+                           ┌──────────────────────────────────────────────┐
+                           │        SOFTWARE DEVELOPMENT LIFECYCLE        │
+                           │  Repos • Branches • PRs • CI/CD • Reviews    │
+                           └──────────────────────────────────────────────┘
+                           ┌──────────────────────────────────────────────┐
+                           │        HUMAN + AGENT COLLABORATION           │
+                           │  Devs • Code Review • Approval • Governance  │
+                           └──────────────────────────────────────────────┘
+                           ════════════════════════════════════════════════
+                                          WATERCOOLER
+                                    VERSIONED REASONING LAYER
+                           ════════════════════════════════════════════════
+                                    • Structured reasoning graph
+                                    • Why behind the code
+                                    • Shared across agents
+                                    • Merge-aware reasoning branches
+                                    • Deterministic replay
+                                    • Full decision provenance
+                           ════════════════════════════════════════════════
+                           ┌──────────────────────────────────────────────┐
+                           │           CODING AGENT RUNTIME               │
+                           │  Planning • File Edits • Tests • Tool Calls  │
+                           └──────────────────────────────────────────────┘
+                           ┌──────────────────────────────────────────────┐
+                           │      LLM RUNTIME (Per-Agent Scratchpad)      │
+                           │  Context Window • Temporary Chain of Thought │
+                           │  Isolated • Ephemeral • Not Shared           │
+                           └──────────────────────────────────────────────┘
+                           ┌──────────────────────────────────────────────┐
+                           │           MODELS & COMPUTE INFRA             │
+                           └──────────────────────────────────────────────┘
 ```
 
 ### Why watercooler?

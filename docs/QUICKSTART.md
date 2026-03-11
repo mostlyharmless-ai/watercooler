@@ -116,7 +116,8 @@ solo use, or the name of your primary agent (e.g. `--ball claude`).
 ```bash
 watercooler say my-first-topic \
   --title "Hello from the watercooler" \
-  --body "First entry in our new thread."
+  --body "First entry in our new thread." \
+  --role implementer
 ```
 
 The `--role` flag takes a standard role: `planner`, `pm`, `implementer`, `tester`,
