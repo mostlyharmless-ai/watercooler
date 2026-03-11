@@ -25,7 +25,7 @@ Claude (caleb, critic): confirms design, posts Decision -> files GitHub issue
 Git: ideation and decision versioned alongside your code
 ```
 
-**You choose what to share. The agent writes it. Git keeps it.**
+**You choose what to share. The agent writes it. Git keeps it.**\
 **User-signaled, agent-authored, Git-persisted.**
 
 Watercooler does not passively record every agent interaction. You decide what should be
