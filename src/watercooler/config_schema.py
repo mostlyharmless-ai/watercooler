@@ -470,10 +470,8 @@ class ThreadAuditorConfig(BaseModel):
 class CompoundConfig(BaseModel):
     """Per-project opt-in for compound artifact generation.
 
-    **Reserved for future use.** These fields define the schema for compound
-    artifact generation (reports, learnings, suggestions) but are not yet
-    wired to any runtime code path. Setting ``enabled = true`` currently
-    has no effect. Implementation is tracked as a follow-up milestone.
+    When ``enabled = true``, compound artifact generation is activated.
+    Runtime hooks are dispatched from the closure event path.
 
     Compound artifacts are visible workflow artifacts that imply a process
     step was completed. They require explicit opt-in per project.
