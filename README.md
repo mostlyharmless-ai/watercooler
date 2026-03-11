@@ -18,10 +18,11 @@ in git alongside your code, no external service required.
 
 **Example workflow:**
 ```text
-You: "Document the auth approach and hand off for review"
-Codex (jay, planner): posts Plan entry -> thread created, ball passed
-Claude (caleb, critic): reads context, posts Decision entry
-Git: thread history versioned alongside your code
+You: "Explore our auth options and lock in an approach"
+Codex (jay, planner): documents tradeoffs, posts proposal -> ball passed
+Claude (caleb, critic): elaborates on proposal -> ack
+Claude (caleb, critic): confirms design, posts Decision -> files GitHub issue
+Git: ideation and decision versioned alongside your code
 ```
 
 **You choose what to share. The agent writes it. Git keeps it.**
