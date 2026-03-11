@@ -221,6 +221,12 @@ If NO: **stop. Do not emit a Decision.**
 
 Search subsequent entries in the same thread for language that reverses, supersedes, or narrows this decision. Check Closure entries especially — if the Closure summary describes a different outcome, the candidate is not a committed decision.
 
+If T2/Graphiti facts are available, perform an additional temporal validity check:
+
+* If the decision fact has `invalid_at != null`, treat it as superseded even if prose is ambiguous.
+* If the decision fact has `invalid_at == null`, it is currently active (subject to normal scope checks).
+* If no decision-scoped fact exists, fall back to thread evidence only and downgrade confidence.
+
 **Reject if**: A later entry in the same thread explicitly contradicts, reverses, or replaces the candidate.
 
 If superseded: **score 0. Do not emit.**
@@ -294,7 +300,35 @@ Otherwise, emit a `Note` explaining why no decision was extracted, or emit nothi
 
 ---
 
-## 9. Agent Reminder
+## 9. T2 supersession feedback loop (decision traces)
+
+Decision trace extraction and T2 supersession are related but separate:
+
+* **Decision trace extraction** identifies and structures commitments with provenance.
+* **T2 supersession** maintains temporal validity (`valid_at`, `invalid_at`, optional successor linkage).
+
+Use them together as a closed loop:
+
+1. Extract candidate decisions conservatively (this guide, Sections 3-8).
+2. Observe which extracted decisions remain active vs. are quickly superseded.
+3. Feed that signal back into extraction confidence and promotion policy.
+
+Recommended derived metrics (rolling window `W`):
+
+* `decision_durability_hours(W)`: median `(now - valid_at)` for active decisions (`invalid_at == null`)
+* `decision_supersession_hazard(W)`: `invalidated_decisions / max(created_decisions, 1)`
+
+Interpretation:
+
+* Higher durability implies stronger stability for that decision dimension.
+* Higher early supersession hazard implies either fast-changing reality or extraction overreach.
+* When hazard spikes, tighten extraction thresholds (for example, require stronger evidence before promoting to `Decision`).
+
+This does not replace rubric scoring; it calibrates it over time using observed temporal outcomes.
+
+---
+
+## 10. Agent Reminder
 
 > **Your job is not to be helpful — it is to be correct.**
 

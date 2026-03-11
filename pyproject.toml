@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "watercooler-cloud"
-version = "0.2.9"
+version = "0.2.10"
 description = "File-based collaboration protocol for agentic coding projects"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -134,6 +134,7 @@ watercooler = "watercooler.cli:main"
 watercooler-mcp = "watercooler_mcp.server:main"
 
 [tool.pytest.ini_options]
+pythonpath = ["src"]
 norecursedirs = [
     "tests/benchmarks/custom/repo",
 ]

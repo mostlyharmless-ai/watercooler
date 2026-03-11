@@ -633,7 +633,7 @@ def resolve_database_config() -> ResolvedDatabaseConfig:
     """Resolve database config with proper priority chain.
 
     Priority (highest first):
-    1. Environment variables (FALKORDB_HOST, FALKORDB_PORT, FALKORDB_PASSWORD)
+    1. Environment variables (FALKORDB_HOST, FALKORDB_PORT, FALKORDB_USERNAME, FALKORDB_PASSWORD)
     2. Shared TOML settings (memory.database.*)
     3. Built-in defaults
 
@@ -656,11 +656,13 @@ def resolve_database_config() -> ResolvedDatabaseConfig:
     else:
         port = mem.database.port
 
-    # Resolve username (no env var, TOML only)
-    username = mem.database.username
+    # Resolve username (env var takes priority)
+    _env_username = os.getenv("FALKORDB_USERNAME")
+    username = _env_username if _env_username is not None else mem.database.username
 
     # Resolve password
-    password = os.getenv("FALKORDB_PASSWORD") or mem.database.password
+    _env_password = os.getenv("FALKORDB_PASSWORD")
+    password = _env_password if _env_password is not None else mem.database.password
 
     return ResolvedDatabaseConfig(host=host, port=port, username=username, password=password)
 

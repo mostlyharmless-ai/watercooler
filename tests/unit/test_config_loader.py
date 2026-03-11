@@ -82,6 +82,42 @@ class TestEnvToConfigKey:
         assert path == []
         assert key == "UNKNOWN_VAR"
 
+    def test_graphiti_path_mapping(self):
+        """WATERCOOLER_GRAPHITI_PATH maps to memory.graphiti.path."""
+        path, key = _env_to_config_key("WATERCOOLER_GRAPHITI_PATH")
+        assert path == ["memory", "graphiti"]
+        assert key == "path"
+
+    def test_falkordb_username_mapping(self):
+        """FALKORDB_USERNAME maps to memory.database.username."""
+        path, key = _env_to_config_key("FALKORDB_USERNAME")
+        assert path == ["memory", "database"]
+        assert key == "username"
+
+    def test_falkordb_password_mapping(self):
+        """FALKORDB_PASSWORD maps to memory.database.password."""
+        path, key = _env_to_config_key("FALKORDB_PASSWORD")
+        assert path == ["memory", "database"]
+        assert key == "password"
+
+
+class TestGraphitiPathEnvOverlay:
+    """Tests that WATERCOOLER_GRAPHITI_PATH env var flows through to config."""
+
+    def test_graphiti_path_env_var_sets_config(self, tmp_path, monkeypatch):
+        """Setting WATERCOOLER_GRAPHITI_PATH makes config.full().memory.graphiti.path match."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("WATERCOOLER_GRAPHITI_PATH", "/opt/graphiti-dev")
+
+        import importlib
+        import watercooler.config_loader as cl
+        importlib.reload(cl)
+
+        config = cl.load_config()
+        assert config.memory.graphiti.path == "/opt/graphiti-dev"
+
 
 class TestConfigDirectories:
     """Tests for config directory functions."""
@@ -333,3 +369,68 @@ class TestGetConfigPaths:
         assert "project_config" in paths
         assert "user_credentials" in paths
         assert "project_credentials" in paths
+
+
+class TestPhantomEnvVarRegistration:
+  """Tests that previously-phantom env vars are registered in ENV_MAPPING.
+
+  These tests validate the source file directly (via source inspection) because
+  the worktree may share an editable install with the main project tree. Using
+  source-level assertions guarantees we validate the worktree code changes.
+  """
+
+  def _get_config_loader_source(self) -> str:
+    """Read config_loader.py from the worktree source."""
+    from pathlib import Path
+    loader_path = Path(__file__).parents[2] / "src" / "watercooler" / "config_loader.py"
+    return loader_path.read_text()
+
+  def test_auto_start_services_in_env_mapping(self):
+    """WATERCOOLER_AUTO_START_SERVICES is registered in ENV_MAPPING with path mcp.graph."""
+    source = self._get_config_loader_source()
+    assert '"WATERCOOLER_AUTO_START_SERVICES"' in source, (
+      "WATERCOOLER_AUTO_START_SERVICES must be registered in ENV_MAPPING"
+    )
+    assert '"auto_start_services"' in source, (
+      "auto_start_services key must appear in ENV_MAPPING entry"
+    )
+    # Verify the mcp.graph section path appears near this entry
+    assert '["mcp", "graph"], "auto_start_services"' in source, (
+      "WATERCOOLER_AUTO_START_SERVICES must map to ['mcp', 'graph'], 'auto_start_services'"
+    )
+
+  def test_embedding_divergence_threshold_in_env_mapping(self):
+    """WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD is registered in ENV_MAPPING with path mcp.graph."""
+    source = self._get_config_loader_source()
+    assert '"WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD"' in source, (
+      "WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD must be registered in ENV_MAPPING"
+    )
+    assert '["mcp", "graph"], "embedding_divergence_threshold"' in source, (
+      "WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD must map to "
+      "['mcp', 'graph'], 'embedding_divergence_threshold'"
+    )
+
+  def test_graphiti_enabled_not_in_env_mapping(self):
+    """WATERCOOLER_GRAPHITI_ENABLED is intentionally NOT in ENV_MAPPING (runtime-only legacy flag)."""
+    from watercooler.config_loader import _env_to_config_key
+    section_path, _ = _env_to_config_key("WATERCOOLER_GRAPHITI_ENABLED")
+    assert section_path == [], (
+      "WATERCOOLER_GRAPHITI_ENABLED must remain a runtime-only flag outside the config system"
+    )
+
+  def test_graphiti_enabled_comment_in_sync(self):
+    """WATERCOOLER_GRAPHITI_ENABLED occurrences in sync.py are documented as runtime-only."""
+    from pathlib import Path
+
+    sync_path = Path(__file__).parents[2] / "src" / "watercooler" / "baseline_graph" / "sync.py"
+    source = sync_path.read_text()
+
+    comment = "# Intentional: WATERCOOLER_GRAPHITI_ENABLED is a legacy runtime-only flag (not in config system)"
+    occurrences = source.count("WATERCOOLER_GRAPHITI_ENABLED")
+    comment_count = source.count(comment)
+
+    # Should have the comment for each os.environ.get usage
+    assert comment_count >= 2, (
+      f"Expected at least 2 runtime-only comments for WATERCOOLER_GRAPHITI_ENABLED, found {comment_count}"
+    )
+    assert occurrences > 0

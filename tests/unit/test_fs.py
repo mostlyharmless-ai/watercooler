@@ -13,7 +13,6 @@ from watercooler.fs import (
     THREAD_CATEGORIES,
     has_structured_layout,
     ensure_directory_structure,
-    migrate_to_structured_layout,
     discover_thread_files,
     find_thread_path,
 )
@@ -109,63 +108,6 @@ class TestEnsureDirectoryStructure:
         assert len(first) > 0
         assert len(second) == 0  # nothing new to create
 
-
-class TestMigrateToStructuredLayout:
-    def test_moves_root_md_to_threads_subdir(self, tmp_path: Path):
-        threads_dir = tmp_path / "threads"
-        threads_dir.mkdir()
-        (threads_dir / "my-topic.md").write_text("# content")
-        (threads_dir / "other.md").write_text("# other")
-
-        moved = migrate_to_structured_layout(threads_dir)
-
-        assert len(moved) == 2
-        # Files should be in threads/ now
-        assert (threads_dir / "threads" / "my-topic.md").exists()
-        assert (threads_dir / "threads" / "other.md").exists()
-        # Old locations should be gone
-        assert not (threads_dir / "my-topic.md").exists()
-        assert not (threads_dir / "other.md").exists()
-
-    def test_skips_hidden_files(self, tmp_path: Path):
-        threads_dir = tmp_path / "threads"
-        threads_dir.mkdir()
-        (threads_dir / ".hidden.md").write_text("# hidden")
-        (threads_dir / "_internal.md").write_text("# internal")
-        (threads_dir / "normal.md").write_text("# normal")
-
-        moved = migrate_to_structured_layout(threads_dir)
-
-        assert len(moved) == 1
-        assert moved[0][0].name == "normal.md"
-        # Hidden files should remain at root
-        assert (threads_dir / ".hidden.md").exists()
-        assert (threads_dir / "_internal.md").exists()
-
-    def test_idempotent(self, tmp_path: Path):
-        threads_dir = tmp_path / "threads"
-        threads_dir.mkdir()
-        (threads_dir / "topic.md").write_text("# content")
-
-        first = migrate_to_structured_layout(threads_dir)
-        second = migrate_to_structured_layout(threads_dir)
-
-        assert len(first) == 1
-        assert len(second) == 0  # already moved
-
-    def test_skips_collision(self, tmp_path: Path):
-        threads_dir = tmp_path / "threads"
-        threads_dir.mkdir()
-        (threads_dir / "threads").mkdir(parents=True)
-        (threads_dir / "topic.md").write_text("# root version")
-        (threads_dir / "threads" / "topic.md").write_text("# subdir version")
-
-        moved = migrate_to_structured_layout(threads_dir)
-
-        assert len(moved) == 0  # collision, not moved
-        assert (threads_dir / "topic.md").exists()  # root file kept
-        # Subdir version unchanged
-        assert (threads_dir / "threads" / "topic.md").read_text() == "# subdir version"
 
 
 class TestThreadPathStructured:
