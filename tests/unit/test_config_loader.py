@@ -414,9 +414,9 @@ class TestPhantomEnvVarRegistration:
 
   def test_graphiti_enabled_not_in_env_mapping(self):
     """WATERCOOLER_GRAPHITI_ENABLED is intentionally NOT in ENV_MAPPING (runtime-only legacy flag)."""
-    source = self._get_config_loader_source()
-    # It should NOT appear as a key in ENV_MAPPING
-    assert '"WATERCOOLER_GRAPHITI_ENABLED"' not in source, (
+    from watercooler.config_loader import _env_to_config_key
+    section_path, _ = _env_to_config_key("WATERCOOLER_GRAPHITI_ENABLED")
+    assert section_path == [], (
       "WATERCOOLER_GRAPHITI_ENABLED must remain a runtime-only flag outside the config system"
     )
 
