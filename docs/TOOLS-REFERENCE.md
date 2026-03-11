@@ -26,7 +26,6 @@ Unified reference for all CLI commands and MCP tools.
 |---|---|---|
 | `set-status <topic> <status>` | Update thread status | `--threads-dir` |
 | `set-ball <topic> <ball>` | Transfer ball ownership | `--threads-dir` |
-| `sync` | **Removed.** Prints a deprecation message and exits. Thread sync is now automatic via the orphan branch worktree. | — | — |
 | `reindex` | Rebuild thread index | `--threads-dir` |
 | `web-export` | Generate HTML index | — |
 | `unlock <topic>` | Clear advisory lock (debugging) | `--threads-dir` |

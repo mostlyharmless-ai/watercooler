@@ -151,9 +151,6 @@ the operation fails and the stash is preserved — no data is lost.
 3. `watercooler_graph_recover()` from your MCP client returns instructions for the
    recovery script and does not modify data directly.
 
-> **Note:** `watercooler sync` is no longer a functional command. Thread sync is
-> automatic via the orphan branch worktree since the async queue was removed.
-
 ---
 
 ### Memory backend connection failure
@@ -168,8 +165,8 @@ explicitly configured. The error scenarios are:
 
 - **T1 not ready:** The baseline graph (`graph/baseline/nodes.jsonl`) doesn't exist yet.
   Build it first: `watercooler baseline-graph build`
-- **T2/T3 endpoint unreachable:** T2 or T3 is configured (enabled via env var) but the
-  backing service (FalkorDB, embedding server) isn't running.
+- **T2/T3 endpoint unreachable:** T2 or T3 is configured (enabled via config or env var)
+  but the backing service (FalkorDB, embedding server) isn't running.
 - **`watercooler_memory` not installed:** The memory package wasn't included in the
   install. Reinstall with the memory extra.
 
