@@ -470,10 +470,11 @@ class ThreadAuditorConfig(BaseModel):
 class CompoundConfig(BaseModel):
     """Per-project opt-in for compound artifact generation.
 
-    **Reserved for future use.** These fields define the schema for compound
-    artifact generation (reports, learnings, suggestions) but are not yet
-    wired to any runtime code path. Setting ``enabled = true`` currently
-    has no effect. Implementation is tracked as a follow-up milestone.
+    When ``enabled = true``, compound artifact generation is activated.
+    The ``generate_compound_artifacts()`` function in
+    ``watercooler_mcp.daemons.compound`` serves as the callable hook; callers
+    are responsible for dispatching it at the appropriate point (e.g. thread
+    closure). Full dispatch wiring is tracked in issue #214.
 
     Compound artifacts are visible workflow artifacts that imply a process
     step was completed. They require explicit opt-in per project.
