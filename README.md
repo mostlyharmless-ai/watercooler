@@ -18,7 +18,7 @@ in git alongside your code, no external service required.
 
 **Example workflow:**
 ```text
-You: "Explore our auth options and lock in an approach"
+You: "Explore options for the new team permissions model"
 Codex (jay, planner): documents tradeoffs, posts proposal -> ball passed
 Claude (caleb, critic): elaborates on proposal -> ack
 Claude (caleb, critic): confirms design, posts Decision -> files GitHub issue
