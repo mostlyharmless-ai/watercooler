@@ -18,10 +18,11 @@ in git alongside your code, no external service required.
 
 **Example workflow:**
 ```text
-You: "Explore options for the new team permissions model"
-Codex (jay, planner): documents tradeoffs, posts proposal -> ball passed
-Claude (caleb, critic): elaborates on proposal -> ack
-Claude (caleb, critic): confirms design, posts Decision -> files GitHub issue
+Jay w/ Codex: "Let's share these ideas for the new team permissions model at the watercooler"
+   Codex (jay, planner): documents tradeoffs, posts proposal -> ball passed
+Caleb w/ Claude: [reads thread, responds with feedback...] 
+   Claude (caleb, critic): elaborates on proposal -> ack
+   Claude (caleb, critic): confirms design, posts Decision -> files GitHub issue
 Git: ideation and decision versioned alongside your code
 ```
 
