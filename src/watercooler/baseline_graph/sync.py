@@ -2610,6 +2610,7 @@ def get_memory_backend_config() -> Optional[Dict[str, Any]]:
     # Legacy auto-detect: if WATERCOOLER_GRAPHITI_ENABLED=1 but no backend specified,
     # default to graphiti for automatic entry sync
     if not backend or backend == "null":
+        # Intentional: WATERCOOLER_GRAPHITI_ENABLED is a legacy runtime-only flag (not in config system)
         graphiti_enabled = os.environ.get("WATERCOOLER_GRAPHITI_ENABLED", "").lower()
         if graphiti_enabled in ("1", "true", "yes"):
             backend = "graphiti"
@@ -2638,6 +2639,7 @@ def _get_memory_backend_config_env_only() -> Optional[Dict[str, Any]]:
     backend = os.environ.get("WATERCOOLER_MEMORY_BACKEND", "").lower().strip()
 
     if not backend:
+        # Intentional: WATERCOOLER_GRAPHITI_ENABLED is a legacy runtime-only flag (not in config system)
         graphiti_enabled = os.environ.get("WATERCOOLER_GRAPHITI_ENABLED", "").lower()
         if graphiti_enabled in ("1", "true", "yes"):
             backend = "graphiti"
