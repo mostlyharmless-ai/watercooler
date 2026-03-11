@@ -203,6 +203,11 @@ def _env_to_config_key(env_var: str) -> tuple[list[str], str]:
         # Graphiti-specific
         "WATERCOOLER_GRAPHITI_RERANKER": (["memory", "graphiti"], "reranker"),
         "WATERCOOLER_GRAPHITI_PATH": (["memory", "graphiti"], "path"),
+        # Graph/MCP settings
+        "WATERCOOLER_AUTO_START_SERVICES": (["mcp", "graph"], "auto_start_services"),
+        "WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD": (["mcp", "graph"], "embedding_divergence_threshold"),
+        # Memory embedding extended
+        "EMBEDDING_TIMEOUT": (["memory", "embedding"], "timeout"),
     }
 
     return ENV_MAPPING.get(env_var, ([], env_var))
@@ -260,6 +265,9 @@ def _apply_env_overlay(config_dict: Dict[str, Any]) -> Dict[str, Any]:
         "FALKORDB_PASSWORD",
         "WATERCOOLER_GRAPHITI_RERANKER",
         "WATERCOOLER_GRAPHITI_PATH",
+        "WATERCOOLER_AUTO_START_SERVICES",
+        "WATERCOOLER_EMBEDDING_DIVERGENCE_THRESHOLD",
+        "EMBEDDING_TIMEOUT",
     ]
 
     for env_var in env_vars:
