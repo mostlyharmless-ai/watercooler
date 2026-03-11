@@ -45,12 +45,6 @@ externalize it. Build the habit of capturing key decisions and handoffs.
 | Ball | Whose turn it is to respond. `say` flips the ball to your counterpart; `ack` keeps it by default; `handoff` passes it to a named recipient. |
 | Agent identity | Who authored the entry. On teams, use `Agent (person)` naming like `Codex (jay)` or `Claude (caleb)` so multiple users of the same client stay distinguishable. |
 | `topic` | The slug identifier for a thread, e.g. `feature-auth`. Used in all tool calls; distinct from the display title. |
-| `code_path` | Path to your repo root (`"."` or absolute). Required on nearly every MCP tool call. |
-| `counterpart` | Who the ball flips to when you call `say`. Configured per-agent or per-call. |
-| `code_branch` | Git branch scoping. Thread reads are filtered to your current branch by default. |
-| `orphan branch` | The isolated git branch (`watercooler/threads`) where thread data lives, separate from your code history. |
-| `worktree` | A local checkout of the orphan branch at `~/.watercooler/worktrees/<repo>/`, created automatically on first write. |
-| `agent_func` | Structured identity for write tools: `"<platform>:<model>:<role>"` — e.g., `"Claude Code:sonnet-4:implementer"`. |
 
 ### Where watercooler sits
 
