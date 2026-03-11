@@ -919,16 +919,11 @@ class TestGetGraphitiPathConfigFallback:
             "watercooler_memory.backends.graphiti._is_graphiti_installed",
             return_value=False,
         ):
-            with patch(
-                "watercooler_memory.backends.graphiti.config",
-                mock_config_obj,
-                create=True,
+            # Patch the import inside the function
+            with patch.dict(
+                "sys.modules",
+                {"watercooler.config_facade": Mock(config=mock_config_obj)},
             ):
-                # Patch the import inside the function
-                with patch.dict(
-                    "sys.modules",
-                    {"watercooler.config_facade": Mock(config=mock_config_obj)},
-                ):
-                    result = _get_graphiti_path()
+                result = _get_graphiti_path()
 
         assert result == Path(config_path)
