@@ -1,0 +1,59 @@
+#!/bin/bash
+# Watercooler pre-push hook
+# Validates branch pairing before pushing to remote
+
+# Get current branch
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+# Skip check for main branch (allows direct pushes if needed)
+if [ "$CURRENT_BRANCH" = "main" ]; then
+  exit 0
+fi
+
+# Try to find threads repo
+THREADS_REPO=""
+if [ -d "../$(basename $(pwd))-threads" ]; then
+  THREADS_REPO="../$(basename $(pwd))-threads"
+elif [ -d ".watercooler" ] && [ -d ".watercooler/../.git" ]; then
+  # If .watercooler is a git repo itself
+  THREADS_REPO=".watercooler"
+elif [ -n "$WATERCOOLER_THREADS_DIR" ]; then
+  THREADS_REPO="$WATERCOOLER_THREADS_DIR"
+fi
+
+if [ -z "$THREADS_REPO" ] || [ ! -d "$THREADS_REPO" ]; then
+  # No threads repo found, skip validation
+  exit 0
+fi
+
+# Check if threads repo has matching branch
+if ! git -C "$THREADS_REPO" show-ref --verify --quiet "refs/heads/$CURRENT_BRANCH"; then
+  echo "⚠️  Warning: Branch '$CURRENT_BRANCH' exists in code repo but not in threads repo"
+  echo "   Create threads branch? [y/N]"
+  read -r response
+  if [[ "$response" =~ ^[Yy]$ ]]; then
+    git -C "$THREADS_REPO" checkout -b "$CURRENT_BRANCH" 2>/dev/null || \
+      git -C "$THREADS_REPO" checkout "$CURRENT_BRANCH" 2>/dev/null || true
+    echo "✅ Threads branch '$CURRENT_BRANCH' created/checked out"
+  else
+    echo "   Continuing with push (branch pairing not enforced)"
+  fi
+fi
+
+# Check if threads branch is on same branch
+THREADS_BRANCH=$(git -C "$THREADS_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+if [ -n "$THREADS_BRANCH" ] && [ "$THREADS_BRANCH" != "$CURRENT_BRANCH" ]; then
+  echo "⚠️  Warning: Branch mismatch detected"
+  echo "   Code branch:    $CURRENT_BRANCH"
+  echo "   Threads branch: $THREADS_BRANCH"
+  echo "   Continue anyway? [y/N]"
+  read -r response
+  if [[ ! "$response" =~ ^[Yy]$ ]]; then
+    echo "   Push cancelled. Sync branches first:"
+    echo "   cd $THREADS_REPO && git checkout $CURRENT_BRANCH"
+    exit 1
+  fi
+fi
+
+exit 0
+

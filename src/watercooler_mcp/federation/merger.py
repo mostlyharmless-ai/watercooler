@@ -1,0 +1,151 @@
+"""Response envelope builder, dedup, allocation cap, and result sorting.
+
+Merges scored results from multiple namespaces into a single ranked list
+with provenance metadata.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+__all__ = [
+    "ScoredResult",
+    "merge_results",
+    "build_response_envelope",
+]
+
+
+@dataclass(frozen=True)
+class ScoredResult:
+    """Immutable scored result — constructed once, never mutated."""
+
+    entry_id: str
+    origin_namespace: str
+    raw_score: float
+    normalized_score: float
+    namespace_weight: float
+    recency_decay: float
+    ranking_score: float
+    entry_data: dict[str, Any]  # Treat as immutable — never mutate in-place
+    timestamp: str  # ISO 8601, for display
+    timestamp_epoch: float  # Pre-computed epoch for sort tiebreaking
+    group_id: str = ""  # FalkorDB database name for T2/T3 queries
+
+
+def merge_results(
+    namespace_results: dict[str, list[ScoredResult]],
+    primary_namespace: str,
+    limit: int,
+    min_score: float = 0.01,
+) -> list[ScoredResult]:
+    """Merge, filter, sort, dedup, truncate.
+
+    1. Filter out results with RankingScore < min_score
+    2. Sort by RankingScore descending
+    3. Tiebreak: primary first, then newest timestamp, then entry_id
+    4. Dedup by entry_id (keeps first = primary-preferred due to sort)
+    5. Truncate to limit
+
+    Args:
+        namespace_results: Results grouped by namespace.
+        primary_namespace: The primary namespace ID.
+        limit: Maximum results to return.
+        min_score: Minimum ranking score threshold. The 0.01 default filters
+            out near-zero results from the multiplicative composition (e.g., a
+            barely-matching entry in a low-weight namespace with high recency
+            decay). Applies equally to all namespaces including primary —
+            baseline-floor-only matches (ranking_score == 0.0) are intentionally
+            dropped as noise. Dedup is handled separately by entry_id.
+
+    Returns:
+        Sorted, deduplicated, truncated list of ScoredResults.
+    """
+    all_results: list[ScoredResult] = []
+    for results in namespace_results.values():
+        all_results.extend(results)
+
+    # Filter by min_score
+    all_results = [r for r in all_results if r.ranking_score >= min_score]
+
+    # Sort: RankingScore desc, tiebreak primary first, newest, entry_id.
+    # Must sort BEFORE dedup so primary version wins when entry_id collides.
+    def sort_key(r: ScoredResult) -> tuple[float, int, float, str]:
+        return (
+            -r.ranking_score,
+            0 if r.origin_namespace == primary_namespace else 1,
+            -r.timestamp_epoch,
+            r.entry_id,
+        )
+
+    all_results.sort(key=sort_key)
+
+    # Dedup by entry_id (keeps first = primary-preferred due to sort above)
+    seen: set[str] = set()
+    deduped: list[ScoredResult] = []
+    for r in all_results:
+        if r.entry_id not in seen:
+            seen.add(r.entry_id)
+            deduped.append(r)
+
+    return deduped[:limit]
+
+
+def build_response_envelope(
+    results: list[ScoredResult],
+    primary_namespace: str,
+    namespace_status: dict[str, Any],
+    queried_namespaces: list[str],
+    query: str,
+    total_candidates: int,
+    warnings: list[str] | None = None,
+    results_complete: bool = True,
+) -> dict[str, Any]:
+    """Build federation response envelope with provenance metadata.
+
+    Args:
+        results: Sorted, merged results.
+        primary_namespace: The primary namespace ID.
+        namespace_status: Per-namespace status dicts with optional diagnostics.
+        queried_namespaces: All namespaces that were queried.
+        query: The original search query.
+        total_candidates: Total scored results before min_score filtering
+            and limit truncation (post-scoring, post-deny_topics,
+            pre-min_score-filter, pre-limit).
+        warnings: Optional list of warning messages (e.g., namespace collisions).
+        results_complete: False if any searchable namespace timed out or errored,
+            meaning total_candidates may undercount actual candidates.
+
+    Returns:
+        Response envelope dict with schema_version for forward compatibility.
+    """
+    result_dicts = []
+    for r in results:
+        result_dicts.append({
+            "entry_id": r.entry_id,
+            "origin_namespace": r.origin_namespace,
+            "group_id": r.group_id,
+            "ranking_score": round(r.ranking_score, 4),
+            "score_breakdown": {
+                "raw_score": round(r.raw_score, 4),
+                "normalized_score": round(r.normalized_score, 4),
+                "namespace_weight": round(r.namespace_weight, 4),
+                "recency_decay": round(r.recency_decay, 4),
+            },
+            "entry_data": r.entry_data,
+        })
+
+    envelope: dict[str, Any] = {
+        "schema_version": 1,
+        "query": query,
+        "primary_namespace": primary_namespace,
+        "queried_namespaces": queried_namespaces,
+        "namespace_status": namespace_status,
+        "result_count": len(results),
+        "total_candidates_before_truncation": total_candidates,
+        "results_complete": results_complete,
+        "results": result_dicts,
+    }
+    envelope["warnings"] = warnings or []
+
+    return envelope

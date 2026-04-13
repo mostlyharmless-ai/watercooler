@@ -1,0 +1,60 @@
+#!/bin/bash
+# Watercooler pre-merge hook
+# Validates branch pairing and checks for OPEN threads before merging
+
+# Get current branch (target of merge)
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+# Skip check for main branch merges (these are usually OK)
+if [ "$CURRENT_BRANCH" = "main" ]; then
+  exit 0
+fi
+
+# Try to find threads repo
+THREADS_REPO=""
+if [ -d "../$(basename $(pwd))-threads" ]; then
+  THREADS_REPO="../$(basename $(pwd))-threads"
+elif [ -d ".watercooler" ] && [ -d ".watercooler/../.git" ]; then
+  THREADS_REPO=".watercooler"
+elif [ -n "$WATERCOOLER_THREADS_DIR" ]; then
+  THREADS_REPO="$WATERCOOLER_THREADS_DIR"
+fi
+
+if [ -z "$THREADS_REPO" ] || [ ! -d "$THREADS_REPO" ]; then
+  # No threads repo found, skip validation
+  exit 0
+fi
+
+# Check if threads repo has matching branch
+if ! git -C "$THREADS_REPO" show-ref --verify --quiet "refs/heads/$CURRENT_BRANCH"; then
+  echo "⚠️  Warning: Branch '$CURRENT_BRANCH' exists in code repo but not in threads repo"
+  echo "   Consider creating threads branch before merging"
+  echo "   Continue? [y/N]"
+  read -r response
+  if [[ ! "$response" =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+fi
+
+# Check for OPEN threads (basic check - looks for "Status: OPEN" in thread files)
+if [ -d "$THREADS_REPO/.watercooler" ]; then
+  THREADS_DIR="$THREADS_REPO/.watercooler"
+elif [ -d "$THREADS_REPO" ]; then
+  THREADS_DIR="$THREADS_REPO"
+else
+  exit 0
+fi
+
+OPEN_THREADS=$(grep -l "Status: OPEN" "$THREADS_DIR"/*.md 2>/dev/null | wc -l || echo "0")
+if [ "$OPEN_THREADS" -gt 0 ]; then
+  echo "⚠️  Warning: $OPEN_THREADS OPEN thread(s) found on branch '$CURRENT_BRANCH'"
+  echo "   Consider closing threads before merge"
+  echo "   Continue? [y/N]"
+  read -r response
+  if [[ ! "$response" =~ ^[Yy]$ ]]; then
+    exit 1
+  fi
+fi
+
+exit 0
+

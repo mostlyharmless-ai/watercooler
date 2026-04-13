@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    timeout-minutes: 10
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install package with all extras
+      # Note: Using graphiti instead of memory to avoid private LeanRAG dependency
+      # LeanRAG tests are skipped anyway (integration_leanrag_llm marker)
+      run: pip install -e ".[dev]"
+
+    - name: Test import
+      run: python -c "import watercooler; print(f'watercooler {watercooler.__version__}')"
+
+    - name: Run tests
+      run: pytest tests/ -v --ignore=tests/benchmarks --ignore=tests/unit/test_middleware_timeout.py -m "not integration_falkor and not integration_leanrag_llm and not integration_graphiti"
+
+  public-build-verify:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install public build (no memory extras)
+      # Build a wheel — NOT an editable install. Editable installs add the entire
+      # src/ directory to sys.path, making watercooler_memory importable even when
+      # it is excluded from the package manifest. A wheel install does not do this.
+      #
+      # In the private repo, pyproject.public.toml contains the sanitized public
+      # package config (with exclude = ["watercooler_memory*"]). Copy it over the
+      # private pyproject.toml before building.
+      # In the public repo, Copybara has already moved it to pyproject.toml.
+      run: |
+        if [ -f pyproject.public.toml ]; then
+          cp pyproject.public.toml pyproject.toml
+        elif ! grep -q '^name = "watercooler"$' pyproject.toml 2>/dev/null; then
+          echo "ERROR: pyproject.public.toml not found and pyproject.toml is not the public config"
+          exit 1
+        fi
+        pip install --quiet build
+        python -m build --wheel --no-isolation --outdir /tmp/public-whl .
+        pip install --quiet /tmp/public-whl/watercooler-*.whl pytest jsonschema tqdm mypy
+
+    - name: Verify watercooler_memory is not installed
+      run: python -c "import importlib.util; assert importlib.util.find_spec('watercooler_memory') is None, 'watercooler_memory must not be present in public build'"
+
+    - name: Check for private package name strings in published src
+      # Scan only the packages that ship in the open-core build (not watercooler_memory).
+      # Pattern covers the three install-command contexts fixed in Phase 1:
+      #   watercooler-cloud[*]  — extras install hints ([memory], [http], …)
+      #   uvx watercooler-cloud — uvx invocations using the private package name
+      #   pip install.*watercooler-cloud — pip install commands
+      # Bare "watercooler-cloud" in docstrings/examples is intentional and not caught.
+      run: |
+        if grep -rn --include="*.py" -E \
+            'watercooler-cloud\[|uvx watercooler-cloud|pip install.*watercooler-cloud' \
+            src/watercooler/ src/watercooler_mcp/; then
+          echo "ERROR: Private package name in install-command context found in published src/"
+          exit 1
+        fi
+
+    - name: Run public-build smoke tests
+      run: pytest tests/integration/test_public_build_smoke.py -v

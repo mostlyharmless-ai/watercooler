@@ -1,0 +1,761 @@
+"""Tests for graph-canonical command implementations.
+
+Tests the writer.py, projector.py, and commands_graph.py modules
+that implement the graph-canonical architecture.
+"""
+
+import json
+import pytest
+from pathlib import Path
+from ulid import ULID
+
+from watercooler.baseline_graph.writer import (
+    ThreadData,
+    EntryData,
+    upsert_thread_node,
+    upsert_entry_node,
+    update_thread_metadata,
+    get_thread_from_graph,
+    get_entry_node_from_graph,
+    get_entries_for_thread,
+    get_last_entry_id,
+    get_next_entry_index,
+    init_thread_in_graph,
+)
+from watercooler.baseline_graph.projector import (
+    project_entry_to_markdown,
+    project_thread_to_markdown,
+    project_and_write_thread,
+    create_thread_file,
+)
+from watercooler.commands_graph import (
+    say,
+    ack,
+    handoff,
+    set_status,
+    set_ball,
+    init_thread,
+)
+
+
+class TestWriterModule:
+    """Tests for baseline_graph/writer.py."""
+
+    def test_upsert_thread_node(self, tmp_path):
+        """Test creating a thread node."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        data = ThreadData(
+            topic="test-thread",
+            title="Test Thread",
+            status="OPEN",
+            ball="Claude",
+            summary="A test thread",
+            entry_count=0,
+        )
+
+        result = upsert_thread_node(threads_dir, data)
+        assert result is True
+
+        # Verify node exists
+        thread = get_thread_from_graph(threads_dir, "test-thread")
+        assert thread is not None
+        assert thread["topic"] == "test-thread"
+        assert thread["title"] == "Test Thread"
+        assert thread["status"] == "OPEN"
+        assert thread["ball"] == "Claude"
+
+    def test_upsert_entry_node(self, tmp_path):
+        """Test creating an entry node."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create thread first
+        thread_data = ThreadData(
+            topic="test-thread",
+            title="Test Thread",
+        )
+        upsert_thread_node(threads_dir, thread_data)
+
+        # Create entry
+        entry_id = str(ULID())
+        entry_data = EntryData(
+            entry_id=entry_id,
+            thread_topic="test-thread",
+            index=0,
+            agent="Claude",
+            role="implementer",
+            entry_type="Note",
+            title="Test Entry",
+            body="Test body content",
+        )
+
+        result = upsert_entry_node(threads_dir, entry_data)
+        assert result is True
+
+        # Verify entry exists
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
+        assert entry is not None
+        assert entry["entry_id"] == entry_id
+        assert entry["agent"] == "Claude"
+        assert entry["title"] == "Test Entry"
+
+    def test_update_thread_metadata(self, tmp_path):
+        """Test updating thread metadata."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create thread
+        data = ThreadData(topic="test-thread", title="Test Thread", status="OPEN")
+        upsert_thread_node(threads_dir, data)
+
+        # Update status
+        result = update_thread_metadata(
+            threads_dir,
+            "test-thread",
+            status="CLOSED",
+            ball="User",
+        )
+        assert result is True
+
+        # Verify updates
+        thread = get_thread_from_graph(threads_dir, "test-thread")
+        assert thread["status"] == "CLOSED"
+        assert thread["ball"] == "User"
+
+    def test_get_entries_for_thread(self, tmp_path):
+        """Test getting all entries for a thread."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create thread
+        thread_data = ThreadData(topic="test-thread", title="Test")
+        upsert_thread_node(threads_dir, thread_data)
+
+        # Create entries
+        for i in range(3):
+            entry_data = EntryData(
+                entry_id=str(ULID()),
+                thread_topic="test-thread",
+                index=i,
+                agent="Agent",
+                role="implementer",
+                entry_type="Note",
+                title=f"Entry {i}",
+                body=f"Body {i}",
+            )
+            upsert_entry_node(threads_dir, entry_data)
+
+        entries = get_entries_for_thread(threads_dir, "test-thread")
+        assert len(entries) == 3
+        assert entries[0]["index"] == 0
+        assert entries[2]["index"] == 2
+
+    def test_get_next_entry_index(self, tmp_path):
+        """Test getting next entry index."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # No entries - should be 0
+        assert get_next_entry_index(threads_dir, "test-thread") == 0
+
+        # Create thread and entry
+        thread_data = ThreadData(topic="test-thread", title="Test")
+        upsert_thread_node(threads_dir, thread_data)
+
+        entry_data = EntryData(
+            entry_id=str(ULID()),
+            thread_topic="test-thread",
+            index=0,
+            agent="Agent",
+            role="implementer",
+            entry_type="Note",
+            title="Entry 0",
+            body="Body",
+        )
+        upsert_entry_node(threads_dir, entry_data)
+
+        # Next should be 1
+        assert get_next_entry_index(threads_dir, "test-thread") == 1
+
+
+class TestProjectorModule:
+    """Tests for baseline_graph/projector.py."""
+
+    def test_project_entry_to_markdown(self):
+        """Test projecting entry node to markdown."""
+        entry = {
+            "agent": "Claude",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "role": "implementer",
+            "entry_type": "Note",
+            "title": "Test Entry",
+            "body": "Test body content",
+            "entry_id": "test-entry-id",
+        }
+
+        md = project_entry_to_markdown(entry)
+
+        assert "Entry: Claude 2024-01-01T00:00:00Z" in md
+        assert "Role: implementer" in md
+        assert "Type: Note" in md
+        assert "Title: Test Entry" in md
+        assert "Test body content" in md
+        assert "<!-- Entry-ID: test-entry-id -->" in md
+
+    def test_project_thread_to_markdown(self):
+        """Test projecting thread with entries to markdown."""
+        thread = {
+            "topic": "test-thread",
+            "status": "OPEN",
+            "ball": "Claude",
+            "last_updated": "2024-01-01T00:00:00Z",
+        }
+        entries = [
+            {
+                "agent": "Claude",
+                "timestamp": "2024-01-01T00:00:00Z",
+                "role": "implementer",
+                "entry_type": "Note",
+                "title": "Entry 1",
+                "body": "Body 1",
+                "entry_id": "entry-1",
+            },
+        ]
+
+        md = project_thread_to_markdown(thread, entries)
+
+        assert "# test-thread — Thread" in md
+        assert "Status: OPEN" in md
+        assert "Ball: Claude" in md
+        assert "Entry: Claude" in md
+        assert "Body 1" in md
+
+    def test_create_thread_file(self, tmp_path):
+        """Test creating a new thread file."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        path = create_thread_file(
+            threads_dir,
+            "test-thread",
+            title="Test Thread",
+            status="OPEN",
+            ball="User",
+        )
+
+        assert path.exists()
+        content = path.read_text()
+        assert "# test-thread — Thread" in content
+        assert "Status: OPEN" in content
+        assert "Ball: User" in content
+
+    def test_reconstruct_after_metadata_update(self, tmp_path):
+        """Test that project_and_write_thread reflects graph metadata changes."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create thread in graph
+        init_thread_in_graph(threads_dir, "test-thread", title="Test", status="OPEN", ball="User")
+
+        # Create initial .md
+        create_thread_file(threads_dir, "test-thread", status="OPEN", ball="User")
+
+        # Update graph metadata
+        update_thread_metadata(threads_dir, "test-thread", status="CLOSED")
+
+        # Reconstruct .md from graph
+        project_and_write_thread(threads_dir, "test-thread")
+
+        content = (threads_dir / "test-thread.md").read_text()
+        assert "Status: CLOSED" in content
+        assert "Ball: User" in content  # Ball unchanged
+
+
+class TestCommandsGraphModule:
+    """Tests for commands_graph.py graph-canonical commands."""
+
+    def test_init_thread(self, tmp_path):
+        """Test initializing thread graph-first."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        path = init_thread(
+            "test-thread",
+            threads_dir=threads_dir,
+            title="Test Thread",
+            status="OPEN",
+            ball="Claude",
+        )
+
+        # Verify MD file exists
+        assert path.exists()
+        content = path.read_text()
+        assert "# test-thread — Thread" in content
+
+        # Verify graph node exists
+        thread = get_thread_from_graph(threads_dir, "test-thread")
+        assert thread is not None
+        assert thread["status"] == "OPEN"
+
+    def test_say(self, tmp_path):
+        """Test say command graph-first."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        entry_id = str(ULID())
+        path = say(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test Entry",
+            body="Test body content",
+            entry_id=entry_id,
+        )
+
+        # Verify MD file has entry
+        assert path.exists()
+        content = path.read_text()
+        assert "Test body content" in content
+        assert entry_id in content
+
+        # Verify graph has entry
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
+        assert entry is not None
+        assert entry["title"] == "Test Entry"
+
+    def test_ack(self, tmp_path):
+        """Test ack command graph-first."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Initialize thread
+        init_thread("test-thread", threads_dir=threads_dir, ball="User")
+
+        # Ack
+        entry_id = str(ULID())
+        path = ack(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            title="Got it",
+            body="Acknowledged",
+            entry_id=entry_id,
+        )
+
+        assert path.exists()
+
+        # Ball should remain unchanged for ack
+        thread = get_thread_from_graph(threads_dir, "test-thread")
+        assert thread["ball"] == "User"
+
+    def test_set_status(self, tmp_path):
+        """Test set_status command graph-first."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Initialize thread
+        init_thread("test-thread", threads_dir=threads_dir, status="OPEN")
+
+        # Change status
+        set_status("test-thread", threads_dir=threads_dir, status="CLOSED")
+
+        # Verify graph updated
+        thread = get_thread_from_graph(threads_dir, "test-thread")
+        assert thread["status"] == "CLOSED"
+
+        # Verify MD updated
+        content = (threads_dir / "test-thread.md").read_text()
+        assert "Status: CLOSED" in content
+
+    def test_set_ball(self, tmp_path):
+        """Test set_ball command graph-first."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Initialize thread
+        init_thread("test-thread", threads_dir=threads_dir, ball="User")
+
+        # Change ball
+        set_ball("test-thread", threads_dir=threads_dir, ball="Claude")
+
+        # Verify graph updated
+        thread = get_thread_from_graph(threads_dir, "test-thread")
+        assert thread["ball"] == "Claude"
+
+        # Verify MD updated
+        content = (threads_dir / "test-thread.md").read_text()
+        assert "Ball: Claude" in content
+
+    def test_handoff(self, tmp_path):
+        """Test handoff command graph-first."""
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Initialize thread with ball=Claude
+        init_thread("test-thread", threads_dir=threads_dir, ball="Claude")
+
+        # Handoff (should flip to counterpart)
+        entry_id = str(ULID())
+        handoff(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            note="Your turn",
+            entry_id=entry_id,
+        )
+
+        # Ball should flip to counterpart (which depends on agent registry)
+        # The key assertion is that the ball changed from "Claude"
+        thread = get_thread_from_graph(threads_dir, "test-thread")
+        assert thread["ball"] != "Claude"  # Ball flipped to some counterpart
+
+        # Verify handoff entry exists
+        entries = get_entries_for_thread(threads_dir, "test-thread")
+        assert len(entries) == 1
+        assert "Handoff to" in entries[0]["title"]
+
+
+class TestEnrichGraphEntry:
+    """Tests for enrich_graph_entry() - graph-canonical enrichment."""
+
+    def test_enrich_graph_entry_returns_noop_when_disabled(self, tmp_path):
+        """Test that enrich_graph_entry returns noop when enrichment disabled."""
+        from watercooler.baseline_graph.sync import enrich_graph_entry, EnrichmentResult
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create thread and entry via graph-first
+        entry_id = str(ULID())
+        say(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test Entry",
+            body="This is test content for enrichment.",
+            entry_id=entry_id,
+        )
+
+        # Call enrich with both disabled - should return noop
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=False,
+            generate_embeddings=False,
+        )
+        assert isinstance(result, EnrichmentResult)
+        assert result.success is True
+        assert result.is_noop is True
+        assert result.summary_generated is False
+        assert result.embedding_generated is False
+
+    def test_enrich_graph_entry_missing_entry_returns_error(self, tmp_path):
+        """Test that enrich_graph_entry returns error for missing entry."""
+        from watercooler.baseline_graph.sync import enrich_graph_entry, EnrichmentResult
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="nonexistent",
+            entry_id="nonexistent-id",
+            generate_summaries=False,
+            generate_embeddings=False,
+        )
+        assert isinstance(result, EnrichmentResult)
+        assert result.success is False
+        assert result.error_message is not None
+        assert "not found" in result.error_message
+
+    def test_enrich_graph_entry_writes_summary_to_graph(self, tmp_path, monkeypatch):
+        """Test that generated summary is written back to graph."""
+        from watercooler.baseline_graph import sync as sync_module
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create entry
+        entry_id = str(ULID())
+        say(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test Entry",
+            body="This is test content that needs summarization.",
+            entry_id=entry_id,
+        )
+
+        # Mock the LLM service
+        monkeypatch.setattr(sync_module, "is_llm_service_available", lambda _: True)
+        monkeypatch.setattr(
+            sync_module, "summarize_entry",
+            lambda *args, **kwargs: "Mocked summary of the test content."
+        )
+
+        # Run enrichment with summaries enabled
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=True,
+            generate_embeddings=False,
+        )
+
+        assert result.success is True
+        assert result.summary_generated is True
+
+        # Verify summary was written to graph
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
+        assert entry is not None
+        assert entry["summary"] == "Mocked summary of the test content."
+
+    def test_enrich_graph_entry_writes_embedding_to_graph(self, tmp_path, monkeypatch):
+        """Test that generated embedding is written back to graph."""
+        from watercooler.baseline_graph import sync as sync_module
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        # Create entry
+        entry_id = str(ULID())
+        say(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test Entry",
+            body="Test content for embedding.",
+            entry_id=entry_id,
+        )
+
+        # Mock the embedding service
+        mock_embedding = [0.1, 0.2, 0.3, 0.4, 0.5]
+        monkeypatch.setattr(sync_module, "is_embedding_available", lambda _: True)
+        monkeypatch.setattr(
+            sync_module, "generate_embedding",
+            lambda *args, **kwargs: mock_embedding
+        )
+
+        # Run enrichment with embeddings enabled
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=False,
+            generate_embeddings=True,
+        )
+
+        assert result.success is True
+        assert result.embedding_generated is True
+
+        # Verify entry exists (embedding stored separately in FalkorDB/search-index)
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
+        assert entry is not None
+        # Embeddings are no longer stored in entry nodes (Phase 2 migration)
+        # They are stored in FalkorDB with fallback to search-index.jsonl
+        assert "embedding" not in entry
+
+    def test_enrich_graph_entry_services_unavailable(self, tmp_path, monkeypatch):
+        """Test enrichment returns noop when services are unavailable."""
+        from watercooler.baseline_graph import sync as sync_module
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        entry_id = str(ULID())
+        say(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test",
+            body="Test content",
+            entry_id=entry_id,
+        )
+
+        # Mock services as unavailable
+        monkeypatch.setattr(sync_module, "is_llm_service_available", lambda _: False)
+        monkeypatch.setattr(sync_module, "is_embedding_available", lambda _: False)
+
+        # Request enrichment but services unavailable
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=True,
+            generate_embeddings=True,
+        )
+
+        # Should succeed as noop (services unavailable is not an error)
+        assert result.success is True
+        assert result.is_noop is True
+
+    def test_enrich_graph_entry_skips_existing_summary(self, tmp_path, monkeypatch):
+        """Test that enrichment skips if summary already exists."""
+        from watercooler.baseline_graph import sync as sync_module
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+        from watercooler.baseline_graph import storage
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        entry_id = str(ULID())
+        say(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test",
+            body="Test content",
+            entry_id=entry_id,
+        )
+
+        # Manually set summary in graph
+        graph_dir = storage.ensure_graph_dir(threads_dir)
+        entries = storage.load_thread_entries_dict(graph_dir, "test-thread")
+        entries[f"entry:{entry_id}"]["summary"] = "Pre-existing summary"
+        meta = storage.load_thread_meta(graph_dir, "test-thread") or {}
+        edges = storage.load_thread_edges(graph_dir, "test-thread")
+        storage.write_thread_graph(graph_dir, "test-thread", meta, entries, edges)
+
+        # Track if summarize_entry is called
+        summarize_called = []
+        def mock_summarize(*args, **kwargs):
+            summarize_called.append(True)
+            return "New summary"
+
+        monkeypatch.setattr(sync_module, "summarize_entry", mock_summarize)
+        monkeypatch.setattr(sync_module, "is_llm_service_available", lambda _: True)
+
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=True,
+            generate_embeddings=False,
+        )
+
+        # Should be noop - existing summary preserved
+        assert result.success is True
+        assert result.summary_generated is False
+        assert len(summarize_called) == 0  # summarize_entry should not be called
+
+        # Verify original summary preserved
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
+        assert entry["summary"] == "Pre-existing summary"
+
+    def test_enrich_graph_entry_partial_enrichment(self, tmp_path, monkeypatch):
+        """Test partial enrichment when only one service is available.
+
+        This tests the scenario where both summary and embedding are requested,
+        but only one service is available. The available service should still
+        generate its output.
+        """
+        from watercooler.baseline_graph import sync as sync_module
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        entry_id = str(ULID())
+        say(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test Entry",
+            body="Content for partial enrichment test.",
+            entry_id=entry_id,
+        )
+
+        # Mock LLM available but embedding unavailable
+        monkeypatch.setattr(sync_module, "is_llm_service_available", lambda _: True)
+        monkeypatch.setattr(sync_module, "is_embedding_available", lambda _: False)
+        monkeypatch.setattr(
+            sync_module, "summarize_entry",
+            lambda *args, **kwargs: "Generated summary from LLM."
+        )
+
+        # Request both, but only LLM is available
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=True,
+            generate_embeddings=True,
+        )
+
+        # Should succeed with partial enrichment
+        assert result.success is True
+        assert result.summary_generated is True
+        assert result.embedding_generated is False
+
+        # Verify summary was written but embedding was not generated
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
+        assert entry["summary"] == "Generated summary from LLM."
+        # Embedding should be empty/falsy (not generated)
+        assert not entry.get("embedding")
+
+    def test_enrich_graph_entry_partial_embedding_only(self, tmp_path, monkeypatch):
+        """Test partial enrichment when only embedding service is available."""
+        from watercooler.baseline_graph import sync as sync_module
+        from watercooler.baseline_graph.sync import enrich_graph_entry
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+
+        entry_id = str(ULID())
+        say(
+            "test-thread",
+            threads_dir=threads_dir,
+            agent="Claude",
+            role="implementer",
+            title="Test Entry",
+            body="Content for embedding only test.",
+            entry_id=entry_id,
+        )
+
+        # Mock embedding available but LLM unavailable
+        mock_embedding = [0.1, 0.2, 0.3, 0.4]
+        monkeypatch.setattr(sync_module, "is_llm_service_available", lambda _: False)
+        monkeypatch.setattr(sync_module, "is_embedding_available", lambda _: True)
+        monkeypatch.setattr(
+            sync_module, "generate_embedding",
+            lambda *args, **kwargs: mock_embedding
+        )
+
+        # Request both, but only embedding is available
+        result = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic="test-thread",
+            entry_id=entry_id,
+            generate_summaries=True,
+            generate_embeddings=True,
+        )
+
+        # Should succeed with partial enrichment
+        assert result.success is True
+        assert result.summary_generated is False
+        assert result.embedding_generated is True
+
+        # Verify entry exists (embedding stored separately in FalkorDB/search-index)
+        entry = get_entry_node_from_graph(threads_dir, entry_id)
+        assert entry is not None
+        # Embeddings are no longer stored in entry nodes (Phase 2 migration)
+        assert "embedding" not in entry
+        # Summary should be empty/falsy (not generated by LLM)
+        assert not entry.get("summary")
+
+
+# NOTE: TestFeatureFlag class removed - graph-first mode is now always enabled
+# and the WATERCOOLER_GRAPH_FIRST env var has been deprecated.

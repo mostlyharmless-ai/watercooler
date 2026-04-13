@@ -1,0 +1,89 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mostlyharmless.ai/schemas/watercooler/thread_entry.schema.json",
+  "title": "ThreadEntry",
+  "description": "Structured representation of a single thread entry in Watercooler format. Matches the canonical ThreadEntry dataclass from watercooler-cloud/src/watercooler/thread_entries.py",
+  "type": "object",
+  "properties": {
+    "index": {
+      "type": "integer",
+      "description": "Zero-based entry position in the thread",
+      "minimum": 0
+    },
+    "header": {
+      "type": "string",
+      "description": "Markdown header block (agent, timestamp, role, type, title)"
+    },
+    "body": {
+      "type": "string",
+      "description": "Entry body content (markdown)"
+    },
+    "agent": {
+      "type": ["string", "null"],
+      "description": "Agent name (extracted from 'Entry: Agent ...' line). Examples: 'Claude (user)', 'Cursor (user)', 'Codex (user)'"
+    },
+    "timestamp": {
+      "type": ["string", "null"],
+      "description": "ISO 8601 timestamp (YYYY-MM-DDTHH:MM:SSZ)",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "role": {
+      "type": ["string", "null"],
+      "description": "Agent role",
+      "enum": ["planner", "critic", "implementer", "tester", "pm", "scribe", null]
+    },
+    "entry_type": {
+      "type": ["string", "null"],
+      "description": "Entry type",
+      "enum": ["Note", "Plan", "Decision", "PR", "Closure", null]
+    },
+    "title": {
+      "type": ["string", "null"],
+      "description": "Entry title"
+    },
+    "entry_id": {
+      "type": ["string", "null"],
+      "description": "ULID identifier from <!-- Entry-ID: ... --> comment (26 chars, Crockford base32)",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "start_line": {
+      "type": "integer",
+      "description": "Starting line number (1-indexed)",
+      "minimum": 1
+    },
+    "end_line": {
+      "type": "integer",
+      "description": "Ending line number (1-indexed)",
+      "minimum": 1
+    },
+    "start_offset": {
+      "type": "integer",
+      "description": "Starting byte offset in file",
+      "minimum": 0
+    },
+    "end_offset": {
+      "type": "integer",
+      "description": "Ending byte offset in file",
+      "minimum": 0
+    }
+  },
+  "required": ["index", "header", "body", "start_line", "end_line", "start_offset", "end_offset"],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "index": 0,
+      "header": "Entry: Claude (user) 2025-11-05T01:42:12Z\nRole: implementer\nType: Note\nTitle: Implementation complete",
+      "body": "All tests passing. Ready for review.",
+      "agent": "Claude (user)",
+      "timestamp": "2025-11-05T01:42:12Z",
+      "role": "implementer",
+      "entry_type": "Note",
+      "title": "Implementation complete",
+      "entry_id": "01HKJM2NQR8XVZWF9PQRS3T4AB",
+      "start_line": 10,
+      "end_line": 20,
+      "start_offset": 500,
+      "end_offset": 750
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "source": {
+    "type": "filesystem",
+    "path": "src/watercooler_mcp/server.py",
+    "entrypoint": "mcp"
+  }
+}
