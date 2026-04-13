@@ -2,6 +2,8 @@
 
 Git-native collaboration threads for human-AI coding teams.
 
+Hosted version coming soon at [watercoolerdev.com](https://watercoolerdev.com)
+
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/) [![MCP](https://img.shields.io/badge/MCP-enabled-green.svg)](https://modelcontextprotocol.io)
 
 [Quick Start](#quick-start) • [Documentation](#documentation) • [Workflow Examples](docs/WORKFLOW_EXAMPLES.md) • [Tools Reference](docs/TOOLS-REFERENCE.md) • [Architecture](dev_docs/ARCHITECTURE.md) • [Contributing](CONTRIBUTING.md)
