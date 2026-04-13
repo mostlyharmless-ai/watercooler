@@ -96,7 +96,7 @@ where = ["src"]
 exclude = ["watercooler_memory*"]
 
 [tool.setuptools.package-data]
-watercooler = ["py.typed", "templates/*.md", "templates/*.toml"]
+watercooler = ["py.typed", "templates/*.md", "templates/*.toml", "data/*.toml"]
 
 [project.scripts]
 watercooler = "watercooler.cli:main"
