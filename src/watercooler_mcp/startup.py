@@ -1537,9 +1537,11 @@ def _ensure_embedding_service_available(
     )
 
     # Resolve model specification
+    log_debug(f"[EMBEDDING] Resolving model spec for: {model_name}")
     try:
         model_spec = resolve_embedding_model(model_name)
     except ModelNotFoundError as e:
+        log_warning(f"[EMBEDDING] Unknown model: {model_name}. {e}")
         _add_startup_warning(f"Unknown embedding model: {model_name}. {e}")
         return False
 
@@ -1559,9 +1561,11 @@ def _ensure_embedding_service_available(
         )
 
     # Ensure model is downloaded
+    log_debug(f"[EMBEDDING] Ensuring model available: {model_name}")
     try:
         model_path = ensure_model_available(model_name, verbose=False)
     except (ModelNotFoundError, ModelDownloadError) as e:
+        log_warning(f"[EMBEDDING] Model download failed: {type(e).__name__}: {e}")
         _add_startup_warning(f"Could not prepare embedding model: {e}")
         return False
 
