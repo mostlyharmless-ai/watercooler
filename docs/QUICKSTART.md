@@ -40,13 +40,13 @@ server. For other auth methods (PAT, environment variable, SSH), see
 **Claude Code (macOS / Linux):**
 
 ```bash
-claude mcp add --transport stdio --scope user watercooler -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-mcp
+claude mcp add --transport stdio --scope user watercooler -- uvx --from 'git+https://github.com/mostlyharmless-ai/watercooler@main[local]' watercooler-mcp
 ```
 
 **Claude Code (Windows PowerShell):**
 
 ```powershell
-cmd /c "claude mcp add --transport stdio --scope user watercooler -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-mcp"
+cmd /c "claude mcp add --transport stdio --scope user watercooler -- uvx --from 'git+https://github.com/mostlyharmless-ai/watercooler@main[local]' watercooler-mcp"
 ```
 
 > **Why `cmd /c` on Windows?** PowerShell does not pass the `--` separator correctly
