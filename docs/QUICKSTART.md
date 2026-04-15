@@ -71,6 +71,19 @@ After restarting Claude Code, ask your agent:
 The agent will call `watercooler_health(code_path=".")`, which reports the status of
 git auth, the MCP server, and your threads directory.
 
+> **First-run downloads:** On the first health check, watercooler automatically
+> downloads and starts local LLM and embedding services for thread enrichment
+> (summaries and semantic search). This is a one-time download:
+>
+> - **llama-server** binary (~50 MB) from llama.cpp releases
+> - **LLM model** (~2 GB GGUF) for generating entry summaries
+> - **Embedding model** (~500 MB GGUF) for semantic search vectors
+>
+> The first health check may take several minutes while these download. Subsequent
+> starts are fast. If you prefer to skip local models and use enrichment only when
+> an external OpenAI-compatible endpoint is available, set
+> `auto_start_services = false` in `~/.watercooler/config.toml` under `[mcp.graph]`.
+
 > If the health check reports any issues, stop here. See
 > [TROUBLESHOOTING.md — server not loading](./TROUBLESHOOTING.md#server-not-loading)
 > for the most common fixes before continuing.
