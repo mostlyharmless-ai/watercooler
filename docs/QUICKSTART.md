@@ -54,20 +54,21 @@ server. For other auth methods (PAT, environment variable, SSH), see
 
 ## Step 3: Connect your MCP client
 
-**Claude Code:**
+**Claude Code (macOS / Linux):**
 
 ```bash
-claude mcp add --transport stdio watercooler --scope user -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-mcp
+claude mcp add --transport stdio --scope user watercooler -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-mcp
 ```
 
-> **Important:** This must be a single line. The `--` separator tells `claude` that
-> everything after it is the server command, not flags for `claude mcp add`. If you
-> split it across lines, `claude` may parse `--from` as its own flag and fail with
-> `error: unknown option '--from'`.
->
-> **PowerShell users:** Copy-paste the line above as-is. Do not use backslash (`\`) for
-> line continuation — PowerShell uses backtick (`` ` ``) instead, but keeping it on one
-> line avoids the issue entirely.
+**Claude Code (Windows PowerShell):**
+
+```powershell
+cmd /c "claude mcp add --transport stdio --scope user watercooler -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-mcp"
+```
+
+> **Why `cmd /c` on Windows?** PowerShell does not pass the `--` separator correctly
+> to `claude mcp add`, causing it to misparse the server command flags. Wrapping in
+> `cmd /c` fixes this.
 
 Restart Claude Code after running. For Codex, Cursor, or manual config, see
 [MCP-CLIENTS.md](./MCP-CLIENTS.md) — each section is self-contained.
