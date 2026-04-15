@@ -241,10 +241,15 @@ def fetch_with_timeout(repo: Repo, timeout: int = 30) -> bool:
     Returns:
         True on success, False on failure
     """
+    import sys as _sys
     import time as _time
     t0 = _time.perf_counter()
     try:
-        repo.git.fetch("origin", kill_after_timeout=timeout)
+        # kill_after_timeout is Unix-only in GitPython; raises on Windows.
+        fetch_kwargs: dict = {}
+        if _sys.platform != "win32":
+            fetch_kwargs["kill_after_timeout"] = timeout
+        repo.git.fetch("origin", **fetch_kwargs)
         log_action("sync.fetch", outcome="ok", duration_ms=(_time.perf_counter() - t0) * 1000)
         return True
     except Exception as e:
