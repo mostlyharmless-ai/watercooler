@@ -58,6 +58,7 @@ LLAMA_SERVER_CHECKSUMS: dict[str, dict[str, str]] = {
         "ubuntu-vulkan-x64": "85191595f05328f01de8f5852f0679a6dd8cce4271ec52d9d0cf3dca08e1ac74",
         "macos-arm64": "231f8f7ff3763de2ab1cbeb097e728e4bb442b0bc941f6dacc7ef83d01ae47bb",
         "macos-x64": "6de178b3f364734e442b4579554f102a6c36c9343cf31cdb8381c02053b2bf11",
+        "win-cpu-x64": "6a1dcc9a3d5344c3afe461c7a9247a69bb4099e15ef1da3a115fea94584b09eb",
     },
     # Release b7885 (2026-01-30) - verified checksums
     "b7885": {
@@ -65,6 +66,7 @@ LLAMA_SERVER_CHECKSUMS: dict[str, dict[str, str]] = {
         "ubuntu-vulkan-x64": "f21649deb021d7b2942227c12a05915dee476835081b65f2698aed4e93459d37",
         "macos-arm64": "608760410b9f65f91a0e9f499dc21f95cea298c59b9df1354bd6a31cad059d35",
         "macos-x64": "4794fd57522f680c17be60dc7c3ef7fb08c89a2524ee2babf3480f9f2c87ffca",
+        "win-cpu-x64": "992bd27f00ec1f5e7979e46e453fd34906034787d786282b0914c0627d829c9c",
     },
     # Release b7869 (2026-01-28) - verified checksums
     "b7869": {
@@ -72,6 +74,7 @@ LLAMA_SERVER_CHECKSUMS: dict[str, dict[str, str]] = {
         "ubuntu-vulkan-x64": "45b73da74307eb11463e042253a506f1ccc4a714ad73b1de19630cfba876d2b8",
         "macos-arm64": "45ecd82ead1574c45ae19738e9d890c2c19bd2944b645eaf3619980d87621b51",
         "macos-x64": "d65e43f4ffb1890bc694f417871dba56374a011011da1bc4c4e8e99768d56f20",
+        "win-cpu-x64": "bf29a6fcd0dc59435e528d00175c68a7a45981317eb55e3b69e7a83b4034f8b5",
     },
 }
 
@@ -1185,7 +1188,7 @@ def _download_llama_server() -> Optional[Path]:
     elif system == "darwin" and machine in ("x86_64", "amd64"):
         asset_patterns.append(("macos-x64", ".tar.gz"))
     elif system == "windows" and machine in ("x86_64", "amd64"):
-        asset_patterns.append(("win-x64", ".zip"))
+        asset_patterns.append(("win-cpu-x64", ".zip"))
     else:
         log_debug(f"Unsupported platform for llama-server download: {system}/{machine}")
         return None
