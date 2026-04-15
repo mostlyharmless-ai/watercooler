@@ -46,7 +46,7 @@ claude mcp add --transport stdio --scope user watercooler -- uvx --from 'git+htt
 **Claude Code (Windows PowerShell):**
 
 ```powershell
-cmd /c "claude mcp add --transport stdio --scope user watercooler -- uvx --from 'git+https://github.com/mostlyharmless-ai/watercooler@main[local]' watercooler-mcp"
+cmd /c "claude mcp add --transport stdio --scope user watercooler -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main[local] watercooler-mcp"
 ```
 
 > **Why `cmd /c` on Windows?** PowerShell does not pass the `--` separator correctly

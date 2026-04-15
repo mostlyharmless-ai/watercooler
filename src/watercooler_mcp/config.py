@@ -203,6 +203,13 @@ def _ensure_worktree(code_root: Path) -> Optional[Path]:
         log_debug(f"CONFIG: Worktree at {wt_path} on wrong branch '{branch}', recreating")
         _run_git(["worktree", "remove", "--force", str(wt_path)], code_root)
 
+    # Prune stale worktree registrations before attempting add.
+    # Git refuses to create a worktree at a path that is "missing but
+    # already registered" (e.g. directory was deleted externally).
+    prune_result = _run_git(["worktree", "prune"], code_root)
+    if prune_result is None:
+        log_debug("CONFIG: git worktree prune failed (permissions or old git version)")
+
     # Check if orphan branch exists
     if not _orphan_branch_exists(code_root):
         try:
