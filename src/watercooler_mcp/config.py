@@ -87,11 +87,12 @@ def _run_git(args: list[str], cwd: Path) -> Optional[str]:
             text=True,
             timeout=10,
             stdin=subprocess.DEVNULL,
-            # Windows: prevent git from inheriting the parent's stdio
-            # pipes. Without this, subprocess.run hangs forever when
-            # spawned inside an MCP server process (Claude Code holds
-            # stdin open, and capture_output waits for all pipes to drain).
-            close_fds=(sys.platform == "win32"),
+            # Prevent git from inheriting open file descriptors (sockets,
+            # pipes) from the MCP server process. On Windows this is
+            # critical — without it, subprocess.run hangs forever because
+            # git inherits Claude Code's stdin pipe. On POSIX, Python
+            # defaults close_fds=True but we set it explicitly to be safe.
+            close_fds=True,
         )
         log_debug(f"CONFIG_GIT_END: git {cmd} (returned {len(result.stdout)} chars)")
         return result.stdout.strip()

@@ -315,8 +315,10 @@ class GraphConfig(BaseModel):
         description="Check service availability before generation; skip gracefully if unavailable",
     )
     auto_start_services: bool = Field(
-        default=True,
-        description="Auto-start LLM/embedding services if unavailable (requires ServerManager)",
+        default=False,
+        description="Auto-start LLM/embedding services if unavailable (requires ServerManager). "
+        "Opt-in: spawns a ServerManager process to provision and start llama-server. "
+        "Leave False to use externally-managed services or skip enrichment gracefully.",
     )
 
     # Arc change detection for thread summaries

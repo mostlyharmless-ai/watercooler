@@ -236,7 +236,9 @@ def fetch_with_timeout(repo: Repo, timeout: int = 30) -> bool:
 
     Args:
         repo: Git repository
-        timeout: Timeout in seconds
+        timeout: Timeout in seconds (enforced on POSIX only; on Windows,
+            GitPython's kill_after_timeout is unsupported and the timeout
+            is silently skipped — git's own network timeouts apply instead)
 
     Returns:
         True on success, False on failure
