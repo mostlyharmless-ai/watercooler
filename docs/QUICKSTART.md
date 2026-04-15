@@ -64,14 +64,12 @@ Restart Claude Code after running. For Codex, Cursor, or manual config, see
 
 ## Step 3: Run the health check
 
-From inside your MCP client, call:
+After restarting Claude Code, ask your agent:
 
-```python
-watercooler_health(code_path=".")
-```
+> "Run a watercooler health check."
 
-This runs the setup doctor and reports the status of git auth, the MCP server, and your
-threads directory.
+The agent will call `watercooler_health(code_path=".")`, which reports the status of
+git auth, the MCP server, and your threads directory.
 
 > If the health check reports any issues, stop here. See
 > [TROUBLESHOOTING.md — server not loading](./TROUBLESHOOTING.md#server-not-loading)
