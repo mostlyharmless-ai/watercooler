@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -84,10 +85,17 @@ def _run_git(args: list[str], cwd: Path) -> Optional[str]:
             check=True,
             capture_output=True,
             text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+            # Windows: prevent git from inheriting the parent's stdio
+            # pipes. Without this, subprocess.run hangs forever when
+            # spawned inside an MCP server process (Claude Code holds
+            # stdin open, and capture_output waits for all pipes to drain).
+            close_fds=(sys.platform == "win32"),
         )
         log_debug(f"CONFIG_GIT_END: git {cmd} (returned {len(result.stdout)} chars)")
         return result.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
         log_debug(f"CONFIG_GIT_FAIL: git {cmd} (error: {type(e).__name__})")
         return None
 
