@@ -168,10 +168,13 @@ def _pid_is_alive(pid: int) -> bool:
         return False  # No such process
     except PermissionError:
         return True  # Process exists but we can't signal it
-    except OSError:
-        # Windows: os.kill(pid, 0) can raise OSError/WinError 87
-        # ("The parameter is incorrect") for certain PIDs.
-        return False
+    except OSError as e:
+        # Windows: os.kill(pid, 0) raises OSError/WinError 87
+        # ("The parameter is incorrect") for invalid/system-reserved PIDs.
+        # Only suppress this specific error; re-raise unexpected codes.
+        if getattr(e, "winerror", None) == 87:
+            return False
+        raise
 
 
 def _try_acquire_daemon_lock() -> bool:
