@@ -13,6 +13,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
