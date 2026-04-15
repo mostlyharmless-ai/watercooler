@@ -34,12 +34,8 @@ on-demand via `uvx` — no separate install step is needed for the MCP server (S
 **Verify:**
 
 ```bash
-uv tool run watercooler -- --help
+uvx watercooler --help
 ```
-
-> **Note:** `uv tool run` executes the tool directly from its managed environment,
-> bypassing PATH. You can also run `watercooler --help` directly if `uv`'s tool
-> bin directory is on your PATH.
 
 ---
 
