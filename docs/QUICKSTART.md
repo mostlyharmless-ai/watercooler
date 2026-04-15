@@ -37,6 +37,16 @@ on-demand via `uvx` — no separate install step is needed for the MCP server (S
 watercooler --help
 ```
 
+> **Windows / PowerShell:** If `watercooler` is not recognized after install, the `uv`
+> tool directory is not on your PATH. Run `uv tool dir` to find it, then add it:
+>
+> ```powershell
+> $env:Path += ";" + (uv tool dir)
+> watercooler --help
+> ```
+>
+> To make this permanent, add the path to your system environment variables.
+
 ---
 
 ## Step 2: Authenticate
@@ -54,12 +64,20 @@ server. For other auth methods (PAT, environment variable, SSH), see
 
 ## Step 3: Connect your MCP client
 
-**Claude Code (one-liner):**
+**Claude Code:**
 
 ```bash
-claude mcp add --transport stdio watercooler --scope user \
-  -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-mcp
+claude mcp add --transport stdio watercooler --scope user -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-mcp
 ```
+
+> **Important:** This must be a single line. The `--` separator tells `claude` that
+> everything after it is the server command, not flags for `claude mcp add`. If you
+> split it across lines, `claude` may parse `--from` as its own flag and fail with
+> `error: unknown option '--from'`.
+>
+> **PowerShell users:** Copy-paste the line above as-is. Do not use backslash (`\`) for
+> line continuation — PowerShell uses backtick (`` ` ``) instead, but keeping it on one
+> line avoids the issue entirely.
 
 Restart Claude Code after running. For Codex, Cursor, or manual config, see
 [MCP-CLIENTS.md](./MCP-CLIENTS.md) — each section is self-contained.
@@ -130,10 +148,7 @@ solo use, or the name of your primary agent (e.g. `--ball claude`).
 **Post an entry:**
 
 ```bash
-watercooler say my-first-topic \
-  --title "Hello from the watercooler" \
-  --body "First entry in our new thread." \
-  --role implementer
+watercooler say my-first-topic --title "Hello from the watercooler" --body "First entry in our new thread." --role implementer
 ```
 
 The `--role` flag takes a role name. Canonical roles are `planner`, `pm`, `implementer`,
