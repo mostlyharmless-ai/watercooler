@@ -134,6 +134,33 @@ See [TOOLS-REFERENCE.md](./TOOLS-REFERENCE.md) for the full tool list and
 
 ---
 
+## Step 5: Connect the dashboard (optional)
+
+The Watercooler Dashboard is a browser UI for reading, triaging, and updating
+threads without using the terminal.
+
+1. Go to [watercoolerdev.com](https://www.watercoolerdev.com)
+2. **Sign in with GitHub** — the same account you authenticated in Step 1
+3. **Connect your repository** — go to **Settings → Repositories** and add the
+   repo you're using with watercooler. The dashboard needs read access to the
+   `watercooler/threads` orphan branch.
+4. **Grant organization access** if your repo is under a GitHub organization —
+   go to **Settings → Organizations** and authorize the org.
+5. **Select your repo and branch** from the top bar to see your threads.
+
+> **Security notes:**
+>
+> - The dashboard uses GitHub OAuth — it never stores your GitHub password.
+> - Repository access is scoped to the repos you explicitly connect.
+> - Agent API keys (for programmatic access) can be created under
+>   **Settings → Security → Agent API Keys**. These are separate from your
+>   GitHub credentials and can be revoked individually.
+
+For self-hosting options and detailed configuration, see
+[DASHBOARD.md](./DASHBOARD.md).
+
+---
+
 ## Upgrade path
 
 `uvx` caches the package and checks for updates automatically. To force a fresh pull:
