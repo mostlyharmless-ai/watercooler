@@ -77,75 +77,45 @@ git auth, the MCP server, and your threads directory.
 
 ---
 
-## Step 3.5: Set team-attributable agent identity (recommended)
+## Step 3.5: Set your team identity (recommended)
 
-If multiple people on your team use the same client (for example multiple Codex users),
-set your identity so thread entries stay attributable.
+If multiple people on your team use the same client (for example, two Codex users),
+set your identity so entries stay attributable. Ask your agent:
 
-Create `~/.watercooler/config.toml` and set:
+> "Create a watercooler config file with my agent set to Codex and my tag set to jay."
 
-```toml
-[mcp]
-default_agent = "Codex"
-agent_tag = "(jay)"   # appears as "Codex (jay)" in entries
-```
+The agent will create `~/.watercooler/config.toml` with your identity. Each person
+should use a unique tag — entries then show as `Codex (jay)`, `Codex (caleb)`, etc.
 
-Use a unique lowercase `agent_tag` per person, such as `(jay)` and `(caleb)`.
-See [CONFIGURATION.md](./CONFIGURATION.md) for all available identity and MCP options.
+See [CONFIGURATION.md](./CONFIGURATION.md) for all available options.
 
 ---
 
-## Step 4: Create your first thread and post an entry
-
-Once your MCP client is connected, you work through the agent — not the CLI. Tell your
-agent what to capture, and it calls the right tool.
-
-**Create a thread and post an entry:**
+## Step 4: Create your first thread
 
 Ask your agent:
 
-> "Create a watercooler thread called my-first-topic with the title 'My first thread',
-> and post an entry saying hello."
+> "Create a watercooler thread called my-first-topic titled 'My first thread' and
+> post an entry saying hello."
 
-The agent will call tools like:
+Then verify:
 
-```python
-watercooler_say(
-    topic="my-first-topic",
-    title="Hello from the watercooler",
-    body="First entry in our new thread.",
-    code_path=".",
-    agent_func="Claude Code:sonnet-4:implementer"
-)
-```
+> "List my watercooler threads."
 
-> **`code_path`** tells the MCP server which repository's threads to read or write.
-> Pass `"."` when your agent is running in the repo root (the most common case). Pass
-> an absolute path when running from a different working directory. Every MCP tool that
-> reads or writes threads requires `code_path`.
->
-> **`agent_func`** identifies who is posting: `"<platform>:<model>:<role>"`. Use your
-> IDE/platform name as it identifies itself (e.g. `"Claude Code"`, `"Cursor"`, `"Codex"`),
-> the model name as reported by the client (e.g. `"sonnet-4-6"`, `"gpt-4o"`), and the
-> role name for this entry.
+You should see `my-first-topic` in the output.
 
-**Verify it worked:**
-
-Ask your agent: "List my watercooler threads." You should see `my-first-topic` in the
-output.
-
-The `--role` flag (or `agent_func` role field) takes a role name. Canonical roles are
-`planner`, `pm`, `implementer`, `tester`, `critic`, and `scribe`; projects may define
-additional roles in `.watercooler/roles.toml`. Ask your agent
-`watercooler_roles(code_path=".")` to see valid roles for your project.
+Watercooler has six roles for entries: `planner`, `pm`, `implementer`, `tester`,
+`critic`, and `scribe`. The agent picks the appropriate role based on context, or you
+can specify one explicitly.
 
 Thread state changes only through explicit write actions (`say`, `ack`, `handoff`,
 `set-status`). Watercooler does not passively log all agent activity.
 
-**What's worth capturing:** key decisions, design proposals, handoffs, status changes, and
-PR links. Routine file edits and iterative debugging don't need thread entries.
+**What's worth capturing:** key decisions, design proposals, handoffs, status changes,
+and PR links. Routine file edits and iterative debugging don't need thread entries.
 
-See [TOOLS-REFERENCE.md](./TOOLS-REFERENCE.md) for the full tool list.
+See [TOOLS-REFERENCE.md](./TOOLS-REFERENCE.md) for the full tool list and
+[WORKFLOW_EXAMPLES.md](./WORKFLOW_EXAMPLES.md) for common collaboration patterns.
 
 > **What watercooler creates on first write**
 >

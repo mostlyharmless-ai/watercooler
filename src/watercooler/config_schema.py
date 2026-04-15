@@ -279,7 +279,7 @@ class GraphConfig(BaseModel):
 
     # Summary generation
     generate_summaries: bool = Field(
-        default=False,
+        default=True,
         description="Generate LLM summaries for entries on write (requires LLM service)",
     )
     summarizer_api_base: str = Field(
@@ -293,7 +293,7 @@ class GraphConfig(BaseModel):
 
     # Embedding generation
     generate_embeddings: bool = Field(
-        default=False,
+        default=True,
         description="Generate embedding vectors for entries on write (requires embedding service)",
     )
     embedding_api_base: str = Field(
@@ -315,7 +315,7 @@ class GraphConfig(BaseModel):
         description="Check service availability before generation; skip gracefully if unavailable",
     )
     auto_start_services: bool = Field(
-        default=False,
+        default=True,
         description="Auto-start LLM/embedding services if unavailable (requires ServerManager)",
     )
 
