@@ -34,18 +34,12 @@ on-demand via `uvx` — no separate install step is needed for the MCP server (S
 **Verify:**
 
 ```bash
-watercooler --help
+uv tool run watercooler -- --help
 ```
 
-> **Windows / PowerShell:** If `watercooler` is not recognized after install, the `uv`
-> tool directory is not on your PATH. Run `uv tool dir` to find it, then add it:
->
-> ```powershell
-> $env:Path += ";" + (uv tool dir)
-> watercooler --help
-> ```
->
-> To make this permanent, add the path to your system environment variables.
+> **Note:** `uv tool run` executes the tool directly from its managed environment,
+> bypassing PATH. You can also run `watercooler --help` directly if `uv`'s tool
+> bin directory is on your PATH.
 
 ---
 
