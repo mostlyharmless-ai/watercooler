@@ -836,11 +836,13 @@ def _find_llama_server() -> Optional[Path]:
         return Path(binary)
 
     # Check common install locations
+    exe = ".exe" if sys.platform == "win32" else ""
     common_locations = [
-        Path.home() / ".local" / "bin" / "llama-server",
-        Path("/usr/local/bin/llama-server"),
-        Path.home() / ".watercooler" / "bin" / "llama-server",
+        Path.home() / ".local" / "bin" / f"llama-server{exe}",
+        Path.home() / ".watercooler" / "bin" / f"llama-server{exe}",
     ]
+    if sys.platform != "win32":
+        common_locations.insert(1, Path("/usr/local/bin/llama-server"))
 
     for location in common_locations:
         if location.exists() and location.is_file():
@@ -1182,6 +1184,8 @@ def _download_llama_server() -> Optional[Path]:
         asset_patterns.append(("macos-arm64", ".tar.gz"))
     elif system == "darwin" and machine in ("x86_64", "amd64"):
         asset_patterns.append(("macos-x64", ".tar.gz"))
+    elif system == "windows" and machine in ("x86_64", "amd64"):
+        asset_patterns.append(("win-x64", ".zip"))
     else:
         log_debug(f"Unsupported platform for llama-server download: {system}/{machine}")
         return None
@@ -1189,7 +1193,8 @@ def _download_llama_server() -> Optional[Path]:
     # Create target directory
     bin_dir = Path.home() / ".watercooler" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
-    target_binary = bin_dir / "llama-server"
+    binary_name = "llama-server.exe" if system == "windows" else "llama-server"
+    target_binary = bin_dir / binary_name
 
     try:
         # Get latest release info from GitHub API
