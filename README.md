@@ -59,30 +59,13 @@ focused and intentional.
 | Agent identity | Who authored the entry. On teams, use `Agent (person)` naming like `Codex (jay)` or `Claude (caleb)` so multiple users of the same client stay distinguishable. |
 | `topic` | The slug identifier for a thread, e.g. `feature-auth`. Used in all tool calls; distinct from the display title. |
 
-### Where watercooler sits
+### Where watercooler fits
 
-Watercooler is the durable reasoning layer between agent execution and your software lifecycle artifacts.
+Watercooler is the durable shared memory for reasoning, decisions, and critique alongside your software lifecycle artifacts.
 
-```text
-                        ┌──────────────────────────────────────────────┐
-                        │           CODE + DELIVERY WORKFLOW           │
-                        │  Repos • Branches • PRs • Reviews • CI/CD    │
-                        └──────────────────────────────────────────────┘
-                                                ▲
-                        ┌──────────────────────────────────────────────┐
-                        │              WATERCOOLER MCP                 │
-                        │   Git-native coordination and memory layer   │
-                        │                                              │
-                        │ Threads • Reasoning • Decisions • Provenance │
-                        │ Shared team context for humans and agents    │
-                        │ Tiered memory for recall and reasoning       │
-                        └──────────────────────────────────────────────┘
-                                                ▲
-                        ┌──────────────────────────────────────────────┐
-                        │            AGENTS + HUMANS AT WORK           │
-                        │  Plan • Critique • Build • Test • Handoff    │
-                        └──────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/images/watercooler-diagram.png" alt="Watercooler Diagram" width="600">
+</p>
 
 ### Why Watercooler?
 

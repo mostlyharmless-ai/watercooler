@@ -172,7 +172,10 @@ class CoordinatorLead:
         relevance_tags: Roles/focus areas most affected. Tuple so the dataclass stays frozen-safe.
         suggested_action: Read-only ``AdvisoryAction`` the agent can execute to
             investigate. ``None`` if reconstruction from a persisted dict failed.
-        t2_context: Phase 2+ only. Always ``None`` in Phase 1.
+        t2_context: Populated in Phase 2+ when ``AnalysisSnapshotDaemon`` data is available
+            for the lead's ``source_topic``. ``None`` when analysis data is unavailable or
+            the daemon has not yet run. Schema: see ``_build_t2_context()`` in
+            ``project_coordinator_lib.py``.
     """
 
     schema_version: int

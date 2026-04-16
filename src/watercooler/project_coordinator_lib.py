@@ -663,7 +663,45 @@ _LEAD_TRIGGER_CATEGORIES: frozenset[str] = frozenset(
 )
 
 
-def _build_lead_for_finding(source_cf: CoordinatorFinding) -> CoordinatorLead | None:
+def _build_t2_context(
+    thread_analysis: dict[str, Any],
+    rule_flags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build a t2_context dict from a single window_threads entry.
+
+    All keys are always present (no key omission).  ``bool`` fields use
+    ``False`` as the type-safe default when absent — never ``None``.
+    ``str``/``float``/``int`` fields use ``None`` for missing source data.
+
+    ``recommendation_rule_ids`` strips empty strings and deduplicates in both
+    the ``rule_flags`` argument and this helper, keeping the invariant
+    self-contained on the public pure function so future callers in other
+    daemons cannot regress it silently.
+
+    Returns a dict with ``schema_version=1``.
+    """
+    wf = thread_analysis.get("workflow_shape") or {}
+    return {
+        "schema_version": 1,
+        "stalled": bool(thread_analysis.get("stalled", False)),
+        "days_since_last": thread_analysis.get("days_since_last"),
+        "workflow_shape_id": wf.get("id"),
+        "workflow_shape_name": wf.get("name"),
+        "workflow_confidence": wf.get("confidence"),
+        "has_decision": bool(thread_analysis.get("has_decision", False)),
+        "has_closure": bool(thread_analysis.get("has_closure", False)),
+        "entry_count_total": thread_analysis.get("entry_count_total"),
+        "recommendation_rule_ids": sorted(
+            {r for r in (rule_flags or []) if r}  # defensive: strip empty strings
+        ),
+    }
+
+
+def _build_lead_for_finding(
+    source_cf: CoordinatorFinding,
+    thread_analysis: dict[str, Any] | None = None,
+    rule_flags: list[str] | None = None,
+) -> CoordinatorLead | None:
     """Construct a CoordinatorLead from a single v1A finding.
 
     Returns None if the category is not a lead trigger. All ``details`` access
@@ -751,6 +789,12 @@ def _build_lead_for_finding(source_cf: CoordinatorFinding) -> CoordinatorLead | 
     else:  # pragma: no cover -- defensive; covered by _LEAD_TRIGGER_CATEGORIES filter
         return None
 
+    t2_ctx = (
+        _build_t2_context(thread_analysis, rule_flags)
+        if thread_analysis is not None
+        else None
+    )
+
     return CoordinatorLead(
         schema_version=1,
         source_category=category,
@@ -758,12 +802,15 @@ def _build_lead_for_finding(source_cf: CoordinatorFinding) -> CoordinatorLead | 
         summary=summary,
         relevance_tags=tags,
         suggested_action=action,
-        t2_context=None,
+        t2_context=t2_ctx,
     )
 
 
 def generate_leads_for_thread(
     thread_findings: list[CoordinatorFinding],
+    *,
+    analysis_by_topic: dict[str, dict[str, Any]] | None = None,
+    analysis_rule_flags: dict[str, list[str]] | None = None,
 ) -> list[CoordinatorFinding]:
     """Generate coordinator_lead findings from v1A per-thread detector results.
 
@@ -779,6 +826,15 @@ def generate_leads_for_thread(
     Suppression inheritance: the lead inherits ``severity`` and
     ``details["suppressed_by"]`` (if present) from the source finding so
     parked-thread leads stay quiet alongside v1A.
+
+    Args:
+        thread_findings: v1A CoordinatorFinding items for a single thread.
+        analysis_by_topic: Optional mapping of topic → window_threads entry from
+            AnalysisSnapshotDaemon.  When present, the matching entry is used to
+            populate ``t2_context`` on each lead.  Missing topics yield ``None``.
+        analysis_rule_flags: Optional mapping of topic → list of rule IDs that
+            flagged that topic.  Passed into ``_build_t2_context()`` when the
+            analysis entry is present.
     """
     leads: list[CoordinatorFinding] = []
     for source_cf in thread_findings:
@@ -792,7 +848,17 @@ def generate_leads_for_thread(
             )
             continue
 
-        lead = _build_lead_for_finding(source_cf)
+        thread_analysis = (
+            analysis_by_topic.get(source_cf.topic)
+            if analysis_by_topic is not None
+            else None
+        )
+        rule_flags = (
+            analysis_rule_flags.get(source_cf.topic)
+            if analysis_rule_flags is not None
+            else None
+        )
+        lead = _build_lead_for_finding(source_cf, thread_analysis, rule_flags)
         if lead is None:
             continue
 

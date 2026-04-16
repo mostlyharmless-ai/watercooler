@@ -939,6 +939,113 @@ class TestGenerateLeadsForThread:
     def test_empty_thread_findings(self) -> None:
         assert generate_leads_for_thread([]) == []
 
+    # ---- Phase 2 t2_context tests (tests 1–5) ----
+
+    def test_t2_context_populated_when_analysis_data_present(self) -> None:
+        """Test 1: generate_leads_for_thread passes matching thread analysis → non-None t2_context."""
+        cf = CoordinatorFinding(
+            category="stalled_open_loop",
+            topic="my-thread",
+            severity="warning",
+            message="stalled",
+            details={"plan_count": 2},
+            dedup_signature="stalled_open_loop|my-thread",
+        )
+        analysis_by_topic = {
+            "my-thread": {
+                "topic": "my-thread",
+                "days_since_last": 18,
+                "workflow_shape": {"id": "wf1", "name": "linear", "confidence": 0.9},
+                "has_decision": False,
+                "has_closure": False,
+                "stalled": True,
+                "entry_count_total": 25,
+            }
+        }
+        leads = generate_leads_for_thread([cf], analysis_by_topic=analysis_by_topic)
+        assert len(leads) == 1
+        lead = CoordinatorLead.from_dict(leads[0].details["lead"])
+        assert lead.t2_context is not None
+        t2 = lead.t2_context
+        assert t2["schema_version"] == 1
+        assert t2["days_since_last"] == 18
+        assert t2["workflow_shape_id"] == "wf1"
+        assert t2["workflow_shape_name"] == "linear"
+        assert t2["workflow_confidence"] == 0.9
+        assert t2["stalled"] is True
+        assert t2["has_decision"] is False
+        assert t2["has_closure"] is False
+        assert t2["entry_count_total"] == 25
+        assert t2["recommendation_rule_ids"] == []
+
+    def test_t2_context_none_when_topic_not_in_analysis(self) -> None:
+        """Test 2: topic absent from analysis_by_topic → t2_context remains None."""
+        cf = CoordinatorFinding(
+            category="stalled_open_loop",
+            topic="my-thread",
+            severity="warning",
+            message="stalled",
+            details={"plan_count": 2},
+            dedup_signature="stalled_open_loop|my-thread",
+        )
+        analysis_by_topic = {
+            "other-thread": {"topic": "other-thread", "days_since_last": 5}
+        }
+        leads = generate_leads_for_thread([cf], analysis_by_topic=analysis_by_topic)
+        assert len(leads) == 1
+        lead = CoordinatorLead.from_dict(leads[0].details["lead"])
+        assert lead.t2_context is None
+
+    def test_t2_context_none_when_no_analysis_data(self) -> None:
+        """Test 3: both new params are None → t2_context stays None, no regression."""
+        cf = CoordinatorFinding(
+            category="stalled_open_loop",
+            topic="my-thread",
+            severity="warning",
+            message="stalled",
+            details={"plan_count": 2},
+            dedup_signature="stalled_open_loop|my-thread",
+        )
+        leads = generate_leads_for_thread([cf])  # old signature, no kwargs
+        assert len(leads) == 1
+        lead = CoordinatorLead.from_dict(leads[0].details["lead"])
+        assert lead.t2_context is None
+        assert lead.source_category == "stalled_open_loop"
+
+    def test_recommendation_rule_ids_in_t2_context(self) -> None:
+        """Test 4: rule IDs are deduplicated, sorted, empty strings excluded."""
+        cf = CoordinatorFinding(
+            category="stalled_open_loop",
+            topic="my-thread",
+            severity="warning",
+            message="stalled",
+            details={"plan_count": 2},
+            dedup_signature="stalled_open_loop|my-thread",
+        )
+        analysis_by_topic = {"my-thread": {"topic": "my-thread", "days_since_last": 10}}
+        analysis_rule_flags = {"my-thread": ["R05", "R03", "R05", ""]}
+        leads = generate_leads_for_thread(
+            [cf],
+            analysis_by_topic=analysis_by_topic,
+            analysis_rule_flags=analysis_rule_flags,
+        )
+        lead = CoordinatorLead.from_dict(leads[0].details["lead"])
+        assert lead.t2_context is not None
+        assert lead.t2_context["recommendation_rule_ids"] == ["R03", "R05"]
+
+    def test_generate_leads_signature_backward_compat(self) -> None:
+        """Test 5: calling generate_leads_for_thread without new kwargs works (no TypeError)."""
+        cf = CoordinatorFinding(
+            category="stalled_open_loop",
+            topic="t",
+            severity="warning",
+            message="m",
+            details={"plan_count": 2},
+            dedup_signature="stalled_open_loop|t",
+        )
+        leads = generate_leads_for_thread([cf])
+        assert len(leads) == 1
+
 
 class TestCoordinatorLeadFromDict:
     """CoordinatorLead.from_dict: safe reconstruction from asdict() output."""

@@ -1887,3 +1887,154 @@ class TestCoordinatorLeads:
             "stalled-b",
         }, f"leads failed to re-mint after cap lift; got {lead_topics}"
         assert daemon._last_tick_leads == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — t2_context enrichment (tests 6, 7, 8, 8b)
+# ---------------------------------------------------------------------------
+
+
+class TestCoordinatorLeadsT2Context:
+    """Phase 2 — _load_analysis_context wired into tick(); t2_context metric."""
+
+    def test_tick_loads_analysis_context(self, tmp_path, monkeypatch):
+        """Test 6: _load_analysis_context returns result → lead has non-None t2_context."""
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        _write_stalled_open_loop_thread(threads_dir, topic="stalled-topic")
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, leads_enabled=True, stance_enabled=False
+        )
+
+        analysis_result = {
+            "window_threads": [
+                {
+                    "topic": "stalled-topic",
+                    "days_since_last": 20,
+                    "workflow_shape": {"id": "w1", "name": "linear", "confidence": 0.8},
+                    "has_decision": False,
+                    "has_closure": False,
+                    "stalled": True,
+                    "entry_count_total": 10,
+                }
+            ],
+            "recommendations": [],
+        }
+        # Patch _load_analysis_context to return the result without needing real daemons.
+        daemon._load_analysis_context = MagicMock(return_value=analysis_result)
+
+        findings = daemon.tick()
+        leads = [f for f in findings if f.category == "coordinator_lead"]
+        assert len(leads) == 1
+        t2 = leads[0].details["lead"].get("t2_context")
+        assert t2 is not None
+        assert t2["days_since_last"] == 20
+        assert t2["stalled"] is True
+
+    def test_tick_t2_context_graceful_degradation(self, tmp_path, monkeypatch):
+        """Test 7: _load_analysis_context returns None → tick completes, t2_context=None."""
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        _write_stalled_open_loop_thread(threads_dir, topic="stalled-topic")
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, leads_enabled=True, stance_enabled=False
+        )
+        daemon._load_analysis_context = MagicMock(return_value=None)
+
+        findings = daemon.tick()
+        leads = [f for f in findings if f.category == "coordinator_lead"]
+        assert len(leads) == 1
+        t2 = leads[0].details["lead"].get("t2_context")
+        assert t2 is None
+        assert daemon._last_tick_leads == 1
+
+    def test_status_summary_exposes_t2_enriched(self, tmp_path, monkeypatch):
+        """Test 8: last_tick_t2_enriched counts leads with non-None t2_context only."""
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        # topic-a → in analysis_by_topic → will have t2_context
+        _write_stalled_open_loop_thread(threads_dir, topic="topic-a")
+        # topic-b → NOT in analysis_by_topic → t2_context=None
+        _write_stalled_open_loop_thread(threads_dir, topic="topic-b")
+
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, leads_enabled=True, stance_enabled=False
+        )
+        analysis_result = {
+            "window_threads": [
+                {
+                    "topic": "topic-a",
+                    "days_since_last": 15,
+                    "workflow_shape": None,
+                    "has_decision": False,
+                    "has_closure": False,
+                    "stalled": False,
+                    "entry_count_total": 5,
+                }
+            ],
+            "recommendations": [],
+        }
+        daemon._load_analysis_context = MagicMock(return_value=analysis_result)
+
+        findings = daemon.tick()
+        leads = [f for f in findings if f.category == "coordinator_lead"]
+        assert len(leads) == 2, f"expected 2 leads, got {len(leads)}"
+
+        summary = daemon.status_summary()
+        assert summary["last_tick_leads"] == 2
+        assert summary["last_tick_t2_enriched"] == 1  # only topic-a has t2_context
+
+    def test_last_tick_t2_enriched_resets_between_ticks(self, tmp_path, monkeypatch):
+        """Test 8b: _last_tick_t2_enriched resets to 0 at tick start (current-tick metric)."""
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        # Write 3 threads for tick 1
+        for i in range(1, 4):
+            _write_stalled_open_loop_thread(threads_dir, topic=f"topic-{i}")
+
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, leads_enabled=True, stance_enabled=False
+        )
+
+        # Tick 1: all 3 topics in analysis context → 3 enriched
+        analysis_result_tick1 = {
+            "window_threads": [
+                {"topic": f"topic-{i}", "days_since_last": 15, "entry_count_total": 5}
+                for i in range(1, 4)
+            ],
+            "recommendations": [],
+        }
+        daemon._load_analysis_context = MagicMock(return_value=analysis_result_tick1)
+        daemon.tick()
+        assert daemon._last_tick_t2_enriched == 3
+
+        # Tick 2: only 1 topic in analysis context (topics 2 and 3 will be deduped anyway).
+        # Because all leads were emitted on tick 1, tick 2's topics are deduped by
+        # _existing_keys and no new leads land → _last_tick_t2_enriched resets to 0.
+        analysis_result_tick2 = {
+            "window_threads": [
+                {"topic": "topic-1", "days_since_last": 16, "entry_count_total": 5}
+            ],
+            "recommendations": [],
+        }
+        daemon._load_analysis_context = MagicMock(return_value=analysis_result_tick2)
+        daemon.tick()
+        # All leads are deduped → 0 new leads emitted → counter is 0 (reset, not 3)
+        assert daemon._last_tick_t2_enriched == 0
+        assert daemon.status_summary()["last_tick_t2_enriched"] == 0

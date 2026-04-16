@@ -19,7 +19,9 @@ from watercooler.pulse_report_lib import (
     StalledThreadInfo,
     SignalStatus,
     TrendSignals,
+    _INSIGHTS_DISPLAY_CAP,
     _parse_pulse_block,
+    _render_coordination_insights,
     _render_signal3_section,
     assemble_report,
     load_analysis_feed_from_dict,
@@ -1417,3 +1419,171 @@ def test_build_enrichment_section_defuses_injection_payloads():
     # Already-bulleted item is not double-bulleted
     assert "- already bulleted" in md
     assert "- - already" not in md
+
+
+# ---------------------------------------------------------------------------
+# Signal 4 — Coordination Insights (tests 12-17)
+# ---------------------------------------------------------------------------
+
+
+def _make_lead_dict(
+    topic: str = "my-thread",
+    summary: str = "Thread has open plan",
+    relevance_tags: list[str] | None = None,
+    source_category: str = "stalled_open_loop",
+    t2_context: dict | None = None,
+) -> dict:
+    """Build a serialised coordinator_lead finding dict."""
+    if relevance_tags is None:
+        relevance_tags = ["pm"]
+    return {
+        "finding_id": f"fid-{topic}",
+        "daemon_name": "project_coordinator",
+        "category": "coordinator_lead",
+        "topic": topic,
+        "severity": "warning",
+        "details": {
+            "lead": {
+                "schema_version": 1,
+                "source_category": source_category,
+                "source_topic": topic,
+                "summary": summary,
+                "relevance_tags": relevance_tags,
+                "suggested_action": None,
+                "t2_context": t2_context,
+            }
+        },
+    }
+
+
+def test_render_coordination_insights_groups_by_primary_relevance_tag():
+    """Test 12: lead with relevance_tags=('planner', 'critic') appears under planner only."""
+    lead = _make_lead_dict(
+        topic="thread-x",
+        summary="planning stall",
+        relevance_tags=["planner", "critic"],
+    )
+    output = _render_coordination_insights([lead])
+    assert "thread-x" in output
+    assert "planning stall" in output
+    # Appears exactly once — not duplicated under critic
+    assert output.count("thread-x") == 1
+    assert "Planner" in output
+    # 'critic' may or may not appear as a group heading — but thread-x should not repeat
+    assert output.count("thread-x") == 1
+
+
+def test_render_coordination_insights_empty_relevance_tags_fallback():
+    """Test 12b: lead with relevance_tags=() → rendered in 'general' group, no IndexError."""
+    lead = _make_lead_dict(
+        topic="thread-y",
+        summary="needs attention",
+        relevance_tags=[],
+    )
+    output = _render_coordination_insights([lead])
+    assert "thread-y" in output
+    assert "needs attention" in output
+    assert "General" in output
+
+
+def test_render_coordination_insights_respects_display_cap():
+    """Test 13: 15 leads provided → only _INSIGHTS_DISPLAY_CAP (10) rendered."""
+    leads = [
+        _make_lead_dict(topic=f"thread-{i}", summary=f"summary {i}", relevance_tags=["pm"])
+        for i in range(15)
+    ]
+    output = _render_coordination_insights(leads)
+    # Count how many distinct topics appear
+    count = sum(1 for i in range(15) if f"thread-{i}" in output)
+    assert count == _INSIGHTS_DISPLAY_CAP
+
+
+def test_render_coordination_insights_with_t2_context():
+    """Test 14: lead with t2_context populated → days_since_last callout line appears."""
+    lead = _make_lead_dict(
+        topic="enriched-thread",
+        summary="enriched summary",
+        t2_context={
+            "schema_version": 1,
+            "days_since_last": 12,
+            "workflow_shape_name": "waterfall",
+            "workflow_shape_id": "wf1",
+            "workflow_confidence": 0.85,
+            "stalled": False,
+            "has_decision": False,
+            "has_closure": False,
+            "entry_count_total": 8,
+            "recommendation_rule_ids": ["R03"],
+        },
+    )
+    output = _render_coordination_insights([lead])
+    assert "enriched-thread" in output
+    assert "12d since last entry" in output
+    assert "waterfall" in output
+    assert "R03" in output
+
+
+def test_assemble_report_includes_signal4_when_leads_present():
+    """Test 15: coordinator_leads=[...] → 'Coordination Insights' section in output."""
+    from dataclasses import replace
+
+    lead = _make_lead_dict(topic="topic-a", summary="needs help")
+    inputs = replace(_make_minimal_inputs(), coordinator_leads=[lead])
+    report = assemble_report(inputs)
+    assert "Coordination Insights" in report.markdown
+    assert "topic-a" in report.markdown
+
+
+def test_assemble_report_omits_signal4_when_leads_none():
+    """Test 16: coordinator_leads=None → no 'Coordination Insights' section."""
+    inputs = _make_minimal_inputs()
+    # coordinator_leads defaults to None — no override needed
+    report = assemble_report(inputs)
+    assert "Coordination Insights" not in report.markdown
+
+
+def test_assemble_report_omits_signal4_when_leads_empty_list():
+    """Test 17: coordinator_leads=[] → no 'Coordination Insights' section (falsy guard)."""
+    from dataclasses import replace
+
+    inputs = replace(_make_minimal_inputs(), coordinator_leads=[])
+    report = assemble_report(inputs)
+    assert "Coordination Insights" not in report.markdown
+
+
+def test_render_coordination_insights_sanitizes_injection_in_summary():
+    """Test 18 — #316: summary with embedded heading smuggling is sanitized before render."""
+    lead = _make_lead_dict(
+        topic="safe-topic",
+        summary="## Injected Section\nmalicious content",
+        relevance_tags=["pm"],
+    )
+    output = _render_coordination_insights([lead])
+    # Heading smuggling must be stripped by _sanitize_enrichment_text
+    assert "## Injected Section" not in output
+    # Content still appears (sanitized form), topic rendered
+    assert "safe-topic" in output
+
+
+def test_render_coordination_insights_sanitizes_injection_in_t2_shape_name():
+    """Test 19 — #316: t2_context shape_name with markdown special chars is sanitized."""
+    lead = _make_lead_dict(
+        topic="t2-topic",
+        summary="normal summary",
+        relevance_tags=["implementer"],
+        t2_context={
+            "schema_version": 1,
+            "stalled": False,
+            "days_since_last": 5.0,
+            "workflow_shape_id": "wf-1",
+            "workflow_shape_name": "## Injected Shape",
+            "workflow_confidence": 0.9,
+            "has_decision": False,
+            "has_closure": False,
+            "entry_count_total": 10,
+            "recommendation_rule_ids": [],
+        },
+    )
+    output = _render_coordination_insights([lead])
+    assert "## Injected Shape" not in output
+    assert "t2-topic" in output

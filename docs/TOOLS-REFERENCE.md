@@ -659,8 +659,24 @@ watercooler_daemon_findings(
 
 Each `coordinator_lead` finding nests the full lead payload under
 `details["lead"]` with fields `source_category`, `source_topic`, `summary`,
-`relevance_tags`, and `suggested_action` (a `{phase, tool, arguments, reason}`
-dict restricted to read-only tools).
+`relevance_tags`, `suggested_action` (a `{phase, tool, arguments, reason}`
+dict restricted to read-only tools), and `t2_context`.
+
+**`t2_context` sub-object** — thread analysis context from `AnalysisSnapshotDaemon`.
+Present when the daemon has data for the lead's `source_topic`; `null` otherwise.
+
+| Sub-key | Type | Description |
+|---|---|---|
+| `schema_version` | int | Always `1` |
+| `stalled` | bool | `true` when the thread has had no recent activity |
+| `days_since_last` | float \| null | Days elapsed since the last entry in this thread |
+| `workflow_shape_id` | string \| null | Detected workflow shape identifier |
+| `workflow_shape_name` | string \| null | Human-readable workflow shape name |
+| `workflow_confidence` | float \| null | Shape detection confidence (0–1) |
+| `has_decision` | bool | `true` when the thread contains a Decision entry |
+| `has_closure` | bool | `true` when the thread contains a Closure entry |
+| `entry_count_total` | int \| null | Total entry count for this thread |
+| `recommendation_rule_ids` | list[string] | Ids of recommendation rules that matched this thread |
 
 **Read-time enrichment overlays** (applied per-lead when `enrich=true`):
 

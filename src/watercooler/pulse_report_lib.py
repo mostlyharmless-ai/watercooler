@@ -40,7 +40,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
+from watercooler.pulse_stance_lib import CoordinatorLead
+
 logger = logging.getLogger(__name__)
+
+# Maximum unique leads rendered in Signal 4 (cap applied before grouping).
+_INSIGHTS_DISPLAY_CAP: int = 10
 
 
 class LLMClient(Protocol):
@@ -261,6 +266,7 @@ class RunStatus:
     signal1: SignalStatus
     signal2: SignalStatus
     signal3: SignalStatus
+    signal4: SignalStatus
     window_days: int
     branch: str
     generated_at: str  # ISO 8601
@@ -305,6 +311,8 @@ class PulseReportInputs:
     # ._extract_validated_enrichment()). Expected keys: situation_trajectory (str),
     # tension_signals (list[str]), coordination_risks (list[str]), recommended_focus (str).
     snapshot_enrichment: dict[str, Any] | None = None
+    # Signal 4 — Coordination Insights (coordinator leads, local-only)
+    coordinator_leads: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -705,6 +713,14 @@ def assemble_report(
             dimension_scores=inputs.dimension_scores,
         ),
         "",
+    ]
+
+    # Signal 4 — Coordination Insights (local-only; falsy check covers both None and [])
+    if inputs.coordinator_leads:
+        parts.append(_render_coordination_insights(inputs.coordinator_leads))
+        parts.append("")
+
+    parts += [
         "---",
         _render_run_footer(run_status),
     ]
@@ -734,7 +750,7 @@ def _derive_run_status(inputs: PulseReportInputs) -> RunStatus:
     if inputs.analysis_feed is None and inputs.decision_pipeline is None:
         signal2 = SignalStatus.NO_DATA
     elif inputs.analysis_feed is None and inputs.decision_pipeline is not None:
-        signal2 = SignalStatus.STALE  # decision data present but coordination feed absent
+        signal2 = SignalStatus.STALE  # decision data present but coordination feed absent  # fmt: skip
     elif inputs.analysis_feed is not None and (
         inputs.analysis_feed.degraded or inputs.analysis_feed.pulse_block is None
     ):
@@ -754,10 +770,20 @@ def _derive_run_status(inputs: PulseReportInputs) -> RunStatus:
     else:
         signal3 = SignalStatus.OK
 
+    # Signal 4
+    # None = daemon not available / not yet run → NO_DATA
+    # [] = daemon available but no active leads → OK
+    # [...] = leads present → OK
+    if inputs.coordinator_leads is None:
+        signal4 = SignalStatus.NO_DATA
+    else:
+        signal4 = SignalStatus.OK
+
     return RunStatus(
         signal1=signal1,
         signal2=signal2,
         signal3=signal3,
+        signal4=signal4,
         window_days=inputs.window_days,
         branch=inputs.branch,
         generated_at=inputs.generated_at,
@@ -957,6 +983,74 @@ def _render_executive_summary(
         lines.append(f"- {b}")
 
     return "\n".join(lines)
+
+
+def _render_coordination_insights(leads: list[dict[str, Any]]) -> str:
+    """Render Signal 4 — Coordination Insights from coordinator_lead findings.
+
+    Caps unique leads to ``_INSIGHTS_DISPLAY_CAP`` (ordered by original list
+    position) **before** grouping, so late-list leads cannot crowd out early-list
+    leads via grouping expansion.  Each lead appears in exactly one group —
+    the primary (first) relevance_tag — so a lead with ``("planner", "critic")``
+    appears under ``planner`` only.  Leads with empty ``relevance_tags`` fall
+    into a ``"general"`` bucket.
+    """
+    parsed: list[CoordinatorLead] = []
+    for f in leads:
+        try:
+            lead_dict = f.get("details", {}).get("lead", {})
+            lead = CoordinatorLead.from_dict(lead_dict)
+        except Exception:
+            logger.debug(
+                "_render_coordination_insights: skipping unparseable lead entry"
+            )
+            continue
+        # Discard heavily-defaulted records that would produce blank output
+        if not lead.source_topic or not lead.summary:
+            continue
+        parsed.append(lead)
+        if len(parsed) >= _INSIGHTS_DISPLAY_CAP:
+            break
+
+    if not parsed:
+        return "## Coordination Insights (Signal 4)\n\n_No actionable coordination signals._"
+
+    # Group by primary relevance_tag; preserve insertion order within each group.
+    groups: dict[str, list[CoordinatorLead]] = {}
+    for lead in parsed:
+        group_key = lead.relevance_tags[0] if lead.relevance_tags else "general"
+        groups.setdefault(group_key, []).append(lead)
+
+    lines: list[str] = ["## Coordination Insights (Signal 4)", ""]
+    for group_key, group_leads in groups.items():
+        lines.append(f"**{_sanitize_enrichment_text(group_key).title()}**")
+        lines.append("")
+        for lead in group_leads:
+            lines.append(
+                f"- **{_sanitize_enrichment_text(lead.source_topic)}**"
+                f" — {_sanitize_enrichment_text(lead.summary)}"
+            )
+            if lead.t2_context is not None:
+                t2 = lead.t2_context
+                days = t2.get("days_since_last")
+                shape_name = t2.get("workflow_shape_name")
+                rule_ids = t2.get("recommendation_rule_ids")
+                if not isinstance(rule_ids, list):
+                    rule_ids = []
+                parts: list[str] = []
+                if days is not None:
+                    parts.append(f"{days}d since last entry")
+                if shape_name:
+                    parts.append(f"shape: {_sanitize_enrichment_text(shape_name)}")
+                if rule_ids:
+                    parts.append(
+                        f"rules: {', '.join(_sanitize_enrichment_text(r) for r in rule_ids)}"
+                    )
+                if parts:
+                    lines.append(f"  ↳ t2: {', '.join(parts)}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
 
 
 def _render_signal1_section(
@@ -1278,7 +1372,8 @@ def _render_run_footer(run_status: RunStatus) -> str:
     return (
         f"Run stats: Signal 1 {run_status.signal1.value} · "
         f"Signal 2 {run_status.signal2.value} · "
-        f"Signal 3 {run_status.signal3.value}\n"
+        f"Signal 3 {run_status.signal3.value} · "
+        f"Signal 4 {run_status.signal4.value}\n"
         f"Window: last {run_status.window_days} days · "
         f"Branch: {run_status.branch} · "
         f"Generated: {run_status.generated_at}"

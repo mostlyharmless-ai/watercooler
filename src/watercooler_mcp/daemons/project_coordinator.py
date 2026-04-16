@@ -104,6 +104,7 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         self._last_tick_findings: int = 0
         self._last_tick_skipped: int = 0
         self._last_tick_leads: int = 0
+        self._last_tick_t2_enriched: int = 0
         # v1B stance observability
         self._last_snapshot_available: bool = False
         self._last_snapshot_age_hours: float | None = None
@@ -245,6 +246,31 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         tick_time = time.time()
         findings: list[Finding] = []
         skipped = 0
+        # Per-tick reset: current-tick count of enriched leads (must precede Phase A).
+        self._last_tick_t2_enriched = 0
+
+        # Load analysis context for t2_context enrichment — fail-open to None.
+        # The helper catches all exceptions internally; no second guard needed here.
+        _analysis_result = self._load_analysis_context()
+        _analysis_by_topic: dict[str, dict[str, Any]] = {}
+        _analysis_rule_flags: dict[str, list[str]] = {}
+        if _analysis_result is not None:
+            _analysis_by_topic = {
+                t["topic"]: t
+                for t in _analysis_result.get("window_threads", [])
+                if isinstance(t, dict) and isinstance(t.get("topic"), str)
+            }
+            for rec in _analysis_result.get("recommendations", []):
+                if not isinstance(rec, dict):
+                    continue  # schema-drift safety
+                rule_id = rec.get("rule_id", "")
+                if not rule_id:
+                    continue  # skip missing/empty rule IDs
+                for topic in rec.get("affected_threads", []):
+                    if not isinstance(topic, str):
+                        continue  # schema-drift safety
+                    _analysis_rule_flags.setdefault(topic, []).append(rule_id)
+
         # v1B follow-on: tick-scoped deferred lead buffer. Populated per-thread
         # after active_signals update; drained in Phase C after the corpus-level
         # detect_new_contributors() branch so v1A findings win the cap.
@@ -377,7 +403,19 @@ class ProjectCoordinatorDaemon(BaseDaemon):
             # detectors have claimed the cap. This enforces the priority
             # v1A per-thread > v1A corpus > coordinator_lead.
             if cfg.leads_enabled:
-                pending_leads.extend(generate_leads_for_thread(thread_findings))
+                pending_leads.extend(
+                    generate_leads_for_thread(
+                        thread_findings,
+                        analysis_by_topic=(
+                            _analysis_by_topic if _analysis_result is not None else None
+                        ),
+                        analysis_rule_flags=(
+                            _analysis_rule_flags
+                            if _analysis_result is not None
+                            else None
+                        ),
+                    )
+                )
 
             # Materialize into Finding objects with dedup
             for cf in thread_findings:
@@ -529,6 +567,8 @@ class ProjectCoordinatorDaemon(BaseDaemon):
                 )
                 self._existing_keys.add(fid)
                 leads_count += 1
+                if cf.details.get("lead", {}).get("t2_context") is not None:
+                    self._last_tick_t2_enriched += 1
 
         # --- Commit deferred checkpoints (minus topics with dropped leads) ---
         # Threads whose lead was dropped in Phase C are intentionally left
@@ -625,7 +665,13 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         # Persist rolling state
         self._save_extras()
 
-        self._update_tick_metrics(len(topics), len(findings), skipped, leads_count)
+        self._update_tick_metrics(
+            len(topics),
+            len(findings),
+            skipped,
+            leads_count,
+            t2_enriched=self._last_tick_t2_enriched,
+        )
 
         logger.debug(
             "DAEMON[project_coordinator]: scanned %d threads, %d findings, %d skipped",
@@ -867,6 +913,62 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         except (ValueError, TypeError):
             return False
 
+    def _load_analysis_context(self) -> dict[str, Any] | None:
+        """Load AnalysisSnapshotDaemon result for t2_context enrichment.
+
+        Uses the same two-path pattern as ``_load_pulse_snapshot()``:
+
+        Path 1 (in-process): manager → ``analysis_snapshot`` daemon
+                             → ``get_analysis_result(repo_key)``
+        Path 2 (checkpoint): load_checkpoint("analysis_snapshot", namespace)
+                             → extras["projects"][repo_key]["analysis_result"]
+
+        Both paths fail open to ``None`` — leads are emitted without t2_context
+        rather than blocking the tick.  All exceptions are caught internally;
+        ``tick()`` does not need a second guard.
+
+        Note: ``self._scope_id`` is only populated when the daemon is constructed
+        via the ``Path.cwd()`` resolution path (``_resolve_threads_dir()``).
+        The ``threads_dir=...`` override path leaves ``_scope_id = ""``, so unit
+        tests will receive ``None`` here unless the test explicitly sets
+        ``_scope_id`` or mocks ``get_analysis_result``/``load_checkpoint``.
+        """
+        repo_key = self._scope_id or ""
+
+        # Path 1: in-process daemon manager
+        try:
+            from watercooler_mcp.daemons import get_daemon_manager
+
+            manager = get_daemon_manager()
+            if manager is not None:
+                ad = manager.get_daemon("analysis_snapshot")
+                if ad is not None and hasattr(ad, "get_analysis_result"):
+                    result = ad.get_analysis_result(repo_key)
+                    if result is not None and self._is_snapshot_fresh(result):
+                        return result
+        except Exception as exc:
+            logger.debug(
+                "DAEMON[project_coordinator]: error reading in-process analysis_snapshot: %s",
+                exc,
+            )
+
+        # Path 2: on-disk checkpoint fallback
+        try:
+            from .state import load_checkpoint
+
+            cp = load_checkpoint("analysis_snapshot", namespace=self.state_namespace)
+            projects = cp.extras.get("projects", {})
+            result = projects.get(repo_key, {}).get("analysis_result")
+            if result is not None and self._is_snapshot_fresh(result):
+                return result
+        except Exception as exc:
+            logger.debug(
+                "DAEMON[project_coordinator]: error loading analysis_snapshot checkpoint: %s",
+                exc,
+            )
+
+        return None
+
     def _tick_hosted(self) -> list[Finding]:
         """Hosted mode — explicit no-op in v1A."""
         self._update_tick_metrics(0, 0, 0, 0)
@@ -878,11 +980,13 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         findings_count: int,
         skipped: int,
         leads: int = 0,
+        t2_enriched: int = 0,
     ) -> None:
         self._last_tick_threads = threads
         self._last_tick_findings = findings_count
         self._last_tick_skipped = skipped
         self._last_tick_leads = leads
+        self._last_tick_t2_enriched = t2_enriched
 
     def status_summary(self) -> dict[str, Any]:
         """Health summary with coordinator-specific metrics."""
@@ -901,4 +1005,5 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         # v1B follow-on: coordinator leads observability
         base["leads_enabled"] = self._config.leads_enabled
         base["last_tick_leads"] = self._last_tick_leads
+        base["last_tick_t2_enriched"] = self._last_tick_t2_enriched
         return base
