@@ -6,7 +6,6 @@ verifying the connection between config files and MCP server operation.
 
 import pytest
 from pathlib import Path
-from unittest.mock import patch
 
 
 class TestMcpConfigIntegration:
@@ -317,88 +316,3 @@ default_agent = "TestAgent"
         # Config file should exist
         config_path = tmp_path / ".watercooler" / "config.toml"
         assert config_path.exists()
-
-    def test_config_init_user_prints_pulse_hook_suggestion(self, tmp_path, monkeypatch, capsys):
-        """config init --user should print the setup-pulse-hook suggestion."""
-        from watercooler.config_loader import clear_config_cache
-        clear_config_cache()
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
-        from watercooler.cli import main
-
-        with pytest.raises(SystemExit) as exc_info:
-            main(["config", "init", "--user"])
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        assert "setup-pulse-hook" in captured.out
-
-    def test_config_init_project_does_not_print_pulse_hook_suggestion(self, tmp_path, monkeypatch, capsys):
-        """config init --project should NOT print the setup-pulse-hook suggestion."""
-        from watercooler.config_loader import clear_config_cache
-        clear_config_cache()
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        # Temporarily change cwd to tmp_path so project config goes there
-        monkeypatch.chdir(tmp_path)
-
-        from watercooler.cli import main
-
-        with pytest.raises(SystemExit) as exc_info:
-            main(["config", "init", "--project"])
-
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        assert "setup-pulse-hook" not in captured.out
-
-
-class TestSetupPulseHookCli:
-    """CLI integration tests for 'watercooler setup-pulse-hook'."""
-
-    def test_setup_pulse_hook_command_exits_0_when_binary_found(self, tmp_path, monkeypatch, capsys):
-        """setup-pulse-hook command exits 0 when watercooler-capture-theme is findable."""
-        from watercooler.config_loader import clear_config_cache
-        clear_config_cache()
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
-        # Create a fake capture binary alongside a fake watercooler CLI so the
-        # sibling-bin check resolves it without requiring PATH activation.
-        fake_bin = tmp_path / "watercooler-capture-theme"
-        fake_bin.write_text("#!/bin/sh\n")
-        fake_bin.chmod(0o755)
-        monkeypatch.setattr("sys.argv", [str(tmp_path / "watercooler")])
-
-        from watercooler.cli import main
-
-        with pytest.raises(SystemExit) as exc_info:
-            main(["setup-pulse-hook"])
-
-        assert exc_info.value.code == 0
-
-        # Settings file should now exist with a PostCompact hook
-        import json as _json
-        settings_path = tmp_path / ".claude" / "settings.json"
-        assert settings_path.exists()
-        data = _json.loads(settings_path.read_text())
-        hooks = data.get("hooks", {}).get("PostCompact", [])
-        # Must use nested envelope so Claude Code pipes stdin to the hook.
-        # See bug-postcompact-hook-stdin-empty.
-        assert any(
-            any(str(fake_bin) in sub.get("command", "") for sub in e.get("hooks", []))
-            for e in hooks
-        )
-
-    def test_setup_pulse_hook_command_exits_1_when_binary_missing(self, tmp_path, monkeypatch, capsys):
-        """setup-pulse-hook command exits 1 when watercooler-capture-theme is not found."""
-        from watercooler.config_loader import clear_config_cache
-        clear_config_cache()
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        # Point argv[0] to an empty directory so the sibling check finds nothing,
-        # and patch shutil.which to also return None.
-        monkeypatch.setattr("sys.argv", [str(tmp_path / "nobin" / "watercooler")])
-
-        with patch("shutil.which", return_value=None):
-            from watercooler.cli import main
-            with pytest.raises(SystemExit) as exc_info:
-                main(["setup-pulse-hook"])
-
-        assert exc_info.value.code == 1

@@ -520,6 +520,8 @@ enabled = false
 # stance_enabled = true        # v1B stance advisories (default: true when coordinator enabled)
 # stance_snapshot_max_age_hours = 4.0  # pulse snapshot freshness gate; operates in
 #                              # degraded coordinator-only mode when no snapshot available
+# leads_enabled = true         # v1B follow-on: emit coordinator_lead findings
+#                              # layered on stalled/aware detections (v1A priority > leads)
 
 # --- T2 Indexer ---
 # Automatically registered when memory backend = "graphiti" with queue enabled.

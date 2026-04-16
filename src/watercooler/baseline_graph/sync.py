@@ -22,13 +22,13 @@ Feature Configuration:
         - When enabled: Generates semantic summaries via LLM for entries/threads
         - When disabled: Falls back to extractive summaries (truncated body text)
         - Requires: LLM server at [servers.llm] endpoint (e.g., llama-server)
-        - Config: mcp.graph.generate_summaries (default: false, TOML-only)
+        - Config: mcp.graph.generate_summaries (default: true, TOML-only)
 
     Embedding Vectors (generate_embeddings):
         - When enabled: Generates embedding vectors for semantic search
         - When disabled: Semantic search falls back to keyword matching
         - Requires: Embedding server at [servers.embedding] endpoint
-        - Config: mcp.graph.generate_embeddings (default: false, TOML-only)
+        - Config: mcp.graph.generate_embeddings (default: true, TOML-only)
 
     Service Auto-Detection (auto_detect_services):
         - When enabled: Checks service availability before generation

@@ -3,8 +3,6 @@
 Connect watercooler to Claude Code, Codex, or Cursor. Each section is fully self-contained —
 no cross-references between sections.
 
-**ChatGPT:** Setup is tracked in [issue #287](https://github.com/mostlyharmless-ai/watercooler/issues/287).
-
 After connecting, run `watercooler_health` from inside your client to verify the
 connection before starting any thread operations.
 
@@ -21,7 +19,7 @@ If multiple people on your team use the same client type, set unique lowercase
 
 ```bash
 claude mcp add --transport stdio watercooler --scope user \
-  -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-mcp
+  -- uvx --from 'git+https://github.com/mostlyharmless-ai/watercooler@main[local]' watercooler-mcp
 ```
 
 This adds the server to your user-level Claude Code config. Restart Claude Code after
@@ -45,7 +43,7 @@ replace the whole file.
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/mostlyharmless-ai/watercooler@main",
+        "git+https://github.com/mostlyharmless-ai/watercooler@main[local]",
         "watercooler-mcp"
       ]
     }
@@ -67,7 +65,7 @@ status report. If the tool is not found, restart Claude Code and try `/mcp` to c
 
 ```bash
 codex mcp add watercooler \
-  -- uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-mcp
+  -- uvx --from 'git+https://github.com/mostlyharmless-ai/watercooler@main[local]' watercooler-mcp
 ```
 
 **Config file location:**
@@ -82,7 +80,7 @@ codex mcp add watercooler \
 command = "uvx"
 args = [
   "--from",
-  "git+https://github.com/mostlyharmless-ai/watercooler@main",
+  "git+https://github.com/mostlyharmless-ai/watercooler@main[local]",
   "watercooler-mcp"
 ]
 ```
@@ -115,7 +113,7 @@ add the `watercooler` block inside the existing `mcpServers` object.
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/mostlyharmless-ai/watercooler@main",
+        "git+https://github.com/mostlyharmless-ai/watercooler@main[local]",
         "watercooler-mcp"
       ]
     }
@@ -159,7 +157,7 @@ api_key = "wc_..."
 ```toml
 [mcp]
 transport = "proxy"
-url = "https://<your-hosted-url>/mcp/"
+url = "https://your-mcp-host.example.com/mcp/"
 ```
 
 5. Restart MCP server — all agents connect via their existing stdio config
@@ -185,7 +183,7 @@ baseline search and graph operations.
 ```toml
 [mcp]
 transport = "hybrid"
-url = "https://<your-hosted-url>/mcp/premium/"
+url = "https://your-mcp-host.example.com/mcp/premium/"
 ```
 
 The hybrid URL uses `/mcp/premium/` (the premium-only surface), not `/mcp/`.

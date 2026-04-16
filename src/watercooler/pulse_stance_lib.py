@@ -18,22 +18,23 @@ Public API
 from __future__ import annotations
 
 import hashlib
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Read-only tool allowlist — advisory actions must never suggest writes
 # ---------------------------------------------------------------------------
 
-_READ_ONLY_TOOLS: frozenset[str] = frozenset({
-    "watercooler_smart_query",
-    "watercooler_read_thread",
-    "watercooler_list_thread_entries",
-    "watercooler_daemon_findings",
-    "watercooler_search",
-    "watercooler_find_similar",
-})
+_READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "watercooler_smart_query",
+        "watercooler_read_thread",
+        "watercooler_list_thread_entries",
+        "watercooler_daemon_findings",
+        "watercooler_search",
+        "watercooler_find_similar",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +62,7 @@ _COORD_NEW_CONTRIB_SOFT = 1  # SOFT-only: presence alone is noteworthy
 # Threshold bucket names (for coarsened advisory_signature)
 # ---------------------------------------------------------------------------
 
+
 def _bucket(value: float, soft: float, hard: float) -> str:
     """Classify a value into NONE / SOFT / HARD bucket."""
     if value >= hard:
@@ -70,12 +72,10 @@ def _bucket(value: float, soft: float, hard: float) -> str:
     return "NONE"
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class StanceVector:
@@ -96,8 +96,8 @@ class AdvisoryAction:
     All tools must be in ``_READ_ONLY_TOOLS`` — no write actions permitted.
     """
 
-    phase: str          # "pre" or "post"
-    tool: str           # MCP tool name
+    phase: str  # "pre" or "post"
+    tool: str  # MCP tool name
     arguments: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
 
@@ -143,7 +143,7 @@ class StanceAdvisory:
 
     schema_version: int
     role: str
-    level: int              # 0-2
+    level: int  # 0-2
     summary: str
     triggered_signals: list[str]
     missing_inputs: list[str]
@@ -152,6 +152,73 @@ class StanceAdvisory:
     signal_values: StanceSignals
     stance: StanceVector
     actions: list[AdvisoryAction]
+
+
+@dataclass(frozen=True)
+class CoordinatorLead:
+    """Thread-specific investigation hint derived from a v1A coordinator finding.
+
+    Leads tell agents *which thread deserves attention right now* and *what tool
+    call gets them started*. The payload is stored under
+    ``CoordinatorFinding.details["lead"]`` via ``dataclasses.asdict()``.
+
+    Attributes:
+        schema_version: Always ``1`` in Phase 1.
+        source_category: v1A category that triggered this lead (e.g. ``stalled_open_loop``).
+        source_topic: Thread topic slug. Duplicates outer ``CoordinatorFinding.topic``
+            so the lead core is self-contained for downstream consumers (e.g.
+            ``PulseReportDaemon``) that read serialized leads without the outer envelope.
+        summary: Human-readable description of what is interesting and why.
+        relevance_tags: Roles/focus areas most affected. Tuple so the dataclass stays frozen-safe.
+        suggested_action: Read-only ``AdvisoryAction`` the agent can execute to
+            investigate. ``None`` if reconstruction from a persisted dict failed.
+        t2_context: Phase 2+ only. Always ``None`` in Phase 1.
+    """
+
+    schema_version: int
+    source_category: str
+    source_topic: str
+    summary: str
+    relevance_tags: tuple[str, ...]
+    suggested_action: AdvisoryAction | None
+    t2_context: dict[str, Any] | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "CoordinatorLead":
+        """Reconstruct a CoordinatorLead from ``asdict()`` output.
+
+        Top-level fields use ``.get()`` with safe defaults so a missing
+        non-load-bearing field (e.g. future schema additions read by old code)
+        does not raise ``KeyError``. The ``suggested_action`` sub-dict is handled
+        with a stricter rule: if any of its required fields is missing, or the
+        tool is not in ``_READ_ONLY_TOOLS``, reconstruction returns
+        ``suggested_action=None`` rather than attempting partial instantiation.
+        This avoids a ``ValueError`` from ``AdvisoryAction.__post_init__`` on
+        malformed records.
+        """
+        action: AdvisoryAction | None = None
+        a = d.get("suggested_action")
+        if isinstance(a, dict):
+            required = ("phase", "tool", "arguments", "reason")
+            if all(k in a for k in required):
+                try:
+                    action = AdvisoryAction(
+                        phase=a["phase"],
+                        tool=a["tool"],
+                        arguments=a["arguments"],
+                        reason=a["reason"],
+                    )
+                except ValueError:
+                    action = None
+        return cls(
+            schema_version=d.get("schema_version", 1),
+            source_category=d.get("source_category", ""),
+            source_topic=d.get("source_topic", ""),
+            summary=d.get("summary", ""),
+            relevance_tags=tuple(d.get("relevance_tags") or ()),
+            suggested_action=action,
+            t2_context=d.get("t2_context"),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -239,9 +306,7 @@ def extract_stance_signals(
             analysis_report_available=analysis_report_available,
             analysis_is_fresh=analysis_is_fresh,
             sessions_in_window=repo_level.get("sessions_in_window", 0),
-            focus_area_overlap_count=len(
-                repo_level.get("focus_area_overlap", [])
-            ),
+            focus_area_overlap_count=len(repo_level.get("focus_area_overlap", [])),
             coordinator_stalled_open_loop_count=coord_counts.get(
                 "stalled_open_loop", 0
             ),
@@ -259,17 +324,13 @@ def extract_stance_signals(
     # Degraded mode: coordinator-only
     return StanceSignals(
         pulse_available=False,
-        coordinator_stalled_open_loop_count=coord_counts.get(
-            "stalled_open_loop", 0
-        ),
+        coordinator_stalled_open_loop_count=coord_counts.get("stalled_open_loop", 0),
         coordinator_role_concentration_count=coord_counts.get(
             "aware_role_concentration", 0
         ),
         coordinator_dropout_count=coord_counts.get("stalled_dropout", 0),
         coordinator_burst_count=coord_counts.get("aware_burst", 0),
-        coordinator_new_contributor_count=coord_counts.get(
-            "aware_new_contributor", 0
-        ),
+        coordinator_new_contributor_count=coord_counts.get("aware_new_contributor", 0),
         trend_supersession_rate=trend_supersession_rate,
     )
 
@@ -277,6 +338,7 @@ def extract_stance_signals(
 # ---------------------------------------------------------------------------
 # Per-role weight tables
 # ---------------------------------------------------------------------------
+
 
 def _planner_stance(signals: StanceSignals) -> StanceAdvisory:
     """Compute planner advisory from signals."""
@@ -292,50 +354,66 @@ def _planner_stance(signals: StanceSignals) -> StanceAdvisory:
     # Row checks — multiple rows can match; take max level and max per-dimension
     if v >= _VOLATILITY_HARD:
         level = max(level, 2)
-        rows.append(StanceVector(
-            retrieval_pressure=0.9, decision_caution=0.8, closure_pressure=0.3,
-        ))
-        triggered.add("volatility_ratio")
-        crossings.append(
-            f"volatility_ratio={v:.2f} >= HARD({_VOLATILITY_HARD})"
+        rows.append(
+            StanceVector(
+                retrieval_pressure=0.9,
+                decision_caution=0.8,
+                closure_pressure=0.3,
+            )
         )
+        triggered.add("volatility_ratio")
+        crossings.append(f"volatility_ratio={v:.2f} >= HARD({_VOLATILITY_HARD})")
     elif v >= _VOLATILITY_SOFT:
         if sol >= _COORD_STALLED_SOFT:
             level = max(level, 2)
-            rows.append(StanceVector(
-                retrieval_pressure=0.8, decision_caution=0.7, closure_pressure=0.5,
-            ))
-            triggered.update({"volatility_ratio", "coordinator_stalled_open_loop_count"})
-            crossings.append(
-                f"volatility_ratio={v:.2f} >= SOFT({_VOLATILITY_SOFT})"
+            rows.append(
+                StanceVector(
+                    retrieval_pressure=0.8,
+                    decision_caution=0.7,
+                    closure_pressure=0.5,
+                )
             )
+            triggered.update(
+                {"volatility_ratio", "coordinator_stalled_open_loop_count"}
+            )
+            crossings.append(f"volatility_ratio={v:.2f} >= SOFT({_VOLATILITY_SOFT})")
             crossings.append(
                 f"coordinator_stalled_open_loop_count={sol} >= SOFT({_COORD_STALLED_SOFT})"
             )
         else:
             level = max(level, 1)
-            rows.append(StanceVector(
-                retrieval_pressure=0.6, decision_caution=0.5, closure_pressure=0.0,
-            ))
-            triggered.add("volatility_ratio")
-            crossings.append(
-                f"volatility_ratio={v:.2f} >= SOFT({_VOLATILITY_SOFT})"
+            rows.append(
+                StanceVector(
+                    retrieval_pressure=0.6,
+                    decision_caution=0.5,
+                    closure_pressure=0.0,
+                )
             )
+            triggered.add("volatility_ratio")
+            crossings.append(f"volatility_ratio={v:.2f} >= SOFT({_VOLATILITY_SOFT})")
 
     if sol >= _COORD_STALLED_HARD:
         level = max(level, 2)
-        rows.append(StanceVector(
-            retrieval_pressure=0.5, decision_caution=0.3, closure_pressure=0.9,
-        ))
+        rows.append(
+            StanceVector(
+                retrieval_pressure=0.5,
+                decision_caution=0.3,
+                closure_pressure=0.9,
+            )
+        )
         triggered.add("coordinator_stalled_open_loop_count")
         crossings.append(
             f"coordinator_stalled_open_loop_count={sol} >= HARD({_COORD_STALLED_HARD})"
         )
     elif sol >= _COORD_STALLED_SOFT and v < _VOLATILITY_SOFT:
         level = max(level, 1)
-        rows.append(StanceVector(
-            retrieval_pressure=0.3, decision_caution=0.0, closure_pressure=0.6,
-        ))
+        rows.append(
+            StanceVector(
+                retrieval_pressure=0.3,
+                decision_caution=0.0,
+                closure_pressure=0.6,
+            )
+        )
         triggered.add("coordinator_stalled_open_loop_count")
         crossings.append(
             f"coordinator_stalled_open_loop_count={sol} >= SOFT({_COORD_STALLED_SOFT})"
@@ -343,18 +421,26 @@ def _planner_stance(signals: StanceSignals) -> StanceAdvisory:
 
     if rc >= _COORD_ROLE_CONC_HARD:
         level = max(level, 2)
-        rows.append(StanceVector(
-            retrieval_pressure=0.7, decision_caution=0.6, closure_pressure=0.4,
-        ))
+        rows.append(
+            StanceVector(
+                retrieval_pressure=0.7,
+                decision_caution=0.6,
+                closure_pressure=0.4,
+            )
+        )
         triggered.add("coordinator_role_concentration_count")
         crossings.append(
             f"coordinator_role_concentration_count={rc} >= HARD({_COORD_ROLE_CONC_HARD})"
         )
     elif rc >= _COORD_ROLE_CONC_SOFT:
         level = max(level, 1)
-        rows.append(StanceVector(
-            retrieval_pressure=0.4, decision_caution=0.3, closure_pressure=0.2,
-        ))
+        rows.append(
+            StanceVector(
+                retrieval_pressure=0.4,
+                decision_caution=0.3,
+                closure_pressure=0.2,
+            )
+        )
         triggered.add("coordinator_role_concentration_count")
         crossings.append(
             f"coordinator_role_concentration_count={rc} >= SOFT({_COORD_ROLE_CONC_SOFT})"
@@ -380,37 +466,45 @@ def _planner_stance(signals: StanceSignals) -> StanceAdvisory:
     # session context if multi-repo scope isolation is needed.
     actions: list[AdvisoryAction] = []
     if level >= 1:
-        actions.append(AdvisoryAction(
-            phase="pre",
-            tool="watercooler_smart_query",
-            arguments={"query": "recent decisions and open questions"},
-            reason="High volatility or stalled loops — review prior decisions before planning",
-        ))
+        actions.append(
+            AdvisoryAction(
+                phase="pre",
+                tool="watercooler_smart_query",
+                arguments={"query": "recent decisions and open questions"},
+                reason="High volatility or stalled loops — review prior decisions before planning",
+            )
+        )
     if "coordinator_new_contributor_count" in triggered:
-        actions.append(AdvisoryAction(
-            phase="pre",
-            tool="watercooler_daemon_findings",
-            arguments={
-                "daemon": "project_coordinator",
-                "category": "aware_new_contributor",
-            },
-            reason="New contributor detected — review their context before planning",
-        ))
+        actions.append(
+            AdvisoryAction(
+                phase="pre",
+                tool="watercooler_daemon_findings",
+                arguments={
+                    "daemon": "project_coordinator",
+                    "category": "aware_new_contributor",
+                },
+                reason="New contributor detected — review their context before planning",
+            )
+        )
     if level >= 2:
-        actions.append(AdvisoryAction(
-            phase="pre",
-            tool="watercooler_daemon_findings",
-            arguments={
-                "daemon": "project_coordinator",
-                "category": "stalled_open_loop",
-            },
-            reason="Multiple stalled loops — check which threads need closure",
-        ))
+        actions.append(
+            AdvisoryAction(
+                phase="pre",
+                tool="watercooler_daemon_findings",
+                arguments={
+                    "daemon": "project_coordinator",
+                    "category": "stalled_open_loop",
+                },
+                reason="Multiple stalled loops — check which threads need closure",
+            )
+        )
 
     missing = _missing_inputs(signals)
     summary = _build_summary("planner", level, triggered)
     signature = _compute_signature(
-        role="planner", level=level, signals=signals,
+        role="planner",
+        level=level,
+        signals=signals,
         triggered=triggered,
     )
 
@@ -442,45 +536,51 @@ def _critic_stance(signals: StanceSignals) -> StanceAdvisory:
 
     if rt >= _RISK_TAG_HARD:
         level = max(level, 2)
-        rows.append(StanceVector(
-            critique_intensity=0.8, provenance_requirement=0.8,
-            retrieval_pressure=0.5,
-        ))
-        triggered.add("risk_tag_count")
-        crossings.append(
-            f"risk_tag_count={rt} >= HARD({_RISK_TAG_HARD})"
+        rows.append(
+            StanceVector(
+                critique_intensity=0.8,
+                provenance_requirement=0.8,
+                retrieval_pressure=0.5,
+            )
         )
+        triggered.add("risk_tag_count")
+        crossings.append(f"risk_tag_count={rt} >= HARD({_RISK_TAG_HARD})")
     elif rt >= _RISK_TAG_SOFT:
         if cd >= _COORD_DROPOUT_SOFT:
             level = max(level, 2)
-            rows.append(StanceVector(
-                critique_intensity=0.7, provenance_requirement=0.7,
-                retrieval_pressure=0.6,
-            ))
-            triggered.update({"risk_tag_count", "coordinator_dropout_count"})
-            crossings.append(
-                f"risk_tag_count={rt} >= SOFT({_RISK_TAG_SOFT})"
+            rows.append(
+                StanceVector(
+                    critique_intensity=0.7,
+                    provenance_requirement=0.7,
+                    retrieval_pressure=0.6,
+                )
             )
+            triggered.update({"risk_tag_count", "coordinator_dropout_count"})
+            crossings.append(f"risk_tag_count={rt} >= SOFT({_RISK_TAG_SOFT})")
             crossings.append(
                 f"coordinator_dropout_count={cd} >= SOFT({_COORD_DROPOUT_SOFT})"
             )
         else:
             level = max(level, 1)
-            rows.append(StanceVector(
-                critique_intensity=0.5, provenance_requirement=0.4,
-                retrieval_pressure=0.3,
-            ))
-            triggered.add("risk_tag_count")
-            crossings.append(
-                f"risk_tag_count={rt} >= SOFT({_RISK_TAG_SOFT})"
+            rows.append(
+                StanceVector(
+                    critique_intensity=0.5,
+                    provenance_requirement=0.4,
+                    retrieval_pressure=0.3,
+                )
             )
+            triggered.add("risk_tag_count")
+            crossings.append(f"risk_tag_count={rt} >= SOFT({_RISK_TAG_SOFT})")
 
     if cd >= _COORD_DROPOUT_SOFT and rt < _RISK_TAG_SOFT:
         level = max(level, 1)
-        rows.append(StanceVector(
-            critique_intensity=0.3, provenance_requirement=0.6,
-            retrieval_pressure=0.5,
-        ))
+        rows.append(
+            StanceVector(
+                critique_intensity=0.3,
+                provenance_requirement=0.6,
+                retrieval_pressure=0.5,
+            )
+        )
         triggered.add("coordinator_dropout_count")
         crossings.append(
             f"coordinator_dropout_count={cd} >= SOFT({_COORD_DROPOUT_SOFT})"
@@ -488,39 +588,46 @@ def _critic_stance(signals: StanceSignals) -> StanceAdvisory:
 
     if ol >= _OPEN_LOOP_HARD:
         level = max(level, 2)
-        rows.append(StanceVector(
-            critique_intensity=0.6, provenance_requirement=0.5,
-            retrieval_pressure=0.8,
-        ))
-        triggered.add("open_loop_count")
-        crossings.append(
-            f"open_loop_count={ol} >= HARD({_OPEN_LOOP_HARD})"
+        rows.append(
+            StanceVector(
+                critique_intensity=0.6,
+                provenance_requirement=0.5,
+                retrieval_pressure=0.8,
+            )
         )
+        triggered.add("open_loop_count")
+        crossings.append(f"open_loop_count={ol} >= HARD({_OPEN_LOOP_HARD})")
     elif ol >= _OPEN_LOOP_SOFT:
         level = max(level, 1)
-        rows.append(StanceVector(
-            critique_intensity=0.3, provenance_requirement=0.3, retrieval_pressure=0.4,
-        ))
-        triggered.add("open_loop_count")
-        crossings.append(
-            f"open_loop_count={ol} >= SOFT({_OPEN_LOOP_SOFT})"
+        rows.append(
+            StanceVector(
+                critique_intensity=0.3,
+                provenance_requirement=0.3,
+                retrieval_pressure=0.4,
+            )
         )
+        triggered.add("open_loop_count")
+        crossings.append(f"open_loop_count={ol} >= SOFT({_OPEN_LOOP_SOFT})")
 
     stance = _merge_vectors(rows) if rows else StanceVector()
 
     actions: list[AdvisoryAction] = []
     if level >= 1:
-        actions.append(AdvisoryAction(
-            phase="pre",
-            tool="watercooler_search",
-            arguments={"query": "risk problem unresolved", "mode": "entries"},
-            reason="Risk signals detected — search for unresolved issues before critiquing",
-        ))
+        actions.append(
+            AdvisoryAction(
+                phase="pre",
+                tool="watercooler_search",
+                arguments={"query": "risk problem unresolved", "mode": "entries"},
+                reason="Risk signals detected — search for unresolved issues before critiquing",
+            )
+        )
 
     missing = _missing_inputs(signals)
     summary = _build_summary("critic", level, triggered)
     signature = _compute_signature(
-        role="critic", level=level, signals=signals,
+        role="critic",
+        level=level,
+        signals=signals,
         triggered=triggered,
     )
 
@@ -542,9 +649,7 @@ def _critic_stance(signals: StanceSignals) -> StanceAdvisory:
 def _tester_stance(signals: StanceSignals) -> StanceAdvisory:
     """Compute tester advisory from signals."""
     st = signals.stalled_thread_count
-    analysis_stale = (
-        signals.analysis_report_available and not signals.analysis_is_fresh
-    )
+    analysis_stale = signals.analysis_report_available and not signals.analysis_is_fresh
     cb = signals.coordinator_burst_count
 
     triggered: set[str] = set()
@@ -554,59 +659,66 @@ def _tester_stance(signals: StanceSignals) -> StanceAdvisory:
 
     if st >= _STALLED_HARD:
         level = max(level, 2)
-        rows.append(StanceVector(
-            retrieval_pressure=0.7, provenance_requirement=0.5,
-            handoff_bias=0.6,
-        ))
-        triggered.add("stalled_thread_count")
-        crossings.append(
-            f"stalled_thread_count={st} >= HARD({_STALLED_HARD})"
+        rows.append(
+            StanceVector(
+                retrieval_pressure=0.7,
+                provenance_requirement=0.5,
+                handoff_bias=0.6,
+            )
         )
+        triggered.add("stalled_thread_count")
+        crossings.append(f"stalled_thread_count={st} >= HARD({_STALLED_HARD})")
     elif st >= _STALLED_SOFT:
         if analysis_stale:
             level = max(level, 2)
-            rows.append(StanceVector(
-                retrieval_pressure=0.6, provenance_requirement=0.8,
-                handoff_bias=0.4,
-            ))
-            triggered.update({"stalled_thread_count", "analysis_stale"})
-            crossings.append(
-                f"stalled_thread_count={st} >= SOFT({_STALLED_SOFT})"
+            rows.append(
+                StanceVector(
+                    retrieval_pressure=0.6,
+                    provenance_requirement=0.8,
+                    handoff_bias=0.4,
+                )
             )
+            triggered.update({"stalled_thread_count", "analysis_stale"})
+            crossings.append(f"stalled_thread_count={st} >= SOFT({_STALLED_SOFT})")
             crossings.append("analysis_stale=True")
         else:
             level = max(level, 1)
-            rows.append(StanceVector(
-                retrieval_pressure=0.5, provenance_requirement=0.3,
-                handoff_bias=0.0,
-            ))
-            triggered.add("stalled_thread_count")
-            crossings.append(
-                f"stalled_thread_count={st} >= SOFT({_STALLED_SOFT})"
+            rows.append(
+                StanceVector(
+                    retrieval_pressure=0.5,
+                    provenance_requirement=0.3,
+                    handoff_bias=0.0,
+                )
             )
+            triggered.add("stalled_thread_count")
+            crossings.append(f"stalled_thread_count={st} >= SOFT({_STALLED_SOFT})")
 
     if analysis_stale and "analysis_stale" not in triggered:
         # Standalone analysis_stale signal — only fires when not already handled
         # by the joint STALLED_SOFT + analysis_stale branch above (which sets
         # level=2 and appends the crossing itself to avoid a duplicate entry).
         level = max(level, 1)
-        rows.append(StanceVector(
-            retrieval_pressure=0.3, provenance_requirement=0.7,
-            handoff_bias=0.0,
-        ))
+        rows.append(
+            StanceVector(
+                retrieval_pressure=0.3,
+                provenance_requirement=0.7,
+                handoff_bias=0.0,
+            )
+        )
         triggered.add("analysis_stale")
         crossings.append("analysis_stale=True")
 
     if cb >= _COORD_BURST_SOFT:
         level = max(level, 1)
-        rows.append(StanceVector(
-            retrieval_pressure=0.4, provenance_requirement=0.3,
-            handoff_bias=0.5,
-        ))
-        triggered.add("coordinator_burst_count")
-        crossings.append(
-            f"coordinator_burst_count={cb} >= SOFT({_COORD_BURST_SOFT})"
+        rows.append(
+            StanceVector(
+                retrieval_pressure=0.4,
+                provenance_requirement=0.3,
+                handoff_bias=0.5,
+            )
         )
+        triggered.add("coordinator_burst_count")
+        crossings.append(f"coordinator_burst_count={cb} >= SOFT({_COORD_BURST_SOFT})")
 
     stance = _merge_vectors(rows) if rows else StanceVector()
 
@@ -615,28 +727,38 @@ def _tester_stance(signals: StanceSignals) -> StanceAdvisory:
     actions: list[AdvisoryAction] = []
     if level >= 1:
         burst_active = signals.coordinator_burst_count >= _COORD_BURST_SOFT
-        stalled_active = (
-            signals.stalled_thread_count >= _STALLED_SOFT or analysis_stale
-        )
+        stalled_active = signals.stalled_thread_count >= _STALLED_SOFT or analysis_stale
         if burst_active:
-            actions.append(AdvisoryAction(
-                phase="pre",
-                tool="watercooler_daemon_findings",
-                arguments={"daemon": "project_coordinator", "category": "aware_burst"},
-                reason="Burst activity detected — check which thread is spiking before testing",
-            ))
+            actions.append(
+                AdvisoryAction(
+                    phase="pre",
+                    tool="watercooler_daemon_findings",
+                    arguments={
+                        "daemon": "project_coordinator",
+                        "category": "aware_burst",
+                    },
+                    reason="Burst activity detected — check which thread is spiking before testing",
+                )
+            )
         if stalled_active:
-            actions.append(AdvisoryAction(
-                phase="pre",
-                tool="watercooler_daemon_findings",
-                arguments={"daemon": "project_coordinator", "category": "stalled_open_loop"},
-                reason="Stalled signals — review open loop findings before testing",
-            ))
+            actions.append(
+                AdvisoryAction(
+                    phase="pre",
+                    tool="watercooler_daemon_findings",
+                    arguments={
+                        "daemon": "project_coordinator",
+                        "category": "stalled_open_loop",
+                    },
+                    reason="Stalled signals — review open loop findings before testing",
+                )
+            )
 
     missing = _missing_inputs(signals)
     summary = _build_summary("tester", level, triggered)
     signature = _compute_signature(
-        role="tester", level=level, signals=signals,
+        role="tester",
+        level=level,
+        signals=signals,
         triggered=triggered,
     )
 
@@ -714,6 +836,7 @@ def build_stance_advisories(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _merge_vectors(rows: list[StanceVector]) -> StanceVector:
     """Merge multiple StanceVector rows — max per dimension."""
     return StanceVector(
@@ -774,6 +897,7 @@ def _coarsen_crossings(
     canonical name appears in the filter. Use this to restrict coarsening to
     role-relevant signals and avoid cross-role signature contamination.
     """
+
     def _include(name: str) -> bool:
         return signal_filter is None or name in signal_filter
 
@@ -802,7 +926,8 @@ def _coarsen_crossings(
     if _include("coordinator_stalled_open_loop_count"):
         csb = _bucket(
             signals.coordinator_stalled_open_loop_count,
-            _COORD_STALLED_SOFT, _COORD_STALLED_HARD,
+            _COORD_STALLED_SOFT,
+            _COORD_STALLED_HARD,
         )
         if csb != "NONE":
             buckets.append(f"coord_stalled:{csb}")
@@ -810,7 +935,8 @@ def _coarsen_crossings(
     if _include("coordinator_role_concentration_count"):
         crb = _bucket(
             signals.coordinator_role_concentration_count,
-            _COORD_ROLE_CONC_SOFT, _COORD_ROLE_CONC_HARD,
+            _COORD_ROLE_CONC_SOFT,
+            _COORD_ROLE_CONC_HARD,
         )
         if crb != "NONE":
             buckets.append(f"coord_role_conc:{crb}")
@@ -835,9 +961,18 @@ def _coarsen_crossings(
 
 
 _SUMMARY_PHRASES: dict[str, tuple[str, str]] = {
-    "planner": ("moderate pressure — review prior context", "elevated pressure — caution advised"),
-    "critic":  ("moderate scrutiny — verify provenance", "elevated scrutiny — thorough review needed"),
-    "tester":  ("moderate caution — check coverage", "elevated caution — validate thoroughly"),
+    "planner": (
+        "moderate pressure — review prior context",
+        "elevated pressure — caution advised",
+    ),
+    "critic": (
+        "moderate scrutiny — verify provenance",
+        "elevated scrutiny — thorough review needed",
+    ),
+    "tester": (
+        "moderate caution — check coverage",
+        "elevated caution — validate thoroughly",
+    ),
 }
 
 

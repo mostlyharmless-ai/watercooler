@@ -979,8 +979,7 @@ def _render_signal1_section(
             )
         else:
             lines.append(
-                "_No session-context threads found. Run `watercooler setup-pulse-hook` "
-                "to configure the PostCompactHook capture layer._"
+                "_No session-context threads found._"
             )
         return "\n".join(lines)
 

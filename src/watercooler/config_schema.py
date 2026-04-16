@@ -1033,6 +1033,10 @@ class ProjectCoordinatorConfig(BaseModel):
         ge=0.5,
         description="Max age of pulse snapshot before degraded mode",
     )
+    leads_enabled: bool = Field(
+        default=True,
+        description="Enable coordinator lead emission (v1B follow-on)",
+    )
 
     model_config = ConfigDict(frozen=True)
 

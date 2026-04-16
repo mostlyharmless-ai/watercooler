@@ -86,9 +86,7 @@ def _make_daemon(
     )
 
 
-def _seed_known_contributors(
-    daemon: ProjectCoordinatorDaemon, *agents: str
-) -> None:
+def _seed_known_contributors(daemon: ProjectCoordinatorDaemon, *agents: str) -> None:
     """Pre-seed seen_contributors so tests that pre-date P2.1 new-contributor
     stance wiring are not perturbed by first-tick new-contributor advisories.
 
@@ -336,7 +334,8 @@ class TestProjectCoordinatorDaemon:
         # Burst detector runs but its finding can't be materialized.
         # Disable stance to isolate v1A cap behavior.
         daemon._config = ProjectCoordinatorConfig(
-            max_findings_per_run=1, stance_enabled=False,
+            max_findings_per_run=1,
+            stance_enabled=False,
         )
         daemon._existing_keys.clear()
         daemon._ticks_since_resync = 0
@@ -567,15 +566,15 @@ class TestProjectCoordinatorDaemon:
         # to "system", so no dropout between them.
         dropout = [f for f in findings if f.category == "stalled_dropout"]
         for f in dropout:
-            assert "(system" not in f.details.get("contributor", ""), (
-                f"Malformed contributor name in dropout finding: {f.details}"
-            )
+            assert "(system" not in f.details.get(
+                "contributor", ""
+            ), f"Malformed contributor name in dropout finding: {f.details}"
         # New contributor findings should not contain "(system"
         new_contrib = [f for f in findings if f.category == "aware_new_contributor"]
         for f in new_contrib:
-            assert f.details.get("contributor") != "(system", (
-                f"Malformed contributor in new_contributor finding: {f.details}"
-            )
+            assert (
+                f.details.get("contributor") != "(system"
+            ), f"Malformed contributor in new_contributor finding: {f.details}"
 
 
 # ---------------------------------------------------------------------------
@@ -656,7 +655,9 @@ class TestStanceAdvisoryEmission:
                 ],
             )
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir, stance_enabled=False,
+            tmp_path,
+            threads_dir=threads_dir,
+            stance_enabled=False,
         )
         findings = daemon.tick()
         stance = self._stance_findings(findings)
@@ -688,9 +689,9 @@ class TestStanceAdvisoryEmission:
         findings2 = daemon.tick()
         stance2 = self._stance_findings(findings2)
         assert len(stance2) == 0, "Unchanged stance should be deduped"
-        assert daemon._last_stance_outcome != "emitted", (
-            f"Deduped tick must not report 'emitted', got {daemon._last_stance_outcome!r}"
-        )
+        assert (
+            daemon._last_stance_outcome != "emitted"
+        ), f"Deduped tick must not report 'emitted', got {daemon._last_stance_outcome!r}"
 
     def test_stance_replace_on_change(self, tmp_path, monkeypatch):
         """When advisory signature changes, new finding emitted."""
@@ -762,7 +763,9 @@ class TestStanceAdvisoryEmission:
             )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
         findings1 = daemon.tick()
-        planner1 = [f for f in self._stance_findings(findings1) if f.topic == "stance:planner"]
+        planner1 = [
+            f for f in self._stance_findings(findings1) if f.topic == "stance:planner"
+        ]
         assert len(planner1) >= 1, "tick 1 should emit L1 planner advisory (sig A)"
         fid_a = planner1[0].finding_id
 
@@ -778,7 +781,9 @@ class TestStanceAdvisoryEmission:
                 ],
             )
         findings2 = daemon.tick()
-        planner2 = [f for f in self._stance_findings(findings2) if f.topic == "stance:planner"]
+        planner2 = [
+            f for f in self._stance_findings(findings2) if f.topic == "stance:planner"
+        ]
         assert len(planner2) >= 1, "tick 2 should emit L2 planner advisory (sig B)"
         fid_b = planner2[0].finding_id
         assert fid_a != fid_b, "sig A → sig B should produce a different finding ID"
@@ -788,18 +793,24 @@ class TestStanceAdvisoryEmission:
             thread_dir = storage.get_thread_graph_dir(graph_dir, f"stalled-{i}")
             storage.atomic_write_jsonl(
                 thread_dir / "entries.jsonl",
-                [_entry(
-                    entry_type="Note", index=0, entry_id=f"E{i}0",
-                )],
+                [
+                    _entry(
+                        entry_type="Note",
+                        index=0,
+                        entry_id=f"E{i}0",
+                    )
+                ],
             )
             (thread_dir / "meta.json").write_text(
                 (thread_dir / "meta.json").read_text()
             )
         findings3 = daemon.tick()
-        planner3 = [f for f in self._stance_findings(findings3) if f.topic == "stance:planner"]
-        assert len(planner3) >= 1, (
-            "tick 3 (sig A again) must re-emit — fid_A must not be suppressed by stale dedup key"
-        )
+        planner3 = [
+            f for f in self._stance_findings(findings3) if f.topic == "stance:planner"
+        ]
+        assert (
+            len(planner3) >= 1
+        ), "tick 3 (sig A again) must re-emit — fid_A must not be suppressed by stale dedup key"
 
     def test_stance_removed_topic_not_in_same_tick(self, tmp_path, monkeypatch):
         """Removed topics must not affect stance computation in the same tick they are pruned.
@@ -827,13 +838,16 @@ class TestStanceAdvisoryEmission:
             )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
         findings1 = daemon.tick()
-        stance1 = [f for f in self._stance_findings(findings1) if f.topic == "stance:planner"]
+        stance1 = [
+            f for f in self._stance_findings(findings1) if f.topic == "stance:planner"
+        ]
         assert len(stance1) >= 1, "tick 1 should produce planner advisory"
 
         # Remove all stalled threads from graph — signals should clear this tick
         for i in range(3):
             thread_dir = storage.get_thread_graph_dir(graph_dir, f"stalled-{i}")
             import shutil
+
             shutil.rmtree(str(thread_dir))
 
         findings2 = daemon.tick()
@@ -884,7 +898,9 @@ class TestStanceAdvisoryEmission:
                 thread_dir / "entries.jsonl",
                 [
                     _entry(
-                        entry_type="Decision", index=0, entry_id=f"E{i}0",
+                        entry_type="Decision",
+                        index=0,
+                        entry_id=f"E{i}0",
                         timestamp=now_iso,
                     ),
                 ],
@@ -897,7 +913,8 @@ class TestStanceAdvisoryEmission:
         stance2 = self._stance_findings(findings2)
         # Should have tombstone for planner (level=0)
         tombstones = [
-            f for f in stance2
+            f
+            for f in stance2
             if f.topic == "stance:planner"
             and f.details.get("advisory", {}).get("level") == 0
         ]
@@ -918,7 +935,10 @@ class TestStanceAdvisoryEmission:
             "benign",
             entries=[
                 _entry(
-                    entry_type="Note", index=0, entry_id="E00", timestamp=now_iso,
+                    entry_type="Note",
+                    index=0,
+                    entry_id="E00",
+                    timestamp=now_iso,
                 ),
             ],
         )
@@ -1077,6 +1097,7 @@ class TestStanceAdvisoryEmission:
 
         # Remove thread from graph
         import shutil
+
         graph_dir = storage.get_graph_dir(threads_dir)
         thread_dir = storage.get_thread_graph_dir(graph_dir, "temp-topic")
         shutil.rmtree(thread_dir)
@@ -1149,16 +1170,21 @@ class TestStanceAdvisoryEmission:
             thread_dir = storage.get_thread_graph_dir(graph_dir, f"stalled-{i}")
             storage.atomic_write_jsonl(
                 thread_dir / "entries.jsonl",
-                [_entry(
-                    entry_type="Decision", index=0, entry_id=f"E{i}0",
-                    timestamp=now_iso,
-                )],
+                [
+                    _entry(
+                        entry_type="Decision",
+                        index=0,
+                        entry_id=f"E{i}0",
+                        timestamp=now_iso,
+                    )
+                ],
             )
             meta = thread_dir / "meta.json"
             meta.write_text(meta.read_text())
         findings3 = daemon.tick()
         tombstones = [
-            f for f in self._stance_findings(findings3)
+            f
+            for f in self._stance_findings(findings3)
             if f.topic == "stance:planner"
             and f.details.get("advisory", {}).get("level") == 0
         ]
@@ -1236,24 +1262,29 @@ class TestStanceAdvisoryEmission:
             thread_dir = storage.get_thread_graph_dir(graph_dir, f"stalled-{i}")
             storage.atomic_write_jsonl(
                 thread_dir / "entries.jsonl",
-                [_entry(
-                    entry_type="Decision", index=0, entry_id=f"E{i}0",
-                    timestamp=now_iso,
-                )],
+                [
+                    _entry(
+                        entry_type="Decision",
+                        index=0,
+                        entry_id=f"E{i}0",
+                        timestamp=now_iso,
+                    )
+                ],
             )
             (thread_dir / "meta.json").write_text(
                 (thread_dir / "meta.json").read_text()
             )
         findings3 = daemon.tick()
         tombstones = [
-            f for f in self._stance_findings(findings3)
+            f
+            for f in self._stance_findings(findings3)
             if f.topic == "stance:planner"
             and f.details.get("advisory", {}).get("level") == 0
         ]
         assert len(tombstones) >= 1
-        assert prior_fid in daemon._extras.cleared_stance_fids, (
-            "prior_fid must be tracked in cleared_stance_fids after tombstone"
-        )
+        assert (
+            prior_fid in daemon._extras.cleared_stance_fids
+        ), "prior_fid must be tracked in cleared_stance_fids after tombstone"
 
         # Simulate disk-based resync re-adding prior_fid to _existing_keys.
         # This is what happens when load_findings() reloads unacknowledged
@@ -1299,9 +1330,9 @@ class TestStanceAdvisoryEmission:
         planner4 = [
             f for f in self._stance_findings(findings4) if f.topic == "stance:planner"
         ]
-        assert len(planner4) >= 1, (
-            "Re-escalation must work even after resync reloads prior_fid from disk"
-        )
+        assert (
+            len(planner4) >= 1
+        ), "Re-escalation must work even after resync reloads prior_fid from disk"
 
     def test_empty_graph_clears_stance_state(self, tmp_path, monkeypatch):
         """When all thread topics disappear, stance state must be cleaned up.
@@ -1331,9 +1362,13 @@ class TestStanceAdvisoryEmission:
             )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
         findings1 = daemon.tick()
-        planner1 = [f for f in self._stance_findings(findings1) if f.topic == "stance:planner"]
+        planner1 = [
+            f for f in self._stance_findings(findings1) if f.topic == "stance:planner"
+        ]
         assert len(planner1) >= 1, "tick 1 should produce planner advisory"
-        assert daemon._extras.active_signals, "active_signals should be populated after tick 1"
+        assert (
+            daemon._extras.active_signals
+        ), "active_signals should be populated after tick 1"
 
         # Remove all thread directories from the graph — topics list will be empty
         for i in range(3):
@@ -1352,25 +1387,28 @@ class TestStanceAdvisoryEmission:
         # _last_stance_levels must show L0 for all roles after the empty-graph tick.
         # (The previous code returned before _emit_stance_advisories, leaving stale
         # levels from tick 1 in _last_stance_levels.)
-        assert daemon._last_stance_levels, (
-            "_last_stance_levels must be populated after empty-graph tick"
-        )
+        assert (
+            daemon._last_stance_levels
+        ), "_last_stance_levels must be populated after empty-graph tick"
         for role, level in daemon._last_stance_levels.items():
-            assert level == 0, (
-                f"_last_stance_levels[{role!r}] must be 0 after all topics removed, got {level}"
-            )
+            assert (
+                level == 0
+            ), f"_last_stance_levels[{role!r}] must be 0 after all topics removed, got {level}"
 
         # A tombstone (L0 advisory) should have been emitted for planner
         tombstones = [
-            f for f in self._stance_findings(findings2)
+            f
+            for f in self._stance_findings(findings2)
             if f.topic == "stance:planner"
             and f.details.get("advisory", {}).get("level") == 0
         ]
-        assert len(tombstones) >= 1, (
-            "Empty-graph tick must emit tombstone for previously-elevated planner stance"
-        )
+        assert (
+            len(tombstones) >= 1
+        ), "Empty-graph tick must emit tombstone for previously-elevated planner stance"
 
-    def test_tombstone_resync_does_not_suppress_second_tombstone(self, tmp_path, monkeypatch):
+    def test_tombstone_resync_does_not_suppress_second_tombstone(
+        self, tmp_path, monkeypatch
+    ):
         """L1→L0→L1→(resync re-adds tombstone fid)→L0 — second tombstone must still emit.
 
         The tombstone fid (dedup_signature="cleared") is discarded from _existing_keys
@@ -1393,7 +1431,9 @@ class TestStanceAdvisoryEmission:
         _write_graph_thread(
             threads_dir,
             "base-topic",
-            entries=[_entry(entry_type="Note", index=0, entry_id="E00", timestamp=now_iso)],
+            entries=[
+                _entry(entry_type="Note", index=0, entry_id="E00", timestamp=now_iso)
+            ],
         )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
         daemon.tick()
@@ -1410,11 +1450,14 @@ class TestStanceAdvisoryEmission:
                 ],
             )
         findings2 = daemon.tick()
-        planner2 = [f for f in self._stance_findings(findings2) if f.topic == "stance:planner"]
+        planner2 = [
+            f for f in self._stance_findings(findings2) if f.topic == "stance:planner"
+        ]
         assert len(planner2) >= 1, "tick 2 must produce planner L1 advisory"
 
         # Capture tombstone fid (dedup_signature="cleared") for the planner role
         from watercooler_mcp.daemons.project_coordinator import build_finding_id
+
         tombstone_fid = build_finding_id(
             scope_id=daemon._scope_id,
             daemon_name=daemon.name,
@@ -1429,13 +1472,24 @@ class TestStanceAdvisoryEmission:
             thread_dir = storage.get_thread_graph_dir(graph_dir, f"stalled-{i}")
             storage.atomic_write_jsonl(
                 thread_dir / "entries.jsonl",
-                [_entry(entry_type="Decision", index=0, entry_id=f"E{i}0", timestamp=now_iso)],
+                [
+                    _entry(
+                        entry_type="Decision",
+                        index=0,
+                        entry_id=f"E{i}0",
+                        timestamp=now_iso,
+                    )
+                ],
             )
-            (thread_dir / "meta.json").write_text((thread_dir / "meta.json").read_text())
+            (thread_dir / "meta.json").write_text(
+                (thread_dir / "meta.json").read_text()
+            )
         findings3 = daemon.tick()
         tombstones3 = [
-            f for f in self._stance_findings(findings3)
-            if f.topic == "stance:planner" and f.details.get("advisory", {}).get("level") == 0
+            f
+            for f in self._stance_findings(findings3)
+            if f.topic == "stance:planner"
+            and f.details.get("advisory", {}).get("level") == 0
         ]
         assert len(tombstones3) >= 1, "tick 3 must emit planner tombstone (L0)"
 
@@ -1450,13 +1504,17 @@ class TestStanceAdvisoryEmission:
                     _entry(entry_type="Note", index=2, entry_id=f"E{i}2"),
                 ],
             )
-            (thread_dir / "meta.json").write_text((thread_dir / "meta.json").read_text())
+            (thread_dir / "meta.json").write_text(
+                (thread_dir / "meta.json").read_text()
+            )
         findings4 = daemon.tick()
-        planner4 = [f for f in self._stance_findings(findings4) if f.topic == "stance:planner"]
+        planner4 = [
+            f for f in self._stance_findings(findings4) if f.topic == "stance:planner"
+        ]
         assert len(planner4) >= 1, "tick 4 must re-escalate planner advisory"
-        assert tombstone_fid in daemon._extras.cleared_stance_fids, (
-            "tombstone_fid must be in cleared_stance_fids after L0→L1 escalation"
-        )
+        assert (
+            tombstone_fid in daemon._extras.cleared_stance_fids
+        ), "tombstone_fid must be in cleared_stance_fids after L0→L1 escalation"
 
         # Tick 5: L0 again — simulate resync re-adding tombstone_fid from disk,
         # then clear stalled threads. Second tombstone must still emit.
@@ -1475,9 +1533,18 @@ class TestStanceAdvisoryEmission:
             thread_dir = storage.get_thread_graph_dir(graph_dir, f"stalled-{i}")
             storage.atomic_write_jsonl(
                 thread_dir / "entries.jsonl",
-                [_entry(entry_type="Decision", index=0, entry_id=f"E{i}0", timestamp=now_iso)],
+                [
+                    _entry(
+                        entry_type="Decision",
+                        index=0,
+                        entry_id=f"E{i}0",
+                        timestamp=now_iso,
+                    )
+                ],
             )
-            (thread_dir / "meta.json").write_text((thread_dir / "meta.json").read_text())
+            (thread_dir / "meta.json").write_text(
+                (thread_dir / "meta.json").read_text()
+            )
 
         with patch(
             "watercooler_mcp.daemons.project_coordinator.load_findings",
@@ -1486,12 +1553,14 @@ class TestStanceAdvisoryEmission:
             findings5 = daemon.tick()
 
         tombstones5 = [
-            f for f in self._stance_findings(findings5)
-            if f.topic == "stance:planner" and f.details.get("advisory", {}).get("level") == 0
+            f
+            for f in self._stance_findings(findings5)
+            if f.topic == "stance:planner"
+            and f.details.get("advisory", {}).get("level") == 0
         ]
-        assert len(tombstones5) >= 1, (
-            "Second tombstone must emit even after resync re-adds tombstone_fid from disk"
-        )
+        assert (
+            len(tombstones5) >= 1
+        ), "Second tombstone must emit even after resync re-adds tombstone_fid from disk"
 
 
 # ---------------------------------------------------------------------------
@@ -1504,7 +1573,9 @@ class TestCorpusSignalTransport:
     through CoordinatorExtras.corpus_signal_inputs into stance coord_counts."""
 
     def test_corpus_signal_inputs_populated_by_new_contributor_branch(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         """2.1.a: two distinct new contributors → count == 2."""
         monkeypatch.setattr(
@@ -1523,9 +1594,7 @@ class TestCorpusSignalTransport:
         )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
         daemon.tick()
-        assert (
-            daemon._extras.corpus_signal_inputs.get("aware_new_contributor") == 2
-        )
+        assert daemon._extras.corpus_signal_inputs.get("aware_new_contributor") == 2
 
     def test_corpus_signal_inputs_cleared_each_tick(self, tmp_path, monkeypatch):
         """2.1.b: tick 1 has new contributors, tick 2 has none → empty dict."""
@@ -1540,15 +1609,15 @@ class TestCorpusSignalTransport:
         )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
         daemon.tick()
-        assert (
-            daemon._extras.corpus_signal_inputs.get("aware_new_contributor") == 1
-        )
+        assert daemon._extras.corpus_signal_inputs.get("aware_new_contributor") == 1
         # Tick 2: no new threads, no new contributors
         daemon.tick()
         assert "aware_new_contributor" not in daemon._extras.corpus_signal_inputs
 
     def test_emit_stance_advisories_merges_corpus_counts(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         """2.1.c: corpus counts propagate into stance signals
         (coordinator_new_contributor_count) and elevate planner."""
@@ -1572,7 +1641,249 @@ class TestCorpusSignalTransport:
         assert adv["level"] >= 1
         # Action routed to aware_new_contributor category
         nc_actions = [
-            a for a in adv["actions"]
+            a
+            for a in adv["actions"]
             if a.get("arguments", {}).get("category") == "aware_new_contributor"
         ]
         assert len(nc_actions) == 1
+
+
+# ---------------------------------------------------------------------------
+# v1B follow-on: coordinator_lead tests
+# ---------------------------------------------------------------------------
+
+
+def _write_stalled_open_loop_thread(
+    threads_dir: Path, topic: str = "stalled-topic"
+) -> None:
+    """Write a thread that produces exactly one stalled_open_loop finding.
+
+    Uses the same default (2024-04-01) timestamps as _entry() — well past
+    OPEN_LOOP_MIN_STALE_DAYS when the test suite runs in 2026+. No burst,
+    no role concentration, no dropout.
+    """
+    _write_graph_thread(
+        threads_dir,
+        topic,
+        entries=[
+            _entry(entry_type="Note", index=0, entry_id=f"{topic}-E01"),
+            _entry(entry_type="Plan", index=1, entry_id=f"{topic}-E02"),
+            _entry(entry_type="Note", index=2, entry_id=f"{topic}-E03"),
+        ],
+    )
+
+
+class TestCoordinatorLeads:
+    """v1B follow-on: coordinator_lead findings layered onto v1A detections."""
+
+    def test_coordinator_lead_not_in_active_signals(self, tmp_path, monkeypatch):
+        """coordinator_lead must never appear in active_signals (pollutes stance)."""
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        _write_stalled_open_loop_thread(threads_dir)
+        daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
+        daemon.tick()
+        for topic, sig_entry in daemon._extras.active_signals.items():
+            assert (
+                "coordinator_lead" not in sig_entry.categories
+            ), f"coordinator_lead leaked into active_signals for topic '{topic}'"
+
+    def test_coordinator_lead_emitted_for_stalled_open_loop(
+        self, tmp_path, monkeypatch
+    ):
+        """Base case: stalled_open_loop triggers exactly one coordinator_lead."""
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        _write_stalled_open_loop_thread(threads_dir)
+        daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
+        findings = daemon.tick()
+        leads = [f for f in findings if f.category == "coordinator_lead"]
+        assert len(leads) == 1
+        lead = leads[0]
+        assert lead.topic == "stalled-topic"
+        # Lead body carries the nested CoordinatorLead as a dict
+        payload = lead.details["lead"]
+        assert payload["source_category"] == "stalled_open_loop"
+        assert payload["source_topic"] == "stalled-topic"
+        assert payload["suggested_action"]["tool"] == "watercooler_read_thread"
+        # Dedup signature is per-finding, prefixed with coordinator_lead|
+        assert lead.finding_id  # deterministic, built from signature
+        assert daemon._last_tick_leads == 1
+
+    def test_coordinator_lead_skipped_when_thread_unchanged(
+        self, tmp_path, monkeypatch
+    ):
+        """Unchanged thread short-circuits at is_thread_changed()."""
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        _write_stalled_open_loop_thread(threads_dir)
+        daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
+
+        tick1 = daemon.tick()
+        assert len([f for f in tick1 if f.category == "coordinator_lead"]) == 1
+
+        tick2 = daemon.tick()  # same data, no thread change → detectors skipped
+        assert [f for f in tick2 if f.category == "coordinator_lead"] == []
+
+    def test_coordinator_lead_deduped_when_thread_mutates(self, tmp_path, monkeypatch):
+        """Mutated thread re-runs detectors; dedup silences the re-minted lead."""
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        _write_stalled_open_loop_thread(threads_dir)
+        daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
+
+        tick1 = daemon.tick()
+        assert len([f for f in tick1 if f.category == "coordinator_lead"]) == 1
+
+        # Append a Note entry — flips is_thread_changed() to True, but keeps
+        # stalled_open_loop's dedup_signature stable (it depends on topic only).
+        graph_dir = storage.get_graph_dir(threads_dir)
+        thread_dir = storage.get_thread_graph_dir(graph_dir, "stalled-topic")
+        existing = [
+            _entry(entry_type="Note", index=0, entry_id="stalled-topic-E01"),
+            _entry(entry_type="Plan", index=1, entry_id="stalled-topic-E02"),
+            _entry(entry_type="Note", index=2, entry_id="stalled-topic-E03"),
+            _entry(entry_type="Note", index=3, entry_id="stalled-topic-E04"),
+        ]
+        storage.atomic_write_jsonl(thread_dir / "entries.jsonl", existing)
+        meta_file = thread_dir / "meta.json"
+        meta_file.write_text(meta_file.read_text())  # bump mtime
+
+        tick2 = daemon.tick()
+        assert [f for f in tick2 if f.category == "coordinator_lead"] == []
+
+    def test_leads_do_not_starve_later_thread_v1a_findings(self, tmp_path, monkeypatch):
+        """Two-phase cap ordering: v1A from all threads emits before any lead."""
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        for i in range(3):
+            _write_stalled_open_loop_thread(threads_dir, topic=f"thread-{i}")
+        daemon = _make_daemon(
+            tmp_path,
+            threads_dir=threads_dir,
+            max_findings_per_run=3,
+            leads_enabled=True,
+            stance_enabled=False,
+        )
+        findings = daemon.tick()
+        stalled = [f for f in findings if f.category == "stalled_open_loop"]
+        leads = [f for f in findings if f.category == "coordinator_lead"]
+        assert len(stalled) == 3, (
+            "expected 3 stalled_open_loop findings; fixture may have "
+            "triggered additional v1A categories"
+        )
+        assert leads == [], "leads starved v1A findings — two-phase cap ordering broken"
+
+    def test_leads_drain_after_corpus_findings(self, tmp_path, monkeypatch):
+        """Corpus findings (aware_new_contributor) take priority over leads."""
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        _write_stalled_open_loop_thread(threads_dir, topic="stalled-a")
+        # A fresh contributor on a separate thread fires aware_new_contributor
+        _write_graph_thread(
+            threads_dir,
+            "newbie-thread",
+            entries=[_entry(agent="Eve", index=0, entry_id="newbie-E01")],
+        )
+        daemon = _make_daemon(
+            tmp_path,
+            threads_dir=threads_dir,
+            max_findings_per_run=2,
+            leads_enabled=True,
+            stance_enabled=False,
+        )
+        findings = daemon.tick()
+        categories = {f.category for f in findings}
+        assert "stalled_open_loop" in categories
+        assert "aware_new_contributor" in categories
+        assert "coordinator_lead" not in categories
+
+    def test_leads_disabled_via_config(self, tmp_path, monkeypatch):
+        """leads_enabled=False suppresses all coordinator_lead findings."""
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        _write_stalled_open_loop_thread(threads_dir)
+        daemon = _make_daemon(tmp_path, threads_dir=threads_dir, leads_enabled=False)
+        findings = daemon.tick()
+        assert all(f.category != "coordinator_lead" for f in findings)
+        assert daemon._last_tick_leads == 0
+
+    def test_status_summary_exposes_leads_fields(self, tmp_path, monkeypatch):
+        """status_summary() includes leads_enabled + last_tick_leads."""
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        _write_stalled_open_loop_thread(threads_dir)
+        daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
+        daemon.tick()
+        summary = daemon.status_summary()
+        assert summary["leads_enabled"] is True
+        assert summary["last_tick_leads"] == 1
+
+    def test_lead_remints_after_cap_lift(self, tmp_path, monkeypatch):
+        """Dropped leads re-mint on the next tick when the cap is lifted.
+
+        Regression for a bug where threads whose leads were dropped in Phase C
+        had their checkpoint advanced anyway, so the next tick's
+        is_thread_changed() gate skipped them and the lead was lost forever
+        unless the thread physically mutated. Fix: defer checkpoint commit
+        until after Phase C and hold back any topic whose lead didn't land.
+        """
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        _write_stalled_open_loop_thread(threads_dir, topic="stalled-a")
+        _write_stalled_open_loop_thread(threads_dir, topic="stalled-b")
+        daemon = _make_daemon(
+            tmp_path,
+            threads_dir=threads_dir,
+            max_findings_per_run=2,
+            leads_enabled=True,
+            stance_enabled=False,
+        )
+
+        # Tick 1: cap=2 fits both v1A findings; leads dropped in Phase C.
+        tick1 = daemon.tick()
+        stalled1 = [f for f in tick1 if f.category == "stalled_open_loop"]
+        leads1 = [f for f in tick1 if f.category == "coordinator_lead"]
+        assert len(stalled1) == 2
+        assert leads1 == [], "expected Phase C to drop both leads at cap=2"
+        assert daemon._last_tick_leads == 0
+
+        # Tick 2: lift the cap without mutating threads. The checkpoint for
+        # each affected topic must have been held back so is_thread_changed()
+        # still returns True on the rescan — without that, the unchanged-thread
+        # gate would skip both threads and the leads would be lost forever.
+        daemon._config = ProjectCoordinatorConfig(
+            max_findings_per_run=10,
+            leads_enabled=True,
+            stance_enabled=False,
+        )
+        tick2 = daemon.tick()
+        stalled2 = [f for f in tick2 if f.category == "stalled_open_loop"]
+        leads2 = [f for f in tick2 if f.category == "coordinator_lead"]
+        # v1A stalled is dedup-blocked (fids already in _existing_keys from tick 1).
+        assert stalled2 == []
+        # Both leads re-mint and land on the rescan.
+        lead_topics = {f.topic for f in leads2}
+        assert lead_topics == {
+            "stalled-a",
+            "stalled-b",
+        }, f"leads failed to re-mint after cap lift; got {lead_topics}"
+        assert daemon._last_tick_leads == 2

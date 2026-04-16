@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastmcp import Context
+
+log = logging.getLogger(__name__)
 
 # Module-level references to registered tools (populated by register_daemon_tools)
 daemon_status = None
@@ -71,7 +74,7 @@ def _daemon_status_impl(
         daemon: Optional daemon name. Empty returns all daemons.
         trigger: If True, wake the target daemon before returning status.
     """
-    from ..daemons import get_daemon_runtime, get_daemon_manager, ensure_hosted_scope_for_current_context
+    from ..daemons import get_daemon_runtime, ensure_hosted_scope_for_current_context
     from ..daemons.hosted_coordinator import HostedDaemonCoordinator
 
     # Ensure daemon scope exists for hosted/premium callers
@@ -79,15 +82,19 @@ def _daemon_status_impl(
 
     runtime = get_daemon_runtime()
     if runtime is None:
-        return json.dumps({
-            "status": "not_initialized",
-            "message": "Daemon manager not initialized",
-        }, indent=2)
+        return json.dumps(
+            {
+                "status": "not_initialized",
+                "message": "Daemon manager not initialized",
+            },
+            indent=2,
+        )
 
     # Hosted coordinator: aggregate status across scopes
     if isinstance(runtime, HostedDaemonCoordinator):
         from ..context import get_effective_context
         from ..daemons.telemetry import get_telemetry
+
         eff_ctx = get_effective_context()
         scope_id = eff_ctx.scope_id if eff_ctx else None
         result = runtime.status(
@@ -107,11 +114,14 @@ def _daemon_status_impl(
     if daemon:
         d = manager.get_daemon(daemon)
         if d is None:
-            return json.dumps({
-                "status": "error",
-                "message": f"Daemon '{daemon}' not found",
-                "available": manager.daemon_names,
-            }, indent=2)
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": f"Daemon '{daemon}' not found",
+                    "available": manager.daemon_names,
+                },
+                indent=2,
+            )
 
     # 2. Handle trigger — runs after validation so d is safe to use.
     triggered = False
@@ -130,6 +140,7 @@ def _daemon_status_impl(
 
     # 4. Attach service telemetry (call counts, tokens, cache stats).
     from ..daemons.telemetry import get_telemetry
+
     telemetry = get_telemetry()
 
     # 5. When trigger was requested, wrap with trigger metadata so
@@ -157,6 +168,8 @@ def _daemon_findings_impl(
     topic: str = "",
     limit: int = 50,
     unacknowledged_only: bool = False,
+    enrich: bool = False,
+    code_path: str = ".",
 ) -> str:
     """Query daemon findings with optional filters.
 
@@ -169,6 +182,13 @@ def _daemon_findings_impl(
         topic: Filter by thread topic.
         limit: Maximum findings to return (default 50).
         unacknowledged_only: Only return unacknowledged findings.
+        enrich: When True, overlay S1/S2/S3 context onto coordinator_lead
+            findings before returning (hygiene tags, decision candidates,
+            pulse dimension scores).  Has no effect when no coordinator_lead
+            findings are present in the result.  Defaults to False.
+        code_path: Path to the code repository root (default: current
+            directory).  Used to derive repo_key for S3 pulse-context
+            enrichment.  Ignored when enrich=False.
     """
     from ..daemons import get_daemon_runtime, ensure_hosted_scope_for_current_context
     from ..daemons.hosted_coordinator import HostedDaemonCoordinator
@@ -178,11 +198,14 @@ def _daemon_findings_impl(
 
     runtime = get_daemon_runtime()
     if runtime is None:
-        return json.dumps({
-            "status": "not_initialized",
-            "message": "Daemon manager not initialized",
-            "findings": [],
-        }, indent=2)
+        return json.dumps(
+            {
+                "status": "not_initialized",
+                "message": "Daemon manager not initialized",
+                "findings": [],
+            },
+            indent=2,
+        )
 
     # Clamp limit
     limit = max(1, min(limit, 500))
@@ -190,6 +213,7 @@ def _daemon_findings_impl(
     try:
         if isinstance(runtime, HostedDaemonCoordinator):
             from ..context import get_effective_context
+
             eff_ctx = get_effective_context()
             scope_id = eff_ctx.scope_id if eff_ctx else None
             findings = runtime.get_findings(
@@ -210,17 +234,133 @@ def _daemon_findings_impl(
                 topic=topic or None,
                 unacknowledged_only=unacknowledged_only,
             )
-    except Exception as exc:
-        return json.dumps({
-            "status": "error",
-            "message": str(exc),
-            "findings": [],
-        }, indent=2)
+    except Exception:
+        log.warning("_daemon_findings_impl: findings load failed", exc_info=True)
+        return json.dumps(
+            {
+                "status": "error",
+                "message": "Failed to load findings. Check server logs for details.",
+                "findings": [],
+            },
+            indent=2,
+        )
 
-    return json.dumps({
-        "count": len(findings),
-        "findings": [f.to_dict() for f in findings],
-    }, indent=2)
+    results = [f.to_dict() for f in findings]
+    enrich_stats: dict[str, Any] | None = None
+
+    if enrich and any(r.get("category") == "coordinator_lead" for r in results):
+        from ..config import _discover_git
+        from watercooler.pulse_snapshot_lib import derive_repo_key
+        from .coordinator_leads import enrich_leads
+
+        # Resolve repo_key from the filesystem path (mirrors _pulse_snapshot_impl).
+        # Guard against non-directory code_path before invoking git discovery.
+        code_root = Path(code_path).resolve()
+        if not code_root.is_dir():
+            log.debug(
+                "_daemon_findings_impl: code_path %r is not a directory; "
+                "skipping enrichment",
+                code_path,
+            )
+            _em = "hosted" if isinstance(runtime, HostedDaemonCoordinator) else "local"
+            enrich_stats = {
+                "attempted": 0,
+                "succeeded": 0,
+                "skipped": 3 if _em == "hosted" else 0,
+                "mode": _em,
+                "error": True,
+            }
+        else:
+            git_info = _discover_git(code_root)
+            if git_info.root:
+                code_root = git_info.root
+            rk = derive_repo_key(code_root)
+
+            # Resolve namespace: use the in-process coordinator daemon's namespace
+            # when available; fall back to scope_id derived from request context.
+            # In hosted mode, a context resolution failure skips enrichment rather
+            # than silently falling back to an empty namespace.
+            namespace = ""
+            enrich_ok = True
+            if isinstance(runtime, HostedDaemonCoordinator):
+                try:
+                    from ..context import get_effective_context
+
+                    eff_ctx = get_effective_context()
+                    if eff_ctx and eff_ctx.user_id and eff_ctx.repo:
+                        namespace = f"{eff_ctx.user_id}:{eff_ctx.repo}"
+                    else:
+                        log.warning(
+                            "_daemon_findings_impl: hosted context missing "
+                            "user_id/repo; skipping enrichment"
+                        )
+                        enrich_ok = False
+                except Exception:
+                    log.warning(
+                        "_daemon_findings_impl: failed to resolve hosted context; "
+                        "skipping enrichment",
+                        exc_info=True,
+                    )
+                    enrich_ok = False
+
+                if not enrich_ok:
+                    enrich_stats = {
+                        "attempted": 0,
+                        "succeeded": 0,
+                        "skipped": 3,
+                        "mode": "hosted",
+                        "error": True,
+                    }
+            else:
+                coord = runtime.get_daemon("project_coordinator")
+                if coord is not None:
+                    namespace = getattr(coord, "state_namespace", "")
+
+            enrich_mode = (
+                "hosted" if isinstance(runtime, HostedDaemonCoordinator) else "local"
+            )
+            if enrich_ok:
+                try:
+                    results, enrich_stats = enrich_leads(
+                        results,
+                        namespace=namespace,
+                        repo_key=rk,
+                        runtime=runtime,
+                    )
+                except Exception:
+                    # Enrichment failure is non-fatal; return raw results.
+                    log.warning(
+                        "_daemon_findings_impl: enrich_leads failed", exc_info=True
+                    )
+                    enrich_stats = {
+                        "attempted": 0 if enrich_mode == "hosted" else 3,
+                        "succeeded": 0,
+                        "skipped": 3 if enrich_mode == "hosted" else 0,
+                        "mode": enrich_mode,
+                        "error": True,
+                    }
+
+    elif enrich:
+        # enrich=True but no coordinator_lead findings — emit zero-count stats
+        # so callers always receive enrichment_stats when they asked for enrichment.
+        enrich_mode = (
+            "hosted" if isinstance(runtime, HostedDaemonCoordinator) else "local"
+        )
+        enrich_stats = {
+            "attempted": 0,
+            "succeeded": 0,
+            "skipped": 3 if enrich_mode == "hosted" else 0,
+            "mode": enrich_mode,
+        }
+
+    response: dict[str, Any] = {
+        "count": len(results),
+        "findings": results,
+    }
+    if enrich and enrich_stats is not None:
+        response["enrichment_stats"] = enrich_stats
+
+    return json.dumps(response, indent=2)
 
 
 def _pulse_snapshot_impl(
@@ -293,6 +433,7 @@ def _pulse_snapshot_impl(
     config_enabled: bool | None = None
     try:
         from watercooler.config_loader import load_config
+
         ps_config = load_config(project_path=code_root).mcp.daemons.pulse_snapshot
         config_enabled = ps_config.enabled
     except Exception:
@@ -309,6 +450,7 @@ def _pulse_snapshot_impl(
     else:
         try:
             from ..context import get_effective_context
+
             ctx = get_effective_context()
             if ctx and ctx.user_id and ctx.repo:
                 namespace = f"{ctx.user_id}:{ctx.repo}"
@@ -316,7 +458,9 @@ def _pulse_snapshot_impl(
             pass
 
     # 1. Primary: in-process daemon (freshest)
-    snapshot: dict[str, Any] | None = daemon.get_snapshot(repo_key) if daemon is not None else None
+    snapshot: dict[str, Any] | None = (
+        daemon.get_snapshot(repo_key) if daemon is not None else None
+    )
     dimension_scores: dict[str, Any] | None = (
         daemon.get_dimension_scores(repo_key) if daemon is not None else None
     )
@@ -338,19 +482,26 @@ def _pulse_snapshot_impl(
         if config_enabled is False:
             return json.dumps({"status": "unavailable", "reason": "disabled"}, indent=2)
         if manager is None:
-            return json.dumps({"status": "unavailable", "reason": "daemon_not_running"}, indent=2)
+            return json.dumps(
+                {"status": "unavailable", "reason": "daemon_not_running"}, indent=2
+            )
         if daemon is None:
             # Daemon not in this process but feature not disabled — cross-process case
             # with no checkpoint data yet.
-            return json.dumps({"status": "unavailable", "reason": "no_snapshot"}, indent=2)
+            return json.dumps(
+                {"status": "unavailable", "reason": "no_snapshot"}, indent=2
+            )
         # Daemon running but hasn't ticked or wrong repo_key
         daemon_summary = daemon.status_summary()
-        return json.dumps({
-            "status": "unavailable",
-            "reason": "no_snapshot",
-            "daemon_repo_key": daemon_summary.get("repo_key", ""),
-            "requested_repo_key": repo_key,
-        }, indent=2)
+        return json.dumps(
+            {
+                "status": "unavailable",
+                "reason": "no_snapshot",
+                "daemon_repo_key": daemon_summary.get("repo_key", ""),
+                "requested_repo_key": repo_key,
+            },
+            indent=2,
+        )
 
     # 4. Return snapshot (sanitized to strip absolute paths)
     sanitized = _sanitize_snapshot(snapshot)
@@ -378,5 +529,9 @@ def register_daemon_tools(mcp) -> None:
     global daemon_status, daemon_findings, pulse_snapshot_tool
 
     daemon_status = mcp.tool(name="watercooler_daemon_status")(_daemon_status_impl)
-    daemon_findings = mcp.tool(name="watercooler_daemon_findings")(_daemon_findings_impl)
-    pulse_snapshot_tool = mcp.tool(name="watercooler_pulse_snapshot")(_pulse_snapshot_impl)
+    daemon_findings = mcp.tool(name="watercooler_daemon_findings")(
+        _daemon_findings_impl
+    )
+    pulse_snapshot_tool = mcp.tool(name="watercooler_pulse_snapshot")(
+        _pulse_snapshot_impl
+    )

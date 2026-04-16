@@ -930,48 +930,6 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
         except Exception as e:
             status_lines.append(f"\nGitHub: Error - {e}")
 
-        # Check PostCompact hook presence
-        try:
-            import json as _json
-
-            def _settings_has_pulse_hook(path: Path) -> bool:
-                if not path.exists():
-                    return False
-                try:
-                    data = _json.loads(path.read_text(encoding="utf-8"))
-                except Exception:
-                    return False
-                hooks = data.get("hooks", {}) if isinstance(data, dict) else {}
-                pc = hooks.get("PostCompact", []) if isinstance(hooks, dict) else []
-                if not isinstance(pc, list):
-                    return False
-                for entry in pc:
-                    if isinstance(entry, dict):
-                        cmd = entry.get("command", "")
-                        if "capture_theme" in cmd or "watercooler-capture-theme" in cmd:
-                            return True
-                        for sub in entry.get("hooks", []):
-                            if isinstance(sub, dict):
-                                sub_cmd = sub.get("command", "")
-                                if "capture_theme" in sub_cmd or "watercooler-capture-theme" in sub_cmd:
-                                    return True
-                return False
-
-            claude_dir = Path.home() / ".claude"
-            hook_ok = (
-                _settings_has_pulse_hook(claude_dir / "settings.json")
-                or _settings_has_pulse_hook(claude_dir / "settings.local.json")
-            )
-            status_lines.extend([
-                "",
-                "PostCompact Hook:",
-                f"  Status: {'configured ✓' if hook_ok else 'not configured'}",
-            ])
-            if not hook_ok:
-                status_lines.append("  → Run: watercooler setup-pulse-hook")
-        except Exception as e:
-            status_lines.append(f"\nPostCompact Hook: Error - {e}")
-
         return _format_warnings_for_response("\n".join(status_lines))
     except Exception as e:
         return _format_warnings_for_response(f"Watercooler MCP Server\nStatus: Error\nError: {str(e)}")

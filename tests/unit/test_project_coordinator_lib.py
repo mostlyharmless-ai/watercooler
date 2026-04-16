@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from watercooler.project_coordinator_lib import (
     BURST_MULTIPLIER,
     NEW_CONTRIBUTOR_PRUNE_DAYS,
@@ -9,6 +11,7 @@ from watercooler.project_coordinator_lib import (
     ROLE_CONCENTRATION_THRESHOLD,
     BurstBaseline,
     CoordinatorExtras,
+    CoordinatorFinding,
     EntryView,
     detect_aware_burst,
     detect_new_contributors,
@@ -16,7 +19,9 @@ from watercooler.project_coordinator_lib import (
     detect_stalled_dropout,
     detect_stalled_open_loops,
     entries_to_views,
+    generate_leads_for_thread,
 )
+from watercooler.pulse_stance_lib import AdvisoryAction, CoordinatorLead
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -211,7 +216,12 @@ class TestStalledOpenLoop:
             _entry(entry_type="Note", index=2, timestamp=recent_ts),
         ]
         finding = detect_stalled_open_loops(
-            entries, "my-thread", "OPEN", set(), set(), tick_time=_NOW,
+            entries,
+            "my-thread",
+            "OPEN",
+            set(),
+            set(),
+            tick_time=_NOW,
         )
         assert finding is None
 
@@ -224,7 +234,12 @@ class TestStalledOpenLoop:
             _entry(entry_type="Note", index=2, timestamp=old_ts),
         ]
         finding = detect_stalled_open_loops(
-            entries, "my-thread", "OPEN", set(), set(), tick_time=_NOW,
+            entries,
+            "my-thread",
+            "OPEN",
+            set(),
+            set(),
+            tick_time=_NOW,
         )
         assert finding is not None
         assert "days_stale" in finding.details
@@ -238,7 +253,12 @@ class TestStalledOpenLoop:
             _entry(entry_type="Note", index=2, timestamp=""),
         ]
         finding = detect_stalled_open_loops(
-            entries, "my-thread", "OPEN", set(), set(), tick_time=_NOW,
+            entries,
+            "my-thread",
+            "OPEN",
+            set(),
+            set(),
+            tick_time=_NOW,
         )
         assert finding is not None
 
@@ -251,7 +271,11 @@ class TestStalledOpenLoop:
             _entry(entry_type="Note", index=2, timestamp=recent_ts),
         ]
         finding = detect_stalled_open_loops(
-            entries, "my-thread", "OPEN", set(), set(),
+            entries,
+            "my-thread",
+            "OPEN",
+            set(),
+            set(),
         )
         assert finding is not None  # No staleness gate without tick_time
 
@@ -622,3 +646,406 @@ class TestRoleConcentration:
         finding = detect_role_concentration(entries, "topic-y", "OPEN")
         assert finding is not None
         assert finding.dedup_signature == "aware_role_concentration|topic-y|planner"
+
+
+# ---------------------------------------------------------------------------
+# Coordinator leads (v1B follow-on)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateLeadsForThread:
+    """generate_leads_for_thread: one lead per triggering v1A finding."""
+
+    def test_stalled_open_loop_generates_lead(self) -> None:
+        cf = CoordinatorFinding(
+            category="stalled_open_loop",
+            topic="test-thread",
+            severity="warning",
+            message="Thread has open plan",
+            details={"plan_count": 2, "days_stale": 10.0},
+            dedup_signature="stalled_open_loop|test-thread",
+        )
+        leads = generate_leads_for_thread([cf])
+        assert len(leads) == 1
+        lead_cf = leads[0]
+        assert lead_cf.category == "coordinator_lead"
+        assert lead_cf.topic == "test-thread"
+        assert lead_cf.severity == "warning"
+        assert (
+            lead_cf.dedup_signature == "coordinator_lead|stalled_open_loop|test-thread"
+        )
+        lead = CoordinatorLead.from_dict(lead_cf.details["lead"])
+        assert lead.source_category == "stalled_open_loop"
+        assert lead.source_topic == "test-thread"
+        assert "2 Plan entries" in lead.summary
+        assert "10 days stale" in lead.summary
+        assert lead.suggested_action is not None
+        assert lead.suggested_action.tool == "watercooler_read_thread"
+        assert lead.suggested_action.arguments == {
+            "topic": "test-thread",
+            "summary_only": True,
+        }
+        assert lead.relevance_tags == ("implementer", "pm")
+        assert lead.t2_context is None
+
+    def test_stalled_open_loop_without_days_stale(self) -> None:
+        cf = CoordinatorFinding(
+            category="stalled_open_loop",
+            topic="t",
+            severity="warning",
+            message="m",
+            details={"plan_count": 3},  # days_stale absent
+            dedup_signature="stalled_open_loop|t",
+        )
+        leads = generate_leads_for_thread([cf])
+        assert len(leads) == 1
+        lead = CoordinatorLead.from_dict(leads[0].details["lead"])
+        assert "3 Plan entries" in lead.summary
+        assert "days stale" not in lead.summary
+
+    def test_aware_new_contributor_does_not_generate_lead(self) -> None:
+        cf = CoordinatorFinding(
+            category="aware_new_contributor",
+            topic="test-thread",
+            severity="info",
+            message="New contributor",
+            details={"contributor": "alice"},
+            dedup_signature="aware_new_contributor|alice|new|2026-04-13",
+        )
+        assert generate_leads_for_thread([cf]) == []
+
+    def test_multiple_dropout_contributors_produce_separate_leads(self) -> None:
+        cf_alice = CoordinatorFinding(
+            category="stalled_dropout",
+            topic="my-thread",
+            severity="warning",
+            message="alice dropped out",
+            details={"contributor": "alice", "contributor_entries": 5},
+            dedup_signature="stalled_dropout|my-thread|alice",
+        )
+        cf_bob = CoordinatorFinding(
+            category="stalled_dropout",
+            topic="my-thread",
+            severity="warning",
+            message="bob dropped out",
+            details={"contributor": "bob", "contributor_entries": 3},
+            dedup_signature="stalled_dropout|my-thread|bob",
+        )
+        leads = generate_leads_for_thread([cf_alice, cf_bob])
+        assert len(leads) == 2
+        dedup_keys = {cf.dedup_signature for cf in leads}
+        assert dedup_keys == {
+            "coordinator_lead|stalled_dropout|my-thread|alice",
+            "coordinator_lead|stalled_dropout|my-thread|bob",
+        }
+
+    def test_stalled_dropout_uses_thread_scoped_search(self) -> None:
+        cf = CoordinatorFinding(
+            category="stalled_dropout",
+            topic="my-thread",
+            severity="warning",
+            message="",
+            details={"contributor": "alice", "contributor_entries": 4},
+            dedup_signature="stalled_dropout|my-thread|alice",
+        )
+        leads = generate_leads_for_thread([cf])
+        lead = CoordinatorLead.from_dict(leads[0].details["lead"])
+        assert lead.suggested_action is not None
+        assert lead.suggested_action.tool == "watercooler_search"
+        assert lead.suggested_action.arguments == {
+            "query": "alice",
+            "thread_topic": "my-thread",
+            "limit": 20,
+        }
+        assert lead.relevance_tags == ("pm", "planner")
+
+    def test_role_concentration_uses_actual_field_names(self) -> None:
+        cf = CoordinatorFinding(
+            category="aware_role_concentration",
+            topic="arch-thread",
+            severity="info",
+            message="Thread is 90% planner",
+            details={
+                "dominant_role": "planner",
+                "concentration": 0.9,
+                "missing_roles": ["tester", "implementer"],
+                "entry_count": 10,
+            },
+            dedup_signature="aware_role_concentration|arch-thread|planner",
+        )
+        leads = generate_leads_for_thread([cf])
+        assert len(leads) == 1
+        lead = CoordinatorLead.from_dict(leads[0].details["lead"])
+        assert "90%" in lead.summary
+        assert "planner" in lead.summary
+        assert "tester" in lead.summary  # sorted -> "implementer, tester"
+        assert lead.suggested_action is not None
+        assert lead.suggested_action.tool == "watercooler_list_thread_entries"
+
+    def test_role_concentration_deterministic_relevance_tags(self) -> None:
+        # missing_roles order should not affect the result
+        cf_a = CoordinatorFinding(
+            category="aware_role_concentration",
+            topic="t",
+            severity="info",
+            message="",
+            details={
+                "dominant_role": "planner",
+                "concentration": 0.85,
+                "missing_roles": ["tester", "implementer"],
+                "entry_count": 10,
+            },
+            dedup_signature="aware_role_concentration|t|planner",
+        )
+        cf_b = CoordinatorFinding(
+            category="aware_role_concentration",
+            topic="t",
+            severity="info",
+            message="",
+            details={
+                "dominant_role": "planner",
+                "concentration": 0.85,
+                "missing_roles": ["implementer", "tester"],  # reversed
+                "entry_count": 10,
+            },
+            dedup_signature="aware_role_concentration|t|planner",
+        )
+        la = CoordinatorLead.from_dict(
+            generate_leads_for_thread([cf_a])[0].details["lead"]
+        )
+        lb = CoordinatorLead.from_dict(
+            generate_leads_for_thread([cf_b])[0].details["lead"]
+        )
+        # Sorted first-missing is "implementer"; dedup "pm"
+        assert la.relevance_tags == ("implementer", "pm")
+        assert la.relevance_tags == lb.relevance_tags
+
+    def test_role_concentration_missing_roles_contains_only_pm(self) -> None:
+        cf = CoordinatorFinding(
+            category="aware_role_concentration",
+            topic="t",
+            severity="info",
+            message="",
+            details={
+                "dominant_role": "planner",
+                "concentration": 0.9,
+                "missing_roles": ["pm"],
+                "entry_count": 10,
+            },
+            dedup_signature="aware_role_concentration|t|planner",
+        )
+        lead = CoordinatorLead.from_dict(
+            generate_leads_for_thread([cf])[0].details["lead"]
+        )
+        assert lead.relevance_tags == ("pm",)
+
+    def test_role_concentration_empty_missing_roles(self) -> None:
+        cf = CoordinatorFinding(
+            category="aware_role_concentration",
+            topic="t",
+            severity="info",
+            message="",
+            details={
+                "dominant_role": "planner",
+                "concentration": 0.9,
+                "missing_roles": [],
+                "entry_count": 10,
+            },
+            dedup_signature="aware_role_concentration|t|planner",
+        )
+        lead = CoordinatorLead.from_dict(
+            generate_leads_for_thread([cf])[0].details["lead"]
+        )
+        assert lead.relevance_tags == ("pm",)
+        assert "none identified" in lead.summary
+
+    def test_burst_lead_uses_multiplier_not_burst_multiplier(self) -> None:
+        cf = CoordinatorFinding(
+            category="aware_burst",
+            topic="hot-thread",
+            severity="info",
+            message="Burst detected",
+            details={"multiplier": 4.5, "new_entries": 12},
+            dedup_signature="aware_burst|hot-thread|2026-04-13",
+        )
+        leads = generate_leads_for_thread([cf])
+        assert len(leads) == 1
+        lead = CoordinatorLead.from_dict(leads[0].details["lead"])
+        assert "4.5x" in lead.summary
+        assert "12 new entries" in lead.summary
+        assert lead.relevance_tags == ("pm",)
+
+    def test_empty_dedup_signature_skipped_with_warning(self, caplog) -> None:
+        cf = CoordinatorFinding(
+            category="stalled_open_loop",
+            topic="t",
+            severity="warning",
+            message="m",
+            details={"plan_count": 2},
+            dedup_signature="",  # empty
+        )
+        import logging
+
+        with caplog.at_level(
+            logging.WARNING, logger="watercooler.project_coordinator_lib"
+        ):
+            leads = generate_leads_for_thread([cf])
+        assert leads == []
+        assert any("empty dedup_signature" in r.message for r in caplog.records)
+
+    def test_suppression_inheritance_propagates_severity_and_tag(self) -> None:
+        cf = CoordinatorFinding(
+            category="stalled_open_loop",
+            topic="parked-thread",
+            severity="info",  # downgraded by suppression
+            message="",
+            details={
+                "plan_count": 2,
+                "days_stale": 15.0,
+                "suppressed_by": "tag:parked",
+            },
+            dedup_signature="stalled_open_loop|parked-thread",
+        )
+        leads = generate_leads_for_thread([cf])
+        assert len(leads) == 1
+        lead_cf = leads[0]
+        assert lead_cf.severity == "info"
+        assert lead_cf.details["suppressed_by"] == "tag:parked"
+
+    def test_non_trigger_categories_filtered(self) -> None:
+        # aware_new_contributor plus a trigger — only trigger produces a lead.
+        cfs = [
+            CoordinatorFinding(
+                category="aware_new_contributor",
+                topic="t",
+                severity="info",
+                message="",
+                details={"contributor": "eve"},
+                dedup_signature="aware_new_contributor|eve|new|x",
+            ),
+            CoordinatorFinding(
+                category="stalled_open_loop",
+                topic="t",
+                severity="warning",
+                message="",
+                details={"plan_count": 2},
+                dedup_signature="stalled_open_loop|t",
+            ),
+        ]
+        leads = generate_leads_for_thread(cfs)
+        assert len(leads) == 1
+        assert leads[0].dedup_signature == "coordinator_lead|stalled_open_loop|t"
+
+    def test_empty_thread_findings(self) -> None:
+        assert generate_leads_for_thread([]) == []
+
+
+class TestCoordinatorLeadFromDict:
+    """CoordinatorLead.from_dict: safe reconstruction from asdict() output."""
+
+    def test_asdict_from_dict_roundtrip(self) -> None:
+        lead = CoordinatorLead(
+            schema_version=1,
+            source_category="stalled_open_loop",
+            source_topic="t",
+            summary="s",
+            relevance_tags=("implementer", "pm"),
+            suggested_action=AdvisoryAction(
+                phase="pre",
+                tool="watercooler_read_thread",
+                arguments={"topic": "t", "summary_only": True},
+                reason="r",
+            ),
+            t2_context=None,
+        )
+        assert CoordinatorLead.from_dict(asdict(lead)) == lead
+
+    def test_missing_suggested_action_returns_none(self) -> None:
+        base = {
+            "schema_version": 1,
+            "source_category": "stalled_open_loop",
+            "source_topic": "t",
+            "summary": "s",
+            "relevance_tags": [],
+            "t2_context": None,
+        }
+        assert (
+            CoordinatorLead.from_dict(
+                {**base, "suggested_action": None}
+            ).suggested_action
+            is None
+        )
+
+    def test_partial_suggested_action_returns_none(self) -> None:
+        base = {
+            "schema_version": 1,
+            "source_category": "stalled_open_loop",
+            "source_topic": "t",
+            "summary": "s",
+            "relevance_tags": [],
+            "t2_context": None,
+        }
+        partial = {
+            "phase": "pre",
+            "tool": "watercooler_read_thread",
+        }  # missing args/reason
+        assert (
+            CoordinatorLead.from_dict(
+                {**base, "suggested_action": partial}
+            ).suggested_action
+            is None
+        )
+
+    def test_invalid_tool_returns_none(self) -> None:
+        base = {
+            "schema_version": 1,
+            "source_category": "stalled_open_loop",
+            "source_topic": "t",
+            "summary": "s",
+            "relevance_tags": [],
+            "t2_context": None,
+        }
+        bad_tool = {
+            "phase": "pre",
+            "tool": "watercooler_say",  # write tool not in _READ_ONLY_TOOLS
+            "arguments": {},
+            "reason": "x",
+        }
+        assert (
+            CoordinatorLead.from_dict(
+                {**base, "suggested_action": bad_tool}
+            ).suggested_action
+            is None
+        )
+
+    def test_from_dict_handles_missing_top_level_fields(self) -> None:
+        # Backward compat: old records might lack some fields; from_dict uses .get()
+        lead = CoordinatorLead.from_dict({})
+        assert lead.schema_version == 1
+        assert lead.source_category == ""
+        assert lead.source_topic == ""
+        assert lead.summary == ""
+        assert lead.relevance_tags == ()
+        assert lead.suggested_action is None
+        assert lead.t2_context is None
+
+
+class TestStdlibOnlyBoundary:
+    """project_coordinator_lib must not import from watercooler_mcp."""
+
+    def test_project_coordinator_lib_is_stdlib_only(self) -> None:
+        import ast
+        from pathlib import Path
+
+        src = Path("src/watercooler/project_coordinator_lib.py").read_text()
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                assert not node.module.startswith(
+                    "watercooler_mcp"
+                ), f"stdlib-only violation (ImportFrom): {node.module}"
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert not alias.name.startswith(
+                        "watercooler_mcp"
+                    ), f"stdlib-only violation (Import): {alias.name}"

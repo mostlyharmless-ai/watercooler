@@ -49,8 +49,12 @@ DOWNLOAD_CHUNK_SIZE = 8192  # Bytes per chunk when downloading files
 # These are checksums we've verified - update when testing new releases
 #
 # To add a new release:
-#   1. gh release download <tag> --repo ggml-org/llama.cpp --pattern "llama-*-bin-*.tar.gz"
-#   2. sha256sum *.tar.gz
+#   Linux/macOS:
+#     1. gh release download <tag> --repo ggml-org/llama.cpp --pattern "llama-*-bin-*.tar.gz"
+#     2. sha256sum *.tar.gz
+#   Windows:
+#     1. gh release download <tag> --repo ggml-org/llama.cpp --pattern "llama-*-bin-win-cpu-x64.zip"
+#     2. certutil -hashfile <file>.zip SHA256   (or sha256sum on Git Bash)
 #   3. Add entries below
 LLAMA_SERVER_CHECKSUMS: dict[str, dict[str, str]] = {
     # Release b7896 (2026-01-31) - verified checksums

@@ -447,8 +447,6 @@ def main(argv: list[str] | None = None) -> None:
     p_install_hooks.add_argument("--hooks-dir", help="Git hooks directory (default: .git/hooks)")
     p_install_hooks.add_argument("--force", action="store_true", help="Overwrite existing hooks")
 
-    sub.add_parser("setup-pulse-hook", help="Wire watercooler-capture-theme as a PostCompact hook")
-
     # Config commands
     p_config = sub.add_parser("config", help="Configuration management")
     config_sub = p_config.add_subparsers(dest="config_cmd")
@@ -847,10 +845,6 @@ def main(argv: list[str] | None = None) -> None:
         print(result)
         sys.exit(0)
 
-    if args.cmd == "setup-pulse-hook":
-        from .commands import setup_pulse_hook
-        sys.exit(setup_pulse_hook())
-
     if args.cmd == "config":
         from pathlib import Path
         import json as json_module
@@ -887,8 +881,6 @@ def main(argv: list[str] | None = None) -> None:
             shutil.copy(template_path, target_path)
             print(f"✅ Created {location} config: {target_path}")
             print(f"   Edit this file to customize Watercooler settings.")
-            if not args.project:
-                print("   Next step: run 'watercooler setup-pulse-hook' to wire up the PostCompact hook.")
             sys.exit(0)
 
         if args.config_cmd == "show":

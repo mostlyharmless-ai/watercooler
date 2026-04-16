@@ -10,8 +10,6 @@ This guide describes an agent-neutral workflow for:
 - iterating until approval
 - packaging final copy for X, LinkedIn, Reddit, or blog posts
 
-The canonical design lives in
-`watercooler-planning/EDITORIAL_PUBLISHING_WORKFLOW.md`.
 This document is the practical operator guide.
 
 ---

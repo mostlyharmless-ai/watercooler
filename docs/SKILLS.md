@@ -1,18 +1,25 @@
 # Skills
 
-Watercooler skills are shortcuts for the most common thread and memory tasks.
-They help you ask better questions and get useful answers without remembering
-every underlying tool call.
+Watercooler skills package common thread and memory workflows so coding agents
+can discover and apply them more reliably. In some clients they also appear as
+user-invokable slash commands, but that is a secondary convenience rather than
+their main purpose.
 
 ## What a skill is
 
-A skill is a reusable workflow your agent can run for you.
+A skill is a reusable workflow and prompt scaffold your agent can run for you.
 
-Instead of explaining every step manually, you can use a skill like:
+Its main job is to improve workflow selection and tool discoverability for the
+agent. Instead of re-deriving the same Watercooler pattern each time, the agent
+can reuse a skill such as:
 
 - `/threads` to list or inspect threads
 - `/recall` to ask what was previously decided
 - `/search-threads` to search with filters
+
+A connected agent can still use Watercooler tools without explicit skill
+invocation. Skills mainly make common workflows more consistent and easier to
+discover.
 
 ## Set up the skills
 
@@ -78,8 +85,9 @@ dropdown.
 
 ## How to use skills
 
-In clients that expose Watercooler skills as slash commands, invoke the skill by
-name and then add your question or topic.
+In clients that expose Watercooler skills as slash commands, you can invoke the
+skill by name and then add your question or topic. This is useful when you want
+to steer the agent toward a specific workflow explicitly.
 
 Examples:
 

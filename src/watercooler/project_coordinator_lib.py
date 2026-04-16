@@ -9,11 +9,16 @@ enforce typed boundaries between the daemon and these detectors.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from collections.abc import Callable
 from typing import Any, TypedDict
+
+from watercooler.pulse_stance_lib import AdvisoryAction, CoordinatorLead
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level threshold constants (promote to config fields in v1B only when
@@ -127,9 +132,7 @@ class CoordinatorExtras:
             "burst_baselines": {
                 k: v.to_dict() for k, v in self.burst_baselines.items()
             },
-            "active_signals": {
-                k: v.to_dict() for k, v in self.active_signals.items()
-            },
+            "active_signals": {k: v.to_dict() for k, v in self.active_signals.items()},
             "last_stance_signatures": dict(self.last_stance_signatures),
             "cleared_stance_fids": sorted(self.cleared_stance_fids),
         }
@@ -644,3 +647,170 @@ def detect_role_concentration(
         },
         dedup_signature=f"aware_role_concentration|{thread_topic}|{dominant_role}",
     )
+
+
+# ---------------------------------------------------------------------------
+# Coordinator leads (v1B follow-on) -- thread-specific investigation hints
+# ---------------------------------------------------------------------------
+
+_LEAD_TRIGGER_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "stalled_open_loop",
+        "aware_role_concentration",
+        "stalled_dropout",
+        "aware_burst",
+    }
+)
+
+
+def _build_lead_for_finding(source_cf: CoordinatorFinding) -> CoordinatorLead | None:
+    """Construct a CoordinatorLead from a single v1A finding.
+
+    Returns None if the category is not a lead trigger. All ``details`` access
+    uses ``.get()`` with fallback to tolerate schema drift.
+    """
+    category = source_cf.category
+    if category not in _LEAD_TRIGGER_CATEGORIES:
+        return None
+
+    topic = source_cf.topic
+    d = source_cf.details
+
+    if category == "stalled_open_loop":
+        plan_count = d.get("plan_count", 0)
+        days_stale = d.get("days_stale")
+        stale_fragment = (
+            f" ({days_stale:.0f} days stale)"
+            if isinstance(days_stale, (int, float))
+            else ""
+        )
+        summary = (
+            f"Thread '{topic}' has {plan_count} Plan entries but no "
+            f"Decision or Closure{stale_fragment}"
+        )
+        action = AdvisoryAction(
+            phase="pre",
+            tool="watercooler_read_thread",
+            arguments={"topic": topic, "summary_only": True},
+            reason="Get thread narrative before investigating coordination issue",
+        )
+        tags: tuple[str, ...] = ("implementer", "pm")
+
+    elif category == "aware_role_concentration":
+        dominant_role = d.get("dominant_role", "unknown")
+        concentration = d.get("concentration", 0.0)
+        missing_roles = d.get("missing_roles") or []
+        entry_count = d.get("entry_count", 0)
+        missing_str = ", ".join(missing_roles) if missing_roles else "none identified"
+        summary = (
+            f"Thread '{topic}' is {concentration:.0%} {dominant_role}; "
+            f"missing: {missing_str} ({entry_count} entries)"
+        )
+        action = AdvisoryAction(
+            phase="pre",
+            tool="watercooler_list_thread_entries",
+            arguments={"topic": topic, "format": "json"},
+            reason="Inspect entry role distribution for this thread",
+        )
+        # Deterministic relevance_tags: sort missing_roles, pick first, dedup with "pm".
+        # "pm" is always present, so the tuple is structurally non-empty.
+        sorted_missing = sorted(missing_roles) if missing_roles else []
+        first_missing = sorted_missing[0] if sorted_missing else None
+        tags = tuple(dict.fromkeys(t for t in (first_missing, "pm") if t))
+
+    elif category == "stalled_dropout":
+        contributor = d.get("contributor", "unknown")
+        contributor_entries = d.get("contributor_entries", 0)
+        summary = (
+            f"Contributor '{contributor}' dropped out of '{topic}' "
+            f"after {contributor_entries} entries"
+        )
+        action = AdvisoryAction(
+            phase="pre",
+            tool="watercooler_search",
+            arguments={"query": contributor, "thread_topic": topic, "limit": 20},
+            reason="Retrieve dropped contributor's last known context within this thread",
+        )
+        tags = ("pm", "planner")
+
+    elif category == "aware_burst":
+        multiplier = d.get("multiplier", 0.0)
+        new_entries = d.get("new_entries", 0)
+        summary = (
+            f"Thread '{topic}' saw {multiplier:.1f}x activity spike "
+            f"({new_entries} new entries)"
+        )
+        action = AdvisoryAction(
+            phase="pre",
+            tool="watercooler_read_thread",
+            arguments={"topic": topic, "summary_only": True},
+            reason="Get thread narrative before investigating coordination issue",
+        )
+        tags = ("pm",)
+
+    else:  # pragma: no cover -- defensive; covered by _LEAD_TRIGGER_CATEGORIES filter
+        return None
+
+    return CoordinatorLead(
+        schema_version=1,
+        source_category=category,
+        source_topic=topic,
+        summary=summary,
+        relevance_tags=tags,
+        suggested_action=action,
+        t2_context=None,
+    )
+
+
+def generate_leads_for_thread(
+    thread_findings: list[CoordinatorFinding],
+) -> list[CoordinatorFinding]:
+    """Generate coordinator_lead findings from v1A per-thread detector results.
+
+    One lead per triggering v1A finding. ``aware_new_contributor`` is excluded
+    (informational only, corpus-scoped, not thread-specific).
+
+    Each returned CoordinatorFinding has ``category="coordinator_lead"``,
+    ``details={"lead": asdict(lead)}``, and ``dedup_signature`` derived from
+    the source finding's own dedup signature so distinct source findings (e.g.
+    two ``stalled_dropout`` findings for different contributors on the same
+    thread) produce distinct leads.
+
+    Suppression inheritance: the lead inherits ``severity`` and
+    ``details["suppressed_by"]`` (if present) from the source finding so
+    parked-thread leads stay quiet alongside v1A.
+    """
+    leads: list[CoordinatorFinding] = []
+    for source_cf in thread_findings:
+        if source_cf.category not in _LEAD_TRIGGER_CATEGORIES:
+            continue
+        if not source_cf.dedup_signature:
+            logger.warning(
+                "skipping lead generation for %s on topic %r: empty dedup_signature",
+                source_cf.category,
+                source_cf.topic,
+            )
+            continue
+
+        lead = _build_lead_for_finding(source_cf)
+        if lead is None:
+            continue
+
+        details: dict[str, Any] = {"lead": asdict(lead)}
+        # Propagate suppression metadata from the source finding.
+        suppressed_by = source_cf.details.get("suppressed_by")
+        if suppressed_by:
+            details["suppressed_by"] = suppressed_by
+
+        leads.append(
+            CoordinatorFinding(
+                category="coordinator_lead",
+                topic=source_cf.topic,
+                severity=source_cf.severity,
+                message=lead.summary,
+                details=details,
+                dedup_signature=f"coordinator_lead|{source_cf.dedup_signature}",
+                entry_id=source_cf.entry_id,
+            )
+        )
+    return leads

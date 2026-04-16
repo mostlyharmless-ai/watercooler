@@ -111,7 +111,7 @@ Ask your agent:
 > "Create a watercooler thread called my-first-topic titled 'My first thread' and
 > post an entry saying hello."
 
-Then verify:
+Then verify by asking your coding agent client:
 
 > "List my watercooler threads."
 

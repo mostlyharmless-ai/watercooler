@@ -9,9 +9,6 @@ permissions:
   contents: write
 
 jobs:
-  # Note: No test job - code is already validated on staging before tagging.
-  # Running tests here would be redundant. The staging branch CI ensures
-  # all tests pass before code reaches stable.
 
   release:
     runs-on: ubuntu-latest

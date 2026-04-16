@@ -26,6 +26,7 @@ from watercooler.baseline_graph.writer import (
 from watercooler.config_schema import ProjectCoordinatorConfig
 from watercooler.project_coordinator_lib import (
     ActiveSignalEntry,
+    BurstBaseline,
     CoordinatorExtras,
     CoordinatorFinding,
     EntryView,
@@ -35,6 +36,7 @@ from watercooler.project_coordinator_lib import (
     detect_stalled_dropout,
     detect_stalled_open_loops,
     entries_to_views,
+    generate_leads_for_thread,
     parse_entry_timestamp,
 )
 from watercooler.pulse_stance_lib import build_stance_advisories
@@ -101,6 +103,7 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         self._last_tick_threads: int = 0
         self._last_tick_findings: int = 0
         self._last_tick_skipped: int = 0
+        self._last_tick_leads: int = 0
         # v1B stance observability
         self._last_snapshot_available: bool = False
         self._last_snapshot_age_hours: float | None = None
@@ -242,6 +245,20 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         tick_time = time.time()
         findings: list[Finding] = []
         skipped = 0
+        # v1B follow-on: tick-scoped deferred lead buffer. Populated per-thread
+        # after active_signals update; drained in Phase C after the corpus-level
+        # detect_new_contributors() branch so v1A findings win the cap.
+        pending_leads: list[CoordinatorFinding] = []
+        leads_count = 0
+        # v1B follow-on: per-thread checkpoint/baseline updates are buffered
+        # here during Phase A and only committed after Phase C confirms every
+        # pending lead for the topic has landed. This prevents the gate at
+        # is_thread_changed() from skipping a thread whose lead was dropped
+        # by the cap in Phase C — on the next tick the thread re-scans, the
+        # v1A source is blocked by _existing_keys, but generate_leads_for_thread
+        # re-mints the lead from the still-present thread state and Phase C
+        # gets another chance to drain it.
+        pending_checkpoints: dict[str, tuple[float, int, BurstBaseline]] = {}
         # Corpus-level accumulators for new-contributor detector
         all_contributors: dict[str, float] = {}
         contributor_threads: dict[str, set[str]] = {}
@@ -312,7 +329,11 @@ class ProjectCoordinatorDaemon(BaseDaemon):
 
             # Detector 1: stalled_open_loop
             f = detect_stalled_open_loops(
-                entries, topic, status, suppression_tags, thread_tags,
+                entries,
+                topic,
+                status,
+                suppression_tags,
+                thread_tags,
                 tick_time=tick_time,
             )
             if f:
@@ -351,6 +372,13 @@ class ProjectCoordinatorDaemon(BaseDaemon):
                 last_evaluated_at=tick_time,
             )
 
+            # v1B follow-on: generate leads but DO NOT materialize inline.
+            # Leads are drained in Phase C after v1A per-thread + corpus
+            # detectors have claimed the cap. This enforces the priority
+            # v1A per-thread > v1A corpus > coordinator_lead.
+            if cfg.leads_enabled:
+                pending_leads.extend(generate_leads_for_thread(thread_findings))
+
             # Materialize into Finding objects with dedup
             for cf in thread_findings:
                 if len(findings) >= cfg.max_findings_per_run:
@@ -382,13 +410,13 @@ class ProjectCoordinatorDaemon(BaseDaemon):
                 )
                 self._existing_keys.add(fid)
 
-            # Checkpoint safety: only update if fully scanned.
-            # Defer burst baseline update too — if the cap interrupted
-            # materialization, the burst finding was lost, so the baseline
-            # must not advance (rescan next tick will re-detect it).
+            # Checkpoint safety: only buffer if fully scanned. The actual
+            # commit happens post-Phase-C so dropped leads can force a rescan
+            # on the next tick. If the cap interrupted materialization, the
+            # burst finding was lost, so the baseline must not advance (rescan
+            # next tick will re-detect it).
             if not cap_hit:
-                self._checkpoint.update_thread(topic, mtime, entry_count)
-                self._extras.burst_baselines[topic] = updated_baseline
+                pending_checkpoints[topic] = (mtime, entry_count, updated_baseline)
             elif baseline is not None:
                 # Cap hit: preserve the previous baseline so burst can re-fire
                 self._extras.burst_baselines[topic] = baseline
@@ -407,8 +435,8 @@ class ProjectCoordinatorDaemon(BaseDaemon):
             # Uses raw detected count (pre-cap) so stance reacts to presence
             # of new contributors even when emission is capped.
             if nc_findings:
-                self._extras.corpus_signal_inputs["aware_new_contributor"] = (
-                    len(nc_findings)
+                self._extras.corpus_signal_inputs["aware_new_contributor"] = len(
+                    nc_findings
                 )
             # Track which contributors produced a finding (emitted or not)
             contributors_with_findings: set[str] = set()
@@ -464,6 +492,60 @@ class ProjectCoordinatorDaemon(BaseDaemon):
                 ):
                     del self._extras.seen_contributors[contributor]
 
+        # --- Phase C: drain deferred leads last (after v1A + corpus) ---
+        # Leads consume only residual cap, so v1A per-thread and corpus-level
+        # findings are guaranteed to land first. Stance advisories (emitted
+        # later) are cap-exempt and sit outside this ordering.
+        # Walk the full list even after the cap fills so every topic whose
+        # lead was dropped gets recorded — its checkpoint will be held back
+        # below so the next tick re-scans and re-mints the lead.
+        topics_with_dropped_leads: set[str] = set()
+        if cfg.leads_enabled and pending_leads:
+            for cf in pending_leads:
+                if len(findings) >= cfg.max_findings_per_run:
+                    topics_with_dropped_leads.add(cf.topic)
+                    continue
+                fid = build_finding_id(
+                    scope_id=self._scope_id,
+                    daemon_name=self.name,
+                    topic=cf.topic,
+                    category=cf.category,
+                    entry_id=cf.entry_id,
+                    dedup_signature=cf.dedup_signature,
+                )
+                if fid in self._existing_keys:
+                    continue
+                findings.append(
+                    Finding(
+                        finding_id=fid,
+                        daemon_name=self.name,
+                        severity=cf.severity,
+                        category=cf.category,
+                        topic=cf.topic,
+                        entry_id=cf.entry_id,
+                        message=cf.message,
+                        details=cf.details,
+                    )
+                )
+                self._existing_keys.add(fid)
+                leads_count += 1
+
+        # --- Commit deferred checkpoints (minus topics with dropped leads) ---
+        # Threads whose lead was dropped in Phase C are intentionally left
+        # un-checkpointed so is_thread_changed() returns True on the next
+        # tick. The v1A source is blocked by _existing_keys (already emitted),
+        # but generate_leads_for_thread re-mints the lead and Phase C gets
+        # another chance to drain it under a lifted cap.
+        for topic, (
+            mtime,
+            entry_count,
+            baseline_to_commit,
+        ) in pending_checkpoints.items():
+            if topic in topics_with_dropped_leads:
+                continue
+            self._checkpoint.update_thread(topic, mtime, entry_count)
+            self._extras.burst_baselines[topic] = baseline_to_commit
+
         # --- v1B: periodic re-evaluation for time-sensitive signals ---
         for topic, sig_entry in list(self._extras.active_signals.items()):
             if topic in already_scanned_this_tick:
@@ -489,7 +571,11 @@ class ProjectCoordinatorDaemon(BaseDaemon):
             re_thread_tags = self._load_thread_tags(graph_dir, topic)
             re_findings: list[CoordinatorFinding] = []
             f = detect_stalled_open_loops(
-                re_entries, topic, re_status, suppression_tags, re_thread_tags,
+                re_entries,
+                topic,
+                re_status,
+                suppression_tags,
+                re_thread_tags,
                 tick_time=tick_time,
             )
             if f:
@@ -525,9 +611,7 @@ class ProjectCoordinatorDaemon(BaseDaemon):
             del self._extras.burst_baselines[t]
         # Prune stale active_signals before stance computation so removed
         # topics don't inflate coordinator signal counts this tick
-        stale_signals = [
-            t for t in self._extras.active_signals if t not in live_topics
-        ]
+        stale_signals = [t for t in self._extras.active_signals if t not in live_topics]
         for t in stale_signals:
             del self._extras.active_signals[t]
 
@@ -541,7 +625,7 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         # Persist rolling state
         self._save_extras()
 
-        self._update_tick_metrics(len(topics), len(findings), skipped)
+        self._update_tick_metrics(len(topics), len(findings), skipped, leads_count)
 
         logger.debug(
             "DAEMON[project_coordinator]: scanned %d threads, %d findings, %d skipped",
@@ -606,7 +690,9 @@ class ProjectCoordinatorDaemon(BaseDaemon):
                         dedup_signature=prev_sig,
                     )
                     self._existing_keys.discard(prev_fid)
-                    self._extras.cleared_stance_fids.add(prev_fid)  # persist clear across resync
+                    self._extras.cleared_stance_fids.add(
+                        prev_fid
+                    )  # persist clear across resync
 
                     fid = build_finding_id(
                         scope_id=self._scope_id,
@@ -617,19 +703,21 @@ class ProjectCoordinatorDaemon(BaseDaemon):
                         dedup_signature="cleared",
                     )
                     if fid not in self._existing_keys:
-                        findings.append(Finding(
-                            finding_id=fid,
-                            daemon_name=self.name,
-                            severity="info",
-                            category="stance_advisory",
-                            topic=f"stance:{advisory.role}",
-                            entry_id="",
-                            message=(
-                                f"{advisory.role.title()} stance cleared"
-                                " — all signals below thresholds"
-                            ),
-                            details={"advisory": asdict(advisory)},
-                        ))
+                        findings.append(
+                            Finding(
+                                finding_id=fid,
+                                daemon_name=self.name,
+                                severity="info",
+                                category="stance_advisory",
+                                topic=f"stance:{advisory.role}",
+                                entry_id="",
+                                message=(
+                                    f"{advisory.role.title()} stance cleared"
+                                    " — all signals below thresholds"
+                                ),
+                                details={"advisory": asdict(advisory)},
+                            )
+                        )
                         self._existing_keys.add(fid)
                         any_emitted = True
                     self._extras.last_stance_signatures[advisory.role] = ""
@@ -648,7 +736,9 @@ class ProjectCoordinatorDaemon(BaseDaemon):
                     dedup_signature="cleared",
                 )
                 self._existing_keys.discard(tombstone_fid)
-                self._extras.cleared_stance_fids.add(tombstone_fid)  # persist across resync
+                self._extras.cleared_stance_fids.add(
+                    tombstone_fid
+                )  # persist across resync
             elif prev_sig != advisory.advisory_signature:
                 # Signature changed while staying elevated (A→B).
                 # Clear the old fid so a future cycle back to the prior
@@ -674,18 +764,22 @@ class ProjectCoordinatorDaemon(BaseDaemon):
                 dedup_signature=advisory.advisory_signature,
             )
             if fid not in self._existing_keys:
-                findings.append(Finding(
-                    finding_id=fid,
-                    daemon_name=self.name,
-                    severity="warning" if advisory.level >= 2 else "info",
-                    category="stance_advisory",
-                    topic=f"stance:{advisory.role}",
-                    entry_id="",
-                    message=advisory.summary,
-                    details={"advisory": asdict(advisory)},
-                ))
+                findings.append(
+                    Finding(
+                        finding_id=fid,
+                        daemon_name=self.name,
+                        severity="warning" if advisory.level >= 2 else "info",
+                        category="stance_advisory",
+                        topic=f"stance:{advisory.role}",
+                        entry_id="",
+                        message=advisory.summary,
+                        details={"advisory": asdict(advisory)},
+                    )
+                )
                 self._existing_keys.add(fid)
-                self._extras.cleared_stance_fids.discard(fid)  # no longer needs filtering
+                self._extras.cleared_stance_fids.discard(
+                    fid
+                )  # no longer needs filtering
                 any_emitted = True
 
             self._extras.last_stance_signatures[advisory.role] = (
@@ -701,9 +795,7 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         if any_emitted:
             self._last_stance_outcome = "emitted"
         else:
-            all_l0 = all(
-                v == 0 for v in self._last_stance_levels.values()
-            )
+            all_l0 = all(v == 0 for v in self._last_stance_levels.values())
             if not all_l0:
                 # Elevated advisory exists and is unchanged (deduped this tick)
                 self._last_stance_outcome = "steady_state"
@@ -777,15 +869,20 @@ class ProjectCoordinatorDaemon(BaseDaemon):
 
     def _tick_hosted(self) -> list[Finding]:
         """Hosted mode — explicit no-op in v1A."""
-        self._update_tick_metrics(0, 0, 0)
+        self._update_tick_metrics(0, 0, 0, 0)
         return []
 
     def _update_tick_metrics(
-        self, threads: int, findings_count: int, skipped: int
+        self,
+        threads: int,
+        findings_count: int,
+        skipped: int,
+        leads: int = 0,
     ) -> None:
         self._last_tick_threads = threads
         self._last_tick_findings = findings_count
         self._last_tick_skipped = skipped
+        self._last_tick_leads = leads
 
     def status_summary(self) -> dict[str, Any]:
         """Health summary with coordinator-specific metrics."""
@@ -801,4 +898,7 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         base["stance_snapshot_age_hours"] = self._last_snapshot_age_hours
         base["stance_last_outcome"] = self._last_stance_outcome
         base["stance_last_levels"] = dict(self._last_stance_levels)
+        # v1B follow-on: coordinator leads observability
+        base["leads_enabled"] = self._config.leads_enabled
+        base["last_tick_leads"] = self._last_tick_leads
         return base

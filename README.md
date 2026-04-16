@@ -2,9 +2,11 @@
 
 Git-native collaboration threads for human-AI coding teams.
 
+Hosted version coming soon at [watercoolerdev.com](https://watercoolerdev.com)
+
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/) [![MCP](https://img.shields.io/badge/MCP-enabled-green.svg)](https://modelcontextprotocol.io)
 
-[Quick Start](#quick-start) • [Documentation](#documentation) • [Workflow Examples](docs/WORKFLOW_EXAMPLES.md) • [Tools Reference](docs/TOOLS-REFERENCE.md) • [Architecture](dev_docs/ARCHITECTURE.md) • [Contributing](CONTRIBUTING.md)
+[Quick Start](#quick-start) • [Documentation](#documentation) • [Workflow Examples](docs/WORKFLOW_EXAMPLES.md) • [Tools Reference](docs/TOOLS-REFERENCE.md) • [Contributing](CONTRIBUTING.md)
 
 [![Watercooler Cloud](docs/images/hero-banner-v2.png)](https://www.watercoolerdev.com)
 
@@ -138,13 +140,13 @@ Most collaborators work entirely through their MCP client:
 4. **[MCP-CLIENTS.md](docs/MCP-CLIENTS.md)** — Connect Claude Code, Codex, or Cursor.
    Each section is self-contained with copy-pasteable config.
 5. **[CONFIGURATION.md](docs/CONFIGURATION.md)** — Config and credentials files, key
-   settings, environment variable reference, and memory feature opt-in.
+   settings, environment variable reference, and custom roles.
 6. **[TOOLS-REFERENCE.md](docs/TOOLS-REFERENCE.md)** — Unified reference for all CLI
    commands and MCP tools, with safety annotations and worked examples.
 7. **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** — Setup flowchart and top 10 issues
    with diagnosis and fix instructions.
-8. **[EDITORIAL_PUBLISHING.md](docs/EDITORIAL_PUBLISHING.md)** — Stub-first workflow for
-   turning Watercooler threads into approved X, LinkedIn, Reddit, or blog drafts.
+8. **[TRADEMARK_POLICY.md](docs/TRADEMARK_POLICY.md)** — Rules for using the Watercooler
+   name, logos, and brand assets in forks, services, and integrations.
 
 ---
 
@@ -177,22 +179,6 @@ We welcome contributions! Please see:
 - **[SECURITY.md](SECURITY.md)** — Security policy
 
 ---
-
-## Open-core model
-
-Watercooler is open-core. The core library, MCP server, CLI, and local daemons are
-open source under Apache-2.0. Premium features are available through a hosted service.
-
-| Feature | Open (Apache-2.0) | Premium (Hosted) |
-|---|:---:|:---:|
-| Core library and CLI | yes | yes |
-| MCP server (30+ tools) | yes | yes |
-| Baseline graph (T1) | yes | yes |
-| Local daemons (6) | yes | yes |
-| Search, annotations, enrichment | yes | yes |
-| Multi-client support | yes | yes |
-| T2/T3 memory (temporal graph) | — | yes |
-| Premium daemons (6) | — | yes |
 
 ## License
 
