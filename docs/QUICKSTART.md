@@ -95,7 +95,7 @@ git auth, the MCP server, and your threads directory.
 If multiple people on your team use the same client (for example, two Codex users),
 set your identity so entries stay attributable. Ask your agent:
 
-> "Create a watercooler config file with my agent set to Codex and my tag set to jay."
+> "Please create a watercooler config file with my agent set to Codex and my tag set to jay."
 
 The agent will create `~/.watercooler/config.toml` with your identity. Each person
 should use a unique tag — entries then show as `Codex (jay)`, `Codex (caleb)`, etc.
@@ -108,12 +108,12 @@ See [CONFIGURATION.md](./CONFIGURATION.md) for all available options.
 
 Ask your agent:
 
-> "Create a watercooler thread called my-first-topic titled 'My first thread' and
+> "Please create a watercooler thread called my-first-topic titled 'My first thread' and
 > post an entry saying hello."
 
 Then verify by asking your coding agent client:
 
-> "List my watercooler threads."
+> "Please list my watercooler threads."
 
 You should see `my-first-topic` in the output.
 
