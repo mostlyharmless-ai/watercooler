@@ -137,6 +137,15 @@ _spawned_pids: list[int] = []
 _spawned_procs: "dict[int, subprocess.Popen]" = {}
 _pids_lock = threading.Lock()
 
+# Cross-port binary-download lock. Both the LLM and embedding workers call
+# ``_find_llama_server()`` → ``_download_llama_server()`` on a clean install.
+# Without serialization the two workers race to write the same archive at
+# ``~/.watercooler/bin/llama-cpp-download.{zip,tar.gz}`` and one returns None,
+# surfacing as "llama-server binary required but could not be downloaded" even
+# though the peer worker just finished downloading successfully. Serialize so
+# the first arrival downloads once and the second re-uses that binary.
+_binary_download_lock = threading.Lock()
+
 # Per-port startup locks to prevent race conditions
 # Key: port number, Value: Lock for that port
 _port_locks: dict[int, threading.Lock] = {}
@@ -576,6 +585,44 @@ def check_first_run() -> None:
         pass
 
 
+def _ensure_llama_server_binary() -> Optional[Path]:
+    """Return the llama-server binary path, downloading if necessary.
+
+    Deduplicates concurrent callers: both the LLM and embedding startup
+    workers race here on first-run clean installs. The lock serializes
+    the download and the loser re-checks ``_find_llama_server()`` so it
+    reuses the winner's binary instead of re-downloading (which would
+    fail on Windows because two processes can't write the same archive
+    file, producing a misleading "could not be downloaded" error).
+
+    Returns:
+        Path to the binary on success, or None if not found and
+        auto-provision is disabled or the download itself failed.
+    """
+    # Fast path: binary already present (either from a previous run or
+    # because the peer worker finished downloading ahead of us).
+    found = _find_llama_server()
+    if found:
+        return found
+
+    if not _is_auto_provision_enabled("llama_server"):
+        return None
+
+    with _binary_download_lock:
+        # Re-check under the lock — the peer worker may have completed
+        # the download while we were waiting. This is the dedup path
+        # that prevents double-downloads on clean installs.
+        found = _find_llama_server()
+        if found:
+            log_debug(
+                "llama-server appeared while waiting for download lock "
+                "(peer worker finished download)."
+            )
+            return found
+        log_debug("llama-server not found, attempting download from GitHub releases...")
+        return _download_llama_server()
+
+
 def _is_auto_provision_enabled(resource: str) -> bool:
     """Check if auto-provisioning is enabled for a resource type.
 
@@ -852,13 +899,12 @@ def _start_llama_server_unlocked(
             log_warning(f"[{service_tag.upper()}] {message}")
             raise RuntimeError(message)
 
-    llama_server = _find_llama_server()
-    if not llama_server:
-        if _is_auto_provision_enabled("llama_server"):
-            log_debug("llama-server not found, attempting download from GitHub releases...")
-            llama_server = _download_llama_server()
-        else:
-            log_debug("llama-server not found and auto-provision disabled")
+    # Find or download the binary. _ensure_llama_server_binary serializes
+    # concurrent callers so the LLM and embedding workers don't race on
+    # the download archive file (which previously produced a misleading
+    # "could not be downloaded" error for whichever worker lost the
+    # race on a clean install).
+    llama_server = _ensure_llama_server_binary()
 
     if not llama_server:
         # Provide clear instructions based on auto-provision setting

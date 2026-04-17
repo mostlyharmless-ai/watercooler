@@ -1249,6 +1249,120 @@ class TestHostAwarePreflight:
         assert hosts_probed == {"::"}
 
 
+class TestConcurrentDownloadSerialization:
+    """Regression guard for the clean-install download race.
+
+    On a first-run install with no binary on disk, the LLM and embedding
+    startup workers both call ``_ensure_llama_server_binary``. Without
+    serialization, both race on ``_download_llama_server()``; on Windows
+    that fails because two processes cannot write the same archive at
+    once, producing a misleading "binary required but could not be
+    downloaded" error for the losing worker even though the winner's
+    download succeeded.
+
+    The fix serializes downloads with ``_binary_download_lock`` and
+    re-checks ``_find_llama_server()`` inside the lock so the loser
+    reuses the winner's binary instead of downloading again.
+    """
+
+    def test_concurrent_callers_download_exactly_once(self):
+        """Ten threads call the helper at the same time; the underlying
+        download function must be called exactly once."""
+        import threading
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        download_call_count = 0
+        download_barrier = threading.Event()
+        _mock_binary = Path("/tmp/mock-llama-server")
+
+        # First find call (fast path) returns None; after download,
+        # subsequent find calls return the "downloaded" binary.
+        find_results = {"after_download": False}
+
+        def fake_find():
+            if find_results["after_download"]:
+                return _mock_binary
+            return None
+
+        def fake_download():
+            nonlocal download_call_count
+            download_call_count += 1
+            # Simulate a slow download so latecomers stack up on the lock.
+            download_barrier.wait(timeout=5.0)
+            find_results["after_download"] = True
+            return _mock_binary
+
+        results: list[Optional[Path]] = []  # type: ignore[name-defined]
+        results_lock = threading.Lock()
+
+        def worker():
+            r = startup._ensure_llama_server_binary()
+            with results_lock:
+                results.append(r)
+
+        with patch("watercooler_mcp.startup._find_llama_server", side_effect=fake_find), \
+             patch("watercooler_mcp.startup._download_llama_server", side_effect=fake_download), \
+             patch("watercooler_mcp.startup._is_auto_provision_enabled", return_value=True):
+
+            threads = [threading.Thread(target=worker) for _ in range(10)]
+            for t in threads:
+                t.start()
+            # Let the first worker acquire the lock, then release the
+            # barrier so the download "completes" and the other nine
+            # threads proceed past the lock and find the binary.
+            import time as _time
+            _time.sleep(0.1)
+            download_barrier.set()
+            for t in threads:
+                t.join(timeout=10.0)
+
+        assert download_call_count == 1, (
+            f"Expected exactly one download under serialization, got "
+            f"{download_call_count} — the loser threads are not re-checking "
+            f"_find_llama_server under the lock."
+        )
+        # Every thread should return the same "downloaded" binary.
+        assert all(r == _mock_binary for r in results), (
+            f"Some threads returned None or wrong path: {results}"
+        )
+        assert len(results) == 10
+
+    def test_fast_path_skips_lock_when_binary_already_present(self):
+        """If the binary already exists, the helper must not enter the
+        download lock at all (avoids gratuitous contention on hot paths)."""
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        _mock_binary = Path("/tmp/mock-llama-server")
+
+        with patch("watercooler_mcp.startup._find_llama_server", return_value=_mock_binary), \
+             patch("watercooler_mcp.startup._download_llama_server") as mock_download, \
+             patch("watercooler_mcp.startup._is_auto_provision_enabled") as mock_auto:
+            result = startup._ensure_llama_server_binary()
+
+        assert result == _mock_binary
+        mock_download.assert_not_called()
+        # Fast path doesn't even need to consult auto-provision config
+        mock_auto.assert_not_called()
+
+    def test_returns_none_when_auto_provision_disabled_and_no_binary(self):
+        """No binary, auto-provision off → return None; do not download."""
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        with patch("watercooler_mcp.startup._find_llama_server", return_value=None), \
+             patch("watercooler_mcp.startup._download_llama_server") as mock_download, \
+             patch("watercooler_mcp.startup._is_auto_provision_enabled", return_value=False):
+            result = startup._ensure_llama_server_binary()
+
+        assert result is None
+        mock_download.assert_not_called()
+
+
 class TestProcExitedEarlyMessageIsTruthful:
     """Review round 4 (Low): the diagnostic instruction must be
     followable — no claims about 'stderr capture' that the code does
