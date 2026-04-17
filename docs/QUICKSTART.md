@@ -66,7 +66,7 @@ Restart Claude Code after running. For Codex, Cursor, or manual config, see
 
 After restarting Claude Code, ask your agent:
 
-> "Run a watercooler health check."
+> "Please run a watercooler health check."
 
 The agent will call `watercooler_health(code_path=".")`, which reports the status of
 git auth, the MCP server, and your threads directory.
