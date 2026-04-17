@@ -51,6 +51,70 @@ Run `watercooler_health` from your MCP client to jump straight to step G.
 
 ---
 
+### Port in use by orphan llama-server {#port-in-use-by-orphan-llama-server}
+
+**Symptom:** `watercooler_health` reports the LLM or embedding service as `failed`
+with a message like `LLM port 8000 is already in use by PID 12345` or
+`Embedding port 8080 is already in use`.
+
+**Cause:** A previous Watercooler session spawned a `llama-server` process that
+did not shut down cleanly — typically because the MCP client (Claude Code,
+Cursor, or Codex) crashed or was force-quit rather than exited normally. The
+old server still holds the port, so the new session cannot bind. Watercooler
+refuses to start a second `llama-server` on an occupied port because doing so
+silently would make your agent issue embedding/LLM calls against the *old*
+server, masking real bugs in the current session's model or config.
+
+**Fix — identify and kill the orphan process:**
+
+Windows (PowerShell):
+
+```powershell
+# Find who owns the port (example: 8080 for embedding, 8000 for LLM)
+Get-NetTCPConnection -LocalPort 8080 -State Listen |
+  Select-Object LocalAddress, LocalPort, OwningProcess
+
+# Kill it (substitute the OwningProcess from above)
+Stop-Process -Id <PID> -Force
+
+# Confirm the port is free
+Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue
+# (should print nothing)
+```
+
+macOS / Linux:
+
+```bash
+# Find who owns the port
+lsof -nP -iTCP:8080 -sTCP:LISTEN
+
+# Kill it
+kill <PID>   # add -9 only if it doesn't exit after a few seconds
+
+# Confirm the port is free
+lsof -nP -iTCP:8080 -sTCP:LISTEN
+# (should print nothing)
+```
+
+Then restart your MCP client. The next `watercooler_health` call should show
+both services as `running` and spawn fresh `llama-server` processes owned by
+the current session.
+
+**Why Watercooler refuses to kill the orphan for you:** early versions masked
+this failure mode by reusing whatever was listening on the port, which caused
+"clean install" tests to appear green when they weren't (see
+`windows-release-hardening` thread). If Watercooler auto-killed processes it
+didn't spawn, a user running other unrelated local tools on 8000 or 8080
+would see them die unexpectedly. Explicit refusal + remediation is the trade
+we picked.
+
+**If the PID keeps re-appearing:** an MCP client may be auto-restarting and
+re-spawning the orphan on each launch. Fully quit the client, kill the PID,
+then relaunch. If you're on Windows, check for multiple `llama-server.exe`
+entries in Task Manager and end them all before relaunching.
+
+---
+
 ### Auth failure {#auth-failure}
 
 **Symptom:** Git push errors, 401 responses, or `authentication required` in logs.

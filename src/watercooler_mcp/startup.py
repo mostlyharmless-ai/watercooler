@@ -12,11 +12,13 @@ import hashlib
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from enum import Enum
@@ -128,6 +130,11 @@ _status_lock = threading.Lock()
 
 # Track spawned process PIDs for cleanup
 _spawned_pids: list[int] = []
+# Track spawned Popen handles by port so wait loops can detect the child
+# exiting before it becomes ready (surfaces bind failures that the probe-
+# then-spawn TOCTOU window allows). Keyed by port → Popen; overwritten
+# on respawn.
+_spawned_procs: "dict[int, subprocess.Popen]" = {}
 _pids_lock = threading.Lock()
 
 # Per-port startup locks to prevent race conditions
@@ -146,6 +153,257 @@ def _get_port_lock(port: int) -> threading.Lock:
         if port not in _port_locks:
             _port_locks[port] = threading.Lock()
         return _port_locks[port]
+
+
+def _normalize_loopback(host: str) -> str:
+    """Coerce a loopback hostname to IPv4 127.0.0.1.
+
+    On Windows, ``localhost`` resolves to ``::1`` (IPv6) first. When
+    llama-server binds without an explicit ``--host``, or when health
+    probes target ``localhost``, this resolution order causes IPv4
+    listeners and IPv6 probes (or vice versa) to miss each other — the
+    F15 failure mode documented in windows-release-hardening. Coercing
+    the loopback name to ``127.0.0.1`` makes both sides deterministic.
+
+    The comparison is case-insensitive so ``LLAMA_SERVER_HOST=LOCALHOST``
+    and similar mixed-case overrides are also normalized — ``urlparse``
+    already lowercases hostnames for the probe side, so matching that
+    behavior here keeps bind and probe aligned on the same address.
+
+    Any non-loopback host (``0.0.0.0``, a LAN IP, a container hostname)
+    is returned unchanged so Docker / remote-binding setups keep working.
+    """
+    if host.lower() in ("", "localhost"):
+        return "127.0.0.1"
+    return host
+
+
+def _normalize_probe_url(url: str) -> str:
+    """Return ``url`` with a ``localhost`` hostname rewritten to 127.0.0.1.
+
+    Used to make health-check probes deterministic on Windows where
+    ``localhost`` prefers IPv6 loopback.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.hostname != "localhost":
+            return url
+        port_part = f":{parsed.port}" if parsed.port else ""
+        # Preserve userinfo if present (uncommon for loopback, but be safe)
+        userinfo = ""
+        if parsed.username:
+            userinfo = parsed.username
+            if parsed.password:
+                userinfo += f":{parsed.password}"
+            userinfo += "@"
+        new_netloc = f"{userinfo}127.0.0.1{port_part}"
+        return urllib.parse.urlunparse(parsed._replace(netloc=new_netloc))
+    except ValueError:
+        return url
+
+
+def _find_pid_on_port(port: int) -> Optional[int]:
+    """Best-effort lookup of the PID listening on ``port``.
+
+    Uses ``netstat -ano`` on Windows and ``lsof`` on Unix. Returns
+    ``None`` if the port is free, the lookup command is unavailable,
+    or output cannot be parsed. Callers must tolerate ``None`` —
+    PID identification is a UX convenience, not a correctness requirement.
+    """
+    system = platform.system().lower()
+    try:
+        if system == "windows":
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode != 0:
+                return None
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                # netstat -ano columns: Proto, LocalAddress, ForeignAddress, State, PID
+                if len(parts) < 5 or parts[0] != "TCP" or parts[3] != "LISTENING":
+                    continue
+                local = parts[1]
+                # LocalAddress formats: 0.0.0.0:8080, 127.0.0.1:8080, [::]:8080, [::1]:8080
+                if local.endswith(f":{port}") or local.endswith(f"]:{port}"):
+                    try:
+                        return int(parts[4])
+                    except ValueError:
+                        continue
+            return None
+
+        # Unix: try lsof first (widely available, clean output)
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            # lsof columns: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME.
+            # A single listener can appear on multiple rows (one per IPv4
+            # and IPv6 binding). Scan all data rows and return the first
+            # valid PID rather than trusting ``lines[1]`` — otherwise the
+            # remediation message can name the wrong PID when dual-stack
+            # listeners are present.
+            lines = result.stdout.strip().splitlines()
+            for row in lines[1:]:
+                parts = row.split()
+                if len(parts) >= 2:
+                    try:
+                        return int(parts[1])
+                    except ValueError:
+                        continue
+        return None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+
+
+def _check_port_available(
+    port: int,
+    host: str = "127.0.0.1",
+) -> tuple[bool, Optional[int]]:
+    """Check whether ``port`` is free to bind on the addresses that
+    ``llama-server`` would actually bind when configured for ``host``.
+
+    Returns ``(True, None)`` if the port is free.
+
+    Returns ``(False, pid)`` if something is actually listening, where
+    ``pid`` is the best-effort PID or ``None`` when it could not be
+    identified.
+
+    Address selection:
+
+    - Loopback bind (``127.0.0.1`` / ``::1``): probe both IPv4 and IPv6
+      loopback so an IPv6-only orphan (F15 in windows-release-hardening)
+      is detected even when the caller plans to bind IPv4.
+    - Wildcard bind (``0.0.0.0`` / ``::``): probe the wildcard family
+      so any listener on the port conflicts.
+    - Specific non-loopback bind (a LAN IP, container bridge, etc.):
+      probe only that address — a loopback listener does not conflict
+      with a bind to a LAN IP, so probing loopback would false-positive.
+
+    TIME_WAIT handling: on POSIX the probe uses ``SO_REUSEADDR`` so a
+    recently-closed socket does not masquerade as an occupied port. On
+    Windows ``SO_REUSEADDR`` has permissive semantics (a second bind
+    can succeed while another process still holds the port), so it is
+    deliberately *not* set there — a normal bind failure is the source
+    of truth. As a safety net, if the probe fails but no listener can
+    be identified by ``_find_pid_on_port``, the port is reported as
+    free; llama-server's own bind error will then surface via the
+    wait-loop ``proc.poll()`` path rather than a misleading preflight.
+    """
+    is_windows = platform.system().lower() == "windows"
+
+    def _can_bind(family: int, bind_host: str) -> bool:
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            if not is_windows:
+                try:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                except OSError:
+                    pass
+            sock.bind((bind_host, port))
+            return True
+        except OSError:
+            return False
+        finally:
+            sock.close()
+
+    h = host.lower()
+    # Determine which addresses to probe based on the configured bind host.
+    if h in ("127.0.0.1", "::1", "localhost", ""):
+        probes: list[tuple[int, str]] = [
+            (socket.AF_INET, "127.0.0.1"),
+            (socket.AF_INET6, "::1"),
+        ]
+    elif h == "0.0.0.0":
+        # IPv4 wildcard — llama-server binds every IPv4 interface. Any
+        # IPv4 listener on the port conflicts. IPv6 listeners don't
+        # (separate namespace unless IPV6_V6ONLY is off, which is
+        # platform-default anyway).
+        probes = [(socket.AF_INET, "0.0.0.0")]
+    elif h == "::":
+        # IPv6 wildcard — bind every IPv6 interface. Must probe IPv6
+        # specifically; an IPv4 probe would be invisible to an IPv6-only
+        # orphan on ``::``, which is exactly the masking this preflight
+        # exists to prevent.
+        probes = [(socket.AF_INET6, "::")]
+    else:
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        probes = [(family, host)]
+
+    all_free = True
+    for family, bind_host in probes:
+        if family == socket.AF_INET6 and not socket.has_ipv6:
+            continue
+        try:
+            free = _can_bind(family, bind_host)
+        except OSError as exc:
+            # socket.socket(AF_INET6) can raise with EAFNOSUPPORT or
+            # EPROTONOSUPPORT when IPv6 is compiled in but runtime-disabled.
+            # Treat those as "IPv6 unavailable, skip" — any other OSError
+            # must surface so the caller sees a real permissions/kernel
+            # problem rather than a silent "available".
+            import errno as _errno
+            if exc.errno in (_errno.EAFNOSUPPORT, _errno.EPROTONOSUPPORT):
+                continue
+            raise
+        if not free:
+            all_free = False
+            break
+
+    if all_free:
+        return True, None
+
+    pid = _find_pid_on_port(port)
+    if pid is None:
+        # Bind failed but nothing is actually listening — typically a
+        # TIME_WAIT state on Windows (where SO_REUSEADDR is unsafe to
+        # use as a probe) or a transient kernel hold. Report free; the
+        # real-spawn bind error, if any, gets caught by proc.poll() in
+        # the readiness wait.
+        return True, None
+    return False, pid
+
+
+def _format_port_in_use_error(service: str, port: int, pid: Optional[int]) -> str:
+    """Format an actionable error message when a service port is occupied.
+
+    ``service`` is a short tag like ``"LLM"`` or ``"embedding"``. The
+    message is deliberately explicit — we refuse to start rather than
+    kill a foreign process, so the user needs clear remediation steps
+    in the failure path itself.
+    """
+    who = f" by PID {pid}" if pid is not None else ""
+    win_cmd = (
+        f"Stop-Process -Id {pid} -Force"
+        if pid is not None
+        else f"Get-NetTCPConnection -LocalPort {port} -State Listen"
+    )
+    unix_cmd = (
+        f"kill {pid}"
+        if pid is not None
+        else f"lsof -nP -iTCP:{port} -sTCP:LISTEN"
+    )
+    return (
+        f"{service} port {port} is already in use{who}.\n\n"
+        f"Watercooler refuses to start a new llama-server while this port is\n"
+        f"occupied, because an existing listener (likely an orphan llama-server\n"
+        f"from a prior session that did not shut down cleanly) would mask genuine\n"
+        f"startup failures — a class of bug that previously made 'clean install'\n"
+        f"tests look green when they were not.\n\n"
+        f"To resolve:\n"
+        f"  Windows:  {win_cmd}\n"
+        f"  Unix:     {unix_cmd}\n\n"
+        f"Then restart your MCP client. "
+        f"See docs/TROUBLESHOOTING.md#port-in-use-by-orphan-llama-server "
+        f"for more detail."
+    )
 
 
 def _register_spawned_pid(pid: int) -> None:
@@ -171,6 +429,7 @@ def _cleanup_spawned_processes() -> None:
             except OSError as e:
                 log_debug(f"Failed to terminate process {pid}: {e}")
         _spawned_pids.clear()
+        _spawned_procs.clear()
 
 
 # Register cleanup handler
@@ -403,7 +662,7 @@ def _check_llm_health(api_base: str, timeout: float = 2.0) -> bool:
     Returns:
         True if service is responding
     """
-    models_url = f"{api_base.rstrip('/')}/models"
+    models_url = f"{_normalize_probe_url(api_base).rstrip('/')}/models"
     try:
         req = urllib.request.Request(
             models_url,
@@ -415,6 +674,47 @@ def _check_llm_health(api_base: str, timeout: float = 2.0) -> bool:
         return False
 
 
+def _get_spawned_proc(port: int) -> "Optional[subprocess.Popen]":
+    """Return the Popen handle registered for ``port``, or None.
+
+    Wait loops use this to check whether a child we spawned has exited
+    early (silent bind failure, missing DLL, invalid args) so they can
+    fail fast with an explicit exit code instead of blocking until the
+    health-probe deadline.
+    """
+    with _pids_lock:
+        return _spawned_procs.get(port)
+
+
+def _proc_exited_early(service_tag: str, api_base: str, proc: "subprocess.Popen") -> bool:
+    """Return True and log the exit if ``proc`` has terminated.
+
+    Centralizes the "did our child die before it could serve?" check so
+    both wait loops log a consistent diagnostic.
+    """
+    rc = proc.poll()
+    if rc is None:
+        return False
+    # Be honest: stderr is DEVNULL on every spawn path in this module,
+    # so any claim like "re-run with stderr capture" would be
+    # unfollowable. Point the user at the actually-achievable
+    # diagnostic path — rerunning the spawn command manually, which is
+    # logged at DEBUG at spawn time ("Starting llama-server in <mode>
+    # mode: ...") and therefore available whenever the MCP client
+    # surfaces DEBUG-level logs.
+    log_warning(
+        f"[{service_tag.upper()}] llama-server (PID {proc.pid}) exited with "
+        f"code {rc} before becoming ready on {api_base}. This typically "
+        f"means the port was grabbed by another process in the probe/"
+        f"spawn window, the model file is corrupt, or required arguments "
+        f"are missing. llama-server's stderr was discarded (spawn uses "
+        f"stderr=subprocess.DEVNULL). To see the underlying error, copy "
+        f"the 'Starting llama-server in <mode> mode: ...' debug line from "
+        f"your MCP log and re-run that command manually in a terminal."
+    )
+    return True
+
+
 def _wait_for_llm_ready(
     api_base: str,
     max_wait: float = DEFAULT_SERVICE_WAIT_TIMEOUT,
@@ -422,16 +722,27 @@ def _wait_for_llm_ready(
 ) -> bool:
     """Wait for LLM server to become ready.
 
+    Polls both the HTTP health endpoint and (if available) the Popen
+    handle registered by ``_start_llama_server_unlocked``. If the
+    child exits before responding — typically a silent bind failure
+    from a TOCTOU race in the preflight check — this returns False
+    immediately with a specific log line instead of blocking until
+    ``max_wait`` expires.
+
     Args:
         api_base: API base URL
         max_wait: Maximum time to wait in seconds
         poll_interval: Time between health checks
 
     Returns:
-        True if server became ready, False if timeout
+        True if server became ready, False if timeout or early exit
     """
+    port = _extract_port(api_base, default=DEFAULT_LLM_PORT)
+    proc = _get_spawned_proc(port)
     elapsed = 0.0
     while elapsed < max_wait:
+        if proc is not None and _proc_exited_early("LLM", api_base, proc):
+            return False
         if _check_llm_health(api_base):
             return True
         time.sleep(poll_interval)
@@ -469,6 +780,13 @@ def _start_llama_server(
     """
     if not host:
         host = os.environ.get("LLAMA_SERVER_HOST", "127.0.0.1")
+    # Mirror the normalization that _start_llama_server_unlocked does.
+    # Without this, LLAMA_SERVER_HOST=localhost would leave the outer
+    # wrapper's api_base pointing at http://localhost:{port}/v1 while
+    # the inner function operates on 127.0.0.1 — bind and probe would
+    # diverge for the same env-var value even though _check_llm_health
+    # applies _normalize_probe_url internally. Normalize early and once.
+    host = _normalize_loopback(host)
 
     # Acquire port-specific lock to prevent race conditions
     port_lock = _get_port_lock(port)
@@ -507,6 +825,32 @@ def _start_llama_server_unlocked(
     """
     if not host:
         host = os.environ.get("LLAMA_SERVER_HOST", "127.0.0.1")
+    host = _normalize_loopback(host)
+
+    # Preflight: refuse to start if the target port is already held by
+    # something we did not spawn. An orphan llama-server on the port would
+    # otherwise make health checks succeed and mask genuine failures (F15
+    # in windows-release-hardening). Explicit refusal > silent masking.
+    #
+    # Note: this is a fast-fail only. A TOCTOU race exists between the
+    # probe and the Popen below; a colocated process could grab the port
+    # in that window. The real-spawn failure then surfaces via
+    # proc.poll() in the readiness wait, which logs the exit code
+    # rather than hanging until the health-probe timeout.
+    #
+    # Pass ``host`` so the probe matches llama-server's actual bind
+    # target — for a non-loopback host (LAN IP, container bridge), a
+    # loopback-only probe would false-positive on unrelated local
+    # services.
+    available, conflict_pid = _check_port_available(port, host)
+    service_tag = "Embedding" if mode == "embedding" else "LLM"
+    if not available:
+        with _pids_lock:
+            is_ours = conflict_pid is not None and conflict_pid in _spawned_pids
+        if not is_ours:
+            message = _format_port_in_use_error(service_tag, port, conflict_pid)
+            log_warning(f"[{service_tag.upper()}] {message}")
+            raise RuntimeError(message)
 
     llama_server = _find_llama_server()
     if not llama_server:
@@ -580,8 +924,14 @@ def _start_llama_server_unlocked(
             start_new_session=True,  # Detach from parent process
             env=env,
         )
-        # Track PID for cleanup on exit
-        _register_spawned_pid(proc.pid)
+        # Track PID for atexit cleanup AND Popen handle by port so
+        # ``_wait_for_llm_ready`` / ``_wait_for_embedding_ready`` can
+        # detect an immediate spawn-side exit (bind failure, invalid
+        # args, missing DLL) instead of hanging until the health-probe
+        # timeout. Locked together to preserve the pid/proc invariant.
+        with _pids_lock:
+            _spawned_pids.append(proc.pid)
+            _spawned_procs[port] = proc
         log_debug(f"Started llama-server with PID {proc.pid}")
         return True
     except Exception as e:
@@ -755,7 +1105,7 @@ def _check_embedding_health(api_base: str, timeout: float = 2.0) -> bool:
     Returns:
         True if service is responding
     """
-    models_url = f"{api_base}/models"
+    models_url = f"{_normalize_probe_url(api_base)}/models"
     try:
         req = urllib.request.Request(
             models_url,
@@ -774,16 +1124,25 @@ def _wait_for_embedding_ready(
 ) -> bool:
     """Wait for embedding server to become ready.
 
+    Mirror of ``_wait_for_llm_ready``: polls both the HTTP health
+    endpoint and the Popen handle so silent bind failures during the
+    TOCTOU window are reported as an exit code rather than swallowed
+    as a timeout.
+
     Args:
         api_base: API base URL
         max_wait: Maximum time to wait in seconds
         poll_interval: Time between health checks
 
     Returns:
-        True if server became ready, False if timeout
+        True if server became ready, False if timeout or early exit
     """
+    port = _extract_port(api_base, default=DEFAULT_EMBEDDING_PORT)
+    proc = _get_spawned_proc(port)
     elapsed = 0.0
     while elapsed < max_wait:
+        if proc is not None and _proc_exited_early("EMBEDDING", api_base, proc):
+            return False
         if _check_embedding_health(api_base):
             return True
         time.sleep(poll_interval)
@@ -1434,85 +1793,6 @@ def _start_embedding_direct(
         raise
 
 
-def _start_embedding_windows(
-    model_path: Path,
-    host: str,
-    port: int,
-    n_ctx: int = DEFAULT_CONTEXT_SIZE,
-) -> bool:
-    """Start embedding server on Windows.
-
-    Uses llama-server with DETACHED_PROCESS flag for Windows.
-
-    Args:
-        model_path: Path to GGUF model file
-        host: Host to bind to
-        port: Port to listen on
-        n_ctx: Context window size
-
-    Returns:
-        True if server started successfully
-    """
-    api_base = f"http://{host}:{port}/v1"
-
-    llama_server = _find_llama_server()
-    if not llama_server:
-        log_debug("llama-server not found, attempting download...")
-        llama_server = _download_llama_server()
-
-    if not llama_server:
-        _add_startup_warning(
-            "llama-server not found and could not be downloaded.\n"
-            "Download from: https://github.com/ggml-org/llama.cpp/releases\n"
-            "Or build from source."
-        )
-        return False
-
-    try:
-        cmd = [
-            str(llama_server),
-            "--model", str(model_path),
-            "--host", host,
-            "--port", str(port),
-            "--embedding",
-            "--parallel", "8",
-            "-c", str(n_ctx),
-            "-b", "4096",
-            "-ub", "4096",
-        ]
-        log_debug(f"Starting embedding server on Windows: {' '.join(cmd)}")
-
-        # Add llama-server directory to PATH for DLL discovery
-        env = os.environ.copy()
-        lib_dir = str(llama_server.parent)
-        existing_path = env.get("PATH", "")
-        env["PATH"] = f"{lib_dir};{existing_path}" if existing_path else lib_dir
-
-        # Windows-specific: DETACHED_PROCESS
-        DETACHED_PROCESS = 0x00000008
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=DETACHED_PROCESS,
-            env=env,
-            cwd=lib_dir,  # Run from the directory containing DLLs
-        )
-
-        if _wait_for_embedding_ready(api_base, max_wait=30.0):
-            log_debug("Embedding server started successfully on Windows")
-            return True
-
-    except Exception as e:
-        log_debug(f"Windows llama-server start failed: {e}")
-
-    _add_startup_warning(
-        f"Embedding server failed to start.\n"
-        f"Start manually: llama-server --model {model_path} --embedding --port {port}"
-    )
-    return False
-
-
 def _ensure_embedding_service_available(
     model_name: str,
     api_base: str,
@@ -1580,31 +1860,44 @@ def _ensure_embedding_service_available(
     # to 0.0.0.0 for Docker container access without changing the config URL.
     parsed = urlparse(api_base)
     host = os.environ.get("LLAMA_SERVER_HOST") or parsed.hostname or "127.0.0.1"
+    host = _normalize_loopback(host)
     port = parsed.port or DEFAULT_EMBEDDING_PORT
 
-    # Start server (platform-aware)
+    # Start server. All platforms route through _start_embedding_direct,
+    # which delegates to the generic _start_llama_server used by the LLM
+    # path. Windows previously had its own _start_embedding_windows using
+    # DETACHED_PROCESS without a DEVNULL stdin — that combination gave the
+    # child an invalid stdin handle, which llama-server's Windows console
+    # handler reads as a close event, so the server died immediately after
+    # `main: starting the main loop...`. The unified path uses the same
+    # spawn code that already works for the LLM on Windows.
     system = platform.system().lower()
-
-    if system == "linux":
-        # Try systemctl first for user service
-        if _try_systemctl_embedding():
-            # Wait for it to be ready
-            if _wait_for_embedding_ready(api_base, max_wait=10.0):
-                return True
-        # Fall back to direct process
-        return _start_embedding_direct(model_path, host, port, context_size)
-
-    elif system == "darwin":
-        # macOS: direct process only
-        return _start_embedding_direct(model_path, host, port, context_size)
-
-    elif system == "windows":
-        # Windows: try pythonw, provide guidance if fails
-        return _start_embedding_windows(model_path, host, port, context_size)
-
-    else:
-        log_debug(f"Unknown platform {system}, trying direct start")
-        return _start_embedding_direct(model_path, host, port, context_size)
+    if system == "linux" and _try_systemctl_embedding():
+        if _wait_for_embedding_ready(api_base, max_wait=10.0):
+            return True
+        # systemctl started watercooler-embedding but it did not become
+        # ready within the wait window. The port is now held by the
+        # systemd unit, so falling through to direct spawn would trip
+        # the preflight's port-in-use check and misleadingly instruct
+        # the user to kill "their orphan" — but that process is a
+        # service they deliberately enabled. Surface the real
+        # diagnostic instead and stop here.
+        message = (
+            f"systemctl --user started watercooler-embedding but the "
+            f"service did not respond at {api_base} within 10 seconds.\n\n"
+            f"Inspect the unit to find the underlying cause:\n"
+            f"  systemctl --user status watercooler-embedding\n"
+            f"  journalctl --user -u watercooler-embedding -n 200\n\n"
+            f"If you want watercooler to manage llama-server directly "
+            f"instead of via systemd, disable the unit:\n"
+            f"  systemctl --user stop watercooler-embedding\n"
+            f"  systemctl --user disable watercooler-embedding\n\n"
+            f"Then restart your MCP client."
+        )
+        log_warning(f"[EMBEDDING] {message}")
+        _add_startup_warning(message)
+        return False
+    return _start_embedding_direct(model_path, host, port, context_size)
 
 
 def _embedding_startup_worker(model_name: str, api_base: str, context_size: int) -> None:

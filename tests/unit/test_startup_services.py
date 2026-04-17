@@ -572,3 +572,719 @@ class TestEnsureFalkordbRunningGuard:
 
         mock_status.assert_called_once()
         assert mock_status.call_args[0][1] == ServiceState.DISABLED
+
+
+# ============================================================================
+# Windows embedding spawn unification (F14/F15 regression guards)
+# ============================================================================
+
+
+class TestEmbeddingSpawnUnification:
+    """Guards against reintroducing the divergent Windows embedding path.
+
+    The Windows-specific ``_start_embedding_windows`` used DETACHED_PROCESS
+    without ``stdin=subprocess.DEVNULL``, giving the child an invalid
+    console handle that llama-server's Windows signal handler interpreted
+    as a close event. The embedding server died seconds after startup
+    while the LLM (using the generic spawn path) stayed up. These tests
+    ensure that single path is preserved.
+    """
+
+    def test_no_windows_specific_embedding_spawn(self):
+        """_start_embedding_windows must not exist.
+
+        If someone reintroduces a Windows-specific branch without fixing
+        the stdin+DETACHED_PROCESS interaction, this test fails and sends
+        them to the windows-release-hardening thread for context.
+        """
+        from watercooler_mcp import startup
+
+        assert not hasattr(startup, "_start_embedding_windows"), (
+            "_start_embedding_windows was reintroduced. This function "
+            "previously spawned llama-server with DETACHED_PROCESS but "
+            "no DEVNULL stdin, causing the embedding server to die "
+            "immediately on Windows. Embedding must route through the "
+            "generic _start_llama_server path. See "
+            "windows-release-hardening thread for history."
+        )
+
+
+# ============================================================================
+# Loopback normalization (F15)
+# ============================================================================
+
+
+class TestNormalizeLoopback:
+    """Tests for _normalize_loopback."""
+
+    def test_empty_becomes_ipv4_loopback(self):
+        from watercooler_mcp.startup import _normalize_loopback
+
+        assert _normalize_loopback("") == "127.0.0.1"
+
+    def test_localhost_becomes_ipv4_loopback(self):
+        from watercooler_mcp.startup import _normalize_loopback
+
+        assert _normalize_loopback("localhost") == "127.0.0.1"
+
+    def test_ipv4_loopback_unchanged(self):
+        from watercooler_mcp.startup import _normalize_loopback
+
+        assert _normalize_loopback("127.0.0.1") == "127.0.0.1"
+
+    def test_bind_all_preserved(self):
+        """0.0.0.0 is used for Docker/LAN binding and must not be coerced."""
+        from watercooler_mcp.startup import _normalize_loopback
+
+        assert _normalize_loopback("0.0.0.0") == "0.0.0.0"
+
+    def test_remote_host_preserved(self):
+        """Non-loopback hostnames (e.g., remote LLM endpoints) pass through."""
+        from watercooler_mcp.startup import _normalize_loopback
+
+        assert _normalize_loopback("llm.example.com") == "llm.example.com"
+
+    def test_uppercase_localhost_coerced(self):
+        """LLAMA_SERVER_HOST=LOCALHOST must normalize to 127.0.0.1.
+
+        urllib.parse lowercases hostnames for the probe side, so without
+        case-insensitive handling here the bind side (which goes
+        through _normalize_loopback) would diverge from the probe side
+        and reopen F15 whenever an operator uses mixed case.
+        """
+        from watercooler_mcp.startup import _normalize_loopback
+
+        assert _normalize_loopback("LOCALHOST") == "127.0.0.1"
+
+    def test_mixed_case_localhost_coerced(self):
+        from watercooler_mcp.startup import _normalize_loopback
+
+        assert _normalize_loopback("Localhost") == "127.0.0.1"
+        assert _normalize_loopback("LocalHost") == "127.0.0.1"
+        assert _normalize_loopback("lOcAlHoSt") == "127.0.0.1"
+
+
+class TestNormalizeProbeUrl:
+    """Tests for _normalize_probe_url."""
+
+    def test_localhost_rewritten(self):
+        from watercooler_mcp.startup import _normalize_probe_url
+
+        assert (
+            _normalize_probe_url("http://localhost:8080/v1")
+            == "http://127.0.0.1:8080/v1"
+        )
+
+    def test_default_port_rewritten(self):
+        from watercooler_mcp.startup import _normalize_probe_url
+
+        assert _normalize_probe_url("http://localhost/v1") == "http://127.0.0.1/v1"
+
+    def test_ipv4_unchanged(self):
+        from watercooler_mcp.startup import _normalize_probe_url
+
+        url = "http://127.0.0.1:8080/v1"
+        assert _normalize_probe_url(url) == url
+
+    def test_remote_unchanged(self):
+        from watercooler_mcp.startup import _normalize_probe_url
+
+        url = "https://api.example.com/v1"
+        assert _normalize_probe_url(url) == url
+
+    def test_uppercase_localhost_url_rewritten(self):
+        """Confirms urlparse's case-insensitive hostname handling actually
+        reaches the rewrite branch for mixed-case variants. Pairs with
+        the _normalize_loopback case-insensitivity test to guarantee
+        bind and probe agree for any mixed-case LLAMA_SERVER_HOST."""
+        from watercooler_mcp.startup import _normalize_probe_url
+
+        assert (
+            _normalize_probe_url("http://LOCALHOST:8080/v1")
+            == "http://127.0.0.1:8080/v1"
+        )
+        assert (
+            _normalize_probe_url("http://Localhost:8080/v1")
+            == "http://127.0.0.1:8080/v1"
+        )
+
+
+# ============================================================================
+# Port preflight check (orphan-masking prevention)
+# ============================================================================
+
+
+class TestCheckPortAvailable:
+    """Tests for _check_port_available."""
+
+    def test_free_port_returns_available(self):
+        """A port nobody is listening on reports (True, None)."""
+        import socket as _socket
+
+        from watercooler_mcp.startup import _check_port_available
+
+        # Find an unused port by binding 0 and reading back
+        probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        available, pid = _check_port_available(port)
+        assert available is True
+        assert pid is None
+
+    def test_occupied_port_returns_unavailable(self):
+        """An actively-listening port reports (False, ...)."""
+        import socket as _socket
+
+        from watercooler_mcp.startup import _check_port_available
+
+        # Hold a real listener on an ephemeral port
+        listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        try:
+            available, _pid = _check_port_available(port)
+            assert available is False
+            # PID may be None (lsof/netstat not available or parseable in
+            # the sandbox) — UX convenience, not a correctness contract.
+        finally:
+            listener.close()
+
+
+class TestFormatPortInUseError:
+    """Tests for _format_port_in_use_error."""
+
+    def test_message_mentions_port_and_service(self):
+        from watercooler_mcp.startup import _format_port_in_use_error
+
+        msg = _format_port_in_use_error("Embedding", 8080, 12345)
+        assert "Embedding" in msg
+        assert "8080" in msg
+        assert "PID 12345" in msg
+
+    def test_message_has_windows_and_unix_remediation(self):
+        from watercooler_mcp.startup import _format_port_in_use_error
+
+        msg = _format_port_in_use_error("LLM", 8000, 999)
+        assert "Stop-Process" in msg
+        assert "kill " in msg
+        assert "TROUBLESHOOTING.md" in msg
+
+    def test_no_pid_fallback_has_inspection_commands(self):
+        """When PID lookup fails, users need a way to find the process."""
+        from watercooler_mcp.startup import _format_port_in_use_error
+
+        msg = _format_port_in_use_error("Embedding", 8080, None)
+        assert "Get-NetTCPConnection" in msg
+        assert "lsof" in msg
+
+
+class TestSpawnPreflightRefusesOnOccupiedPort:
+    """End-to-end: _start_llama_server_unlocked refuses when port is held."""
+
+    def test_preflight_raises_runtime_error_with_actionable_message(self):
+        """Listener held on the target port causes a RuntimeError with a
+        remediation-focused message — no masking, no silent failure."""
+        import socket as _socket
+
+        from watercooler_mcp.startup import _start_llama_server_unlocked
+
+        listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                _start_llama_server_unlocked(
+                    model_path=Path("/nonexistent/model.gguf"),
+                    port=port,
+                    mode="embedding",
+                    context_size=512,
+                    host="127.0.0.1",
+                )
+            msg = str(exc_info.value)
+            assert "already in use" in msg
+            assert str(port) in msg
+            # TROUBLESHOOTING link is part of the remediation
+            assert "TROUBLESHOOTING.md" in msg
+        finally:
+            listener.close()
+
+
+# ============================================================================
+# Review-round fixes: TOCTOU-resilient wait loops, _pids_lock read, TIME_WAIT
+# ============================================================================
+
+
+class TestWaitLoopFailsFastOnEarlyProcessExit:
+    """Review item #1 (High): the wait loop must surface an early child
+    exit instead of blocking until the health-probe deadline."""
+
+    def test_wait_returns_false_when_proc_exited_before_ready(self):
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        class _FakeExitedProc:
+            """Stand-in for ``subprocess.Popen`` that has already exited."""
+
+            pid = 99999
+            returncode = 1
+
+            def poll(self):
+                return 1
+
+        fake_proc = _FakeExitedProc()
+        port = 65432  # arbitrary ephemeral port not actually bound
+        api_base = f"http://127.0.0.1:{port}/v1"
+
+        # Register our fake exited proc for this port so _get_spawned_proc
+        # returns it. We restore state in finally so other tests aren't
+        # affected.
+        with startup._pids_lock:
+            startup._spawned_procs[port] = fake_proc  # type: ignore[assignment]
+
+        try:
+            # Patch the health check to always fail so only proc.poll()
+            # can short-circuit the wait.
+            with patch("watercooler_mcp.startup._check_llm_health", return_value=False):
+                start = __import__("time").time()
+                result = startup._wait_for_llm_ready(
+                    api_base, max_wait=5.0, poll_interval=0.05
+                )
+                elapsed = __import__("time").time() - start
+            assert result is False
+            # Should exit promptly (well under max_wait) because proc.poll()
+            # returned a non-None exit code on the first iteration.
+            assert elapsed < 1.0
+        finally:
+            with startup._pids_lock:
+                startup._spawned_procs.pop(port, None)
+
+    def test_wait_returns_true_when_health_passes_and_proc_alive(self):
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        class _FakeRunningProc:
+            pid = 88888
+            returncode = None
+
+            def poll(self):
+                return None
+
+        fake_proc = _FakeRunningProc()
+        port = 65431
+        api_base = f"http://127.0.0.1:{port}/v1"
+
+        with startup._pids_lock:
+            startup._spawned_procs[port] = fake_proc  # type: ignore[assignment]
+        try:
+            with patch("watercooler_mcp.startup._check_embedding_health", return_value=True):
+                result = startup._wait_for_embedding_ready(
+                    api_base, max_wait=5.0, poll_interval=0.05
+                )
+            assert result is True
+        finally:
+            with startup._pids_lock:
+                startup._spawned_procs.pop(port, None)
+
+
+class TestPreflightTreatsOwnedPidAsOurs:
+    """Review item #2 (High): _spawned_pids read must be locked and the
+    owned-PID path must not raise."""
+
+    def test_owned_pid_does_not_trigger_refuse_to_start(self):
+        """When _check_port_available returns a PID that's in our
+        _spawned_pids, we must treat it as ours and proceed past the
+        preflight, not raise RuntimeError.
+
+        We verify the branch by patching _check_port_available and
+        _find_llama_server so the rest of the function exits cleanly
+        (auto-provisioning disabled → RuntimeError from a *different*
+        code path, which we don't want to confuse with the port-in-use
+        path).
+        """
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        owned_pid = 123456
+        port = 65430
+
+        with startup._pids_lock:
+            startup._spawned_pids.append(owned_pid)
+        try:
+            with patch(
+                "watercooler_mcp.startup._check_port_available",
+                return_value=(False, owned_pid),
+            ), patch(
+                "watercooler_mcp.startup._find_llama_server",
+                return_value=None,
+            ), patch(
+                "watercooler_mcp.startup._is_auto_provision_enabled",
+                return_value=False,
+            ):
+                # Expect a RuntimeError, but from the "llama-server not
+                # found and auto-provisioning disabled" branch — NOT
+                # from the port-in-use branch. The message content is
+                # the tell-tale.
+                with pytest.raises(RuntimeError) as exc_info:
+                    startup._start_llama_server_unlocked(
+                        model_path=Path("/nonexistent/model.gguf"),
+                        port=port,
+                        mode="embedding",
+                        context_size=512,
+                        host="127.0.0.1",
+                    )
+                msg = str(exc_info.value)
+                assert "already in use" not in msg
+                assert "auto-provisioning" in msg or "not found" in msg
+        finally:
+            with startup._pids_lock:
+                if owned_pid in startup._spawned_pids:
+                    startup._spawned_pids.remove(owned_pid)
+
+
+class TestCheckPortAvailableTimeWaitTolerance:
+    """Review item #3 (Medium): TIME_WAIT on POSIX should not false-positive."""
+
+    def test_bind_fail_without_listener_reports_free(self):
+        """If _find_pid_on_port returns None (nothing actually listening),
+        _check_port_available should report the port as free even when a
+        bind probe fails. Simulates the TIME_WAIT edge case without
+        requiring a real TIME_WAIT socket."""
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        # Force both bind probes to "fail" and the PID lookup to find
+        # nothing — this is the TIME_WAIT signature.
+        with patch.object(startup, "_find_pid_on_port", return_value=None), patch(
+            "socket.socket"
+        ) as fake_socket_cls:
+            fake_sock = fake_socket_cls.return_value
+            fake_sock.bind.side_effect = OSError("EADDRINUSE (simulated)")
+
+            available, pid = startup._check_port_available(59999)
+
+        assert available is True
+        assert pid is None
+
+
+class TestCheckPortAvailableIpv6Disabled:
+    """Review item #4 (Medium): the IPv6 catch must not mask genuine errors."""
+
+    def test_ipv6_disabled_via_has_ipv6_guard(self):
+        """When ``socket.has_ipv6`` is False, the IPv6 branch is skipped
+        entirely — no exceptions raised, result reflects IPv4 only."""
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        # Pick an unused port and hold a listener to make IPv4 busy.
+        import socket as _socket
+
+        listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        try:
+            with patch.object(startup.socket, "has_ipv6", False):
+                available, _pid = startup._check_port_available(port)
+            assert available is False
+        finally:
+            listener.close()
+
+
+# ============================================================================
+# Review round 3 fixes: systemctl bailout, outer-wrapper normalization,
+# host-aware preflight
+# ============================================================================
+
+
+class TestSystemctlBailout:
+    """Review round 3 (High): systemctl started but not ready must not
+    cascade into the preflight misdiagnosing the systemd unit as an
+    orphan."""
+
+    def test_systemctl_failure_bails_with_diagnostic_not_runtime_error(self):
+        """_ensure_embedding_service_available returns False with a
+        systemctl-specific startup warning when _try_systemctl_embedding
+        succeeds but the health check times out. Critically, it must
+        NOT raise RuntimeError from the preflight telling the user to
+        ``kill`` the systemd service."""
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        # Replace the model-resolution prelude so we land at the
+        # systemctl branch without needing real model files.
+        fake_model_path = Path("/tmp/fake-model.gguf")
+        fake_spec = {"dim": 1024, "file_name": "fake.gguf"}
+
+        with patch(
+            "watercooler.models.resolve_embedding_model", return_value=fake_spec
+        ), patch(
+            "watercooler.models.ensure_model_available", return_value=fake_model_path
+        ), patch(
+            "platform.system", return_value="Linux"
+        ), patch(
+            "watercooler_mcp.startup._try_systemctl_embedding", return_value=True
+        ), patch(
+            "watercooler_mcp.startup._wait_for_embedding_ready", return_value=False
+        ), patch(
+            "watercooler_mcp.startup._start_embedding_direct"
+        ) as mock_direct, patch(
+            "watercooler_mcp.startup._add_startup_warning"
+        ) as mock_warn:
+            result = startup._ensure_embedding_service_available(
+                model_name="bge-m3",
+                api_base="http://127.0.0.1:8080/v1",
+                context_size=8192,
+            )
+
+        assert result is False, "systemctl failure must return False, not raise"
+        # The direct-spawn fallthrough must NOT have been invoked — that
+        # is the whole point of the bailout.
+        mock_direct.assert_not_called()
+        # A systemctl-specific diagnostic should have been surfaced.
+        warning_msgs = [call.args[0] for call in mock_warn.call_args_list]
+        joined = "\n".join(warning_msgs)
+        assert "watercooler-embedding" in joined
+        assert "journalctl" in joined or "systemctl --user status" in joined
+
+
+class TestOuterWrapperAppliesNormalizeLoopback:
+    """Review round 3 (Medium): _start_llama_server outer wrapper must
+    apply _normalize_loopback so the 'already running' health-check
+    probe uses the same canonical host as the inner function."""
+
+    def test_localhost_env_normalized_before_api_base_build(self, monkeypatch):
+        """Setting LLAMA_SERVER_HOST=localhost must produce a
+        ``http://127.0.0.1:PORT/v1`` probe URL, not ``http://localhost:...``.
+        We detect the normalization by inspecting the url
+        ``_check_llm_health`` receives."""
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        monkeypatch.setenv("LLAMA_SERVER_HOST", "localhost")
+        captured: dict[str, str] = {}
+
+        def fake_health(api_base, timeout=2.0):
+            captured["api_base"] = api_base
+            return True  # claim server is already running to short-circuit
+
+        with patch(
+            "watercooler_mcp.startup._check_llm_health", side_effect=fake_health
+        ), patch(
+            "watercooler_mcp.startup._get_port_lock"
+        ) as mock_get_lock:
+            # Give the lock a real context manager shape
+            mock_get_lock.return_value.__enter__ = lambda _self: None
+            mock_get_lock.return_value.__exit__ = lambda *_args: False
+            startup._start_llama_server(
+                model_path=Path("/tmp/ignored.gguf"),
+                port=65429,
+                mode="completion",
+                context_size=512,
+            )
+
+        assert captured["api_base"] == "http://127.0.0.1:65429/v1"
+
+
+class TestHostAwarePreflight:
+    """Review round 3 (Low): _check_port_available must match the
+    address llama-server would actually bind — probing 127.0.0.1 for a
+    non-loopback bind false-positives on unrelated local services."""
+
+    def test_loopback_bind_probes_both_ipv4_and_ipv6(self):
+        """Legacy F15 behavior preserved for loopback."""
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        calls: list[tuple[int, str]] = []
+
+        def fake_can_bind(self_unused, address):  # pragma: no cover
+            raise AssertionError("_can_bind is a closure; not called via class")
+
+        # Instead of patching the closure, patch socket.socket and record
+        # which bind attempts happen.
+        real_socket = startup.socket.socket
+
+        class _RecordingSocket:
+            def __init__(self, family, kind):
+                self.family = family
+                self._inner = real_socket(family, kind)
+
+            def setsockopt(self, *a, **kw):
+                pass
+
+            def bind(self, addr):
+                calls.append((self.family, addr[0]))
+                # Actually bind so we return a realistic success/failure
+                self._inner.bind(addr)
+
+            def close(self):
+                self._inner.close()
+
+        with patch.object(startup.socket, "socket", _RecordingSocket):
+            startup._check_port_available(0, "127.0.0.1")
+
+        families_probed = {fam for fam, _host in calls}
+        hosts_probed = {h for _fam, h in calls}
+        import socket as _socket
+
+        # Both families probed when configured for loopback
+        assert _socket.AF_INET in families_probed
+        # IPv6 may be skipped on hosts without IPv6 support; only assert
+        # when the host actually has it.
+        if _socket.has_ipv6:
+            assert _socket.AF_INET6 in families_probed
+        assert "127.0.0.1" in hosts_probed
+
+    def test_non_loopback_bind_probes_only_that_address(self):
+        """When host is a specific non-loopback address, the probe
+        targets only that address — no 127.0.0.1 probe that could
+        false-positive on an unrelated local listener."""
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        calls: list[tuple[int, str]] = []
+
+        class _NonBindingSocket:
+            def __init__(self, family, kind):
+                self.family = family
+
+            def setsockopt(self, *a, **kw):
+                pass
+
+            def bind(self, addr):
+                calls.append((self.family, addr[0]))
+                # Simulate success so preflight reports available; that
+                # keeps the test deterministic without needing a real
+                # LAN IP to bind.
+                return None
+
+            def close(self):
+                pass
+
+        with patch.object(startup.socket, "socket", _NonBindingSocket):
+            available, _pid = startup._check_port_available(0, "192.168.1.50")
+
+        hosts_probed = {h for _fam, h in calls}
+        assert hosts_probed == {"192.168.1.50"}
+        assert available is True
+
+    def test_wildcard_bind_probes_wildcard(self):
+        """0.0.0.0 configured bind means llama-server binds every
+        interface — the probe must match (any listener on the port
+        conflicts)."""
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        calls: list[tuple[int, str]] = []
+
+        class _NonBindingSocket:
+            def __init__(self, family, kind):
+                self.family = family
+
+            def setsockopt(self, *a, **kw):
+                pass
+
+            def bind(self, addr):
+                calls.append((self.family, addr[0]))
+
+            def close(self):
+                pass
+
+        with patch.object(startup.socket, "socket", _NonBindingSocket):
+            startup._check_port_available(0, "0.0.0.0")
+
+        hosts_probed = {h for _fam, h in calls}
+        assert hosts_probed == {"0.0.0.0"}
+
+    def test_ipv6_wildcard_bind_probes_ipv6_wildcard(self):
+        """Host='::' must probe (AF_INET6, '::'), not (AF_INET, '0.0.0.0').
+
+        This is the exact masking scenario the preflight exists to
+        prevent: an IPv6-only orphan on ``::`` would be invisible to
+        an IPv4 wildcard probe, so a new spawn would fail silently at
+        bind time and the preflight-guarantee would regress for this
+        configuration.
+        """
+        from unittest.mock import patch
+
+        import socket as _socket
+
+        from watercooler_mcp import startup
+
+        calls: list[tuple[int, str]] = []
+
+        class _NonBindingSocket:
+            def __init__(self, family, kind):
+                self.family = family
+
+            def setsockopt(self, *a, **kw):
+                pass
+
+            def bind(self, addr):
+                calls.append((self.family, addr[0]))
+
+            def close(self):
+                pass
+
+        with patch.object(startup.socket, "socket", _NonBindingSocket):
+            startup._check_port_available(0, "::")
+
+        families_probed = {fam for fam, _host in calls}
+        hosts_probed = {h for _fam, h in calls}
+        assert families_probed == {_socket.AF_INET6}
+        assert hosts_probed == {"::"}
+
+
+class TestProcExitedEarlyMessageIsTruthful:
+    """Review round 4 (Low): the diagnostic instruction must be
+    followable — no claims about 'stderr capture' that the code does
+    not actually offer."""
+
+    def test_warning_message_does_not_claim_stderr_capture_is_available(self):
+        """Regression guard. If someone reintroduces the misleading
+        'Re-run with stderr capture for details' line, this test fails
+        and points the author at the honest path (acknowledge DEVNULL,
+        point at the spawn-command debug log line)."""
+        from unittest.mock import patch
+
+        from watercooler_mcp import startup
+
+        class _ExitedProc:
+            pid = 77777
+            returncode = 1
+
+            def poll(self):
+                return 1
+
+        with patch("watercooler_mcp.startup.log_warning") as mock_warn:
+            result = startup._proc_exited_early(
+                "LLM", "http://127.0.0.1:8000/v1", _ExitedProc()
+            )
+
+        assert result is True
+        mock_warn.assert_called_once()
+        msg = mock_warn.call_args.args[0]
+        # Negative assertion: the outdated misleading claim must not
+        # resurface.
+        assert "Re-run with stderr capture" not in msg
+        # Positive assertions: honest, followable path.
+        assert "stderr" in msg.lower()
+        assert "DEVNULL" in msg
+        assert "Starting llama-server" in msg
+        # Still surfaces the exit code so users know what happened.
+        assert "exited with code 1" in msg
+        assert "PID 77777" in msg
