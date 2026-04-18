@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from watercooler_mcp.middleware import run_with_sync
+from watercooler_mcp.middleware import run_with_graph_sync, run_with_sync
 
 
 # ---------------------------------------------------------------------------
@@ -196,3 +196,111 @@ class TestMemorySyncGuarantee:
         call_kw = mock_mem.call_args[1]
         assert call_kw["topic"] == "test-topic"
         assert call_kw["entry_id"] == "entry-001"
+
+
+class TestWriteGuardNotSilentlyBypassed:
+    """Regression guard for the post-PR #613 round-2 finding: when
+    ``context.threads_dir`` is None, ``run_with_sync`` previously
+    skipped the write guard entirely (``if context.threads_dir:``),
+    letting the write proceed against whatever downstream code
+    inferred — defeating the "every MCP write is guarded" contract.
+    The guard must now refuse the write with a clear error instead.
+    """
+
+    def test_run_with_sync_refuses_when_threads_dir_is_none(
+        self, tmp_path, monkeypatch
+    ):
+        from watercooler.write_guard import (
+            ENV_ALLOW_LOCAL_ONLY,
+            WatercoolerWriteError,
+        )
+
+        # Opt-in must NOT let a missing threads_dir through — a
+        # missing threads_dir is misconfiguration, not local-only mode.
+        monkeypatch.setenv(ENV_ALLOW_LOCAL_ONLY, "1")
+
+        ctx = _FakeContext(code_root=tmp_path, threads_dir=None)
+
+        with pytest.raises(WatercoolerWriteError) as exc:
+            run_with_sync(
+                ctx,
+                commit_title="test commit",
+                operation=lambda: "ok",
+                topic="test-topic",
+                entry_id="entry-001",
+            )
+        msg = str(exc.value)
+        assert "no threads_dir is configured" in msg
+        # The round-8 finding: the `threads_dir is None` branch runs
+        # BEFORE `assert_github_backed_threads`, so the opt-in env
+        # var never reaches the bypass. The error message must not
+        # suggest that setting the env var is a fix — it isn't.
+        assert "set WATERCOOLER_ALLOW_LOCAL_ONLY=1" not in msg
+        assert "does NOT help here" in msg
+
+
+class TestRunWithGraphSyncGuarded:
+    """Regression guards for the post-PR #613 round-6 M1 finding:
+    ``run_with_graph_sync`` previously committed + pushed without
+    calling ``assert_github_backed_threads``. The two graph write
+    tools (``graph_project`` / ``graph_enrich``) that route through
+    this wrapper bypassed the "every MCP write is guarded" claim —
+    a non-GitHub remote would accept the push, and a missing ``.git``
+    would silently skip the commit rather than refusing the write.
+    """
+
+    def test_refuses_when_threads_dir_is_none(self, tmp_path, monkeypatch):
+        from watercooler.write_guard import (
+            ENV_ALLOW_LOCAL_ONLY,
+            WatercoolerWriteError,
+        )
+
+        # Opt-in must NOT let a missing threads_dir through.
+        monkeypatch.setenv(ENV_ALLOW_LOCAL_ONLY, "1")
+        ctx = _FakeContext(code_root=tmp_path, threads_dir=None)
+        executed = []
+
+        with pytest.raises(WatercoolerWriteError) as exc:
+            run_with_graph_sync(
+                ctx,
+                operation=lambda: (executed.append("ran") or "ok"),
+                commit_msg="graph op",
+                topic="test-topic",
+            )
+        # Guard runs BEFORE the operation — no mutation leaked.
+        assert executed == [], "operation must not run when guard refuses"
+        msg = str(exc.value)
+        assert "no threads_dir is configured" in msg
+        # Round-8 regression: the error message used to suggest
+        # ``WATERCOOLER_ALLOW_LOCAL_ONLY=1`` as a remediation, but the
+        # opt-in only fires inside ``assert_github_backed_threads`` —
+        # which this ``None``-branch never reaches. The suggestion
+        # must not appear.
+        assert "set WATERCOOLER_ALLOW_LOCAL_ONLY=1" not in msg
+        assert "does NOT help here" in msg
+
+    def test_refuses_non_github_backed_target(self, tmp_path, monkeypatch):
+        from watercooler.write_guard import (
+            ENV_ALLOW_LOCAL_ONLY,
+            WatercoolerWriteError,
+        )
+
+        # Make sure the conftest autouse bypass isn't masking the guard.
+        monkeypatch.delenv(ENV_ALLOW_LOCAL_ONLY, raising=False)
+
+        # Threads dir with no ``.git`` at all (common local-only mode).
+        threads = tmp_path / "threads"
+        threads.mkdir()
+        ctx = _FakeContext(code_root=tmp_path, threads_dir=threads)
+        executed = []
+
+        with pytest.raises(WatercoolerWriteError):
+            run_with_graph_sync(
+                ctx,
+                operation=lambda: (executed.append("ran") or "ok"),
+                commit_msg="graph op",
+                topic="test-topic",
+            )
+        assert executed == [], (
+            "graph operation must not execute before guard accepts"
+        )

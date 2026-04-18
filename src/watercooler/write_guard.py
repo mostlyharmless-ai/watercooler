@@ -25,20 +25,27 @@ case as an explicit opt-in rather than a silent default.
 
 Stdlib-only: the core package must not grow a GitPython dependency for
 this check. We detect git-repo state via the presence of a ``.git``
-entry (directory or file) in ``threads_dir`` or an ancestor, and read
-the origin remote URL directly from ``.git/config`` (or the gitdir
-pointer for worktrees). This keeps ``core`` minimal-deps per the
-project's design principles.
+entry (directory or file) AT ``threads_dir`` — no ancestor walk, because
+a ``<repo>/_local`` child would otherwise inherit the parent's origin
+while writes still land in ``_local``. The origin URL comes from
+``.git/config`` (via the gitdir pointer for worktrees and the
+``commondir`` indirection when present); when the main config has no
+``[remote "origin"]`` stanza we shell out to ``git config --get
+remote.origin.url`` so includes (``[include]`` / ``[includeIf]``) and
+any other git config semantics are honored via the canonical source.
+This keeps ``core`` minimal-deps per the project's design principles.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Optional
 
 
 ENV_ALLOW_LOCAL_ONLY = "WATERCOOLER_ALLOW_LOCAL_ONLY"
+ENV_EXTRA_GITHUB_HOSTS = "WATERCOOLER_GITHUB_HOSTS"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 _URL_SCHEMES = ("https://", "http://", "ssh://", "git://")
@@ -58,24 +65,6 @@ class WatercoolerWriteError(Exception):
 def _is_allow_local_only_enabled() -> bool:
     value = os.environ.get(ENV_ALLOW_LOCAL_ONLY, "").strip().lower()
     return value in _TRUTHY
-
-
-def _find_git_dir(start: Path) -> Optional[Path]:
-    """Walk up from ``start`` looking for a ``.git`` entry.
-
-    Returns the path to the ``.git`` entry (which may be a directory
-    for a normal repo or a file for a worktree / submodule), or None
-    if no git repo is found up to the filesystem root.
-    """
-    try:
-        cur = start.resolve(strict=False)
-    except OSError:
-        return None
-    for candidate in (cur, *cur.parents):
-        git_entry = candidate / ".git"
-        if git_entry.exists():
-            return git_entry
-    return None
 
 
 def _resolve_real_gitdir(git_entry: Path) -> Optional[Path]:
@@ -100,12 +89,46 @@ def _resolve_real_gitdir(git_entry: Path) -> Optional[Path]:
     return target if target.is_dir() else None
 
 
+def _read_origin_url_from_git(gitdir: Path) -> Optional[str]:
+    """Ask git itself for the origin URL via ``git config --get``.
+
+    Used as a fallback when the manual INI parser finds no origin
+    stanza in the top-level config. Git's own reader honors
+    ``[include] path = ...`` and ``[includeIf ... ] path = ...``
+    stanzas (common in dotfile-shared configs), which our lightweight
+    parser does not follow. Returns None when git reports no origin,
+    the binary is unavailable, or any error occurs.
+    """
+    try:
+        # ``--git-dir`` anchors the lookup to *this* repo's config
+        # chain, not whatever cwd git happens to resolve. ``--local``
+        # and ``--system`` / ``--global`` all compose into the final
+        # answer when no scope flag is given, which is what we want —
+        # the same value git would see for a push.
+        result = subprocess.run(
+            ["git", f"--git-dir={gitdir}", "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
 def _read_origin_url(gitdir: Path) -> Optional[str]:
     """Read the ``[remote "origin"] url`` value from ``config``.
 
     Handles worktree gitdirs by following the ``commondir`` indirection
     so worktrees see the main repo's origin URL, not a nonexistent
-    worktree-local config. Returns None when origin is missing.
+    worktree-local config. Falls back to ``git config --get
+    remote.origin.url`` when the manual parser doesn't find an origin
+    stanza — this catches configs that pull the remote in via
+    ``[include]`` / ``[includeIf]``, which the lightweight parser
+    doesn't follow. Returns None when origin is missing everywhere.
     """
     # If this is a worktree gitdir, the shared config is at
     # gitdir/commondir's target (typically the main repo's .git dir).
@@ -120,30 +143,39 @@ def _read_origin_url(gitdir: Path) -> Optional[str]:
             pass
 
     config_path = gitdir / "config"
-    if not config_path.exists():
-        return None
-    try:
-        text = config_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
+    if config_path.exists():
+        try:
+            text = config_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = None
+        if text is not None:
+            # Parse INI-style stanzas looking for [remote "origin"] url.
+            in_origin = False
+            for raw in text.splitlines():
+                line = raw.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    header = line[1:-1].strip()
+                    # Accept both `remote "origin"` and `remote.origin`-style variants
+                    in_origin = header.replace('"', '').lower() in (
+                        "remote origin",
+                        "remote.origin",
+                    )
+                    continue
+                key, sep, value = line.partition("=")
+                # Exact key match — ``startswith("url")`` would also
+                # match hypothetical keys like ``urlpath`` or
+                # ``url-tracking``. Standard git remote sections
+                # don't have such keys today, but the strict form
+                # keeps the parser correct if they ever appear.
+                if in_origin and sep and key.strip().lower() == "url":
+                    result = value.strip()
+                    if result:
+                        return result
 
-    # Parse INI-style stanzas looking for [remote "origin"] url.
-    in_origin = False
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith("[") and line.endswith("]"):
-            header = line[1:-1].strip()
-            # Accept both `remote "origin"` and `remote.origin`-style variants
-            in_origin = header.replace('"', '').lower() in (
-                "remote origin",
-                "remote.origin",
-            )
-            continue
-        if in_origin and line.lower().startswith("url"):
-            # url = <value>
-            _, _, value = line.partition("=")
-            return value.strip() or None
-    return None
+    # Manual parse found nothing — defer to git itself, which honors
+    # include / includeIf / any other config-resolution semantics we'd
+    # otherwise have to reimplement.
+    return _read_origin_url_from_git(gitdir)
 
 
 def _extract_host(url: str) -> str:
@@ -172,18 +204,64 @@ def _extract_host(url: str) -> str:
     return s
 
 
+def _parse_extra_github_hosts() -> list[tuple[str, bool]]:
+    """Parse ``WATERCOOLER_GITHUB_HOSTS`` into ``(pattern, is_suffix)`` pairs.
+
+    Each comma-separated entry may be either ``host.example.com``
+    (exact match) or ``*.example.com`` (suffix match — matches any
+    subdomain of ``example.com`` but NOT ``example.com`` itself).
+    Empty / whitespace-only entries are ignored. Case-insensitive.
+    """
+    raw = os.environ.get(ENV_EXTRA_GITHUB_HOSTS, "").strip()
+    if not raw:
+        return []
+    entries: list[tuple[str, bool]] = []
+    for part in raw.split(","):
+        p = part.strip().lower()
+        if not p:
+            continue
+        if p.startswith("*."):
+            suffix = p[2:]
+            if suffix:
+                entries.append((suffix, True))
+        else:
+            entries.append((p, False))
+    return entries
+
+
 def _looks_github_hosted(url: str) -> bool:
     """True if ``url`` points at a GitHub-family host.
 
-    Accepts ``github.com``, subdomains like ``api.github.com``, and the
-    GitHub Enterprise family (``github.acme.com``, ``github.ghe.io``,
-    etc.). Conservative — doesn't verify the user has push permissions,
-    only that the thread pushes have a plausible GitHub destination.
+    Accepts by default:
+    - ``github.com``
+    - subdomains of ``github.com`` (e.g. ``api.github.com``)
+
+    The prior check (``host.startswith("github.")``) was too permissive
+    — it accepted attacker-controlled hostnames like
+    ``github.attacker.com``. GitHub Enterprise installations (which
+    often use ``github.<company>.<tld>`` hostnames) are now supported
+    via the ``WATERCOOLER_GITHUB_HOSTS`` env var, which takes a
+    comma-separated allowlist of exact hostnames or ``*.suffix.com``
+    patterns. This keeps the default guard tight while preserving an
+    explicit escape hatch for GHE users.
     """
     host = _extract_host(url)
     if not host:
         return False
-    return host.startswith("github.") or host.endswith(".github.com")
+    # Built-in trust root: only real github.com.
+    if host == "github.com" or host.endswith(".github.com"):
+        return True
+    # User-configured GitHub Enterprise hostnames.
+    for entry, is_suffix in _parse_extra_github_hosts():
+        if is_suffix:
+            # ``*.example.com`` matches subdomains of ``example.com``
+            # but NOT the bare ``example.com`` itself — same semantics
+            # as the TLS SAN / cookie-domain convention.
+            if host.endswith("." + entry):
+                return True
+        elif host == entry:
+            return True
+    return False
 
 
 def _format_error(
@@ -217,13 +295,16 @@ def assert_github_backed_threads(
     threads_dir: Path,
     code_root: Optional[Path] = None,
 ) -> None:
-    """Ensure ``threads_dir`` is backed by a GitHub git repository.
+    """Ensure ``threads_dir`` is itself a GitHub-backed git worktree.
 
     Raises ``WatercoolerWriteError`` with an actionable remediation
     message when any of the following is true:
 
     - ``WATERCOOLER_ALLOW_LOCAL_ONLY=1`` is not set, AND
-    - No ``.git`` is found walking up from ``threads_dir``, OR
+    - ``threads_dir`` is not itself a git worktree root (no ``.git``
+      entry directly at the path — we do NOT walk up to ancestors,
+      because a ``<repo>/_local`` child would falsely inherit the
+      parent's origin while writes still land in ``_local``), OR
     - The repo has no ``origin`` remote, OR
     - The ``origin`` URL does not point at a GitHub-family host.
 
@@ -236,10 +317,22 @@ def assert_github_backed_threads(
     if _is_allow_local_only_enabled():
         return
 
-    git_entry = _find_git_dir(threads_dir)
-    if git_entry is None:
+    # Require a .git entry AT threads_dir, not at any ancestor. Walking
+    # up would accept <repo>/_local as "GitHub-backed" because the parent
+    # repo has a github origin — but writes still land in _local and
+    # never reach the remote. Orphan-branch worktrees pass this check
+    # because their .git is a file (gitdir pointer) sitting at the
+    # worktree root.
+    git_entry = threads_dir / ".git"
+    if not git_entry.exists():
         raise WatercoolerWriteError(
-            _format_error(threads_dir, reason="no .git found at or above threads_dir")
+            _format_error(
+                threads_dir,
+                reason=(
+                    "threads_dir is not itself a git worktree "
+                    "(no .git entry at this path)"
+                ),
+            )
         )
 
     gitdir = _resolve_real_gitdir(git_entry)

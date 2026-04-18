@@ -325,13 +325,32 @@ def run_with_sync(
     ``_run_with_sync_report_push`` — covers every current and future
     MCP write tool automatically.
     """
-    from watercooler.write_guard import assert_github_backed_threads
+    from watercooler.write_guard import (
+        WatercoolerWriteError,
+        assert_github_backed_threads,
+    )
 
-    if context.threads_dir:
-        # Raises WatercoolerWriteError when threads_dir is not backed
-        # by a GitHub remote (and opt-in is absent). MCP tool wrappers
-        # convert that to a user-visible error message.
-        assert_github_backed_threads(context.threads_dir)
+    # Hard-fail when threads_dir is missing. Skipping the guard here
+    # would let the write proceed against whatever downstream sync code
+    # happened to infer, defeating the "every MCP write is guarded"
+    # contract this function's docstring promises. A missing
+    # threads_dir is itself a misconfiguration — refuse the write
+    # rather than silently bypassing the check.
+    if context.threads_dir is None:
+        raise WatercoolerWriteError(
+            "Cannot write threads — no threads_dir is configured on "
+            "this request context. Ensure WATERCOOLER_DIR is set or "
+            "the code_path argument resolves to a git repository. "
+            "(WATERCOOLER_ALLOW_LOCAL_ONLY does NOT help here — a "
+            "missing threads_dir is a configuration gap, not local-"
+            "only mode.) "
+            "See docs/TROUBLESHOOTING.md#local-only-mode for details."
+        )
+
+    # Raises WatercoolerWriteError when threads_dir is not backed by a
+    # GitHub remote (and opt-in is absent). MCP tool wrappers convert
+    # that to a user-visible error message.
+    assert_github_backed_threads(context.threads_dir)
 
     lock = None
     pre_write_wt_lock = None
@@ -661,14 +680,44 @@ def run_with_graph_sync(
 ) -> T:
     """Execute graph operation with sync.
 
-    Flow: operation -> commit graph files -> push
+    Flow: guard -> operation -> commit graph files -> push
+
+    Guards against writing into a non-GitHub-backed target (Bug #3,
+    plan v4): ``assert_github_backed_threads`` runs BEFORE the graph
+    mutation, matching ``run_with_sync``'s contract. Without this
+    guard the ``graph_project`` and ``graph_enrich`` tools could
+    mutate a local-only or non-GitHub target and then silently skip
+    the push — leaving the graph divergent from the remote.
 
     Args:
         topic: If provided, uses topic-scoped staging instead of git add -A.
     """
+    from watercooler.write_guard import (
+        WatercoolerWriteError,
+        assert_github_backed_threads,
+    )
+
+    # Same hard-fail as ``run_with_sync``: missing ``threads_dir`` is
+    # a misconfiguration, not a reason to silently bypass the guard.
+    if context.threads_dir is None:
+        raise WatercoolerWriteError(
+            "Cannot write threads — no threads_dir is configured on "
+            "this request context. Ensure WATERCOOLER_DIR is set or "
+            "the code_path argument resolves to a git repository. "
+            "(WATERCOOLER_ALLOW_LOCAL_ONLY does NOT help here — a "
+            "missing threads_dir is a configuration gap, not local-"
+            "only mode.) "
+            "See docs/TROUBLESHOOTING.md#local-only-mode for details."
+        )
+
+    # Raises WatercoolerWriteError when threads_dir is not GitHub-
+    # backed (and the opt-in is absent). MCP tool wrappers convert
+    # the exception to a user-visible error.
+    assert_github_backed_threads(context.threads_dir)
+
     result = operation()
 
-    if context.threads_dir and (context.threads_dir / ".git").exists():
+    if (context.threads_dir / ".git").exists():
         # Note: acquires worktree lock only (no topic lock). This is safe
         # because run_with_graph_sync never acquires a topic lock, so the
         # "topic → worktree" ordering invariant is not violated. The

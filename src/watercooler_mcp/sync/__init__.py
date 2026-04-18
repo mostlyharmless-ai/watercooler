@@ -223,9 +223,22 @@ def ensure_readable(
                 # Re-check parity after cleaning
                 parity = get_parity_state(repo)
                 if parity == "behind_only":
-                    if pull_ff_only(repo):
-                        actions.append("pulled")
-                        parity = "clean"
+                    # Mirror the primary ``behind_only`` branch above —
+                    # when the ff-only pull can't resolve the behind
+                    # state, flag the caller so the stale-read banner
+                    # fires. Without this, ``dirty_derived_only`` →
+                    # ``behind_only`` silently fell through with
+                    # ``auto_heal_failed = False`` and no banner.
+                    try:
+                        if pull_ff_only(repo):
+                            actions.append("pulled")
+                            parity = "clean"
+                        else:
+                            actions.append("pull failed (ff-only)")
+                            auto_heal_failed = True
+                    except Exception as pull_err:
+                        actions.append(f"pull failed: {pull_err}")
+                        auto_heal_failed = True
             except Exception as clean_err:
                 actions.append(f"derived cache cleanup failed: {clean_err}")
 
