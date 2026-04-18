@@ -160,6 +160,7 @@ Environment variables override TOML settings.
 | `WATERCOOLER_CODE_REPO` | `mcp.proxy_repo` | `""` | Override repo sent to remote MCP in `proxy` or `hybrid` mode |
 | `WATERCOOLER_CODE_BRANCH` | `mcp.proxy_branch` | `""` | Override branch sent to remote MCP in `proxy` or `hybrid` mode |
 | `WATERCOOLER_ALLOW_LOCAL_ONLY` | _(no TOML)_ | `""` | Set to `1` to explicitly allow thread writes into a directory that is not backed by a GitHub repository. Default behavior refuses such writes with an actionable error. Threads written in local-only mode are **not pushed to any remote**. See [TROUBLESHOOTING.md#local-only-mode](./TROUBLESHOOTING.md#local-only-mode). |
+| `WATERCOOLER_GITHUB_HOSTS` | _(no TOML)_ | `""` | Comma-separated allowlist of additional hostnames the write guard should treat as GitHub Enterprise (e.g. `github.acme.com,*.ghe.example`). Default behavior only trusts `github.com` and its subdomains. Each entry is either an exact hostname or a `*.suffix` pattern that matches any subdomain of the suffix. Leave unset unless you push threads to a GHE instance whose hostname doesn't match `*.github.com`. |
 
 ### Git commit identity
 

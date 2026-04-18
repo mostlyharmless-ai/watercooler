@@ -125,6 +125,113 @@ class TestCheckGitAuthHealthFallback:
 
         assert result["connectivity"] != "no git repo"
 
+    def test_fallback_subprocess_uses_succeeding_repos_working_tree(self, tmp_path):
+        """Regression guard for the post-PR #613 finding: when Repo()
+        falls back from threads_dir to code_path, all subsequent
+        subprocess probes must run with ``cwd=<working_tree of the
+        repo that opened>`` — NOT with the broken threads_dir. Using
+        threads_dir re-triggers the filesystem error we just recovered
+        from and pollutes ``connectivity`` with an ``Errno 2`` message
+        when the code repo is actually healthy.
+        """
+        threads_dir = tmp_path / "missing-threads"  # never created
+        code_path = tmp_path / "code"
+        code_path.mkdir()
+        fake_working_tree = code_path  # what Repo().working_tree_dir will report
+
+        class _FakeRepoWithWT:
+            def __init__(self, url):
+                self.remotes = _FakeRemotes(url)
+                self.working_tree_dir = str(fake_working_tree)
+
+            def config_reader(self):
+                raise NotImplementedError
+
+        with _patch_repo([
+            ValueError("threads missing"),
+            _FakeRepoWithWT("https://github.com/example/repo.git"),
+        ]):
+            # Capture every subprocess.run call and assert cwd never
+            # equals the missing threads_dir.
+            with patch.object(diagnostic, "subprocess") as mock_subp:
+                mock_subp.run.return_value.returncode = 1
+                mock_subp.run.return_value.stdout = ""
+                mock_subp.run.return_value.stderr = ""
+                mock_subp.TimeoutExpired = Exception  # shield except clause
+                result = _check_git_auth_health(threads_dir, code_path)
+
+        cwds = {
+            call.kwargs.get("cwd")
+            for call in mock_subp.run.call_args_list
+            if "cwd" in call.kwargs
+        }
+        # At least one probe ran (sanity check the test itself).
+        assert cwds, "expected at least one subprocess probe with cwd"
+        # None of them should be the broken threads_dir — they must
+        # use the code_path's working tree instead.
+        assert str(threads_dir) not in cwds, (
+            f"subprocess cwd still using broken threads_dir: {cwds}"
+        )
+        # The result should not carry the no-such-file-or-directory
+        # error that the pre-fix code produced.
+        connectivity = result.get("connectivity", "")
+        assert "No such file or directory" not in connectivity
+        assert "Errno 2" not in connectivity
+
+    def test_fallback_bare_repo_working_tree_none_does_not_use_broken_threads_dir(
+        self, tmp_path
+    ):
+        """Regression guard for the post-PR #613 round-2 finding: when
+        ``Repo()`` falls back to ``code_path`` but the opened repo has
+        ``working_tree_dir is None`` (bare-repo / unusual worktree
+        state), ``probe_cwd`` must NOT fall back to the broken
+        ``threads_dir``. Doing so re-introduces the exact Errno 2 we
+        fixed in round 1. The fallback order is:
+        ``working_tree_dir`` → ``opened_from`` (the candidate that
+        actually opened the repo) → ``threads_dir`` (last resort).
+        """
+        threads_dir = tmp_path / "missing-threads"  # never created
+        code_path = tmp_path / "code"
+        code_path.mkdir()
+
+        class _FakeBareRepo:
+            def __init__(self, url):
+                self.remotes = _FakeRemotes(url)
+                self.working_tree_dir = None  # bare repo semantics
+
+            def config_reader(self):
+                raise NotImplementedError
+
+        with _patch_repo([
+            ValueError("threads missing"),
+            _FakeBareRepo("https://github.com/example/repo.git"),
+        ]):
+            with patch.object(diagnostic, "subprocess") as mock_subp:
+                mock_subp.run.return_value.returncode = 1
+                mock_subp.run.return_value.stdout = ""
+                mock_subp.run.return_value.stderr = ""
+                mock_subp.TimeoutExpired = Exception
+                result = _check_git_auth_health(threads_dir, code_path)
+
+        cwds = {
+            call.kwargs.get("cwd")
+            for call in mock_subp.run.call_args_list
+            if "cwd" in call.kwargs
+        }
+        assert cwds, "expected at least one subprocess probe with cwd"
+        # The broken threads_dir must NOT appear as any probe's cwd —
+        # the bare-repo path must fall through to opened_from
+        # (code_path), which exists.
+        assert str(threads_dir) not in cwds, (
+            f"bare-repo fallback re-used broken threads_dir: {cwds}"
+        )
+        assert str(code_path) in cwds, (
+            f"expected code_path (opened_from) as fallback cwd, got {cwds}"
+        )
+        connectivity = result.get("connectivity", "")
+        assert "No such file or directory" not in connectivity
+        assert "Errno 2" not in connectivity
+
 
 class TestSafeForReadsSemantics:
     """Bug #4 part 1 — honest safe_for_reads semantics.

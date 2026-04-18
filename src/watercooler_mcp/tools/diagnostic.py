@@ -116,9 +116,12 @@ def _describe_storage_mode(threads_dir: Path) -> str:
     of actual state. This helper classifies the directory so the
     display matches what's really there (Bug #3, plan v4):
 
-    - ``_local`` leaf or no ``.git`` or no origin remote →
-      ``"local-only (no GitHub backing)"`` — appended with
-      ``" (WATERCOOLER_ALLOW_LOCAL_ONLY)"`` when the opt-in is set.
+    - No ``.git`` at ``threads_dir`` OR no origin remote OR origin
+      is not a GitHub-family host → ``"local-only (no GitHub
+      backing)"`` — appended with ``" (WATERCOOLER_ALLOW_LOCAL_ONLY)"``
+      when the opt-in is set. These are the same three conditions
+      ``assert_github_backed_threads`` refuses on, so the health
+      display stays 1:1 with the write guard.
     - Under ``~/.watercooler/worktrees/<repo>/`` with a valid
       ``.git`` entry → ``"orphan worktree"``.
     - Sibling ``<parent>/<repo>-threads`` directory → ``"sibling-threads (legacy)"``.
@@ -130,7 +133,7 @@ def _describe_storage_mode(threads_dir: Path) -> str:
     """
     from watercooler.write_guard import (
         ENV_ALLOW_LOCAL_ONLY,
-        _find_git_dir,
+        _looks_github_hosted,
         _read_origin_url,
         _resolve_real_gitdir,
         _is_allow_local_only_enabled,
@@ -147,14 +150,34 @@ def _describe_storage_mode(threads_dir: Path) -> str:
     except (ValueError, OSError):
         pass
 
-    git_entry = _find_git_dir(threads_dir)
+    # Require the .git entry AT threads_dir, not at an ancestor — same
+    # semantics as ``assert_github_backed_threads``. Walking ancestors
+    # here would label ``<repo>/_custom`` as ``custom (_custom)`` or
+    # even ``orphan worktree`` (implying GitHub-backed) while the write
+    # guard refuses the write with "not a git worktree". Health output
+    # and write behavior must agree on what counts as backed.
+    direct_git = threads_dir / ".git"
+    git_entry = direct_git if direct_git.exists() else None
     origin_url: Optional[str] = None
     if git_entry is not None:
         gitdir = _resolve_real_gitdir(git_entry)
         if gitdir is not None:
             origin_url = _read_origin_url(gitdir)
 
-    local_only = name == "_local" or git_entry is None or not origin_url
+    # "local-only" iff writes won't actually reach a GitHub remote —
+    # the exact same conditions ``assert_github_backed_threads``
+    # refuses on: no .git at threads_dir, no origin URL, or an
+    # origin URL that isn't GitHub-hosted. Omitting the host check
+    # would label a GitLab / Bitbucket threads dir as ``custom`` or
+    # ``orphan worktree`` (implying writes are fine) while the
+    # guard refuses the write — health and guard must agree. The
+    # directory's NAME (e.g. ``_local``) is a convention, not a
+    # guarantee, and is deliberately not a short-circuit here.
+    local_only = (
+        git_entry is None
+        or not origin_url
+        or not _looks_github_hosted(origin_url)
+    )
     if local_only:
         label = "local-only (no GitHub backing)"
         if _is_allow_local_only_enabled():
@@ -212,12 +235,14 @@ def _check_git_auth_health(
     from git import Repo
 
     repo = None
+    opened_from: Optional[Path] = None
     probe_errors: list[str] = []
     for candidate in (threads_dir, code_path):
         if candidate is None:
             continue
         try:
             repo = Repo(candidate, search_parent_directories=True)
+            opened_from = candidate
             break
         except Exception as exc:
             probe_errors.append(
@@ -232,6 +257,30 @@ def _check_git_auth_health(
             f"Probe errors: {'; '.join(probe_errors) if probe_errors else '(none recorded)'}."
         )
         return result
+
+    # Every subprocess probe below uses ``probe_cwd`` — the working
+    # tree of the repo that Repo() actually opened. Falling back from
+    # threads_dir to code_path but then shelling out to git with
+    # cwd=threads_dir would re-trigger the filesystem error we just
+    # recovered from (missing/broken worktree), producing a misleading
+    # "connectivity: error: [Errno 2] No such file or directory" when
+    # the actual auth state of the code repo is healthy.
+    #
+    # Preference order: working_tree_dir > the candidate path that
+    # actually opened the repo > threads_dir as last resort.
+    # ``working_tree_dir`` is None for bare repos, in which case
+    # falling back to ``threads_dir`` (which may not exist — that's
+    # why we fell back) would re-introduce the Errno 2 we're guarding
+    # against. Using ``opened_from`` preserves the fallback intent.
+    probe_cwd: Path = threads_dir
+    try:
+        wt_dir = repo.working_tree_dir
+    except Exception:
+        wt_dir = None
+    if wt_dir:
+        probe_cwd = Path(wt_dir)
+    elif opened_from is not None:
+        probe_cwd = opened_from
 
     # Detect protocol from remote URL
     try:
@@ -257,7 +306,7 @@ def _check_git_auth_health(
             result_cmd = subprocess.run(
                 ["git", "config", "--global", "--get", "credential.https://github.com.helper"],
                 capture_output=True, text=True, timeout=5,
-                cwd=str(threads_dir)
+                cwd=str(probe_cwd)
             )
             if result_cmd.returncode == 0:
                 github_helper = result_cmd.stdout.strip() or None
@@ -276,7 +325,7 @@ def _check_git_auth_health(
                 result_cmd = subprocess.run(
                     ["git", "config", "--global", "--get", "credential.helper"],
                     capture_output=True, text=True, timeout=5,
-                    cwd=str(threads_dir)
+                    cwd=str(probe_cwd)
                 )
                 if result_cmd.returncode == 0:
                     helper = result_cmd.stdout.strip() or None
@@ -289,7 +338,7 @@ def _check_git_auth_health(
                 result_cmd = subprocess.run(
                     ["git", "config", "--system", "--get", "credential.helper"],
                     capture_output=True, text=True, timeout=5,
-                    cwd=str(threads_dir)
+                    cwd=str(probe_cwd)
                 )
                 if result_cmd.returncode == 0:
                     helper = result_cmd.stdout.strip() or None
@@ -373,7 +422,7 @@ def _check_git_auth_health(
         ls_remote = subprocess.run(
             ["git", "ls-remote", "--heads", "origin"],
             capture_output=True, text=True, timeout=10,
-            cwd=str(threads_dir),
+            cwd=str(probe_cwd),
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}  # Prevent password prompts
         )
         if ls_remote.returncode == 0:

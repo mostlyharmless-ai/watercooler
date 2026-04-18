@@ -130,3 +130,64 @@ class TestEnsureReadableAutoHealFailed:
         assert ok is True
         assert parity == "clean"
         assert auto_heal_failed is False
+
+    @patch("watercooler_mcp.sync.pull_ff_only", return_value=False)
+    @patch(
+        "watercooler_mcp.sync.get_parity_state",
+        side_effect=["dirty_derived_only", "behind_only"],
+    )
+    @patch("watercooler_mcp.sync.fetch_with_timeout", return_value=True)
+    def test_dirty_derived_then_behind_only_ff_fail_sets_flag(
+        self, _fetch, _parity, _pull, tmp_path
+    ):
+        """Regression guard for post-PR #613 round-6 M2: when
+        ``ensure_readable`` enters ``dirty_derived_only``, the
+        cleanup loop re-checks parity and lands at ``behind_only``.
+        If the subsequent ``pull_ff_only`` returns False, the flag
+        must be set — mirroring the primary ``behind_only`` branch
+        that already sets it. Prior code silently fell through with
+        ``auto_heal_failed = False`` and no banner fired.
+        """
+        (tmp_path / ".git").mkdir()
+
+        # Fake repo with a no-op cleanup pass. ``repo.git.status(...)``
+        # returns empty so the cleanup loop is trivial; ``repo.git
+        # .checkout(...)`` is never called because no derived files
+        # match.
+        fake_repo = MagicMock()
+        fake_repo.git.status.return_value = ""
+
+        with patch("git.Repo") as MockRepo:
+            MockRepo.return_value = fake_repo
+            ok, _actions, parity, auto_heal_failed = ensure_readable(tmp_path)
+
+        assert ok is True
+        assert parity == "behind_only"
+        assert auto_heal_failed is True, (
+            "dirty_derived_only → behind_only → ff-fail must flag unresolved"
+        )
+
+    @patch("watercooler_mcp.sync.pull_ff_only", side_effect=RuntimeError("boom"))
+    @patch(
+        "watercooler_mcp.sync.get_parity_state",
+        side_effect=["dirty_derived_only", "behind_only"],
+    )
+    @patch("watercooler_mcp.sync.fetch_with_timeout", return_value=True)
+    def test_dirty_derived_then_behind_only_ff_raises_sets_flag(
+        self, _fetch, _parity, _pull, tmp_path
+    ):
+        """Same path as above, but ``pull_ff_only`` raises instead of
+        returning False. The flag must still be set; the outer
+        exception handler must not swallow the signal into a generic
+        ``derived cache cleanup failed`` message."""
+        (tmp_path / ".git").mkdir()
+        fake_repo = MagicMock()
+        fake_repo.git.status.return_value = ""
+
+        with patch("git.Repo") as MockRepo:
+            MockRepo.return_value = fake_repo
+            ok, _actions, parity, auto_heal_failed = ensure_readable(tmp_path)
+
+        assert ok is True
+        assert parity == "behind_only"
+        assert auto_heal_failed is True
