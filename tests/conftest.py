@@ -194,3 +194,22 @@ def memory_test_env(
     """
     monkeypatch.setenv("WATERCOOLER_GRAPHITI_ENABLED", "1")
     yield
+
+
+@pytest.fixture(autouse=True)
+def _bypass_write_guard(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Auto-bypass the GitHub-backed write guard in unit tests.
+
+    The guard in ``src/watercooler/write_guard.py`` (Bug #3, plan v4)
+    blocks writes to non-GitHub-backed threads_dir targets by default.
+    The vast majority of unit tests operate against a ``tmp_path``
+    fixture that has no git repo, so without this bypass every
+    exercise of ``_cli_write_with_sync`` or ``run_with_sync`` would
+    fail with ``WatercoolerWriteError``.
+
+    Tests that exercise the guard itself (see
+    ``tests/unit/test_write_guard.py``) use ``monkeypatch.delenv`` or
+    a fresh environment to restore the guard's behavior.
+    """
+    monkeypatch.setenv("WATERCOOLER_ALLOW_LOCAL_ONLY", "1")
+    yield

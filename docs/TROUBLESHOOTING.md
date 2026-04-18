@@ -115,6 +115,89 @@ entries in Task Manager and end them all before relaunching.
 
 ---
 
+### Local-only mode {#local-only-mode}
+
+**Symptom:** A watercooler write (`watercooler_say`, `watercooler_ack`,
+`watercooler init-thread`, etc.) exits with:
+
+```
+Cannot write threads — target is not a GitHub-backed git repository.
+  Resolved threads dir: <path>
+  Reason: <specific check that failed>
+
+To proceed:
+  - cd into a git repository with a GitHub 'origin' remote, OR
+  - set WATERCOOLER_DIR=<path> to point at an existing GitHub-backed
+    threads directory, OR
+  - set WATERCOOLER_ALLOW_LOCAL_ONLY=1 to explicitly enable local-only
+    mode (threads will NOT be pushed to any remote).
+```
+
+**Cause:** Watercooler threads are designed to be backed by a GitHub-hosted
+git repository (the orphan `watercooler/threads` branch on the code repo's
+origin). The write guard refuses to silently fall back to a local directory
+that never pushes anywhere, because that contradicts the "threads are
+GitHub-backed" product contract.
+
+You'll hit this when:
+
+- You ran the command from outside any git repository (e.g., from the
+  parent of a repo directory, or from a scratch folder).
+- Your code repo has no `origin` remote configured, or the `origin` URL
+  doesn't point at a GitHub-family host (github.com, GitHub Enterprise
+  subdomains, or `github.*` tenants).
+- The resolved threads directory's gitdir pointer is broken.
+
+**Fix (99% of the time):** `cd` into a git repository with a GitHub `origin`
+remote before running the command. All subsequent watercooler writes will
+push to `watercooler/threads` on that origin.
+
+**Fix (existing threads elsewhere):** point `WATERCOOLER_DIR` at the
+threads directory you want to use:
+
+```bash
+export WATERCOOLER_DIR=/path/to/existing/threads-dir
+```
+
+**Fix (intentional local-only, e.g., offline work or non-code use):**
+
+```bash
+export WATERCOOLER_ALLOW_LOCAL_ONLY=1
+```
+
+Threads written in this mode are **not pushed to any remote**. They live
+only on your local filesystem and will not sync to teammates or across
+machines. The `watercooler_health` output labels this mode explicitly as
+`Mode: local-only (no GitHub backing) (WATERCOOLER_ALLOW_LOCAL_ONLY)` so
+you can see at a glance that you're in the opt-in configuration.
+
+---
+
+### Stale-read sync warnings
+
+**Symptom:** A thread read returns with a banner like:
+
+```
+⚠ Sync: Threads worktree is behind origin and auto-heal could not
+fast-forward — data may be stale. Run watercooler_sync_repair.
+```
+
+…or `watercooler_health` reports `Safe for Reads: False` with a
+`⚠️ STALE DATA (parity=behind_only)` line.
+
+**Cause:** Your local thread worktree is behind its origin, and the
+fast-forward pull attempt failed. This usually means the worktree has
+local divergence or uncommitted non-derived changes blocking the ff.
+Reads continue to return local data but may miss recent entries
+pushed by teammates or other agent sessions.
+
+**Fix:** `watercooler sync-repair` reconciles the state (rebases your
+local commits onto origin, restores stashed changes). For a stubborn
+case, run `watercooler sync-repair --diagnose` first to see what's
+blocking the auto-heal before committing to the recovery.
+
+---
+
 ### Auth failure {#auth-failure}
 
 **Symptom:** Git push errors, 401 responses, or `authentication required` in logs.

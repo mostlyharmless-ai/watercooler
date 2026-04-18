@@ -515,8 +515,8 @@ def _search_baseline_impl(
     # Sync preflight: ensure worktree is up-to-date before searching
     parity_banner = ""
     try:
-        _ok, _actions, parity = ensure_readable(threads_dir)
-        parity_banner = format_parity_warning(parity)
+        _ok, _actions, parity, _auto_heal_failed = ensure_readable(threads_dir)
+        parity_banner = format_parity_warning(parity, auto_heal_failed=_auto_heal_failed)
         if _actions:
             logging.getLogger(__name__).debug(f"search sync preflight: {_actions}")
     except Exception as e:

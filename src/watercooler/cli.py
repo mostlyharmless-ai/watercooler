@@ -218,8 +218,24 @@ def _cli_write_with_sync(
     Acquires topic lock → worktree lock → fetch/reset → write → stage →
     commit → push → release. The worktree lock is held continuously from
     pre-write through commit with no gap.
+
+    Guards against writing into a non-GitHub-backed target (Bug #3,
+    plan v4): before any lock acquisition the shared
+    ``assert_github_backed_threads`` helper runs and aborts with an
+    actionable remediation message unless
+    ``WATERCOOLER_ALLOW_LOCAL_ONLY=1`` is set. This covers every CLI
+    write command (`init-thread`, `append-entry`, `say`, `ack`,
+    `handoff`, `set-status`, `set-ball`, plus any future additions)
+    since they all route through this wrapper.
     """
     from .lock import AdvisoryLock
+    from .write_guard import WatercoolerWriteError, assert_github_backed_threads
+
+    try:
+        assert_github_backed_threads(threads_dir)
+    except WatercoolerWriteError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
 
     lock_path = _topic_lock_path(threads_dir, topic)
     topic_lock = AdvisoryLock(lock_path, ttl=120, timeout=30)

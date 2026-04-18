@@ -53,6 +53,8 @@ from ..helpers import (
 from watercooler.baseline_graph.reader import (
     read_thread_from_graph,
     format_thread_markdown,
+    get_branches_with_entries,
+    format_branch_discovery_hint,
 )
 from ..errors import (
     ContextError,
@@ -324,8 +326,8 @@ def _list_threads_impl(
         agent = get_agent_name(ctx.client_id)
 
         # Lightweight read sync: auto-pull if behind origin (never blocks)
-        sync_ok, sync_actions, parity = ensure_readable(context.threads_dir, context.code_root)
-        parity_banner = format_parity_warning(parity)
+        sync_ok, sync_actions, parity, auto_heal_failed = ensure_readable(context.threads_dir, context.code_root)
+        parity_banner = format_parity_warning(parity, auto_heal_failed=auto_heal_failed)
         if sync_actions:
             log_debug(f"list_threads read sync: {sync_actions}")
 
@@ -623,8 +625,8 @@ def _read_thread_impl(
             code_branch = context.code_branch
 
         # Lightweight read sync: auto-pull if behind origin (never blocks)
-        sync_ok, sync_actions, parity = ensure_readable(context.threads_dir, context.code_root)
-        parity_banner = format_parity_warning(parity)
+        sync_ok, sync_actions, parity, auto_heal_failed = ensure_readable(context.threads_dir, context.code_root)
+        parity_banner = format_parity_warning(parity, auto_heal_failed=auto_heal_failed)
         if sync_actions:
             log_debug(f"read_thread read sync: {sync_actions}")
 
@@ -643,11 +645,31 @@ def _read_thread_impl(
         # Track thread access (non-blocking)
         _track_access(threads_dir, "thread", topic)
 
+        # Branch-discovery hint when a filtered read produced 0 entries
+        # but other code_branch values do have entries for this topic.
+        # The filter is a documented feature; this only surfaces the
+        # escape hatch when it would actually be useful.
+        _graph_entries_for_hint = graph_result[1]
+        branch_hint = ""
+        branches_with_entries_list: list[str] = []
+        if (
+            not _graph_entries_for_hint
+            and code_branch
+            and code_branch != "*"
+        ):
+            _all_branches = get_branches_with_entries(threads_dir, topic)
+            branch_hint = format_branch_discovery_hint(code_branch, _all_branches)
+            if branch_hint:
+                branches_with_entries_list = sorted(
+                    b for b in _all_branches if b != code_branch
+                )
+        hint_banner = f"{branch_hint}\n\n" if branch_hint else ""
+
         # Serve markdown format reconstructed from graph
         if resolved_format == "markdown" and not summary_only:
             graph_thread, graph_entries = graph_result
             content = format_thread_markdown(graph_thread, graph_entries)
-            return _format_warnings_for_response(parity_banner + content)
+            return _format_warnings_for_response(hint_banner + parity_banner + content)
 
         # Load entries from graph (canonical)
         load_error, entries, summaries = _load_entries(topic, context, code_branch=code_branch)
@@ -674,7 +696,7 @@ def _read_thread_impl(
                     lines.append(f"- [{entry.index}] {ts} — {t} ({eid_short})")
                     if s:
                         lines.append(f"  {s}")
-                return _format_warnings_for_response("\n".join(lines))
+                return _format_warnings_for_response(hint_banner + "\n".join(lines))
 
             # JSON summary_only mode
             payload = {
@@ -702,6 +724,9 @@ def _read_thread_impl(
                 payload["_warnings"] = warnings
             if parity_banner:
                 payload["_parity_warning"] = parity_banner.strip()
+            if branch_hint:
+                payload["_hint"] = branch_hint
+                payload["_branches_with_entries"] = branches_with_entries_list
             return json.dumps(payload, indent=2)
 
         # Full JSON mode (with summaries included)
@@ -730,6 +755,9 @@ def _read_thread_impl(
             payload["_warnings"] = warnings
         if parity_banner:
             payload["_parity_warning"] = parity_banner.strip()
+        if branch_hint:
+            payload["_hint"] = branch_hint
+            payload["_branches_with_entries"] = branches_with_entries_list
         return json.dumps(payload, indent=2)
 
     except (ValidationError, ContextError, HostedModeError, ThreadNotFoundError) as e:
@@ -826,8 +854,8 @@ def _list_thread_entries_impl(
     # Local Mode Path (Filesystem)
     # =========================================================================
     # Lightweight read sync: auto-pull if behind origin (never blocks)
-    _sync_ok, sync_actions, parity = ensure_readable(context.threads_dir, context.code_root)
-    parity_banner = format_parity_warning(parity)
+    _sync_ok, sync_actions, parity, auto_heal_failed = ensure_readable(context.threads_dir, context.code_root)
+    parity_banner = format_parity_warning(parity, auto_heal_failed=auto_heal_failed)
     if sync_actions:
         log_debug(f"list_thread_entries read sync: {sync_actions}")
 
@@ -842,6 +870,20 @@ def _list_thread_entries_impl(
     start = min(offset, total)
     end = total if limit is None else min(start + limit, total)
     slice_entries = entries[start:end]
+
+    # Branch-discovery hint — fires only when the topic exists but
+    # filtered entries list is empty AND an explicit branch filter is
+    # active. Matches `_read_thread_impl` semantics.
+    branch_hint = ""
+    branches_with_entries_list: list[str] = []
+    if not entries and code_branch and code_branch != "*":
+        _all_branches = get_branches_with_entries(context.threads_dir, topic)
+        branch_hint = format_branch_discovery_hint(code_branch, _all_branches)
+        if branch_hint:
+            branches_with_entries_list = sorted(
+                b for b in _all_branches if b != code_branch
+            )
+    hint_banner = f"{branch_hint}\n\n" if branch_hint else ""
 
     payload = {
         "topic": topic,
@@ -876,10 +918,13 @@ def _list_thread_entries_impl(
         else:
             lines.append("- (no entries in range)")
         text = "\n".join(lines)
-        return ToolResult(content=[TextContent(type="text", text=parity_banner + text)])
+        return ToolResult(content=[TextContent(type="text", text=hint_banner + parity_banner + text)])
 
     if parity_banner:
         payload["_parity_warning"] = parity_banner.strip()
+    if branch_hint:
+        payload["_hint"] = branch_hint
+        payload["_branches_with_entries"] = branches_with_entries_list
     return ToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))])
 
 
@@ -951,8 +996,8 @@ def _get_thread_entry_impl(
     # Local Mode Path (Filesystem)
     # =========================================================================
     # Lightweight read sync: auto-pull if behind origin (never blocks)
-    _sync_ok, sync_actions, parity = ensure_readable(context.threads_dir, context.code_root)
-    parity_banner = format_parity_warning(parity)
+    _sync_ok, sync_actions, parity, auto_heal_failed = ensure_readable(context.threads_dir, context.code_root)
+    parity_banner = format_parity_warning(parity, auto_heal_failed=auto_heal_failed)
     if sync_actions:
         log_debug(f"get_thread_entry read sync: {sync_actions}")
 
@@ -1097,8 +1142,8 @@ def _get_thread_entry_range_impl(
         code_branch = context.code_branch
 
     # Lightweight read sync: auto-pull if behind origin (never blocks)
-    _sync_ok, sync_actions, parity = ensure_readable(context.threads_dir, context.code_root)
-    parity_banner = format_parity_warning(parity)
+    _sync_ok, sync_actions, parity, auto_heal_failed = ensure_readable(context.threads_dir, context.code_root)
+    parity_banner = format_parity_warning(parity, auto_heal_failed=auto_heal_failed)
     if sync_actions:
         log_debug(f"get_thread_entry_range read sync: {sync_actions}")
 
@@ -1119,6 +1164,20 @@ def _get_thread_entry_range_impl(
         raise ValidationError("computed end index is before start index", field="end_index")
 
     selected_entries = entries[start_index : effective_end + 1] if total else []
+
+    # Branch-discovery hint — same semantics as the other two branch-
+    # filtered read tools. Only fires when filtered `entries` is empty
+    # AND an explicit branch filter is active.
+    branch_hint = ""
+    branches_with_entries_list: list[str] = []
+    if not entries and code_branch and code_branch != "*":
+        _all_branches = get_branches_with_entries(context.threads_dir, topic)
+        branch_hint = format_branch_discovery_hint(code_branch, _all_branches)
+        if branch_hint:
+            branches_with_entries_list = sorted(
+                b for b in _all_branches if b != code_branch
+            )
+    hint_banner = f"{branch_hint}\n\n" if branch_hint else ""
 
     # Track entry access for all entries in range (non-blocking)
     if context.threads_dir:
@@ -1158,7 +1217,8 @@ def _get_thread_entry_range_impl(
 
     if resolved_format == "markdown":
         if not selected_entries:
-            return ToolResult(content=[TextContent(type="text", text="(no entries in range)")])
+            empty_text = "(no entries in range)"
+            return ToolResult(content=[TextContent(type="text", text=hint_banner + empty_text)])
         if summary_only:
             lines = [f"Range for '{topic}':"]
             for entry in selected_entries:
@@ -1179,10 +1239,13 @@ def _get_thread_entry_range_impl(
                     block += "\n\n" + entry.body
                 markdown_blocks.append(block)
             text = "\n\n---\n\n".join(markdown_blocks)
-        return ToolResult(content=[TextContent(type="text", text=parity_banner + text)])
+        return ToolResult(content=[TextContent(type="text", text=hint_banner + parity_banner + text)])
 
     if parity_banner:
         payload["_parity_warning"] = parity_banner.strip()
+    if branch_hint:
+        payload["_hint"] = branch_hint
+        payload["_branches_with_entries"] = branches_with_entries_list
     return ToolResult(content=[TextContent(type="text", text=json.dumps(payload, indent=2))])
 
 

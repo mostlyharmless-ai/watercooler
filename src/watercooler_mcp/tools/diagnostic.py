@@ -12,7 +12,7 @@ import subprocess
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastmcp import Context
 
@@ -109,19 +109,92 @@ def _get_service_gap_instructions(service_status: dict) -> list[str]:
     return instructions
 
 
-def _check_git_auth_health(threads_dir: Path) -> dict[str, Any]:
+def _describe_storage_mode(threads_dir: Path) -> str:
+    """Return a human label for the thread storage mode at ``threads_dir``.
+
+    The health block previously hard-coded "orphan worktree" regardless
+    of actual state. This helper classifies the directory so the
+    display matches what's really there (Bug #3, plan v4):
+
+    - ``_local`` leaf or no ``.git`` or no origin remote →
+      ``"local-only (no GitHub backing)"`` — appended with
+      ``" (WATERCOOLER_ALLOW_LOCAL_ONLY)"`` when the opt-in is set.
+    - Under ``~/.watercooler/worktrees/<repo>/`` with a valid
+      ``.git`` entry → ``"orphan worktree"``.
+    - Sibling ``<parent>/<repo>-threads`` directory → ``"sibling-threads (legacy)"``.
+    - Anything else → ``"custom (<basename>)"``.
+
+    Stdlib-only; reuses the write_guard module's lightweight git
+    detection so we don't pay for a GitPython import in the hot
+    health path.
+    """
+    from watercooler.write_guard import (
+        ENV_ALLOW_LOCAL_ONLY,
+        _find_git_dir,
+        _read_origin_url,
+        _resolve_real_gitdir,
+        _is_allow_local_only_enabled,
+    )
+
+    name = threads_dir.name
+    worktrees_root = Path.home() / ".watercooler" / "worktrees"
+    is_under_worktrees = False
+    try:
+        threads_dir.resolve(strict=False).relative_to(
+            worktrees_root.resolve(strict=False)
+        )
+        is_under_worktrees = True
+    except (ValueError, OSError):
+        pass
+
+    git_entry = _find_git_dir(threads_dir)
+    origin_url: Optional[str] = None
+    if git_entry is not None:
+        gitdir = _resolve_real_gitdir(git_entry)
+        if gitdir is not None:
+            origin_url = _read_origin_url(gitdir)
+
+    local_only = name == "_local" or git_entry is None or not origin_url
+    if local_only:
+        label = "local-only (no GitHub backing)"
+        if _is_allow_local_only_enabled():
+            label += f" ({ENV_ALLOW_LOCAL_ONLY})"
+        return label
+
+    if is_under_worktrees:
+        return "orphan worktree"
+
+    if name.endswith("-threads") and threads_dir.parent.exists():
+        return "sibling-threads (legacy)"
+
+    return f"custom ({name})"
+
+
+def _check_git_auth_health(
+    threads_dir: Path,
+    code_path: Optional[Path] = None,
+) -> dict[str, Any]:
     """Check git authentication configuration and connectivity.
+
+    Tries the threads worktree first (where thread pushes land), then
+    falls back to ``code_path`` if the worktree probe fails — orphan
+    worktrees occasionally raise from ``Repo()`` for gitdir-pointer
+    edge cases even when the worktree otherwise functions. When both
+    probes fail, the original exception texts are preserved in
+    ``warnings`` instead of reporting a flat "no git repo" while every
+    other feature is demonstrably working against the same repo.
 
     Returns a dict with:
         protocol: 'https' or 'ssh' or 'unknown'
         credential_helper: configured helper or None
         ssh_agent_running: True/False (only for SSH)
         ssh_keys_loaded: True/False (only for SSH)
-        connectivity: 'ok', 'failed', or error message
-        warnings: list of warning messages
+        connectivity: 'ok', 'failed', 'probe failed', or error message
+        warnings: list of warning messages (includes probe-error details
+            when all candidates raised)
         recommendations: list of recommended actions
     """
-    result = {
+    result: dict[str, Any] = {
         "protocol": "unknown",
         "credential_helper": None,
         "ssh_agent_running": None,
@@ -131,10 +204,33 @@ def _check_git_auth_health(threads_dir: Path) -> dict[str, Any]:
         "recommendations": [],
     }
 
-    try:
-        repo = Repo(threads_dir, search_parent_directories=True)
-    except Exception:
-        result["connectivity"] = "no git repo"
+    # Local import (matches the pattern elsewhere in this module; `Repo`
+    # isn't imported at module scope, which in the pre-fix code caused
+    # every call to raise NameError and fall through to the flat
+    # "no git repo" connectivity string — the root reason Adi's Mac
+    # reported that despite the worktree being operational).
+    from git import Repo
+
+    repo = None
+    probe_errors: list[str] = []
+    for candidate in (threads_dir, code_path):
+        if candidate is None:
+            continue
+        try:
+            repo = Repo(candidate, search_parent_directories=True)
+            break
+        except Exception as exc:
+            probe_errors.append(
+                f"{candidate}: {type(exc).__name__}: {exc}"
+            )
+
+    if repo is None:
+        result["connectivity"] = "probe failed"
+        targets = "threads worktree" + (" or code_path" if code_path else "")
+        result["warnings"].append(
+            f"Could not open a git repository at {targets}. "
+            f"Probe errors: {'; '.join(probe_errors) if probe_errors else '(none recorded)'}."
+        )
         return result
 
     # Detect protocol from remote URL
@@ -766,7 +862,12 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
         # Add thread storage info with parity state
         if context.threads_dir:
             try:
-                orphan_label = "orphan worktree"
+                # Storage-mode display is computed dynamically (Bug #3).
+                # Previously hard-coded as "orphan worktree" regardless
+                # of the actual threads_dir state, which directly
+                # contradicted the "Threads Repo URL: local-only" line
+                # printed above when the resolver fell back to _local.
+                orphan_label = _describe_storage_mode(context.threads_dir)
                 status_lines.extend([
                     "",
                     "Thread Storage:",
@@ -822,8 +923,21 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
                     if parity == "stuck_rebase_or_merge":
                         status_lines.append("  → Run: watercooler sync-repair")
 
-                    safe_for_reads = parity not in ("auth_or_network_error",)
+                    # Honest semantics: "safe for reads" means local data is
+                    # at least as current as the remote — not just "did the
+                    # fetch complete." A behind-only worktree serves stale
+                    # entries until a pull lands, so report that truthfully
+                    # and surface a stale-data line for states that
+                    # format_parity_warning doesn't already cover (behind_only
+                    # in particular is excluded from _WARN_PARITY_STATES).
+                    safe_for_reads = parity in ("clean", "ahead_only", "no_upstream")
                     status_lines.append(f"  Safe for Reads: {safe_for_reads}")
+
+                    if not safe_for_reads:
+                        status_lines.append(
+                            f"  ⚠️ STALE DATA (parity={parity}): "
+                            "local thread data may not reflect recent origin updates."
+                        )
 
                     if parity not in ("clean", "behind_only", "ahead_only"):
                         status_lines.append(f"  Recommended: watercooler sync-repair --diagnose")
@@ -833,10 +947,17 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
             except Exception as e:
                 status_lines.append(f"\nThread Storage: Error - {e}")
 
-        # Add git authentication health check
+        # Add git authentication health check.
+        # Pass code_path so the probe has a fallback when the orphan
+        # worktree's Repo() call raises (gitdir-pointer quirks, moved
+        # code repo, etc.). Keeps the diagnostic honest instead of
+        # reporting "no git repo" while the rest of the system works.
         if context.threads_dir:
             try:
-                git_health = _check_git_auth_health(context.threads_dir)
+                git_health = _check_git_auth_health(
+                    context.threads_dir,
+                    Path(code_path) if code_path else None,
+                )
                 status_lines.extend([
                     "",
                     "Git Authentication:",

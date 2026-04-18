@@ -159,6 +159,7 @@ Environment variables override TOML settings.
 | `WATERCOOLER_MCP_URL` | `mcp.url` | `""` | Remote MCP endpoint URL for `proxy` or `hybrid` transport |
 | `WATERCOOLER_CODE_REPO` | `mcp.proxy_repo` | `""` | Override repo sent to remote MCP in `proxy` or `hybrid` mode |
 | `WATERCOOLER_CODE_BRANCH` | `mcp.proxy_branch` | `""` | Override branch sent to remote MCP in `proxy` or `hybrid` mode |
+| `WATERCOOLER_ALLOW_LOCAL_ONLY` | _(no TOML)_ | `""` | Set to `1` to explicitly allow thread writes into a directory that is not backed by a GitHub repository. Default behavior refuses such writes with an actionable error. Threads written in local-only mode are **not pushed to any remote**. See [TROUBLESHOOTING.md#local-only-mode](./TROUBLESHOOTING.md#local-only-mode). |
 
 ### Git commit identity
 

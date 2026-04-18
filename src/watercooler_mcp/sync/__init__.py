@@ -134,7 +134,7 @@ def acquire_topic_lock(
 
 def ensure_readable(
     threads_repo_path: Path, code_repo_path: Optional[Path] = None
-) -> Tuple[bool, List[str], str]:
+) -> Tuple[bool, List[str], str, bool]:
     """Ensure threads dir is readable by doing a fast-forward pull if needed.
 
     Uses the parity engine to honestly report sync state and only attempt
@@ -142,19 +142,30 @@ def ensure_readable(
     ``parity_state`` to decide how to proceed.
 
     Returns:
-        Tuple of (ok, actions, parity_state) where parity_state is one of
-        the canonical states from ``get_parity_state()``.
+        Tuple of ``(ok, actions, parity_state, auto_heal_failed)``.
+
+        - ``parity_state`` is one of the canonical states from
+          ``get_parity_state()``. The canonical vocabulary is preserved;
+          no synthetic states.
+        - ``auto_heal_failed`` is True only when the entry state was
+          ``behind_only`` AND the ``pull_ff_only()`` attempt failed, so
+          callers (or ``format_parity_warning``) can surface the
+          otherwise-silent "behind but couldn't fast-forward" case
+          without adding ``behind_only`` to ``_WARN_PARITY_STATES``
+          (which would also fire in the common, successful ff-only
+          path).
     """
     actions: List[str] = []
     parity = "unknown"
+    auto_heal_failed = False
     try:
         if not threads_repo_path.exists():
-            return (True, actions, "clean")
+            return (True, actions, "clean", False)
         git_dir = threads_repo_path / ".git"
         if not git_dir.exists() and not (threads_repo_path / "HEAD").exists():
             git_file = threads_repo_path / ".git"
             if not git_file.exists():
-                return (True, actions, "clean")
+                return (True, actions, "clean", False)
 
         from git import Repo
         repo = Repo(threads_repo_path)
@@ -177,8 +188,15 @@ def ensure_readable(
                 if pull_ff_only(repo):
                     actions.append("pulled")
                     parity = "clean"
+                else:
+                    # pull_ff_only returned False — can't fast-forward
+                    # (typically: worktree has local divergence or
+                    # uncommitted changes preventing the ff). Mark the
+                    # state as unresolved so the caller emits a banner.
+                    auto_heal_failed = True
             except Exception as pull_err:
                 actions.append(f"pull failed: {pull_err}")
+                auto_heal_failed = True
 
         elif parity == "dirty_derived_only":
             # Auto-clean derived caches, then retry
@@ -213,7 +231,7 @@ def ensure_readable(
 
         elif parity == "auth_or_network_error":
             if not fetch_ok:
-                return (False, actions, parity)
+                return (False, actions, parity, auto_heal_failed)
 
         elif parity == "diverged":
             # Reconcile: clean derived caches, stash, rebase, best-effort push.
@@ -221,7 +239,7 @@ def ensure_readable(
             # Skip if fetch failed — remote refs are stale and rebase would fail.
             if not fetch_ok:
                 actions.append("warning: diverged but fetch failed, skipping reconciliation")
-                return (True, actions, parity)
+                return (True, actions, parity, auto_heal_failed)
             try:
                 from ..observability import log_action
 
@@ -281,17 +299,17 @@ def ensure_readable(
             except Exception as recon_err:
                 actions.append(f"reconciliation failed: {recon_err}")
 
-            return (True, actions, parity)
+            return (True, actions, parity, auto_heal_failed)
 
         elif parity in ("dirty_mixed", "stuck_rebase_or_merge"):
             # Data may be stale but still readable — return True with warning
             actions.append(f"warning: worktree in {parity} state, data may be stale")
-            return (True, actions, parity)
+            return (True, actions, parity, auto_heal_failed)
 
         # clean, ahead_only, no_upstream are all readable states
-        return (True, actions, parity)
+        return (True, actions, parity, auto_heal_failed)
     except Exception as e:
-        return (False, [f"error: {e}"], parity)
+        return (False, [f"error: {e}"], parity, auto_heal_failed)
 
 
 # Parity states that warrant a user-visible warning banner.
@@ -303,12 +321,29 @@ _WARN_PARITY_STATES = frozenset({
 })
 
 
-def format_parity_warning(parity: str) -> str:
+def format_parity_warning(parity: str, auto_heal_failed: bool = False) -> str:
     """Return a one-line warning banner for non-clean parity states.
 
-    Returns empty string for clean/benign states.  Designed to be
-    prepended to tool response text so the user knows data may be stale.
+    Returns empty string for clean/benign states. Designed to be
+    prepended to tool response text so the user knows data may be
+    stale.
+
+    The ``auto_heal_failed`` flag is a narrow, targeted signal from
+    ``ensure_readable``: True means the worktree was ``behind_only``
+    at entry AND the fast-forward pull attempt failed (typically
+    because the worktree has local divergence or uncommitted
+    non-derived changes). This case is invisible via
+    ``_WARN_PARITY_STATES`` alone — adding ``behind_only`` to that
+    set would emit a banner in the common, successful ff-only path
+    too. Routing through this flag surfaces stale-read risk only
+    when auto-heal actually failed.
     """
+    if auto_heal_failed and parity == "behind_only":
+        return (
+            "⚠ Sync: Threads worktree is behind origin and auto-heal "
+            "could not fast-forward — data may be stale. "
+            "Run watercooler_sync_repair.\n\n"
+        )
     if parity not in _WARN_PARITY_STATES:
         return ""
     msgs = {

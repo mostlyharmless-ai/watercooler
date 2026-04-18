@@ -240,6 +240,50 @@ def _matches_code_branch(entry_branch: Optional[str], filter_branch: Optional[st
     return entry_branch == filter_branch
 
 
+def get_branches_with_entries(threads_dir: Path, topic: str) -> set[str]:
+    """Return the set of non-null ``code_branch`` values across entries.
+
+    Used to make the branch-filtering feature discoverable when a filtered
+    read returns empty: the caller surfaces "entries exist on branches X,
+    Y — pass code_branch='*' to see them" rather than a silent empty
+    payload that looks like the thread is gone.
+
+    Branch-filtered reads are intentional (see TOOLS-REFERENCE.md and
+    TROUBLESHOOTING.md). This helper exposes the escape hatch only when
+    it's actually needed, without changing the default.
+    """
+    graph_dir = get_graph_dir(threads_dir)
+    branches: set[str] = set()
+    for node in storage.load_thread_entries(graph_dir, topic):
+        entry = _node_to_entry(node)
+        if entry.code_branch:
+            branches.add(entry.code_branch)
+    return branches
+
+
+def format_branch_discovery_hint(
+    code_branch: str, available_branches: set[str]
+) -> str:
+    """Return a prose hint prompting the caller to try ``code_branch="*"``.
+
+    Returns an empty string when no hint should be emitted (the filter
+    is unset / wildcard, or no other branches carry entries).
+    Otherwise returns one line suitable to prepend to markdown output
+    or carry as the JSON ``_hint`` field.
+    """
+    if not code_branch or code_branch == "*":
+        return ""
+    other = sorted(b for b in available_branches if b != code_branch)
+    if not other:
+        return ""
+    joined = ", ".join(other)
+    return (
+        f"Showing 0 entries on code_branch='{code_branch}'. "
+        f"Entries exist on branches: {joined}. "
+        f"Pass code_branch=\"*\" to see all entries."
+    )
+
+
 def read_thread_from_graph(
     threads_dir: Path,
     topic: str,

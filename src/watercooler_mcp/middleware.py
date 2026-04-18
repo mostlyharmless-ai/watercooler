@@ -312,7 +312,27 @@ def run_with_sync(
 
     Flow: acquire lock -> pull -> operation -> commit -> push -> release lock
     No preflight state machine, no branch switching.
+
+    Guards against writing into a non-GitHub-backed target (Bug #3,
+    plan v4): before any lock acquisition the shared
+    ``assert_github_backed_threads`` helper runs and raises
+    ``WatercoolerWriteError`` unless ``WATERCOOLER_ALLOW_LOCAL_ONLY=1``
+    is set. Placing the guard here — at the shared wrapper that ALL
+    MCP writes route through, including the seven ``graph.py`` tools
+    (``annotate``, ``remove_annotation``, ``delete_entry``,
+    ``delete_thread``, ``archive_thread``, ``unarchive``) that call
+    ``run_with_sync`` directly without going through
+    ``_run_with_sync_report_push`` — covers every current and future
+    MCP write tool automatically.
     """
+    from watercooler.write_guard import assert_github_backed_threads
+
+    if context.threads_dir:
+        # Raises WatercoolerWriteError when threads_dir is not backed
+        # by a GitHub remote (and opt-in is absent). MCP tool wrappers
+        # convert that to a user-visible error message.
+        assert_github_backed_threads(context.threads_dir)
+
     lock = None
     pre_write_wt_lock = None
     if sync_status is not None:

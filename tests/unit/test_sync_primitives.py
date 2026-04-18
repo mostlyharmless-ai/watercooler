@@ -487,7 +487,7 @@ class TestEnsureReadableDiverged:
 
         with patch("git.Repo") as MockRepo:
             MockRepo.return_value = MagicMock()
-            ok, actions, parity = ensure_readable(tmp_path)
+            ok, actions, parity, _auto_heal_failed = ensure_readable(tmp_path)
 
         assert ok is True
         assert "rebased onto remote" in actions
@@ -514,7 +514,7 @@ class TestEnsureReadableDiverged:
 
         with patch("git.Repo") as MockRepo:
             MockRepo.return_value = MagicMock()
-            ok, actions, parity = ensure_readable(tmp_path)
+            ok, actions, parity, _auto_heal_failed = ensure_readable(tmp_path)
 
         assert ok is True
         assert any("rebase failed" in a for a in actions)
@@ -533,7 +533,7 @@ class TestEnsureReadableDiverged:
         with patch("git.Repo") as MockRepo:
             MockRepo.return_value = MagicMock()
             with patch("watercooler_mcp.sync.pull_rebase") as mock_rebase:
-                ok, actions, parity = ensure_readable(tmp_path)
+                ok, actions, parity, _auto_heal_failed = ensure_readable(tmp_path)
 
         assert ok is True
         assert parity == "diverged"
@@ -557,7 +557,7 @@ class TestEnsureReadableDiverged:
 
         with patch("git.Repo") as MockRepo:
             MockRepo.return_value = MagicMock()
-            ok, actions, parity = ensure_readable(tmp_path)
+            ok, actions, parity, _auto_heal_failed = ensure_readable(tmp_path)
 
         assert ok is True
         assert "rebased onto remote" in actions

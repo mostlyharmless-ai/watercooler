@@ -115,6 +115,13 @@ version = 1
 # Env: WATERCOOLER_THREADS_BASE
 # threads_base = ""
 
+# Local-only mode (advanced): setting WATERCOOLER_ALLOW_LOCAL_ONLY=1 in
+# the environment allows thread writes into a directory that is not
+# backed by a GitHub repository. Threads written in this mode are NOT
+# pushed to any remote — use for offline work or non-code project
+# experiments only. No TOML equivalent; env-var only.
+# See docs/TROUBLESHOOTING.md#local-only-mode for details.
+
 
 # -----------------------------------------------------------------------------
 # Agent-Specific Overrides

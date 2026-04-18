@@ -134,8 +134,9 @@ def patched_context(mock_context, monkeypatch):
     # Mock is_hosted_context to return False (local mode)
     monkeypatch.setattr("watercooler_mcp.tools.thread_query.is_hosted_context", lambda ctx: False)
 
-    # Mock ensure_readable (sync function)
-    monkeypatch.setattr("watercooler_mcp.tools.thread_query.ensure_readable", lambda *args, **kwargs: (True, [], "clean"))
+    # Mock ensure_readable (sync function). 4-tuple: (ok, actions,
+    # parity, auto_heal_failed) — plan v4 Bug #4 extended the return.
+    monkeypatch.setattr("watercooler_mcp.tools.thread_query.ensure_readable", lambda *args, **kwargs: (True, [], "clean", False))
 
     # Mock graph functions to use markdown fallback
     monkeypatch.setattr(
