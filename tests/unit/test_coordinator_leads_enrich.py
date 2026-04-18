@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import importlib.util
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from watercooler_mcp.daemons.state import DaemonCheckpoint, Finding
 from watercooler_mcp.tools.coordinator_leads import enrich_leads
+
+# ``pulse_snapshot`` is one of the seven private daemons excluded from the
+# open-core public build via copy.bara.sky. The S3 (PulseSnapshot dimension)
+# tests transitively depend on it via ``patch(...)`` calls and a direct
+# import in one test body, so ``TestEnrichLeadsS3`` must skip on builds
+# where the module isn't installed. The other four classes (S1, S2,
+# FailOpen, Stats) don't touch pulse_snapshot and continue to run on
+# public, preserving coverage of enrich_leads's other overlays.
+_PULSE_SNAPSHOT_AVAILABLE = (
+    importlib.util.find_spec("watercooler_mcp.daemons.pulse_snapshot") is not None
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -312,6 +326,10 @@ class TestEnrichLeadsS2:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    not _PULSE_SNAPSHOT_AVAILABLE,
+    reason="watercooler_mcp.daemons.pulse_snapshot not in open-core build",
+)
 class TestEnrichLeadsS3:
     _SCORES = {
         "goal_clarity": 0.8,
