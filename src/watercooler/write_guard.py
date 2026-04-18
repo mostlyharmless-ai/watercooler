@@ -217,13 +217,16 @@ def assert_github_backed_threads(
     threads_dir: Path,
     code_root: Optional[Path] = None,
 ) -> None:
-    """Ensure ``threads_dir`` is backed by a GitHub git repository.
+    """Ensure ``threads_dir`` is itself a GitHub-backed git worktree.
 
     Raises ``WatercoolerWriteError`` with an actionable remediation
     message when any of the following is true:
 
     - ``WATERCOOLER_ALLOW_LOCAL_ONLY=1`` is not set, AND
-    - No ``.git`` is found walking up from ``threads_dir``, OR
+    - ``threads_dir`` is not itself a git worktree root (no ``.git``
+      entry directly at the path — we do NOT walk up to ancestors,
+      because a ``<repo>/_local`` child would falsely inherit the
+      parent's origin while writes still land in ``_local``), OR
     - The repo has no ``origin`` remote, OR
     - The ``origin`` URL does not point at a GitHub-family host.
 
@@ -236,10 +239,22 @@ def assert_github_backed_threads(
     if _is_allow_local_only_enabled():
         return
 
-    git_entry = _find_git_dir(threads_dir)
-    if git_entry is None:
+    # Require a .git entry AT threads_dir, not at any ancestor. Walking
+    # up would accept <repo>/_local as "GitHub-backed" because the parent
+    # repo has a github origin — but writes still land in _local and
+    # never reach the remote. Orphan-branch worktrees pass this check
+    # because their .git is a file (gitdir pointer) sitting at the
+    # worktree root.
+    git_entry = threads_dir / ".git"
+    if not git_entry.exists():
         raise WatercoolerWriteError(
-            _format_error(threads_dir, reason="no .git found at or above threads_dir")
+            _format_error(
+                threads_dir,
+                reason=(
+                    "threads_dir is not itself a git worktree "
+                    "(no .git entry at this path)"
+                ),
+            )
         )
 
     gitdir = _resolve_real_gitdir(git_entry)

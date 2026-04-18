@@ -233,6 +233,18 @@ def _check_git_auth_health(
         )
         return result
 
+    # Every subprocess probe below uses ``probe_cwd`` — the working
+    # tree of the repo that Repo() actually opened. Falling back from
+    # threads_dir to code_path but then shelling out to git with
+    # cwd=threads_dir would re-trigger the filesystem error we just
+    # recovered from (missing/broken worktree), producing a misleading
+    # "connectivity: error: [Errno 2] No such file or directory" when
+    # the actual auth state of the code repo is healthy.
+    try:
+        probe_cwd = Path(repo.working_tree_dir) if repo.working_tree_dir else threads_dir
+    except Exception:
+        probe_cwd = threads_dir
+
     # Detect protocol from remote URL
     try:
         remote_url = repo.remotes.origin.url if repo.remotes else None
@@ -257,7 +269,7 @@ def _check_git_auth_health(
             result_cmd = subprocess.run(
                 ["git", "config", "--global", "--get", "credential.https://github.com.helper"],
                 capture_output=True, text=True, timeout=5,
-                cwd=str(threads_dir)
+                cwd=str(probe_cwd)
             )
             if result_cmd.returncode == 0:
                 github_helper = result_cmd.stdout.strip() or None
@@ -276,7 +288,7 @@ def _check_git_auth_health(
                 result_cmd = subprocess.run(
                     ["git", "config", "--global", "--get", "credential.helper"],
                     capture_output=True, text=True, timeout=5,
-                    cwd=str(threads_dir)
+                    cwd=str(probe_cwd)
                 )
                 if result_cmd.returncode == 0:
                     helper = result_cmd.stdout.strip() or None
@@ -289,7 +301,7 @@ def _check_git_auth_health(
                 result_cmd = subprocess.run(
                     ["git", "config", "--system", "--get", "credential.helper"],
                     capture_output=True, text=True, timeout=5,
-                    cwd=str(threads_dir)
+                    cwd=str(probe_cwd)
                 )
                 if result_cmd.returncode == 0:
                     helper = result_cmd.stdout.strip() or None
@@ -373,7 +385,7 @@ def _check_git_auth_health(
         ls_remote = subprocess.run(
             ["git", "ls-remote", "--heads", "origin"],
             capture_output=True, text=True, timeout=10,
-            cwd=str(threads_dir),
+            cwd=str(probe_cwd),
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}  # Prevent password prompts
         )
         if ls_remote.returncode == 0:

@@ -106,7 +106,9 @@ class TestAssertGitHubBackedThreads:
         with pytest.raises(WatercoolerWriteError) as exc:
             assert_github_backed_threads(tmp_path)
         msg = str(exc.value)
-        assert "no .git found" in msg
+        # Reason text reflects the strict "threads_dir itself must be a
+        # worktree" check — no ancestor walk (post-PR #613 correction).
+        assert "not itself a git worktree" in msg
         assert "WATERCOOLER_ALLOW_LOCAL_ONLY" in msg
 
     def test_no_origin_remote_raises(self, tmp_path):
@@ -169,6 +171,34 @@ class TestAssertGitHubBackedThreads:
         assert "WATERCOOLER_DIR=" in msg
         assert "WATERCOOLER_ALLOW_LOCAL_ONLY=1" in msg
         assert "docs/TROUBLESHOOTING.md#local-only-mode" in msg
+
+    def test_ancestor_walk_regression_local_subdir_is_refused(self, tmp_path):
+        """Regression guard for the post-PR #613 finding: a sub-directory
+        of a valid GitHub-backed repo (e.g. ``<repo>/_local``) must NOT
+        be accepted as "GitHub-backed." The parent repo's origin gives
+        the sub-dir nothing — writes still land in the sub-dir and
+        never reach the remote. Guard must require .git AT threads_dir,
+        not at any ancestor."""
+        repo = _make_repo(tmp_path, remote_url="https://github.com/example/repo.git")
+        local_subdir = repo / "_local"
+        local_subdir.mkdir()
+
+        with pytest.raises(WatercoolerWriteError) as exc:
+            assert_github_backed_threads(local_subdir)
+        msg = str(exc.value)
+        assert "not itself a git worktree" in msg
+        assert "WATERCOOLER_ALLOW_LOCAL_ONLY" in msg
+
+    def test_arbitrary_subdir_of_repo_also_refused(self, tmp_path):
+        """Any sub-directory, not just ``_local``. The ancestor walk
+        was too permissive across the board — every subdir would have
+        been accepted."""
+        repo = _make_repo(tmp_path)
+        random_subdir = repo / "notes" / "deep"
+        random_subdir.mkdir(parents=True)
+
+        with pytest.raises(WatercoolerWriteError):
+            assert_github_backed_threads(random_subdir)
 
 
 class TestDescribeStorageMode:
