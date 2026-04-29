@@ -2372,6 +2372,41 @@ def ensure_falkordb_running() -> None:
     try:
         from watercooler.memory_config import get_memory_backend, resolve_database_config
 
+        # Plan v20 follow-on: in ``hybrid`` and ``proxy`` modes, T1/T2 graph
+        # operations are routed to the hosted FalkorDB on Railway. The local
+        # FalkorDB on 127.0.0.1:6379 isn't on any code path — auto-starting
+        # it produces the "Local FalkorDB reachable but memory_ingest=remote"
+        # mismatch warning every health-check, and risks shadowing the
+        # hosted path if a regression accidentally re-enables an
+        # in-process GraphitiBackend (design principle #9).
+        try:
+            from .config import get_watercooler_config
+            transport = get_watercooler_config().mcp.transport
+        except Exception as cfg_exc:
+            # PR #656 review (LOW): a malformed config or unexpected
+            # runtime error here would silently fall through to stdio
+            # behavior — auto-starting a local FalkorDB even when the
+            # operator's intent was hybrid. Log so the failure is
+            # visible in operator-facing logs; behavior still falls
+            # through to the conservative path so a broken config
+            # doesn't lock the operator out of stdio mode entirely.
+            log_error(
+                "STARTUP: failed to resolve transport config; "
+                "falling back to stdio (local FalkorDB auto-start "
+                "may run unexpectedly): %s", cfg_exc,
+            )
+            transport = "stdio"
+        if transport in ("hybrid", "proxy"):
+            _update_service_status(
+                "falkordb", ServiceState.DISABLED,
+                message=f"Transport is '{transport}' — using hosted FalkorDB",
+            )
+            log_debug(
+                f"Transport is '{transport}', skipping local FalkorDB "
+                f"auto-start (hosted Railway FalkorDB owns T1/T2 in this mode)"
+            )
+            return
+
         # Only auto-start if Graphiti backend is enabled
         try:
             backend = get_memory_backend()

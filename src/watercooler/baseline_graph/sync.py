@@ -87,6 +87,81 @@ _sync_entry_deprecation_warned = False
 
 
 # ============================================================================
+# Plan v20 Phase 8: T1 embedding write hook for hybrid routing
+# ============================================================================
+#
+# In hybrid mode the local process must not write to a local FalkorDB. The MCP
+# layer (watercooler_mcp) registers a callback here that knows how to forward
+# embedding upserts/deletes to the hosted side via premium_client and record a
+# Stage-A handoff receipt. Core (``watercooler`` package) stays stdlib-only so
+# this hook is a callable registered by the MCP layer at startup rather than a
+# direct import of premium_client.
+
+_T1_REMOTE_UPSERT: Optional[Callable[..., bool]] = None
+_T1_REMOTE_DELETE: Optional[Callable[..., bool]] = None
+
+
+def register_t1_remote_embedding_callbacks(
+    *,
+    upsert: Optional[Callable[..., bool]],
+    delete: Optional[Callable[..., bool]],
+) -> None:
+    """Register hybrid-mode T1 embedding write callbacks.
+
+    Args:
+        upsert: Callable
+            ``(threads_dir, entry_id, topic, embedding, role, entry_type, agent, timestamp) -> bool``
+            returning True on successful hosted submission. The metadata
+            positional args are empty strings when the caller does not have
+            them (e.g., migration backfill).
+        delete: Callable ``(threads_dir, entry_id, topic) -> bool`` returning
+            True on successful hosted submission. ``topic`` may be empty
+            when the caller does not have it in scope — PR #654 code-review
+            §4 required the topic to be present on the contract so the
+            hosted delete can scope against the right thread.
+
+    Pass ``None`` for both to clear (e.g., on server shutdown or test teardown).
+    """
+    global _T1_REMOTE_UPSERT, _T1_REMOTE_DELETE
+    _T1_REMOTE_UPSERT = upsert
+    _T1_REMOTE_DELETE = delete
+
+
+def _t1_remote_upsert_enabled() -> bool:
+    return _T1_REMOTE_UPSERT is not None
+
+
+def _t1_remote_delete_enabled() -> bool:
+    return _T1_REMOTE_DELETE is not None
+
+
+# ----- T2 hybrid-handoff signal ---------------------------------------------
+# When set to True by the MCP layer (server_factory wires this on
+# ``surface == "local_hybrid"``), sync_to_memory_backend() routes via the
+# registered graphiti callback (which forwards to hosted via premium_client)
+# instead of enqueueing into the local memory queue where a local worker
+# would try — and fail — to construct a local Graphiti backend.
+_HYBRID_T2_HANDOFF_ACTIVE: bool = False
+
+
+def set_hybrid_t2_handoff_active(active: bool) -> None:
+    """Toggle the hybrid T2 handoff signal.
+
+    Called by the MCP layer during server construction. When True,
+    :func:`sync_to_memory_backend` bypasses the durable memory queue
+    because the queue's worker cannot execute T2 tasks locally in hybrid
+    (get_graphiti_backend returns ``hybrid_refused``). The callback path
+    routes via ``premium_client`` and records a handoff receipt.
+    """
+    global _HYBRID_T2_HANDOFF_ACTIVE
+    _HYBRID_T2_HANDOFF_ACTIVE = bool(active)
+
+
+def is_hybrid_t2_handoff_active() -> bool:
+    return _HYBRID_T2_HANDOFF_ACTIVE
+
+
+# ============================================================================
 # Constants
 # ============================================================================
 
@@ -379,6 +454,11 @@ def store_entry_embedding_to_falkordb(
     entry_id: str,
     topic: str,
     embedding: List[float],
+    *,
+    role: str = "",
+    entry_type: str = "",
+    agent: str = "",
+    timestamp: str = "",
 ) -> bool:
     """Store entry embedding to FalkorDB if available.
 
@@ -393,11 +473,37 @@ def store_entry_embedding_to_falkordb(
         entry_id: Entry ULID
         topic: Thread topic
         embedding: Embedding vector
+        role, entry_type, agent, timestamp: Optional Entry metadata stored
+            alongside the embedding. Added in Phase 8 / Codex re-review
+            01KPZ47AYVR56NF0PTNAK4NQWH so hosted semantic search can filter
+            on these fields with parity against the hosted keyword path.
 
     Returns:
         True if stored successfully, False otherwise
     """
     global _falkordb_checked, _falkordb_available
+
+    # Plan v20 Phase 8: hybrid routing. When the MCP layer has registered a
+    # remote upsert callback we forward to the hosted side instead of
+    # touching a local FalkorDB. A successful hosted submission is treated
+    # as "stored" so the caller does not fall back to the JSONL index.
+    if _T1_REMOTE_UPSERT is not None:
+        try:
+            return bool(
+                _T1_REMOTE_UPSERT(
+                    threads_dir,
+                    entry_id,
+                    topic,
+                    embedding,
+                    role,
+                    entry_type,
+                    agent,
+                    timestamp,
+                )
+            )
+        except Exception as e:
+            logger.warning(f"T1 hybrid upsert callback raised: {e}")
+            return False
 
     # Skip if we already know FalkorDB is unavailable
     if _falkordb_checked and not _falkordb_available:
@@ -418,7 +524,15 @@ def store_entry_embedding_to_falkordb(
         _falkordb_checked = True
         _falkordb_available = True
 
-        store.store_embedding(entry_id, topic, embedding)
+        store.store_embedding(
+            entry_id,
+            topic,
+            embedding,
+            role=role,
+            entry_type=entry_type,
+            agent=agent,
+            timestamp=timestamp,
+        )
         logger.debug(f"Stored embedding in FalkorDB: {entry_id}")
         return True
 
@@ -435,17 +549,45 @@ def store_entry_embedding_to_falkordb(
 def delete_entry_embedding_from_falkordb(
     threads_dir: Path,
     entry_id: str,
+    *,
+    topic: str = "",
 ) -> bool:
     """Delete entry embedding from FalkorDB if available.
 
     Args:
         threads_dir: Threads directory
         entry_id: Entry ULID
+        topic: Thread topic for hosted-side scoping. PR #654 code-review
+            §4 flagged that the hybrid delete callback could not tag the
+            hosted request with its originating thread; this kwarg closes
+            that gap. Empty string preserves the prior behavior for
+            callers that genuinely don't have the topic in scope.
 
     Returns:
         True if deleted successfully, False otherwise
     """
     global _falkordb_checked, _falkordb_available
+
+    # Plan v20 Phase 8: hybrid delete routing, same pattern as upsert.
+    if _T1_REMOTE_DELETE is not None:
+        # PR #654 in-PR review (MEDIUM): the hosted delete needs thread
+        # scoping to avoid cross-thread collisions. Entry IDs are ULIDs so
+        # collision is unlikely today, but a future caller that omits
+        # ``topic`` would quietly delete un-scoped. Log at WARNING when
+        # the callback is active but no topic is provided so the gap is
+        # auditable even though the default stays "".
+        if not topic:
+            logger.warning(
+                "T1 hybrid delete called without topic for entry %s; hosted "
+                "delete will scope by (entry_id, group_id) only. Pass topic "
+                "if the caller has it in scope.",
+                entry_id,
+            )
+        try:
+            return bool(_T1_REMOTE_DELETE(threads_dir, entry_id, topic))
+        except Exception as e:
+            logger.warning(f"T1 hybrid delete callback raised: {e}")
+            return False
 
     if _falkordb_checked and not _falkordb_available:
         return False
@@ -509,6 +651,10 @@ def upsert_embedding(
     embedding: List[float],
     *,
     skip_file_storage: bool = False,
+    role: str = "",
+    entry_type: str = "",
+    agent: str = "",
+    timestamp: str = "",
 ) -> None:
     """Store entry embedding, preferring FalkorDB with fallback to file storage.
 
@@ -524,11 +670,47 @@ def upsert_embedding(
         topic: Thread topic
         embedding: Embedding vector
         skip_file_storage: If True, skip file-based storage even if FalkorDB fails
+        role, entry_type, agent, timestamp: Optional entry metadata stored
+            on the Entry node alongside the embedding so hosted semantic
+            search can filter on them. Codex re-review
+            01KPZ47AYVR56NF0PTNAK4NQWH §1.
     """
     # Try FalkorDB first
     stored_in_falkordb = store_entry_embedding_to_falkordb(
-        threads_dir, entry_id, topic, embedding
+        threads_dir,
+        entry_id,
+        topic,
+        embedding,
+        role=role,
+        entry_type=entry_type,
+        agent=agent,
+        timestamp=timestamp,
     )
+
+    # Plan v20 Phase 8: in hybrid mode (remote upsert callback registered)
+    # the hosted side is authoritative for T1 semantic storage. Do NOT fall
+    # back to the local JSONL search index — that would silently recreate
+    # the "local fallback masks hybrid" failure mode.
+    #
+    # PR #654 in-PR review round 5 (MEDIUM §3): the prior form returned
+    # unconditionally when the hybrid callback was registered, regardless
+    # of whether the remote upsert actually succeeded. A failed hybrid
+    # submit left the caller (sync_entry_to_graph / sync_thread_to_graph
+    # / enrich_graph_entry) with no signal; the entry would land in the
+    # baseline graph with no T1 embedding, invisible until a semantic
+    # query missed it. Log at WARNING on hybrid submit failure so the
+    # loss is auditable in operator logs — the caller still owns whether
+    # to surface this upstream, but the gap is no longer silent.
+    if _t1_remote_upsert_enabled():
+        if not stored_in_falkordb:
+            logger.warning(
+                "T1 hybrid submit reported failure for entry %s in topic %s; "
+                "embedding NOT stored on hosted T1. No local JSONL fallback "
+                "is written in hybrid (principle 10). Entry will be "
+                "invisible to hosted semantic queries until re-submitted.",
+                entry_id, topic,
+            )
+        return
 
     # Fall back to file storage if FalkorDB failed and not skipped
     if not stored_in_falkordb and not skip_file_storage:
@@ -539,6 +721,8 @@ def delete_embedding(
     threads_dir: Path,
     graph_dir: Path,
     entry_id: str,
+    *,
+    topic: str = "",
 ) -> None:
     """Delete entry embedding from both FalkorDB and file storage.
 
@@ -546,11 +730,29 @@ def delete_embedding(
         threads_dir: Threads directory
         graph_dir: Graph directory for file storage
         entry_id: Entry ULID
+        topic: Thread topic for hosted-side scoping (PR #654 §4). Empty
+            string preserves the prior behavior when the caller doesn't
+            have the topic in scope.
     """
-    # Delete from FalkorDB
-    delete_entry_embedding_from_falkordb(threads_dir, entry_id)
+    # Delete from FalkorDB (or hosted via hybrid callback).
+    deleted = delete_entry_embedding_from_falkordb(
+        threads_dir, entry_id, topic=topic,
+    )
 
-    # Delete from file storage
+    # Symmetric with upsert_embedding's hybrid guard: if the remote
+    # delete callback is registered and reported failure, log at WARNING
+    # so the gap is auditable. The file-storage cleanup below still runs
+    # to tidy any stale local-only entry, but the hosted node may still
+    # exist and remain searchable.
+    if _t1_remote_delete_enabled() and not deleted:
+        logger.warning(
+            "T1 hybrid delete reported failure for entry %s; the hosted "
+            "node may still exist and remain searchable until the "
+            "underlying RPC error is resolved and the delete is retried.",
+            entry_id,
+        )
+
+    # Delete from file storage.
     storage.remove_from_search_index(graph_dir, entry_id)
 
 
@@ -1299,9 +1501,23 @@ def enrich_graph_entry(
             # Write back atomically (summary only, not embedding)
             storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-            # Store embedding in FalkorDB (with fallback to search-index.jsonl)
+            # Store embedding in FalkorDB (with fallback to search-index.jsonl).
+            # Phase 8 / Codex re-review: look up entry metadata from the
+            # in-memory entries dict so role/entry_type/agent/timestamp land
+            # on the Entry node and hosted semantic filters can match.
             if new_embedding:
-                upsert_embedding(threads_dir, graph_dir, entry_id, topic, new_embedding)
+                entry_node = entries.get(entry_node_id, {}) or {}
+                upsert_embedding(
+                    threads_dir,
+                    graph_dir,
+                    entry_id,
+                    topic,
+                    new_embedding,
+                    role=str(entry_node.get("role") or ""),
+                    entry_type=str(entry_node.get("entry_type") or ""),
+                    agent=str(entry_node.get("agent") or ""),
+                    timestamp=str(entry_node.get("timestamp") or ""),
+                )
 
             logger.debug(f"Enrichment complete for {topic}/{entry_id}")
 
@@ -1548,9 +1764,21 @@ def sync_entry_to_graph(
         # Write all per-thread files atomically
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
-        # Store embedding in FalkorDB (with fallback to search-index.jsonl)
+        # Store embedding in FalkorDB (with fallback to search-index.jsonl).
+        # Phase 8 / Codex re-review: thread entry metadata through so hosted
+        # semantic search can filter on role/entry_type/agent/timestamp.
         if entry_embedding:
-            upsert_embedding(threads_dir, graph_dir, entry.entry_id, topic, entry_embedding)
+            upsert_embedding(
+                threads_dir,
+                graph_dir,
+                entry.entry_id,
+                topic,
+                entry_embedding,
+                role=entry.role or "",
+                entry_type=entry.entry_type or "",
+                agent=entry.agent or "",
+                timestamp=entry.timestamp or "",
+            )
 
         # Update sync state
         state = GraphSyncState(
@@ -1659,7 +1887,12 @@ def sync_thread_to_graph(
 
         # Build all entry nodes with optional embeddings
         entries: Dict[str, Dict[str, Any]] = {}
-        search_index_updates: List[tuple[str, List[float]]] = []
+        # Phase 8 / Codex re-review: pair each embedding with the entry
+        # metadata so upsert_embedding can materialise role/entry_type/
+        # agent/timestamp on the Entry node for filtered semantic search.
+        search_index_updates: List[
+            tuple[str, List[float], str, str, str, str]
+        ] = []
 
         for entry in parsed.entries:
             entry_node = entry_to_node(entry, topic)
@@ -1671,7 +1904,16 @@ def sync_thread_to_graph(
                 embedding = generate_embedding(embed_text)
                 if embedding:
                     entry_node["embedding"] = embedding
-                    search_index_updates.append((entry.entry_id, embedding))
+                    search_index_updates.append(
+                        (
+                            entry.entry_id,
+                            embedding,
+                            entry.role or "",
+                            entry.entry_type or "",
+                            entry.agent or "",
+                            entry.timestamp or "",
+                        )
+                    )
 
             entries[entry_node_id] = entry_node
 
@@ -1688,8 +1930,18 @@ def sync_thread_to_graph(
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
 
         # Store embeddings in FalkorDB (with fallback to search-index.jsonl)
-        for entry_id, embedding in search_index_updates:
-            upsert_embedding(threads_dir, graph_dir, entry_id, topic, embedding)
+        for entry_id, embedding, role, entry_type, agent, timestamp in search_index_updates:
+            upsert_embedding(
+                threads_dir,
+                graph_dir,
+                entry_id,
+                topic,
+                embedding,
+                role=role,
+                entry_type=entry_type,
+                agent=agent,
+                timestamp=timestamp,
+            )
 
         # Update sync state
         last_entry_id = parsed.entries[-1].entry_id if parsed.entries else None
@@ -1984,7 +2236,17 @@ def backfill_missing(
                             if embedding:
                                 # NOTE: No longer storing embedding in entries.jsonl
                                 # Store in FalkorDB (with fallback to search-index.jsonl)
-                                upsert_embedding(threads_dir, graph_dir, entry_raw_id, topic, embedding)
+                                upsert_embedding(
+                                    threads_dir,
+                                    graph_dir,
+                                    entry_raw_id,
+                                    topic,
+                                    embedding,
+                                    role=str(entry.get("role") or ""),
+                                    entry_type=str(entry.get("entry_type") or ""),
+                                    agent=str(entry.get("agent") or ""),
+                                    timestamp=str(entry.get("timestamp") or ""),
+                                )
                                 result.entries_embedding_generated += 1
                                 # Note: thread_updated is for summary changes only now
                         except Exception as e:
@@ -2220,7 +2482,17 @@ def enrich_graph(
                         if embedding:
                             # NOTE: No longer storing embedding in entries.jsonl
                             # Store in FalkorDB (with fallback to search-index.jsonl)
-                            upsert_embedding(threads_dir, graph_dir, entry_raw_id, topic, embedding)
+                            upsert_embedding(
+                                threads_dir,
+                                graph_dir,
+                                entry_raw_id,
+                                topic,
+                                embedding,
+                                role=str(entry.get("role") or ""),
+                                entry_type=str(entry.get("entry_type") or ""),
+                                agent=str(entry.get("agent") or ""),
+                                timestamp=str(entry.get("timestamp") or ""),
+                            )
                             result.embeddings_generated += 1
                             entry_processed = True
                             # Note: thread_updated is for summary changes only now
@@ -2770,11 +3042,33 @@ def sync_to_memory_backend(
 
     from watercooler.memory_config import is_memory_queue_enabled
 
-    # Try persistent memory queue when enabled (env var or TOML config).
-    # The queue provides retry, persistence, and dead-letter semantics.
-    # Falls back to the legacy ThreadPoolExecutor when not enabled or
-    # when the memory_queue package is not installed (core-lib-only).
-    if is_memory_queue_enabled():
+    # Plan v20 Phase 5 + Codex review: in hybrid mode the local memory queue
+    # cannot execute T2 tasks — the worker's executor would try to construct
+    # a local Graphiti backend, which is explicitly refused by
+    # get_graphiti_backend (hybrid_refused). Skip the queue path entirely so
+    # the callback (which routes to hosted via premium_client) runs instead.
+    #
+    # Scope cut (Plan v20 / Codex re-review 01KPZ367CBHGCZZ6JWWM36KFE6 §3):
+    # queue-enabled hybrid T2 intentionally gives up local retry/persistence
+    # *before hosted acceptance*. Durability in this mode is owned by the
+    # hosted Phase 4 queue on the Railway side (which writes terminal
+    # receipts); the local Stage-A side persists a handoff receipt
+    # (handoff_receipts.jsonl) but does not retry failed submissions. A
+    # future follow-on can add an MCP-side submission queue with
+    # execution_target="remote" to restore durable local retry.
+    if is_hybrid_t2_handoff_active() and backend == "graphiti":
+        # We're skipping only the durable memory_queue here, not the
+        # legacy ThreadPoolExecutor fall-through below. The executor
+        # runs the registered graphiti callback, which itself does the
+        # premium_client routing. Phrase the log accordingly so
+        # operators aren't misled about which worker touches the task.
+        logger.debug(
+            "MEMORY: hybrid T2 handoff active — skipping durable memory "
+            "queue for %s/%s; routing via the legacy executor, whose "
+            "callback forwards to premium_client.",
+            topic, entry_id,
+        )
+    elif is_memory_queue_enabled():
         try:
             from watercooler_mcp.memory_queue import enqueue_memory_task, get_worker
 

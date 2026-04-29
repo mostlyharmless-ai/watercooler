@@ -13,6 +13,19 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# Premium daemon routing — where does this daemon run?
+#
+# - ``auto`` (default): resolve by transport — stdio/local-HTTP → local,
+#   hybrid/proxy → hosted, hosted-coordinator → hosted.  Preserves
+#   backward-compatible behaviour for existing configs.
+# - ``local``: always in-process; the local manager registers it.
+# - ``hosted``: always on the Watercooler hosted coordinator; the local
+#   manager skips registration and lets Railway own the work.
+# - ``disabled``: never registered, regardless of ``enabled`` flag.
+#   Equivalent to ``enabled=false`` but preserves the rest of the
+#   sub-config for future re-enablement.
+DaemonRoute = Literal["auto", "local", "hosted", "disabled"]
+
 
 class CommonConfig(BaseModel):
     """Shared settings for both MCP and Dashboard."""
@@ -699,6 +712,14 @@ class DecisionDetectorConfig(BaseModel):
         default_factory=lambda: ["ExtractDecisionsDaemon"],
         description="Agent name prefixes to exclude from scoring (prevents feedback loops)",
     )
+    exclude_topic_patterns: list[str] = Field(
+        default_factory=lambda: ["test-*", "testing-*", "demo-*", "*-scratch"],
+        description=(
+            "Glob patterns (fnmatch) to skip during scanning. Default excludes "
+            "test/demo/scratch threads that score as decisions but lack real "
+            "quotable content, burning extractor budget."
+        ),
+    )
 
 
 class DecisionExtractorConfig(BaseModel):
@@ -774,12 +795,53 @@ class DecisionExtractorConfig(BaseModel):
     )
 
 
+class DecisionStanceConfig(BaseModel):
+    """Configuration for the open-core decision-stance daemon.
+
+    Produces ``stance_advisory`` findings driven entirely by the open-core
+    decision pipeline (DetectDecisionsDaemon + ExtractDecisionsDaemon). Only
+    registers when ``project_coordinator`` is not registered locally — the
+    premium coordinator's richer signal mix wins where both could run. No
+    ``route`` field: this daemon ships in open-core and runs locally.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable the decision-stance daemon (opt-in). Skipped if "
+            "project_coordinator is registered locally."
+        ),
+    )
+    interval: float = Field(
+        default=600.0,
+        ge=60.0,
+        description="Seconds between stance evaluations (default 10 min)",
+    )
+    window_seconds: float = Field(
+        default=86400.0,
+        ge=600.0,
+        description=(
+            "Rolling window over which decision-pipeline findings are counted. "
+            "Default 24h matches the extractor's daily cap."
+        ),
+    )
+
+
 class PulseSnapshotConfig(BaseModel):
     """Configuration for the pulse snapshot daemon."""
 
     enabled: bool = Field(
         default=False,
         description="Enable the pulse snapshot daemon (opt-in)",
+    )
+    route: DaemonRoute = Field(
+        default="auto",
+        description=(
+            "Where to run the daemon. ``auto`` resolves per transport "
+            "(stdio/http → local; hybrid/proxy → hosted). Set explicitly "
+            "to ``local`` or ``hosted`` to override; ``disabled`` is a "
+            "soft-disable that leaves the rest of the sub-config intact."
+        ),
     )
     interval: float = Field(
         default=600.0,
@@ -878,6 +940,13 @@ class AnalysisSnapshotConfig(BaseModel):
         default=False,
         description="Enable analysis snapshot daemon (opt-in)",
     )
+    route: DaemonRoute = Field(
+        default="auto",
+        description=(
+            "Where to run the daemon. ``auto`` resolves per transport "
+            "(stdio/http → local; hybrid/proxy → hosted)."
+        ),
+    )
     interval: float = Field(
         default=3600.0,
         ge=60.0,
@@ -908,6 +977,13 @@ class TrendSnapshotConfig(BaseModel):
         default=False,
         description="Enable trend snapshot daemon (opt-in)",
     )
+    route: DaemonRoute = Field(
+        default="auto",
+        description=(
+            "Where to run the daemon. ``auto`` resolves per transport "
+            "(stdio/http → local; hybrid/proxy → hosted)."
+        ),
+    )
     interval: float = Field(
         default=3600.0,
         ge=60.0,
@@ -933,6 +1009,13 @@ class PulseReportConfig(BaseModel):
     enabled: bool = Field(
         default=False,
         description="Enable automated pulse report generation (opt-in)",
+    )
+    route: DaemonRoute = Field(
+        default="auto",
+        description=(
+            "Where to run the daemon. ``auto`` resolves per transport "
+            "(stdio/http → local; hybrid/proxy → hosted)."
+        ),
     )
     interval: float = Field(
         default=86400.0,
@@ -1010,6 +1093,13 @@ class ProjectCoordinatorConfig(BaseModel):
         default=False,
         description="Enable the project coordinator daemon (opt-in)",
     )
+    route: DaemonRoute = Field(
+        default="auto",
+        description=(
+            "Where to run the daemon. ``auto`` resolves per transport "
+            "(stdio/http → local; hybrid/proxy → hosted)."
+        ),
+    )
     interval: float = Field(
         default=600.0,
         ge=60.0,
@@ -1022,7 +1112,12 @@ class ProjectCoordinatorConfig(BaseModel):
     )
     suppression_tags: list[str] = Field(
         default_factory=lambda: ["parked", "wontfix", "deferred"],
-        description="Thread annotation tags that soft-suppress stalled_* findings",
+        description=(
+            "Thread annotation tags that soft-suppress coordinator findings. "
+            "Matching tags downgrade stalled_* severity from warning to info; "
+            "aware_* findings preserve their base info severity and acquire a "
+            "'suppressed_by' marker in details."
+        ),
     )
     stance_enabled: bool = Field(
         default=True,
@@ -1036,6 +1131,126 @@ class ProjectCoordinatorConfig(BaseModel):
     leads_enabled: bool = Field(
         default=True,
         description="Enable coordinator lead emission (v1B follow-on)",
+    )
+    role_complement_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable connect_role_complement detector (Phase 3d-1). "
+            "Ships disabled by default — opt in after validating false-positive rate."
+        ),
+    )
+    role_complement_monitored_roles: list[str] = Field(
+        default_factory=lambda: ["tester", "critic"],
+        description=(
+            "Canonical roles monitored for cross-thread complement gaps. "
+            "Must be a subset of {planner, critic, implementer, tester, pm, scribe}."
+        ),
+    )
+    role_complement_max_per_thread: int = Field(
+        default=3,
+        ge=1,
+        description="Max connect_role_complement findings emitted per source thread per tick.",
+    )
+    role_complement_pair_tag_prefix: str = Field(
+        default="pair:",
+        description=(
+            "Annotation tag prefix that explicitly pairs two threads for "
+            "role-complement analysis (e.g. 'pair:auth-rework')."
+        ),
+    )
+    role_complement_min_role_entries_in_related: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Minimum number of entries carrying a role in thread B for it to "
+            "qualify as 'actively exercising' that role."
+        ),
+    )
+
+    @field_validator("role_complement_monitored_roles")
+    @classmethod
+    def _validate_monitored_roles(cls, v: list[str]) -> list[str]:
+        # Mirrors _CANONICAL_ROLES in project_coordinator_lib.py — keep in sync.
+        # Direct import avoided: config_schema is lower-level than lib.
+        canonical = {"planner", "critic", "implementer", "tester", "pm", "scribe"}
+        unknown = set(v) - canonical
+        if unknown:
+            raise ValueError(
+                f"role_complement_monitored_roles contains unknown canonical roles: "
+                f"{sorted(unknown)}. Must be a subset of {sorted(canonical)}."
+            )
+        # Deduplicate while preserving order; duplicates can distort capped output.
+        seen: set[str] = set()
+        deduped = [r for r in v if not (r in seen or seen.add(r))]  # type: ignore[func-returns-value]
+        return deduped
+
+    @field_validator("role_complement_pair_tag_prefix")
+    @classmethod
+    def _validate_pair_tag_prefix(cls, v: str) -> str:
+        if not v:
+            raise ValueError(
+                "role_complement_pair_tag_prefix must be non-empty; "
+                "an empty prefix matches all tags (use a specific prefix like 'pair:')."
+            )
+        return v
+
+    model_config = ConfigDict(frozen=True)
+
+
+class CoordinatorRefinerConfig(BaseModel):
+    """Configuration for the coordinator refiner daemon.
+
+    L2 synthesis daemon that reads ``coordinator_lead`` findings produced by
+    ``ProjectCoordinatorDaemon`` and emits refined findings with LLM-generated
+    narrative assessment and recommended next step. Per-lead 1:1 refinement;
+    no clustering, no multi-dimensional scoring.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable coordinator refiner daemon (opt-in)",
+    )
+    route: DaemonRoute = Field(
+        default="auto",
+        description=(
+            "Where to run the daemon. ``auto`` resolves per transport "
+            "(stdio/http → local; hybrid/proxy → hosted)."
+        ),
+    )
+    interval: float = Field(
+        default=600.0,
+        ge=60.0,
+        description="Seconds between refinement ticks (default 10 min)",
+    )
+    max_leads_per_tick: int = Field(
+        default=5,
+        ge=1,
+        description="Cap refinements per tick to bound LLM cost",
+    )
+    cursor_gc_interval: int = Field(
+        default=24,
+        ge=1,
+        description=(
+            "Prune cursor of stale source-lead ids every N ticks. "
+            "Steady-state cursor size ≤ unacknowledged coordinator_lead count "
+            "(compaction ceiling ~5,000 lines)."
+        ),
+    )
+    llm_max_tokens: int = Field(
+        default=512,
+        ge=64,
+        description="LLM response cap — narrative output is short",
+    )
+    llm_temperature: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=2.0,
+        description="Synthesis temperature — low; not a creative task",
+    )
+    llm_timeout_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        description="Per-lead LLM call timeout in seconds (float for sub-second precision)",
     )
 
     model_config = ConfigDict(frozen=True)
@@ -1052,6 +1267,44 @@ class SyncGuardConfig(BaseModel):
         default=180.0,
         ge=30.0,
         description="Seconds between parity checks",
+    )
+
+
+class T2IndexerConfig(BaseModel):
+    """Configuration for the T2 indexer daemon.
+
+    Registration also requires a fully configured Graphiti memory stack
+    (``memory.enabled``, ``memory.queue_enabled``, ``memory.backend=graphiti``)
+    — the daemon skips registration internally when those are absent.
+
+    Opt-in by design: before the config-driven refactor, local
+    registration required the ``WATERCOOLER_DEV_LOCAL_DAEMONS=1`` env
+    override, so existing projects that enabled other daemons plus
+    Graphiti never saw background T2 ingestion.  Defaulting this flag
+    to ``False`` preserves that behaviour — users must add an explicit
+    ``[mcp.daemons.t2_indexer]`` stanza to turn it on locally.  Hosted
+    deployments continue to enable it via ``_hosted_daemon_defaults``.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable T2 indexer daemon.  Opt-in for local deployments — "
+            "even a fully-configured Graphiti stack will not auto-start "
+            "background ingestion without this flag.  Hosted deployments "
+            "enable it by default via the hosted defaults table."
+        ),
+    )
+    route: DaemonRoute = Field(
+        default="auto",
+        description=(
+            "Where to run the daemon. ``auto`` resolves per transport "
+            "(stdio/http → local; hybrid/proxy → hosted). Note: choosing "
+            "``local`` also requires ``[mcp.capability_routes] memory_ingest = "
+            '"local"`` otherwise the advertised memory tools will not see '
+            "the indexer's output — ``init_daemons`` warns at startup when "
+            "these are mis-aligned."
+        ),
     )
 
 
@@ -1090,6 +1343,14 @@ class DaemonsConfig(BaseModel):
         default_factory=DecisionExtractorConfig,
         description="Decision extractor daemon settings (LLM-powered extraction)",
     )
+    decision_stance: DecisionStanceConfig = Field(
+        default_factory=DecisionStanceConfig,
+        description=(
+            "Open-core role-stance daemon — produces stance_advisory findings "
+            "from decision pipeline signals. Skipped when project_coordinator "
+            "is registered locally."
+        ),
+    )
     pulse_snapshot: PulseSnapshotConfig = Field(
         default_factory=PulseSnapshotConfig,
         description="Pulse snapshot daemon settings",
@@ -1110,20 +1371,41 @@ class DaemonsConfig(BaseModel):
         default_factory=ProjectCoordinatorConfig,
         description="Project coordinator daemon settings (coordination intelligence)",
     )
+    coordinator_refiner: CoordinatorRefinerConfig = Field(
+        default_factory=CoordinatorRefinerConfig,
+        description="Coordinator refiner daemon settings (L2 LLM synthesis of coordinator leads)",
+    )
     sync_guard: SyncGuardConfig = Field(
         default_factory=SyncGuardConfig,
         description="Sync guard daemon settings (proactive worktree parity checks)",
+    )
+    t2_indexer: T2IndexerConfig = Field(
+        default_factory=T2IndexerConfig,
+        description="T2 indexer daemon settings (graphiti ingestion)",
     )
 
 
 class McpConfig(BaseModel):
     """MCP server configuration."""
 
-    # Transport
+    # Transport (historical name — actually an execution-routing mode).
+    #
+    # Naming caveat: this key does NOT control the agent↔mcp stdio pipe
+    # (which is always stdio today). It selects where the local
+    # watercooler-mcp process executes tool calls:
+    #   stdio  — every call runs in-process, using local backends
+    #   http   — the process itself serves an HTTP endpoint (hosted Railway)
+    #   proxy  — all calls forwarded to a remote hosted MCP endpoint
+    #   hybrid — local calls run locally, premium capabilities proxied
+    # See docs/MCP-CLIENTS.md for the full table and the naming-overlap caveat.
     transport: Literal["stdio", "http", "proxy", "hybrid"] = Field(
         default="stdio",
-        description="MCP transport mode: stdio (default), http, proxy (forward to remote), "
-        "or hybrid (local threads + remote premium capabilities)",
+        description=(
+            "Execution-routing mode for the local watercooler-mcp process. "
+            "NOT the agent↔mcp stdio pipe (which is always stdio). "
+            "stdio=all-local; http=self-hosted HTTP server; "
+            "proxy=forward all calls to remote; hybrid=local + proxied premium."
+        ),
     )
     host: str = Field(
         default="127.0.0.1",

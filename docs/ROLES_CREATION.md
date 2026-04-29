@@ -28,7 +28,7 @@ This is the deeper point: **roles separate types of thinking**. The hardest chal
 
 **They enable accountability at the contribution level.** A `planner` Decision entry records that direction was set, and what it was. A `critic` Note records that a concern was raised, by whom, and what it was. A `tester` Note records what was verified, under what conditions, and with what result. This is accountability for the *kind of thinking* applied to the project — not just who typed which message. For AI-assisted work in particular, where "who contributed" is often several agents across several sessions, role attribution is what makes the record auditable and the project's epistemic history reconstructible.
 
-**They make project health machine-readable.** Because roles are structured, Watercooler can analyze them. One built-in rule (R06): if more than 70% of entries across your project carry `implementer` with fewer than 10% carrying `critic`, the system flags potential review debt. This signal is visible in `watercooler_pulse_snapshot`. This kind of analysis is only possible because roles give the record a consistent semantic structure — without them, the system can only search text, not reason about what kind of work was done.
+**They make project health machine-readable.** Because roles are structured, Watercooler can analyze them. One built-in rule (R06): if more than 70% of entries across your project carry `implementer` with fewer than 10% carrying `critic`, the system flags potential review debt. This signal is surfaced by `watercooler_pulse_snapshot` in premium and hosted builds. This kind of analysis is only possible because roles give the record a consistent semantic structure — without them, the system can only search text, not reason about what kind of work was done.
 
 **They encode team epistemology as convention.** Custom roles go beyond tagging — they're a documented answer to the question "what does this kind of contribution mean on our project?" A `security-audit` role with explicit `instructions`, `boundary`, and `handoff_to` fields defines not just a label but a practice: what a security review looks like, what it covers, what it doesn't, and what happens next. When that file is committed to the repository, it becomes a shared convention that every contributor and every AI agent working in the repo can consult.
 
@@ -147,7 +147,15 @@ You need a custom role when a recurring contribution type doesn't map cleanly to
 
 ### Step 1: Create `.watercooler/roles.toml`
 
-Create the file in your project repository root if it doesn't already exist. The project file is **merged with the bundled defaults at the role level**: new role names you add become available alongside the six canonical roles. Any role name that appears in your file **replaces** its bundled counterpart in its entirety — field-level merging is not supported.
+The fastest way is to scaffold the bundled defaults into your project so you can edit them in place:
+
+```bash
+watercooler roles init
+```
+
+This drops `.watercooler/roles.toml` (a copy of the bundled six-role file, with all annotations) into your project's repository root. Re-running the command is safe — it refuses to overwrite an existing file unless you pass `--force`. Use `--project-path /path/to/repo` to scaffold somewhere other than the current directory.
+
+If you'd rather author the file by hand, just create `.watercooler/roles.toml` directly. Either way, the project file is **merged with the bundled defaults at the role level**: new role names you add become available alongside the six canonical roles. Any role name that appears in your file **replaces** its bundled counterpart in its entirety — field-level merging is not supported.
 
 > **Important:** If you include a `[roles.planner]` section in your project file, it replaces the bundled `planner` definition completely. Any field you omit will be empty, not inherited from the bundled version. When overriding a canonical role, include every field you want to preserve.
 
@@ -256,7 +264,8 @@ Structure: Context → Options → Decision → Consequences.
 ### Requirements summary
 
 - Missing fields silently default to empty strings or empty lists — the loader does not reject a role with missing fields. The only enforced write-time check is that the role **name** exists in the active set. See the "Enforced vs advisory" table in the Field reference section for the full picture.
-- `canonical_role` should be one of the six canonical names. If omitted, it defaults to the role name itself (e.g., `security-audit`), which is not a canonical name — analytics that filter on canonical roles will not include entries from this custom role.
+- `canonical_role` is an optional documentation hint. If omitted, it defaults to the role name itself (e.g., `security-audit`). It does not affect runtime behavior — analytics, stance, and coordinator findings operate on literal role names. **Stance modulation is a fixed protocol feature** emitted only for the three canonical stance roles `planner`, `critic`, and `tester`; custom roles do not produce their own stance advisories by design, regardless of `canonical_role`. See [DAEMONS.md](DAEMONS.md#decision-stance-decision_stance).
+- **Malformed TOML now fails loud.** A syntax error or unreadable `.watercooler/roles.toml` raises a clear error naming the file and the underlying parse failure. Fix the file (or remove it to fall back to bundled defaults) and retry. Earlier versions silently fell back to defaults, leaving the user unaware their override was ignored.
 - **Use lowercase in TOML role keys.** Role names from `.watercooler/roles.toml` are stored exactly as written. Write-time validation lowercases the incoming role value before lookup, so `[roles.Security-Audit]` in TOML would not match a write call with `role="security-audit"`. Stick to `[roles.security-audit]`.
 - Multi-line string fields use TOML triple-quote syntax (`""" ... """`), which is the recommended form for `instructions`, `boundary`, and `entry_style`.
 
@@ -325,7 +334,14 @@ If the role name is not in the active set, `watercooler_say` returns an error li
 
 - **Unrecognized role name at write time** → `ValueError: Invalid role 'my-role'. Valid roles are: critic, implementer, ...` — fix the role name in your TOML key or your write call.
 - **Missing fields (description, produces, etc.)** → silently default to `""` or `[]`. No error is raised. Check `watercooler_role_details()` output to confirm fields are populated as expected.
-- **Malformed TOML** (unclosed triple-quote, invalid key) → the project roles file is skipped entirely and bundled defaults are used silently. If `watercooler_roles()` doesn't show your custom role, check your TOML syntax with any TOML validator (online or CLI) — the loader gives no parse error, so `watercooler_roles()` output is the practical signal.
+
+> **Warning — silent TOML parse failures.** If `.watercooler/roles.toml`
+> is malformed (unclosed triple-quote string, invalid key, bad
+> indentation), the loader skips the file entirely and falls back to
+> the bundled defaults **without raising a parse error**. Your custom
+> role will simply not appear. The practical signal is `watercooler_roles()`
+> output — if your role is missing, validate the TOML syntax with any
+> TOML linter (online or CLI) before assuming a deeper bug.
 
 ---
 

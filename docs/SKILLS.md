@@ -21,6 +21,31 @@ A connected agent can still use Watercooler tools without explicit skill
 invocation. Skills mainly make common workflows more consistent and easier to
 discover.
 
+## Getting the skills
+
+The open-source Watercooler repository ships five skills under a top-level
+`skills/` directory:
+
+- `find-related/`
+- `recall/`
+- `search-threads/`
+- `threads/`
+- `watercooler-health/`
+
+Each is a self-contained folder with a `SKILL.md` file and any
+supporting scripts or reference material it needs.
+
+Clone the public repo (or download a release archive) and copy the
+folders into your client-specific skills directory as shown below:
+
+```bash
+git clone https://github.com/mostlyharmless-ai/watercooler.git
+# then cp -r watercooler/skills/<name>/ <your-client-skills-dir>/
+```
+
+The exact destination depends on which MCP client you use — see the
+next section.
+
 ## Set up the skills
 
 <details>

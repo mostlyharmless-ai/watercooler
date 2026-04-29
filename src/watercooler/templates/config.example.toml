@@ -22,14 +22,15 @@ version = 1
 # =============================================================================
 [common]
 
-# Threads repo URL pattern
-# Placeholders: {org} = GitHub org, {repo} = code repo name, {namespace} = full path
+# DEPRECATED: legacy separate-threads-repo settings (pre-orphan-branch model).
+# Current layout uses a `watercooler/threads` orphan branch in your code repo
+# with a worktree at `~/.watercooler/worktrees/<repo>/`. These two keys are
+# ignored under the default orphan-branch layout and only have effect if you
+# are migrating from the legacy sibling-threads-repo model.
+# See docs/ARCHITECTURE.md for the current storage model.
+#
 # Env: WATERCOOLER_THREADS_PATTERN
-# Default is HTTPS (works with credential helpers/tokens without SSH agent):
 # threads_pattern = "https://github.com/{org}/{repo}-threads.git"
-# For SSH, use: threads_pattern = "git@github.com:{org}/{repo}-threads.git"
-
-# Simple suffix mode (alternative to pattern)
 # threads_suffix = "-threads"
 
 # Templates directory (empty = use bundled templates)
@@ -43,12 +44,33 @@ version = 1
 # =============================================================================
 [mcp]
 
-# Transport mode: "stdio" (default), "http", "proxy", or "hybrid"
-# proxy:  forwards ALL tool calls to a remote hosted MCP endpoint.
-# hybrid: local threads + baseline, remote premium capabilities.
-#         Local services (llama-server, FalkorDB) start for baseline ops.
-#         Premium memory tools are mounted from the remote endpoint.
-# Agent config stays unchanged (stdio). Set url and [hosted].api_key.
+# ----- transport (execution-routing mode) -----
+#
+# NAMING CAVEAT: despite the key name, this setting does NOT control the
+# agent↔mcp stdio pipe (which is always stdio). It picks where the local
+# `watercooler-mcp` process executes tool calls. A clearer name would be
+# "execution mode" or "routing" — we inherited "transport" from an earlier
+# design. See docs/MCP-CLIENTS.md for the full discussion.
+#
+# Values:
+# stdio:  local process — threads, baseline, local daemons, LLM + embedding.
+#         Starts local FalkorDB via Docker. Premium tools only appear if
+#         watercooler-cloud[memory] is installed (team-private; open-core
+#         users see baseline tools only). No Railway dependency.
+# hybrid: local threads + baseline + local daemons; premium capabilities
+#         (memory query/observe/ingest, hosted coordinator daemons) proxy to
+#         the remote endpoint. Local LLM + embedding services still start;
+#         FalkorDB does NOT start locally (memory queries route to remote).
+#         Needs [hosted].api_key in credentials.toml (dashboard-issued).
+#         Observability splits by design: watercooler_health shows local
+#         daemons, watercooler_daemon_status shows hosted daemons.
+# proxy:  forwards ALL tool calls to a remote hosted MCP endpoint (no local
+#         services start — the local process is a thin passthrough).
+# http:   used by the hosted SERVER itself (Railway) — clients still use stdio.
+#
+# Agent client config (`claude mcp add --transport stdio ...`) stays stdio
+# regardless of this value. Set url and api_key in credentials.toml for
+# proxy/hybrid.
 # Env: WATERCOOLER_MCP_TRANSPORT
 # transport = "stdio"
 
@@ -65,27 +87,6 @@ version = 1
 # proxy_repo = "org/repo"
 # proxy_branch = "main"
 
-# Per-capability route overrides (hybrid transport only).
-# Keys are capability ids, values are "auto", "local", "remote", or "disabled".
-# Omitted capabilities use the hybrid default routes shown below.
-# [mcp.capability_routes]
-# threads_core = "local"           # Thread CRUD operations
-# thread_state_admin = "local"     # Thread deletion and archiving
-# baseline_search = "local"        # Keyword and semantic search
-# semantic_similarity = "local"    # Find-similar operations
-# baseline_maintenance = "local"   # Graph maintenance and repair
-# annotation_admin = "local"       # Annotation management
-# memory_query = "remote"          # Smart query, entity edges, provenance
-# memory_observe = "remote"        # Memory diagnostics and task status
-# memory_ingest = "remote"         # Bulk indexing, episode ingestion
-# memory_admin_graph = "disabled"   # Graph group clearing
-# memory_admin_cluster = "disabled" # Cluster-level memory admin
-# memory_migration = "disabled"    # Memory backend migration
-# daemon_observe = "local"         # Daemon status and findings
-# daemon_control = "local"         # Daemon lifecycle management
-# federation_search = "local"      # Cross-repo search
-# diagnostics = "local"            # Health checks and whoami
-
 # HTTP server settings (only used when transport = "http")
 # Env: WATERCOOLER_MCP_HOST, WATERCOOLER_MCP_PORT
 # host = "127.0.0.1"
@@ -95,7 +96,9 @@ version = 1
 # Env: WATERCOOLER_AGENT
 # default_agent = "Agent"
 
-# User tag appended to agent name (e.g., "(caleb)")
+# User tag appended to agent name. Watercooler wraps the value in parens
+# automatically, so set the bare tag (e.g., "caleb") — the rendered author
+# becomes "Codex (caleb)".
 # Env: WATERCOOLER_AGENT_TAG
 # agent_tag = ""
 
@@ -124,6 +127,52 @@ version = 1
 
 
 # -----------------------------------------------------------------------------
+# Capability Route Overrides (hybrid transport only)
+# -----------------------------------------------------------------------------
+# Per-capability routing for hybrid mode. Keys are capability ids; valid
+# values are "auto", "local", "remote", or "disabled":
+#   auto     — local if available, else remote if available, else disabled
+#   local    — run in the local process
+#   remote   — forward to the hosted endpoint
+#   disabled — tool registered but refuses to execute
+# Omitted capabilities inherit the hybrid defaults shown below (from
+# HYBRID_DEFAULT_ROUTES in src/watercooler_mcp/capabilities.py). Uncomment
+# any line below to override — the live section header makes single-line
+# overrides safe.
+[mcp.capability_routes]
+# threads_core = "local"            # Thread CRUD operations
+# thread_state_admin = "local"      # Thread deletion and archiving
+# annotation_admin = "local"        # Annotation management
+# baseline_search = "local"         # Keyword entry search (non-semantic)
+# semantic_similarity = "remote"    # Semantic entry search + find_similar.
+#                                   # ↑ Plan v20 Phase 8: in hybrid this runs
+#                                   # against the hosted T1 FalkorDB HNSW index
+#                                   # (<org>_<repo>_t1). Setting to "local" forces
+#                                   # the JSONL fallback — useful for fully offline
+#                                   # dev, but breaks the "no silent JSONL
+#                                   # fallback" invariant of principle 10.
+# baseline_maintenance = "local"    # Graph maintenance and repair
+# federation_search = "local"       # Cross-repo search
+# diagnostics = "local"             # Health checks and whoami
+# memory_query = "remote"           # Smart query, entity edges, provenance
+# memory_observe = "remote"         # Memory diagnostics and task status
+# memory_ingest = "remote"          # Bulk indexing, episode ingestion
+# daemon_observe = "remote"         # Daemon status and findings
+#                                   # ↑ Keep on "remote" in hybrid for the clean
+#                                   # split-surface contract: `watercooler_health`
+#                                   # reports local daemons, `watercooler_daemon_status`
+#                                   # reports hosted premium daemons.
+#                                   # Setting this to "local" selects the LOCAL
+#                                   # daemon tool surface — hosted daemons are then
+#                                   # NOT surfaced through `watercooler_daemon_status`.
+#                                   # See docs/MCP-CLIENTS.md § Daemon observability.
+# daemon_control = "remote"         # Daemon lifecycle management
+# memory_admin_graph = "disabled"   # Graph group clearing
+# memory_admin_cluster = "disabled" # Cluster-level memory admin
+# memory_migration = "disabled"     # Memory backend migration
+
+
+# -----------------------------------------------------------------------------
 # Agent-Specific Overrides
 # Each agent platform can have custom settings
 # -----------------------------------------------------------------------------
@@ -143,7 +192,10 @@ default_spec = "planner-architecture"
 name = "Gemini"
 default_spec = "general-purpose"
 
-# Add custom agents:
+# Add custom agents by copying the following 3 lines and removing the
+# leading `# `. Uncomment the section header AND the keys together —
+# uncommenting just the keys would redefine `name` in the preceding
+# [mcp.agents.gemini] block.
 # [mcp.agents.my-custom-agent]
 # name = "My Agent"
 # default_spec = "implementer-code"
@@ -176,7 +228,7 @@ default_spec = "general-purpose"
 
 # Enable async git operations
 # Env: WATERCOOLER_ASYNC_SYNC
-# async = true
+# async_sync = true
 
 # Seconds to batch commits before pushing
 # Env: WATERCOOLER_BATCH_WINDOW
@@ -232,11 +284,18 @@ default_spec = "general-purpose"
 # Env: WATERCOOLER_SLACK_CHANNEL_PREFIX
 # channel_prefix = ""
 
+# Auto-create a Slack channel for each new thread (requires bot_token)
+# Default: true. Set to false to opt out.
+# auto_create_channels = true
+
 # Notification triggers (when to send Slack notifications)
 # notify_on_say = true
 # notify_on_ball_flip = true
 # notify_on_status_change = true
 # notify_on_handoff = true
+
+# Minimum seconds between notifications for the same thread (rate limiter)
+# min_notification_interval = 1.0
 
 
 # -----------------------------------------------------------------------------
@@ -247,9 +306,9 @@ default_spec = "general-purpose"
 # -----------------------------------------------------------------------------
 [mcp.http]
 
-# CORS allowed origins (comma-separated)
-# Empty = allow all origins (no credentials)
-# Explicit = allow credentials for those origins
+# CORS allowed origins (comma-separated).
+#   - empty string: allow all origins (no credentials mode)
+#   - explicit list: allow credentials for those origins
 # Env: WATERCOOLER_CORS_ORIGINS
 # cors_origins = ""
 
@@ -415,13 +474,47 @@ auto_detect_services = true
 
 # =============================================================================
 # DAEMON SETTINGS
-# Background daemons for continuous thread analysis
-# Enable globally, then opt-in per daemon
+# Background daemons for continuous thread analysis.
+# Enable globally, then opt-in per daemon. `enabled = false` is the default for
+# most daemons (`sync_guard` is the exception — it defaults to `true`).
+# Daemons marked [PREMIUM] ship only in hosted/premium deployments; their
+# config schema is present in open-core so configs remain forward-compatible,
+# but the daemon module itself is not installed on the open-core build.
+#
+# Per-daemon routing (PR #653):
+#   Each premium daemon accepts a `route` field with values
+#   "auto" (default) | "local" | "hosted" | "disabled".
+#   "auto" resolves per transport: stdio/http → local, hybrid/proxy → hosted.
+#
+#   Observability consequence in hybrid mode:
+#     - Default (all premium daemons on `route = "auto"`): `watercooler_health`
+#       shows local-only daemons (e.g., sync_guard) and `watercooler_daemon_status`
+#       shows the hosted premium set — clean split.
+#     - Pinning any premium daemon to `route = "local"`: local daemon tools
+#       mount to surface that pinned daemon, and the proxy daemon-tool mount
+#       is SUPPRESSED. `watercooler_daemon_status` then reports the local
+#       surface with an `authority_scope = "local_daemons_hybrid_override"`
+#       label; hosted daemons are NOT surfaced through the tool in that
+#       configuration. Merging local + hosted daemon views under one tool
+#       is an explicitly deferred refactor (see
+#       src/watercooler_mcp/server_factory.py:424-436 and docs/MCP-CLIENTS.md).
 # =============================================================================
 [mcp.daemons]
 
 # Global on/off for all daemons (must be true for any daemon to run)
 enabled = false
+
+# --- Shared LLM (fallback for daemons that accept per-daemon LLM config) ---
+# When a daemon's own [mcp.daemons.<name>.llm] is not set, some daemons
+# (content_refiner, decision_extractor) fall through to this shared config.
+# pulse_snapshot and pulse_report do NOT fall through — they require
+# explicit per-daemon LLM config, by design.
+[mcp.daemons.llm]
+# api_base = ""        # LLM API base URL (empty = resolve via baseline graph config)
+# model = ""           # LLM model name (empty = resolve via baseline graph config)
+# timeout = 60.0       # request timeout in seconds
+# max_tokens = 512     # max response tokens
+# NOTE: api_key belongs in ~/.watercooler/credentials.toml, not here.
 
 # --- Thread Auditor ---
 # Checks thread hygiene: missing Status/Ball headers, missing entry IDs,
@@ -439,29 +532,16 @@ enabled = false
 # check_classification = true  # suggest directory reclassification
 # max_findings_per_run = 200   # cap per tick to prevent runaway
 
-# --- Content Scout ---
-# Identifies threads with potential for external content (blog posts,
-# social media, feature announcements, process stories).
-# Zero LLM cost (heuristic scoring). Findings surface in watercooler_daemon_findings.
-[mcp.daemons.content_scout]
-# enabled = false              # opt-in (default: false)
-# interval = 300.0             # seconds between content scans
-# check_blog_opportunities = true     # threads deep enough for blog posts
-# check_social_opportunities = true   # threads with sharp insights for social
-# check_novel_features = true         # shipped features worth announcing
-# check_process_stories = true        # notable human/agent collaboration patterns
-# max_findings_per_run = 200   # cap per tick to prevent runaway
-
-# --- Content Refiner ---
-# Layer 2 LLM-powered scoring of content scout findings.
-# Requires LLM service. Per-daemon LLM config via [mcp.daemons.content_refiner.llm].
-[mcp.daemons.content_refiner]
-# enabled = false              # opt-in (default: false)
-# interval = 600.0             # seconds between refiner ticks
-# max_candidates_per_tick = 5  # Layer 1 findings to process per tick
-# min_layer1_confidence = 0.3  # minimum Layer 1 confidence to consider
-# max_context_chars = 3000     # character budget for thread context sent to LLM
-# cursor_gc_interval = 24      # ticks between cursor garbage collection
+# --- Sync Guard ---
+# Proactive worktree parity checker — fetches periodically, auto-heals
+# bounded cases (behind-only, dirty-derived), emits warnings for states
+# that require manual sync_repair. Complements the reactive ensure_readable
+# path so divergence doesn't compound silently between reads.
+# NOTE: sync_guard is the one daemon enabled by default (when
+# [mcp.daemons].enabled is true), since it protects data integrity.
+[mcp.daemons.sync_guard]
+# enabled = true               # ON by default (unlike other daemons)
+# interval = 180.0             # seconds between parity checks
 
 # --- Decision Detector ---
 # Scores entries for decision-candidate likelihood using deterministic NLP.
@@ -489,50 +569,63 @@ enabled = false
 # max_body_chars = 4000        # max entry body chars sent to LLM
 # min_confidence = 3           # minimum LLM confidence to emit Decision
 # max_tick_duration = 300.0    # hard timeout per tick (seconds)
+# max_extraction_attempts = 3     # per-entry cap on LLM-caused extraction failures
+# max_write_failure_attempts = 5  # per-entry cap on infrastructure write failures
 
-# Optional: daemon-specific LLM (falls through to [mcp.daemons.llm])
-# [mcp.daemons.decision_extractor.llm]
+# Optional: daemon-specific LLM (overrides [mcp.daemons.llm] fallback)
+[mcp.daemons.decision_extractor.llm]
 # api_base = "http://localhost:8000/v1"
 # model = "qwen3-30b-a3b"
 
-# --- Pulse Report ---
-# Daily automated project pulse report posted to the project-pulse-report thread.
-# Reads from PulseSnapshotDaemon + AnalysisSnapshotDaemon + TrendSnapshotDaemon.
-# [mcp.daemons.pulse_report]
-# enabled = false              # opt-in (default: false)
-# interval = 86400.0           # 24h between reports
-# report_thread = "project-pulse-report"
-# report_branch = "main"
+# The four daemons above — thread_auditor, sync_guard, decision_detector,
+# decision_extractor — are the full set that ships in the open-core build.
+# Additional daemons (content scout, content refiner, project coordinator,
+# coordinator refiner, pulse snapshot / pulse report, analysis snapshot,
+# trend snapshot, compound, t2 indexer) are closed-source and not present in
+# this build. Their config schemas still parse (via the shared pydantic model)
+# but no daemon registers to consume them, so adding those sections is a no-op.
+#
+# Two exceptions are shown below because their contracts affect operator
+# behavior on the hosted stack:
+#   - `project_coordinator`: `suppression_tags` affects annotation authoring.
+#   - `coordinator_refiner`: L2 LLM synthesis of coordinator leads; knobs
+#     shown so operators can tune cadence and LLM cost.
+# Both sections are inert in open-core builds.
 
-# Optional: LLM for executive summary. Must be set explicitly here —
-# [mcp.daemons.llm] is NOT consulted. Omit to use deterministic fallback.
-# [mcp.daemons.pulse_report.llm]
-# api_base = "http://localhost:8000/v1"
-# model = "deepseek-chat"
+# --- Project Coordinator (hosted-only) ---
+# Emits coordinator findings (stalled_open_loop, stalled_dropout, aware_burst,
+# aware_role_concentration) across threads. Tag-based suppression quiets
+# findings on threads carrying a matching annotation tag:
+#   - stalled_* findings: severity downgraded from `warning` to `info`.
+#   - aware_* findings: base `info` severity preserved; only the
+#     `details.suppressed_by` marker is added.
+# See docs/TOOLS-REFERENCE.md "Tag-based suppression" for details.
+[mcp.daemons.project_coordinator]
+# enabled = false                            # opt-in; hosted-only daemon
+# interval = 600.0                           # seconds between scans
+# max_findings_per_run = 200                 # cap per tick
+# suppression_tags = ["parked", "wontfix", "deferred"]  # annotation tags that soft-suppress findings
+# role_complement_enabled = false            # opt-in: detect threads missing a role active in a related thread
+# role_complement_monitored_roles = ["tester", "critic"]  # subset of {planner,critic,implementer,tester,pm,scribe}
+# role_complement_max_per_thread = 3         # max connect_role_complement findings per source thread per tick
+# role_complement_pair_tag_prefix = "pair:"  # thread annotation tag prefix for explicit thread pairing
+# role_complement_min_role_entries_in_related = 2  # min entries with the role in related thread B
 
-# --- Trend Snapshot ---
-# Tier 3 graph volatility: queries Graphiti for superseded facts, computes churn rate.
-# Requires [memory] backend = "graphiti".
-# [mcp.daemons.trend_snapshot]
-# enabled = false              # opt-in (default: false); requires Graphiti backend
-# interval = 3600.0            # seconds between runs (default: 1h)
-# query = "decided committed architecture approach design"
-# max_facts = 50               # hard cap (GraphitiBackend maximum)
-
-# [mcp.daemons.project_coordinator]
-# enabled = false              # opt-in (default: false); T1-only, no LLM dependency
-# interval = 600.0             # seconds between coordination scans (default: 10 min)
-# max_findings_per_run = 200   # cap findings per tick
-# suppression_tags = ["parked", "wontfix", "deferred"]
-# stance_enabled = true        # v1B stance advisories (default: true when coordinator enabled)
-# stance_snapshot_max_age_hours = 4.0  # pulse snapshot freshness gate; operates in
-#                              # degraded coordinator-only mode when no snapshot available
-# leads_enabled = true         # v1B follow-on: emit coordinator_lead findings
-#                              # layered on stalled/aware detections (v1A priority > leads)
-
-# --- T2 Indexer ---
-# Automatically registered when memory backend = "graphiti" with queue enabled.
-# No user-configurable TOML options; lifecycle is managed internally.
+# --- Coordinator Refiner (hosted-only, L2 LLM synthesis) ---
+# Reads unacknowledged `coordinator_lead` findings produced by
+# `project_coordinator` and emits `refined_coordinator_lead` findings under its
+# own producer identity. Narrative-only output: 2-4 sentence `assessment` +
+# 1-2 sentence `recommended_next_step`, plus verbatim passthrough of
+# `suggested_action` and `t2_context` from the source lead. No clustering, no
+# thread writes, no annotations.
+[mcp.daemons.coordinator_refiner]
+# enabled = false              # opt-in; hosted-only daemon
+# interval = 600.0             # seconds between refinement ticks (>= 60)
+# max_leads_per_tick = 5       # cap refinements per tick to bound LLM cost
+# cursor_gc_interval = 24      # prune cursor of stale source-lead ids every N ticks
+# llm_max_tokens = 512         # LLM response cap — narrative output is short
+# llm_temperature = 0.3        # synthesis temperature — low; not a creative task
+# llm_timeout_seconds = 30     # per-lead LLM call timeout
 
 
 # =============================================================================
@@ -629,6 +722,16 @@ enabled = false
 # Env: WATERCOOLER_MEMORY_BACKEND
 # backend = "graphiti"
 
+# Async memory-indexing queue (premium — applies to graphiti + leanrag).
+# When enabled, entry writes enqueue indexing jobs instead of blocking on
+# the backend. Requires watercooler_memory package (not present in
+# open-core builds).
+# queue_enabled = false
+# queue_max_workers = 1          # concurrent indexing workers
+# Base per-task timeout in seconds. Retries escalate as
+# base * 2^(attempt-1), capped at stale_timeout.
+# queue_task_timeout = 300.0
+
 
 # -----------------------------------------------------------------------------
 # LLM Service Configuration (shared across backends)
@@ -710,6 +813,10 @@ enabled = false
 # Maximum tokens for LLM response
 # Env: LLM_MAX_TOKENS
 # max_tokens = 512
+
+# Maximum context window the model supports (input tokens)
+# Env: LLM_CONTEXT_SIZE
+# context_size = 8192
 
 # -----------------------------------------------------------------------------
 # Prompt Configuration
@@ -883,9 +990,16 @@ enabled = false
 # Env: FALKORDB_PORT
 # port = 6379
 
+# FalkorDB username (optional; default empty)
+# Env: FALKORDB_USERNAME
+# username = ""
+
 # FalkorDB password (optional)
 # Env: FALKORDB_PASSWORD
 # password = ""
+
+# Socket read/write timeout in seconds (None = default)
+# socket_timeout = 10.0
 
 
 # -----------------------------------------------------------------------------
@@ -907,6 +1021,13 @@ enabled = false
 
 # Track entry-episode mappings for provenance
 # track_entry_episodes = true
+
+# Use Graphiti episode summaries rather than raw text at retrieval
+# use_summary = false
+
+# Filesystem path for Graphiti data (empty = default discovery)
+# Env: WATERCOOLER_GRAPHITI_DATABASE (via path name)
+# path = ""
 
 # Override LLM settings for Graphiti only (empty = use shared [memory.llm])
 # Use this when Graphiti needs a more capable model than the baseline graph.
@@ -951,6 +1072,10 @@ enabled = false
 
 # Max parallel workers for graph building
 # max_workers = 8
+
+# LeanRAG installation / database path (empty = resolve via LEANRAG_PATH env var)
+# Env: LEANRAG_PATH
+# path = ""
 
 # Override LLM settings for LeanRAG only (empty = use shared [memory.llm])
 # Use this when LeanRAG needs a more capable model than the baseline graph.

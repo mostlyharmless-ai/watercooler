@@ -2,6 +2,21 @@
 
 Reference for public CLI commands and MCP tools in open-source Watercooler.
 
+## Contents
+
+- [CLI commands](#cli-commands)
+- [MCP tools](#mcp-tools)
+  - [Required parameters](#required-parameters)
+  - [Safety annotations](#safety-annotations)
+- [Thread read tools](#thread-read-tools)
+- [Thread write tools](#thread-write-tools)
+- [Utility tools](#utility-tools)
+- [Search and graph tools](#search-and-graph-tools)
+- [Annotation tools](#annotation-tools)
+- [Destructive tools](#destructive-tools)
+- [Daemon tools](#daemon-tools)
+- [Common agent workflows](#common-agent-workflows)
+
 ## CLI commands
 
 ### Group 1 — Core
@@ -31,6 +46,61 @@ Reference for public CLI commands and MCP tools in open-source Watercooler.
 | `baseline-graph stats` | Show graph entry/thread counts | — |
 | `sync-repair` | Diagnose and repair orphan-branch sync issues | `--diagnose`, `--dry-run`, `--regenerate-cache`, `--migrate`, `--json` |
 | `sync` | Inspect or flush the async git sync queue | `--code-path`, `--threads-dir` |
+
+### Group 3 — Branch lifecycle
+
+Manage the interaction between code branches and the `watercooler/threads`
+orphan branch. These are infrequent operations, usually run once per
+feature-branch lifecycle.
+
+| Command | Synopsis | Key flags |
+|---|---|---|
+| `check-branch <branch>` | Validate branch pairing for a specific code branch | `--code-root` |
+| `check-branches` | Comprehensive audit of all branch pairings | `--code-root`, `--include-merged` |
+| `merge-branch <branch>` | Merge the paired threads branch to `main` | `--code-root`, `--force` |
+| `archive-branch <branch>` | Close OPEN threads on the branch, merge to `main`, then delete the threads branch | `--code-root`, `--abandon` (sets OPEN → `ABANDONED` instead of `CLOSED`), `--force` (skip confirmation prompts) |
+| `install-hooks` | Install git hooks that validate branch pairing on commit/push | `--code-root`, `--hooks-dir`, `--force` |
+
+### Group 4 — Slack integration
+
+Configure the Slack webhook integration defined in `[mcp.slack]` of
+[CONFIGURATION.md](./CONFIGURATION.md#mcpslack--slack-integration).
+
+| Command | Synopsis |
+|---|---|
+| `slack setup` | Interactive webhook setup — prompts for webhook URL, bot token, channel |
+| `slack status` | Show current Slack configuration |
+| `slack test` | Send a test notification to verify the webhook |
+| `slack disable` | Disable Slack notifications |
+
+### Group 5 — Memory graph (premium)
+
+Memory operations depend on the `[memory]` backend configured in
+`~/.watercooler/config.toml`. **These require the `watercooler_memory`
+package**, which ships only in premium/hosted builds — on open-core
+installs the CLI exits with an actionable message pointing at the
+premium extras.
+
+| Command | Synopsis |
+|---|---|
+| `memory build` | Build the memory graph from thread data |
+| `memory export` | Export the memory graph to an external format |
+| `memory stats` | Show memory graph statistics (node / edge / episode counts) |
+
+### Scripting alternative — `append-entry`
+
+`append-entry` is a low-level CLI for adding entries with explicit flags.
+It predates the agent-driven MCP `say` tool and is useful for scripts,
+CI hooks, or one-off tooling where passing `--agent`, `--role`, `--type`,
+`--title`, and `--body` on the command line is simpler than calling the
+MCP tool. Prefer `say` / `ack` / `handoff` for interactive agent work.
+
+```bash
+watercooler append-entry feature-auth \
+  --agent "CI" --role implementer --title "Build passed" \
+  --body "GitHub Actions run 12345 green on all targets" \
+  --type Note
+```
 
 For full flag details on any command, run `watercooler <cmd> --help`.
 
@@ -115,7 +185,7 @@ List all threads with ball ownership and NEW markers.
 **Example:**
 ```python
 watercooler_list_threads(code_path=".")
-watercooler_list_threads(code_path=".", tags="editorial_candidate")
+watercooler_list_threads(code_path=".", tags="needs_review")
 ```
 
 ### `watercooler_read_thread`
@@ -234,6 +304,10 @@ Add an entry without flipping the ball.
 **Tip:** `watercooler_ack` has no explicit `role` parameter. Include
 `Spec: <role>` as the first line of `body` if you want the specialization to be
 explicit in the thread record.
+
+> **Not to be confused with daemon findings.** To acknowledge a daemon finding,
+> use [`watercooler_acknowledge_finding`](#watercooler_acknowledge_finding).
+> `watercooler_ack` writes a thread entry; it does not mark findings as seen.
 
 **Example:**
 ```python
@@ -389,13 +463,19 @@ Search entries and thread content.
 |---|---|---|---|
 | `query` | string | yes | Search query |
 | `code_path` | string | yes | Path to code repo root |
-| `mode` | string | no | `"auto"`, `"entries"`, `"entities"`, `"episodes"`, or `"facts"` |
+| `mode` | string | no | `"auto"` or `"entries"` on open-core; `"entities"`, `"episodes"`, and `"facts"` require a memory backend (hosted builds) |
 | `limit` | int | no | Max results (default: 10) |
 | `query_operator` | string | no | `"AND"` (default) or `"OR"` |
 | `semantic` | bool | no | Use embedding search (default: false) |
 | `tags` | string | no | Comma-separated tag names; all must be present |
 | `flag` | string | no | Flag value substring match |
 | `pinned` | bool | no | `true` = has pinned entries, `false` = has no pinned entries |
+
+> **Mode availability.** Open-core installs answer `"auto"` and `"entries"`
+> from the baseline graph. The `"entities"`, `"episodes"`, and `"facts"` modes
+> depend on a memory backend and are available in hosted builds; calling them
+> on an open-core install returns a memory-unavailable error rather than
+> results.
 
 **Example:**
 ```python
@@ -407,14 +487,20 @@ watercooler_search(query="sync", code_path=".", tags="sync-hardening")
 
 Ask a natural-language question over local thread history and baseline context.
 
+> **Backend scope.** On open-core this tool answers from the baseline graph
+> only. Tier escalation and provenance resolution require a memory backend,
+> which ships in hosted builds. The tier- and provenance-related parameters
+> below are accepted on open-core for API compatibility but have no effect
+> without a memory backend configured.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `query` | string | yes | Natural language question |
 | `code_path` | string | yes | Path to code repo root |
-| `max_tiers` | int | no | Max tiers to query (default: 2) |
-| `force_tier` | string | no | Force a specific tier |
+| `max_tiers` | int | no | Max tiers to query (default: 2) *(memory backend only; no-op on open-core)* |
+| `force_tier` | string | no | Force a specific tier *(memory backend only; no-op on open-core)* |
 | `group_ids` | list | no | Optional project group IDs to filter results |
-| `resolve_provenance` | bool | no | Enrich evidence with `provenance.thread_entry_id` when available |
+| `resolve_provenance` | bool | no | Enrich evidence with `provenance.thread_entry_id` when available *(memory backend only; no-op on open-core)* |
 
 **Example:**
 ```python
@@ -439,14 +525,21 @@ Find entries semantically similar to a given entry.
 
 ### `watercooler_federated_search`
 
-Search across configured namespaces or repositories.
+Fan a keyword query across all configured namespaces and return merged,
+ranked results. Requires `federation.enabled = true` in config.
+See [Federation](FEDERATION.md) for setup and configuration details.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `query` | string | yes | Search query |
-| `code_path` | string | no | Primary repo root |
-| `namespaces` | string | no | Comma-separated namespace IDs |
-| `limit` | int | no | Max results (default: 10) |
+| `query` | string | yes | Search text. Max 500 characters. |
+| `code_path` | string | no | Primary repo root. Determines which namespace is "local". |
+| `namespaces` | string | no | Comma-separated namespace IDs to query. Leave empty to query all configured namespaces. |
+| `limit` | int | no | Max results 1–100 (default: 10). |
+
+Results are scored with a multiplicative formula: `normalize(base_score) × namespace_weight × recency_decay`. Primary namespace results use `local_weight` (default 1.0); secondaries use `wide_weight` (default 0.55).
+
+The response includes a `namespace_status` map so you can tell whether
+each secondary succeeded, timed out, or was skipped.
 
 ### `watercooler_graph_recover`
 
@@ -522,7 +615,7 @@ watercooler_annotate(
     target_id="01ABC...",
     target_type="entry",
     kind="tag",
-    value="editorial_candidate",
+    value="needs_review",
     code_path="."
 )
 ```
@@ -548,7 +641,7 @@ watercooler_remove_annotation(
     target_id="01ABC...",
     target_type="entry",
     kind="tag_remove",
-    value="editorial_candidate",
+    value="needs_review",
     code_path="."
 )
 ```
@@ -606,22 +699,32 @@ Archive or unarchive a thread.
 
 ---
 
-### Daemon tools
+## Daemon tools
+
+See [Daemons](DAEMONS.md) for daemon setup, configuration, and finding categories.
 
 ### `watercooler_daemon_status`
-Check daemon health and configuration. | Safety: read-only (side-effecting when `trigger=True`) | Prerequisites: daemon
+
+Check daemon health and configuration.
+
+**Safety:** read-only (side-effecting when `trigger=True`)
+**Prerequisites:** daemon
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `daemon` | string | no | Filter by daemon name (default: all) |
-| `trigger` | bool | no | Wake the target daemon immediately (default: false); target is `daemon` if given, else `t2_indexer` |
+| `trigger` | bool | no | Wake the target daemon immediately (default: false); target is `daemon` if given, else `t2_indexer` *(premium)* |
 
 When `trigger=True` the response shape changes: daemon status is nested under `"daemons"` and a top-level `"triggered": true` (plus optional `"trigger_error"`) is added. The wake is **asynchronous** — call this tool again after a short wait to see updated `last_tick_*` metrics.
 
 ---
 
 ### `watercooler_daemon_findings`
-Retrieve findings reported by the background daemon. | Safety: read-only | Prerequisites: daemon
+
+Retrieve findings reported by the background daemon.
+
+**Safety:** read-only
+**Prerequisites:** daemon
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -631,99 +734,138 @@ Retrieve findings reported by the background daemon. | Safety: read-only | Prere
 | `topic` | string | no | Filter by thread topic |
 | `limit` | int | no | Max results (default: 50) |
 | `unacknowledged_only` | bool | no | Return only unacknowledged findings (default: false) |
-| `enrich` | bool | no | When `true`, overlay S1/S2/S3 context onto `coordinator_lead` findings before returning and emit an `enrichment_stats` key in the response (default: false). Overlays are local-only — hosted deployments skip S1/S2/S3 but still return `enrichment_stats`. |
+| `enrich` | bool | no | Overlay additional context onto premium `coordinator_lead` findings (default: false). Has no effect on open-core daemons. |
 | `code_path` | string | no | Path to the code repository root (default: `.`). Used to derive `repo_key` for S3 pulse-context enrichment. Supply an explicit value (e.g., from `watercooler_whoami()["code_path"]`) in multi-repo workspaces or when the MCP server's working directory may differ from the target repository. |
 
-**Available daemons:** `thread_auditor`, `content_scout`, `content_refiner`, `decision_detector`, `decision_extractor`, `t2_indexer`, `pulse_snapshot`, `project_coordinator`
+**Available daemons (open-core):** `sync_guard`, `thread_auditor`, `decision_detector`, `decision_extractor`, `decision_stance`
 
-**`project_coordinator` finding categories:**
+Premium and hosted builds expose additional daemons — `content_scout`,
+`content_refiner`, `pulse_snapshot`, `analysis_snapshot`, `trend_snapshot`,
+`t2_indexer`, `project_coordinator`, and `coordinator_refiner`. Filtering by
+a premium daemon name on an open-core install returns an empty list (no
+error).
 
-| Category | Description |
-|---|---|
-| `stalled_open_loop` | Thread has Plan entries but no Decision or Closure |
-| `stalled_dropout` | Previously active contributor stopped participating |
-| `aware_burst` | Sudden activity spike relative to rolling baseline |
-| `aware_role_concentration` | Single role dominates thread participation |
-| `aware_new_contributor` | First appearance of a contributor across the corpus |
-| `stance_advisory` | Cross-role stance elevation (v1B — `topic` = `stance:<role>`) |
-| `coordinator_lead` | Pre-built investigation lead layered on a v1A finding (v1B follow-on); `details["lead"]` carries a read-only `suggested_action` the agent can execute directly |
+> **`project_coordinator` (premium).** The `project_coordinator` daemon
+> emits investigation leads (`coordinator_lead`) with read-only suggested
+> actions, plus a handful of awareness and stalled-state categories. Its
+> full finding schema, enrichment overlays, and example payloads are
+> documented in the hosted reference at
+> [watercoolerdev.com/docs](https://www.watercoolerdev.com/docs).
+> `watercooler_daemon_findings(daemon="project_coordinator", ...)` on
+> open-core returns an empty list (no error).
+>
+> **`connect_role_complement` (info, disabled by default).** Fires when
+> thread A lacks a monitored role (default: `tester`, `critic`) that is
+> actively exercised in a related thread B. Relation evidence is
+> multi-tier: Tier 1 (explicit xref annotation), Tier 2 (shared `pair:`
+> tag), or Tier 3+4 (pulse_block co-affected risk cluster ∩ shared
+> workflow shape — both required). Ships disabled; enable with
+> `role_complement_enabled = true` in `[coordinator]` config.
+>
+> `details` keys on each finding: `missing_role`, `related_thread_topic`,
+> `related_thread_role_entry_count`, `relation_evidence` (list of
+> evidence items, each with a `tier` key from `{"xref", "pair_tag",
+> "pulse_block+workflow_shape"}`). Tier-specific fields:
+> `xref` → `source_entry_id`, `target_entry_id`, `direction`;
+> `pair_tag` → `tags` (sorted list of all shared `pair:`-prefixed tags);
+> `pulse_block+workflow_shape` → `risk_rule_id`, `risk_text`,
+> `workflow_shape_name`. Wrapped as `coordinator_lead` with
+> `source_category = "connect_role_complement"` when `leads_enabled =
+> true`. See [CONFIGURATION.md](CONFIGURATION.md) for
+> `role_complement_*` config keys.
+>
+> **`decision_stance` (open-core).** Converts decision-pipeline
+> findings into per-role `stance_advisory` findings (one per
+> canonical role: `planner`, `critic`, `tester`). Each advisory
+> cites the detector/extractor finding IDs that drove it via
+> `details.advisory.source_lead_ids` (capped at 10; check
+> `details.source_lead_ids_truncated` for partial citations). Topics
+> are namespaced `stance:{role}`. See
+> [DAEMONS.md](DAEMONS.md#decision-stance-decision_stance) for the
+> full spec, including the rule that `decision_stance` is skipped
+> when premium `project_coordinator` is active.
+>
+> **`coordinator_xref_suppression` (info).** When a thread with unresolved
+> `Plan` entries has an xref annotation pointing at a `Decision` entry in
+> another thread, the coordinator suppresses the `stalled_open_loop`
+> finding and emits a `coordinator_xref_suppression` info finding instead.
+> `details.xref_resolves_to` names the resolving target entry; agents and
+> operators can audit suppressions with
+> `watercooler_daemon_findings(daemon="project_coordinator", category="coordinator_xref_suppression")`.
+>
+> **Tag-based suppression (`suppression_tags`).** When a thread carries
+> an annotation tag that matches `project_coordinator.suppression_tags`
+> (default `parked`, `wontfix`, `deferred`), coordinator findings on
+> that thread acquire a `details.suppressed_by: "tag:<name>"` marker.
+> `stalled_open_loop` and `stalled_dropout` findings are downgraded from
+> `warning` to `info` severity; `aware_burst` and `aware_role_concentration`
+> findings preserve their native `info` severity and add the marker
+> without changing severity. Leads generated from suppressed source
+> findings inherit the same severity and `suppressed_by` marker so
+> parked threads stay quiet end-to-end.
+>
+> **`coordinator_lead` `t2_context` schema (v2).** Each `coordinator_lead`
+> finding's `details.lead.t2_context` is a dict with the following shape
+> when `AnalysisSnapshotDaemon` data is available (`null` otherwise):
+>
+> | Key | Type | Description |
+> |---|---|---|
+> | `schema_version` | int | `2` for payloads written by Phase 3b-1+. v1 payloads used `"stalled"` instead of `"analysis_stalled"`. |
+> | `analysis_stalled` | bool | Whether the analysis snapshot marked this thread stalled within the analysis window. Renamed from `"stalled"` in v1 to avoid confusion with coordinator staleness semantics. |
+> | `days_since_last` | int or null | Days since the last thread entry, per the analysis snapshot. |
+> | `workflow_shape_id` | str or null | Workflow shape identifier from the analysis snapshot. |
+> | `workflow_shape_name` | str or null | Human-readable workflow shape name. |
+> | `workflow_confidence` | float or null | Workflow shape classification confidence (0–1). |
+> | `has_decision` | bool | Thread has at least one `Decision` entry, per analysis. |
+> | `has_closure` | bool | Thread has at least one `Closure` entry, per analysis. |
+> | `entry_count_total` | int or null | Total entry count from the analysis snapshot. |
+> | `recommendation_rule_ids` | list[str] | Analysis rule IDs that flagged this thread (sorted, deduplicated). |
+>
+> **Backward compat:** `CoordinatorLead.from_dict()` migrates v1 payloads
+> on read — if `"stalled"` is present without `"analysis_stalled"`, the key
+> is renamed automatically. Writers (the daemon) always emit v2.
 
-**Example — fetch leads only:**
-```python
-watercooler_daemon_findings(
-    daemon="project_coordinator",
-    category="coordinator_lead",
-    unacknowledged_only=True,
-)
-```
-
-Each `coordinator_lead` finding nests the full lead payload under
-`details["lead"]` with fields `source_category`, `source_topic`, `summary`,
-`relevance_tags`, `suggested_action` (a `{phase, tool, arguments, reason}`
-dict restricted to read-only tools), and `t2_context`.
-
-**`t2_context` sub-object** — thread analysis context from `AnalysisSnapshotDaemon`.
-Present when the daemon has data for the lead's `source_topic`; `null` otherwise.
-
-| Sub-key | Type | Description |
-|---|---|---|
-| `schema_version` | int | Always `1` |
-| `stalled` | bool | `true` when the thread has had no recent activity |
-| `days_since_last` | float \| null | Days elapsed since the last entry in this thread |
-| `workflow_shape_id` | string \| null | Detected workflow shape identifier |
-| `workflow_shape_name` | string \| null | Human-readable workflow shape name |
-| `workflow_confidence` | float \| null | Shape detection confidence (0–1) |
-| `has_decision` | bool | `true` when the thread contains a Decision entry |
-| `has_closure` | bool | `true` when the thread contains a Closure entry |
-| `entry_count_total` | int \| null | Total entry count for this thread |
-| `recommendation_rule_ids` | list[string] | Ids of recommendation rules that matched this thread |
-
-**Read-time enrichment overlays** (applied per-lead when `enrich=true`):
-
-| Key | Source | Presence |
-|---|---|---|
-| `hygiene_tags` | ThreadAuditor findings for the same topic | present when unacknowledged hygiene findings exist |
-| `pending_decision_candidates` | DetectDecisionsDaemon candidates for the same topic | present when candidates exist |
-| `suggested_action_override` | Replaces `details.lead.suggested_action` — same `{phase, tool, arguments, reason}` schema | present when `pending_decision_candidates > 0` |
-| `pulse_context` | PulseSnapshot dimension scores (`goal_clarity`, `constraint_pressure`, `evidence_quality`, `execution_momentum`) | present when snapshot available; individual keys absent when their score is not yet computed |
-
-All overlay keys are omitted when the source is unavailable — key absence is not an error.
-In hosted mode all overlays are silently skipped (no overlay keys added).
-
-**`enrichment_stats` response object** (present in the top-level response when `enrich=true`):
-
-| Field | Type | Description |
-|---|---|---|
-| `attempted` | int | Number of signals attempted (always 3 in local mode when coordinator_lead findings exist; 0 when no leads or hosted context fails) |
-| `succeeded` | int | Number of signals that contributed at least one overlay to at least one lead. `succeeded=0` on a clean repo (no hygiene issues, no pending decisions, no snapshot yet) is normal — it does not indicate a signal failure. |
-| `skipped` | int | Number of signals skipped (3 in hosted mode; 0 in local mode) |
-| `mode` | string | `"local"` or `"hosted"` |
-| `error` | bool | Present and `true` only when `enrich_leads` threw an unexpected exception. Absent on clean runs (including zero-overlay runs). |
-
-`enrichment_stats` is present whenever `enrich=true`, regardless of whether any
-coordinator_lead findings were returned.  When no coordinator_lead findings exist,
-`attempted=0` and `succeeded=0`.
-
-To force fresh enrichment data, trigger a new snapshot:
-```python
-watercooler_daemon_status(daemon="pulse_snapshot", trigger=True)
-```
-Then re-call `watercooler_daemon_findings` — enrichment is recomputed on every call.
-
-**Example — enriched leads:**
-```python
-watercooler_daemon_findings(
-    daemon="project_coordinator",
-    category="coordinator_lead",
-    enrich=True,
-    unacknowledged_only=True,
-)
-```
+> **`coordinator_refiner` (premium).** Layer-2 LLM synthesis daemon that
+> reads unacknowledged `coordinator_lead` findings produced by
+> `project_coordinator` and emits `refined_coordinator_lead` findings under
+> its own producer identity. Per-lead 1:1 refinement: one refined finding
+> per raw lead, no clustering. Narrative-only output — no multi-dimensional
+> scoring. Findings-only posture: the refiner does not write thread entries,
+> annotate source leads, or mutate `project_coordinator` state.
+>
+> Query with
+> `watercooler_daemon_findings(daemon="coordinator_refiner", category="refined_coordinator_lead")`.
+> On open-core installs this returns an empty list (no error).
+>
+> `details` schema (v1) on each refined finding:
+>
+> | Key | Type | Description |
+> |---|---|---|
+> | `schema_version` | int | `1` for v1 payloads. |
+> | `source_finding_id` | str | Raw `coordinator_lead` finding id this refinement came from (singular; no clustering in v1). |
+> | `source_category` | str | Copied from the source lead's `source_category` so reviewers can filter without re-resolving the source finding. |
+> | `source_topic` | str | Source lead's `source_topic`; also equal to the outer Finding `topic` field. |
+> | `source_summary` | str | Verbatim copy of the source lead's `summary`. |
+> | `assessment` | str | LLM-produced prose, 2–4 sentences. |
+> | `recommended_next_step` | str | LLM-produced prose, 1–2 sentences. One concrete investigation step; no specific agent is nominated. |
+> | `relevance_tags` | list[str] | Verbatim passthrough from source lead. |
+> | `suggested_action` | dict or null | Verbatim passthrough from source lead; not rewritten by the LLM. |
+> | `source_t2_context` | dict or null | Verbatim passthrough of the source lead's `t2_context` (same v2 schema documented above). Key is always present; value is `null` when the raw lead had no `t2_context`. |
+>
+> Refined findings have `severity = "info"` (suggestions, never alerts) and
+> acknowledge independently of the source lead: acking the raw
+> `coordinator_lead` does not ack its refined finding and vice versa. See
+> [CONFIGURATION.md](CONFIGURATION.md) for `coordinator_refiner` config
+> keys.
 
 ---
 
-### `watercooler_pulse_snapshot`
+### `watercooler_pulse_snapshot` *(premium)*
 Read the cached Project Pulse snapshot maintained by `PulseSnapshotDaemon`. | Safety: read-only | Prerequisites: daemon (`pulse_snapshot` enabled)
+
+> **Premium only.** The `pulse_snapshot` daemon is excluded from open-core
+> builds. This tool will report `status: "unavailable"` with `reason:
+> "daemon_not_running"` on an open-source install.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -747,7 +889,48 @@ watercooler_daemon_status(daemon="pulse_snapshot", trigger=True)
 watercooler_pulse_snapshot(code_path=".")
 ```
 
+### `watercooler_acknowledge_finding`
+Mark a daemon finding as acknowledged. | Safety: **mutating** (`daemon_control`) | Prerequisites: daemon
+
+Acknowledged findings are excluded from future `watercooler_daemon_findings(unacknowledged_only=True)` queries. The operation is idempotent — acknowledging an already-acknowledged finding returns `acknowledged: true` without error. Returns `status: "not_found"` when the finding ID is absent or the daemon's findings file does not exist.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `daemon_name` | string | yes | Daemon that owns the finding (from `findings[].daemon_name`, e.g., `project_coordinator`) |
+| `finding_id` | string | yes | Finding ID to acknowledge (from `findings[].finding_id`) |
+
+**Response shape:**
+
+| Field | Type | Description |
+|---|---|---|
+| `status` | string | `"ok"` on success, `"not_found"` when the ID is absent, `"error"` on unexpected failure |
+| `acknowledged` | bool | `true` when the finding was successfully marked acknowledged |
+| `finding_id` | string | Echo of the requested finding ID |
+
+**Example — consume, act, acknowledge loop:**
+```python
+# 1. Fetch unacknowledged findings (e.g. from decision_detector)
+result = watercooler_daemon_findings(
+    daemon="decision_detector",
+    unacknowledged_only=True,
+)
+# 2. Act on each finding
+for finding in result["findings"]:
+    # ... review the candidate, post a Decision entry if appropriate ...
+    # 3. Acknowledge when done
+    watercooler_acknowledge_finding(
+        daemon_name=finding["daemon_name"],
+        finding_id=finding["finding_id"],
+    )
+# → {"status": "ok", "acknowledged": true, "finding_id": "..."}
+```
+
+---
+
 ## Common agent workflows
+
+For the higher-level narrative patterns these snippets serve (ideation → plan, blocked,
+handoff, closure, etc.), see [WORKFLOW_EXAMPLES.md](./WORKFLOW_EXAMPLES.md).
 
 ### Session start sequence
 
@@ -769,7 +952,7 @@ watercooler_say(
     role="planner",
     entry_type="Decision",
     code_path=".",
-    agent_func="Codex:gpt-5:planner"
+    agent_func="Codex:gpt-5-codex:planner"
 )
 ```
 

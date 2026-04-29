@@ -642,3 +642,62 @@ def install_hooks(*, code_root: Path | None = None, hooks_dir: Path | None = Non
         
     except Exception as e:
         return f"Error installing hooks: {str(e)}"
+
+
+def roles_init(*, project_path: Path, force: bool = False) -> int:
+    """Scaffold ``.watercooler/roles.toml`` from bundled defaults.
+
+    Args:
+        project_path: Project directory (where ``.watercooler/`` will be created).
+        force: When True, overwrite an existing ``.watercooler/roles.toml``.
+
+    Returns:
+        0 on success or "already initialized" (idempotent), 1 on error.
+    """
+    import os
+    import sys
+    import tempfile
+    from importlib.resources import files
+
+    target_dir = project_path / ".watercooler"
+    target_path = target_dir / "roles.toml"
+
+    if target_path.exists() and not force:
+        print(f"✅ Roles already initialized: {target_path}")
+        print("   Use --force to overwrite with bundled defaults.")
+        return 0
+
+    try:
+        bundled = files("watercooler") / "data" / "roles.toml"
+        content = bundled.read_bytes()
+    except Exception as e:
+        print(f"❌ Failed to read bundled roles.toml: {e}", file=sys.stderr)
+        return 1
+
+    tmp_path_str = None
+    try:
+        # mkdir is inside the write-error handler so a pre-existing
+        # ``.watercooler`` file (FileExistsError, an OSError subclass) or an
+        # unwritable parent (PermissionError) reports the same clean ❌
+        # failure as the later mkstemp/replace errors instead of tracebacking.
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        fd, tmp_path_str = tempfile.mkstemp(
+            dir=target_dir, suffix=".tmp", prefix="roles_"
+        )
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+        os.replace(tmp_path_str, target_path)
+    except OSError as e:
+        if tmp_path_str:
+            try:
+                os.unlink(tmp_path_str)
+            except OSError:
+                pass
+        print(f"❌ Failed to write {target_path}: {e}", file=sys.stderr)
+        return 1
+
+    print(f"✅ Created project roles: {target_path}")
+    print("   Edit this file to customize roles for your project.")
+    print("   See docs/ROLES_CREATION.md for the full guide.")
+    return 0

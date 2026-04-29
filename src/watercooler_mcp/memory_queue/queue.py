@@ -81,8 +81,21 @@ class MemoryTaskQueue:
         self._queue_file = self._dir / "queue.jsonl"
         self._dead_letter_file = self._dir / "dead_letter.jsonl"
         self._stats_file = self._dir / "stats.json"
+        # Plan v20 Phase 4: terminal receipts sidecar. The active queue
+        # removes terminal tasks on complete() / terminal fail(), so
+        # watercooler_memory_task_status has no source for past outcomes.
+        # Receipts are append-only and bounded at _max_receipts entries.
+        self._receipts_file = self._dir / "task_receipts.jsonl"
+        self._max_receipts = 1000
 
         self._max_depth = max_depth
+        # Round 26 note: we keep threading.Lock (not RLock) because
+        # existing tests and internal helpers rely on ``Lock.locked()``
+        # to assert the queue lock is held. The latent-deadlock risk
+        # the reviewer flagged (nested acquire in a future refactor) is
+        # mitigated by keeping ``_find_receipt`` / ``_trim_receipts_if_needed``
+        # discipline explicit in their docstrings — no callsite today
+        # composes them under a single locked region.
         self._lock = threading.Lock()
         self._tasks: Dict[str, MemoryTask] = {}
 
@@ -184,6 +197,7 @@ class MemoryTaskQueue:
             task = self._get_or_raise(task_id)
             task.mark_completed(episode_uuid=episode_uuid, entities=entities, facts=facts)
             self._stats["total_completed"] += 1
+            self._append_receipt(task, terminal_state="completed")
             # Remove terminal tasks from active queue (they're done)
             del self._tasks[task_id]
             self._persist()
@@ -202,6 +216,7 @@ class MemoryTaskQueue:
             if task.status == TaskStatus.DEAD_LETTER:
                 self._stats["total_dead_lettered"] += 1
                 self._append_dead_letter(task)
+                self._append_receipt(task, terminal_state="dead_letter")
                 del self._tasks[task_id]
             else:
                 self._stats["total_retries"] += 1
@@ -464,6 +479,133 @@ class MemoryTaskQueue:
                 os.fsync(f.fileno())
         except OSError as e:
             logger.warning("MEMORY_QUEUE: could not write dead letter: %s", e)
+
+    def _append_receipt(self, task: MemoryTask, *, terminal_state: str) -> None:
+        """Append a terminal receipt to ``task_receipts.jsonl``.
+
+        Plan v20 Phase 4: the active queue removes terminal tasks, so
+        ``watercooler_memory_task_status`` cannot see past outcomes. Receipts
+        are the append-only observability trail for terminal state.
+
+        Terminal states: ``completed`` or ``dead_letter``.
+
+        Must be called with ``self._lock`` held.
+        """
+        receipt = {
+            "task_id": task.task_id,
+            "remote_task_id": task.remote_task_id,
+            "entry_id": task.entry_id,
+            "backend": task.backend,
+            "execution_target": task.execution_target,
+            "terminal_state": terminal_state,
+            "episode_uuid": task.episode_uuid,
+            "entities_extracted": list(task.entities_extracted),
+            "facts_extracted": task.facts_extracted,
+            "attempt": task.attempt,
+            "last_error": task.last_error,
+            "created_at": task.created_at,
+            "completed_at": time.time(),
+        }
+        try:
+            with open(self._receipts_file, "a") as f:
+                f.write(json.dumps(receipt, separators=(",", ":")) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError as e:
+            logger.warning("MEMORY_QUEUE: could not write receipt: %s", e)
+            return
+
+        self._trim_receipts_if_needed()
+
+    def _trim_receipts_if_needed(self) -> None:
+        """Trim ``task_receipts.jsonl`` to the most recent ``_max_receipts``.
+
+        Called after every append; cheap in the common case where file is
+        under the cap. Must be called with ``self._lock`` held.
+        """
+        try:
+            if not self._receipts_file.exists():
+                return
+            with open(self._receipts_file, "r") as f:
+                lines = f.readlines()
+            if len(lines) <= self._max_receipts:
+                return
+            trimmed = lines[-self._max_receipts:]
+            self._atomic_write(self._receipts_file, "".join(trimmed))
+        except OSError as e:
+            logger.debug("MEMORY_QUEUE: receipt trim failed: %s", e)
+
+    def get_receipt(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Look up a terminal receipt by local ``task_id``.
+
+        Returns the most recent matching receipt, or ``None`` if none found.
+        """
+        return self._find_receipt(lambda r: r.get("task_id") == task_id)
+
+    def get_receipt_by_remote_task_id(
+        self, remote_task_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Look up a terminal receipt by hosted-side ``remote_task_id``.
+
+        Returns the most recent matching receipt, or ``None`` if none found.
+        """
+        if not remote_task_id:
+            return None
+        return self._find_receipt(
+            lambda r: r.get("remote_task_id") == remote_task_id
+        )
+
+    def recent_receipts(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return the most recent receipts (newest first)."""
+        with self._lock:
+            if not self._receipts_file.exists():
+                return []
+            try:
+                with open(self._receipts_file, "r") as f:
+                    lines = f.readlines()
+            except OSError:
+                return []
+
+        out: List[Dict[str, Any]] = []
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+            if len(out) >= limit:
+                break
+        return out
+
+    def _find_receipt(self, predicate) -> Optional[Dict[str, Any]]:
+        """Scan receipts newest-first, return first match.
+
+        Acquires and releases ``self._lock`` internally. Callers must NOT
+        hold ``self._lock`` at entry — ``threading.Lock`` is non-reentrant
+        and would deadlock. (PR #654 in-PR review round 6 LOW.)
+        """
+        with self._lock:
+            if not self._receipts_file.exists():
+                return None
+            try:
+                with open(self._receipts_file, "r") as f:
+                    lines = f.readlines()
+            except OSError:
+                return None
+
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                receipt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if predicate(receipt):
+                return receipt
+        return None
 
     def _atomic_write(self, path: Path, content: str) -> None:
         """Write *content* to *path* via temp-file + fsync + rename."""

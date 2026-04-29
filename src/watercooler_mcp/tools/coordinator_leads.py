@@ -45,7 +45,9 @@ def enrich_leads(
     Takes a list of serialized Finding dicts (Finding.to_dict() output) and
     returns a new list with enrichment fields merged onto coordinator_lead items.
     Non-coordinator-lead findings are passed through unchanged, preserving
-    original ordering.
+    original ordering. ``refined_coordinator_lead`` findings are passed through
+    unchanged — their ``suggested_action`` is already present in ``details``
+    directly (not nested under ``details["lead"]``).
 
     Overlay keys are omitted when the signal source is unavailable — key
     absence is not an error.  Partial enrichment (some keys present, others
@@ -78,8 +80,7 @@ def enrich_leads(
     mode = "hosted" if is_hosted else "local"
 
     if not any(ld.get("category") == "coordinator_lead" for ld in leads):
-        skipped = 3 if is_hosted else 0
-        return leads, {"attempted": 0, "succeeded": 0, "skipped": skipped, "mode": mode}
+        return leads, {"attempted": 0, "succeeded": 0, "skipped": 0, "mode": mode}
 
     # Track per-signal success for enrichment_stats.
     # s1_ok/s2_ok: True when at least one lead received an overlay from that signal.

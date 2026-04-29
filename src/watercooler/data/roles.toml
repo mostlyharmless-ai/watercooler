@@ -20,9 +20,13 @@
 # - A scribe entry may be written by a human or by a daemon if its function is
 #   to preserve the record rather than introduce new authority.
 #
-# To customize: copy this file to .watercooler/roles.toml in your project.
-# Custom roles require a canonical_role field mapping to one of the six
-# canonical roles for analytics compatibility.
+# To customize: copy this file to .watercooler/roles.toml in your project,
+# or run 'watercooler roles init'.
+#
+# `canonical_role` is an optional documentation hint that records which
+# canonical role a custom role most resembles. It does not affect runtime
+# behavior — analytics, stance, and coordinator findings operate on
+# literal role names.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [roles.planner]

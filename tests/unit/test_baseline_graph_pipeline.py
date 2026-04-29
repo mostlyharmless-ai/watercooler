@@ -471,6 +471,30 @@ class TestThreadGraphOperations:
         entry_ids = [e["id"] for e in loaded_entries]
         assert "entry:e1" in entry_ids
 
+    def test_load_thread_entries_skips_non_dict_lines(self, graph_dir):
+        """Valid-JSON-but-wrong-shape lines (a list, string, null, number)
+        must be filtered out before downstream consumers call ``.get()`` on
+        them. Guards against corrupted writers or partial merges.
+        """
+        topic = "drift-test"
+        thread_dir = storage.get_thread_graph_dir(graph_dir, topic)
+        thread_dir.mkdir(parents=True, exist_ok=True)
+        entries_file = thread_dir / "entries.jsonl"
+        entries_file.write_text(
+            '{"id":"a","body":"ok"}\n'
+            '[1,2,3]\n'
+            '"oops"\n'
+            'null\n'
+            '42\n'
+            'true\n'
+            '{"id":"b","body":"ok"}\n',
+            encoding="utf-8",
+        )
+
+        loaded = list(storage.load_thread_entries(graph_dir, topic))
+        assert [e["id"] for e in loaded] == ["a", "b"]
+        assert all(isinstance(e, dict) for e in loaded)
+
     def test_load_thread_edges(self, graph_dir):
         """Test loading thread edges."""
         topic = "test-topic"

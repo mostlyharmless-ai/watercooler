@@ -391,6 +391,230 @@ def namespace_to_group_id(namespace_id: str) -> str:
     return derive_group_id(code_repo_name=namespace_id)
 
 
+# =============================================================================
+# Slug-aware canonical identity helpers (Plan v20 Phase 1)
+# =============================================================================
+#
+# These helpers introduce the canonical ``<org>_<repo>`` form for hosted
+# identity while remaining backward-compatible with the repo-only form.
+# Callers that pass ``repo_slug="<org>/<repo>"`` receive the full canonical
+# form; callers that pass only ``code_repo_name`` / ``code_path`` /
+# ``threads_dir`` continue to receive the repo-only form as before.
+#
+# Phase 1 adds the helpers and makes them available. Phase 6 is where the
+# physical Falkor database names on hosted actually migrate to the
+# ``<org>_<repo>_t1`` / ``<org>_<repo>_t2`` form and where in-code callers
+# start preferring ``derive_project_group_id`` over ``derive_group_id``.
+
+
+def _split_slug(repo_slug: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Split ``<org>/<repo>`` into ``(org, repo)``. Returns ``(None, None)`` on invalid input."""
+    if not repo_slug or "/" not in repo_slug:
+        return None, None
+    parts = repo_slug.split("/", 1)
+    org = parts[0].strip() or None
+    repo = parts[1].strip() or None
+    return org, repo
+
+
+def derive_repo_slug(
+    code_path: Optional[Path] = None,
+    threads_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """Extract ``<org>/<repo>`` from the git remote of ``code_path``.
+
+    Phase 1 scaffolding (Plan v20). The canonical project identity is
+    ``<org>_<repo>``; to produce that from a bare path, we first need the
+    ``<org>/<repo>`` slug. This helper reads ``remote.origin.url`` via
+    ``git config`` and strips any trailing ``.git`` / trailing slash.
+
+    Returns ``None`` if no code_path/threads_dir resolves to a git
+    repository with an ``origin`` remote — callers should then fall back
+    to the repo-only form via :func:`derive_project_group_id` without a
+    ``repo_slug``.
+    """
+    import subprocess
+
+    target: Optional[Path] = None
+    if code_path is not None:
+        target = Path(code_path)
+    elif threads_dir is not None:
+        td = Path(threads_dir)
+        stem = td.name
+        if stem.endswith("-threads"):
+            stem = stem.removesuffix("-threads")
+        candidate = td.parent / stem
+        target = candidate if candidate.exists() else td.parent
+    if target is None:
+        return None
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(target), "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return None
+    url = result.stdout.strip()
+    if not url or result.returncode != 0:
+        return None
+
+    # Normalize SSH / HTTPS / scp-style URLs into ``org/repo``.
+    # git@github.com:org/repo.git                 -> org/repo
+    # https://github.com/org/repo.git             -> org/repo
+    # ssh://git@gitserver/org/repo.git            -> org/repo
+    # http://intra-server:2222/org/repo.git       -> org/repo
+    #
+    # PR #654 in-PR review round 5 (LOW §5): the prior host-strip
+    # heuristic keyed on ``"." in segments[0]`` which silently preserved
+    # the host on dotless intranet hostnames (``gitserver``, ``dev-box``),
+    # producing slugs like ``gitserver/org`` and downgrading identity to
+    # repo-only. Use ``urllib.parse`` on schemed URLs so the host always
+    # comes off, regardless of whether it has a dot; fall back to the
+    # scp-style split when the URL has no scheme.
+    from urllib.parse import urlparse as _urlparse
+
+    path_part: str
+    if url.startswith("git@") and ":" in url and "://" not in url:
+        # scp-style: "git@host:path"
+        _, path_part = url.split(":", 1)
+    else:
+        parsed = _urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            # Schemed URL — urlparse already stripped the host into netloc.
+            path_part = parsed.path.lstrip("/")
+        else:
+            # Schemeless, non-scp form. PR #654 in-PR review round 9 (LOW):
+            # a URL like ``gitserver/org/repo`` (dotless intranet host,
+            # no scheme, no colon) used to keep ``gitserver`` as the
+            # first segment because the host-strip heuristic required a
+            # ``.`` or ``:`` — producing a slug of ``gitserver/org``
+            # instead of ``org/repo``. There is no reliable way to
+            # distinguish a dotless hostname from a two-segment path
+            # (``org/repo``) in a schemeless form, so this form is
+            # inherently ambiguous. The downstream two-segment
+            # truncation below will only produce a plausible slug when
+            # the input is already in ``org/repo`` shape; otherwise we
+            # refuse.
+            path_part = url.lstrip("/")
+            segments = path_part.split("/")
+            if len(segments) >= 2 and ("." in segments[0] or ":" in segments[0]):
+                path_part = "/".join(segments[1:])
+            elif len(segments) > 2:
+                # Ambiguous schemeless URL with more than two segments.
+                # We can't tell if segment 0 is a dotless host or an org.
+                # Refuse rather than emit a wrong slug.
+                return None
+
+    if path_part.endswith(".git"):
+        path_part = path_part[:-4]
+    path_part = path_part.strip("/")
+    # Collapse accidental double slashes or empty segments.
+    path_part = "/".join(seg for seg in path_part.split("/") if seg)
+    if "/" not in path_part:
+        return None
+    # Take only the first two segments — some servers nest deeper paths
+    # (e.g., GitLab subgroups); the <org>/<repo> contract is fixed to
+    # two.
+    segments = path_part.split("/")
+    if len(segments) > 2:
+        path_part = "/".join(segments[:2])
+    return path_part
+
+
+def derive_project_group_id(
+    repo_slug: Optional[str] = None,
+    code_repo_name: Optional[str] = None,
+    code_path: Optional[Path] = None,
+    threads_dir: Optional[Path] = None,
+) -> str:
+    """Derive the canonical project group identifier.
+
+    This is the slug-aware successor to :func:`derive_group_id`. When
+    ``repo_slug`` is provided (format ``"<org>/<repo>"``), the canonical
+    form is ``<org>_<repo>`` with identical sanitisation as
+    :func:`derive_group_id` (hyphens to underscores, lowercase). When
+    ``repo_slug`` is absent, falls back to the repo-only form via
+    :func:`derive_group_id`.
+
+    Example::
+
+        derive_project_group_id(repo_slug="mostlyharmless-ai/watercooler-cloud")
+          → "mostlyharmless_ai_watercooler_cloud"
+
+        derive_project_group_id(code_repo_name="watercooler-cloud")
+          → "watercooler_cloud"   # same as derive_group_id(...)
+
+    Args:
+        repo_slug: Preferred source — ``"<org>/<repo>"`` GitHub slug.
+        code_repo_name: Repo-only fallback (e.g., ``"watercooler-cloud"``).
+        code_path: Path-based fallback.
+        threads_dir: Threads-dir-based fallback (strips threads suffix).
+
+    Returns:
+        Sanitised canonical project identifier suitable for a FalkorDB
+        database name. Non-empty; falls back to ``"watercooler"`` if all
+        inputs are absent.
+    """
+    org, repo_from_slug = _split_slug(repo_slug)
+
+    if org and repo_from_slug:
+        joined = f"{org}_{repo_from_slug}"
+        return joined.replace("-", "_").lower() or "watercooler"
+
+    # Fall through to repo-only form for back-compat.
+    return derive_group_id(
+        code_repo_name=code_repo_name,
+        code_path=code_path,
+        threads_dir=threads_dir,
+    )
+
+
+def derive_t1_database_name(
+    repo_slug: Optional[str] = None,
+    code_repo_name: Optional[str] = None,
+    code_path: Optional[Path] = None,
+    threads_dir: Optional[Path] = None,
+) -> str:
+    """Physical FalkorDB database name for T1 (baseline graph + embedding HNSW).
+
+    Returns ``<project_group_id>_t1``. See :func:`derive_project_group_id`
+    for the ``project_group_id`` rules.
+
+    Example::
+
+        derive_t1_database_name(repo_slug="mostlyharmless-ai/watercooler-cloud")
+          → "mostlyharmless_ai_watercooler_cloud_t1"
+    """
+    project_group_id = derive_project_group_id(
+        repo_slug=repo_slug,
+        code_repo_name=code_repo_name,
+        code_path=code_path,
+        threads_dir=threads_dir,
+    )
+    return f"{project_group_id}_t1"
+
+
+def derive_t2_database_name(
+    repo_slug: Optional[str] = None,
+    code_repo_name: Optional[str] = None,
+    code_path: Optional[Path] = None,
+    threads_dir: Optional[Path] = None,
+) -> str:
+    """Physical FalkorDB database name for T2 (Graphiti episodic + entity).
+
+    Returns ``<project_group_id>_t2``. See :func:`derive_project_group_id`
+    for the ``project_group_id`` rules.
+    """
+    project_group_id = derive_project_group_id(
+        repo_slug=repo_slug,
+        code_repo_name=code_repo_name,
+        code_path=code_path,
+        threads_dir=threads_dir,
+    )
+    return f"{project_group_id}_t2"
+
+
 def _compose_threads_slug(code_repo: Optional[str], repo_root: Optional[Path]) -> Optional[str]:
     """Compose threads repository slug from code repository info.
 

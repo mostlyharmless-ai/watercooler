@@ -203,3 +203,102 @@ class TestHostedAuthMiddlewareE2E:
             assert data["capability"] == "memory_query"
         finally:
             clear_http_context()
+
+    @pytest.mark.anyio
+    async def test_unregistered_tool_fails_closed(self):
+        """A tool registered with FastMCP but absent from ``_TOOL_CAPABILITY_MAP``
+        must be refused with ``capability_not_registered`` rather than silently
+        bypassing the grant check (or crashing with UnboundLocalError).
+
+        Regression guard for two bugs in the same code path:
+          - P2.7: fall-through to ``call_next`` executed unregistered tools
+            with no auth on hosted surfaces.
+          - Follow-up: the initial fix shadowed ``TextContent`` / ``ToolResult``
+            with inner re-imports, so the fail-closed branch raised
+            ``UnboundLocalError`` instead of returning the denial payload.
+        """
+        from watercooler_mcp.capability_auth import CapabilityGrantService
+        from watercooler_mcp.server_factory import build_mcp_server
+        from watercooler_mcp.tool_runtime import ToolRuntime
+        from watercooler_mcp.capabilities import CapabilityProfile
+        from watercooler_mcp.context import (
+            HttpRequestContext, set_http_context, clear_http_context,
+        )
+
+        svc = MagicMock(spec=CapabilityGrantService)
+        svc.get_capabilities.return_value = {"threads_core"}
+        auth = CapabilityAuthorizer(svc)
+
+        rt = ToolRuntime(
+            surface="hosted_full",
+            capability_profile=CapabilityProfile(),
+            authorizer=auth,
+        )
+        mcp = build_mcp_server(rt)
+
+        # Register a tool that's intentionally absent from
+        # _TOOL_CAPABILITY_MAP. FastMCP accepts it, the capability lookup
+        # in the middleware raises ValueError, and the fail-closed branch
+        # must return a denial rather than crash or pass through.
+        @mcp.tool(name="watercooler_unregistered_probe")
+        def _probe() -> str:
+            return "should-never-execute"
+
+        set_http_context(HttpRequestContext(
+            user_id="test_user", repo="org/repo", github_token="ghp_test",
+        ))
+        try:
+            result = await mcp.call_tool(
+                "watercooler_unregistered_probe", {}
+            )
+            assert result.content and len(result.content) > 0
+            text = result.content[0].text
+            data = json.loads(text)
+            assert data["error"] == "capability_not_registered"
+            assert data["tool"] == "watercooler_unregistered_probe"
+            assert "_TOOL_CAPABILITY_MAP" in data["message"]
+        finally:
+            clear_http_context()
+
+    @pytest.mark.anyio
+    async def test_unknown_tool_preserves_fastmcp_404(self):
+        """A tool name that doesn't exist in the FastMCP registry must fall
+        through to FastMCP's normal unknown-tool handling rather than
+        being rewritten into a ``capability_not_registered`` payload.
+
+        ``tool_capability`` raises ``ValueError`` for both the registered-
+        but-unmapped case AND the truly-unknown-name case; the middleware
+        must disambiguate so client typos surface as protocol 404s instead
+        of misleading server-configuration errors.
+        """
+        from watercooler_mcp.capability_auth import CapabilityGrantService
+        from watercooler_mcp.server_factory import build_mcp_server
+        from watercooler_mcp.tool_runtime import ToolRuntime
+        from watercooler_mcp.capabilities import CapabilityProfile
+        from watercooler_mcp.context import (
+            HttpRequestContext, set_http_context, clear_http_context,
+        )
+
+        svc = MagicMock(spec=CapabilityGrantService)
+        svc.get_capabilities.return_value = {"threads_core"}
+        auth = CapabilityAuthorizer(svc)
+
+        rt = ToolRuntime(
+            surface="hosted_full",
+            capability_profile=CapabilityProfile(),
+            authorizer=auth,
+        )
+        mcp = build_mcp_server(rt)
+
+        set_http_context(HttpRequestContext(
+            user_id="test_user", repo="org/repo", github_token="ghp_test",
+        ))
+        try:
+            # Client typo — no such tool. Must surface as a FastMCP error,
+            # not a ``capability_not_registered`` rewrite.
+            with pytest.raises(Exception) as excinfo:
+                await mcp.call_tool("totally_unknown_tool_name_xyz", {})
+            # The error should not carry our config-error payload shape.
+            assert "capability_not_registered" not in str(excinfo.value)
+        finally:
+            clear_http_context()

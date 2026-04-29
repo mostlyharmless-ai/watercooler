@@ -113,8 +113,17 @@ class TestHybridSearchWrapper:
 class TestHybridFindSimilarWrapper:
     @pytest.mark.anyio
     async def test_local_route_calls_impl(self):
-        """semantic_similarity defaults to local → calls local impl."""
-        rt = _make_runtime()
+        """When the operator overrides semantic_similarity to "local", the
+        wrapper calls the local impl rather than routing remote.
+
+        Plan v20 Phase 8 flipped the hybrid default for semantic_similarity
+        from "local" to "remote" so the hosted T1 HNSW index is authoritative;
+        this test now exercises the explicit-local-override path instead of
+        relying on the default.
+        """
+        routes = dict(HYBRID_DEFAULT_ROUTES)
+        routes["semantic_similarity"] = "local"
+        rt = _make_runtime(routes=routes)
         wrapper = _build_hybrid_find_similar_wrapper(rt)
 
         with patch(
@@ -127,13 +136,12 @@ class TestHybridFindSimilarWrapper:
 
     @pytest.mark.anyio
     async def test_remote_route_calls_premium(self):
-        """When capability route is remote, calls premium client."""
+        """Default hybrid route for semantic_similarity is remote → premium."""
         mock_client = MagicMock()
         mock_client.call_tool_text = AsyncMock(return_value='{"remote": true}')
 
-        routes = dict(HYBRID_DEFAULT_ROUTES)
-        routes["semantic_similarity"] = "remote"
-        rt = _make_runtime(routes=routes, premium_client=mock_client)
+        # No route override needed — "remote" is the Plan v20 default.
+        rt = _make_runtime(premium_client=mock_client)
         wrapper = _build_hybrid_find_similar_wrapper(rt)
 
         result = await wrapper(_mock_ctx(), entry_id="01ABC")

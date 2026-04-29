@@ -1,5 +1,12 @@
 # Authentication
 
+> **Is this page relevant to you?** GitHub authentication is only required when your
+> thread remote is hosted on GitHub. Watercooler threads live on an orphan branch inside
+> your code repo (see [ARCHITECTURE.md](./ARCHITECTURE.md)), so the auth method you need
+> is whatever your code repo already uses. If your code lives on a non-GitHub host
+> (self-hosted GitLab, Gitea, a bare git server, etc.), configure that host's credentials
+> for git and skip the GitHub-specific steps below.
+
 > **Choose your authentication method:**
 >
 > - **Start here (recommended):** Run `gh auth login && gh auth setup-git`. Sets up both

@@ -574,6 +574,129 @@ class TestEnsureFalkordbRunningGuard:
         assert mock_status.call_args[0][1] == ServiceState.DISABLED
 
 
+class TestEnsureFalkordbRunningTransportGuard:
+    """Plan v20 follow-on: in hybrid/proxy mode, T1/T2 graph operations
+    are routed to the hosted FalkorDB on Railway. The local FalkorDB on
+    127.0.0.1:6379 is dead weight and produces the "Mismatch: hybrid mode
+    with memory_ingest=remote, but a local FalkorDB is reachable" warning
+    on every health-check. ``ensure_falkordb_running`` must skip
+    auto-start when transport is hybrid or proxy, BEFORE the backend
+    check (so even ``backend=graphiti`` with ``transport=hybrid`` skips).
+    """
+
+    def _patched_config(self, transport: str):
+        class _Mcp:
+            def __init__(self, t):
+                self.transport = t
+
+        class _Config:
+            def __init__(self, t):
+                self.mcp = _Mcp(t)
+
+        return _Config(transport)
+
+    def test_returns_early_for_hybrid_transport(self):
+        from watercooler_mcp.startup import ensure_falkordb_running
+
+        with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            return_value=self._patched_config("hybrid"),
+        ), patch(
+            "watercooler.memory_config.get_memory_backend",
+            return_value="graphiti",
+        ), patch(
+            "watercooler_mcp.startup._update_service_status"
+        ) as mock_status:
+            ensure_falkordb_running()
+
+        mock_status.assert_called_once()
+        args = mock_status.call_args[0]
+        assert args[0] == "falkordb"
+        assert args[1] == ServiceState.DISABLED
+        # Message must name the transport so operators can decode the skip.
+        assert "hybrid" in mock_status.call_args[1].get("message", "").lower()
+
+    def test_returns_early_for_proxy_transport(self):
+        from watercooler_mcp.startup import ensure_falkordb_running
+
+        with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            return_value=self._patched_config("proxy"),
+        ), patch(
+            "watercooler.memory_config.get_memory_backend",
+            return_value="graphiti",
+        ), patch(
+            "watercooler_mcp.startup._update_service_status"
+        ) as mock_status:
+            ensure_falkordb_running()
+
+        mock_status.assert_called_once()
+        assert mock_status.call_args[0][1] == ServiceState.DISABLED
+
+    def test_proceeds_for_stdio_transport(self):
+        """stdio is the local-full case — backend guard runs as before."""
+        from watercooler_mcp.startup import ensure_falkordb_running
+
+        with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            return_value=self._patched_config("stdio"),
+        ), patch(
+            "watercooler.memory_config.get_memory_backend",
+            return_value="null",
+        ), patch(
+            "watercooler_mcp.startup._update_service_status"
+        ) as mock_status:
+            ensure_falkordb_running()
+
+        # Backend guard hits ('null' backend) — not the transport guard.
+        mock_status.assert_called_once()
+        msg = mock_status.call_args[1].get("message", "")
+        assert "null" in msg.lower(), (
+            f"expected the backend guard to fire for stdio, got message={msg!r}"
+        )
+
+    def test_logs_when_config_resolution_fails(self):
+        """PR #656 review (LOW): silent fallback to 'stdio' on config error
+        hides misconfiguration. The fallback must log so operators see
+        the failure mode (a hybrid deployment with a broken config file
+        that silently auto-starts a local FalkorDB is exactly the
+        muddle this fix exists to eliminate).
+        """
+        from watercooler_mcp.startup import ensure_falkordb_running
+
+        with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            side_effect=RuntimeError("malformed config.toml"),
+        ), patch(
+            "watercooler.memory_config.get_memory_backend",
+            return_value="null",
+        ), patch(
+            "watercooler_mcp.startup.log_error"
+        ) as mock_log_error, patch(
+            "watercooler_mcp.startup._update_service_status"
+        ):
+            ensure_falkordb_running()
+
+        # log_error must be called at least once with a message that
+        # references the resolution failure. (The fallback then proceeds
+        # to the OLD backend-guard path which is fine — that's the
+        # conservative behavior.)
+        config_error_logs = [
+            c for c in mock_log_error.call_args_list
+            if any(
+                "transport" in str(arg).lower()
+                or "stdio" in str(arg).lower()
+                or "fall" in str(arg).lower()
+                for arg in c.args
+            )
+        ]
+        assert config_error_logs, (
+            f"config-resolution failure was silent — no log_error call "
+            f"mentioning the fallback. All log_error calls: "
+            f"{mock_log_error.call_args_list}"
+        )
+
+
 # ============================================================================
 # Windows embedding spawn unification (F14/F15 regression guards)
 # ============================================================================

@@ -22,9 +22,30 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+
+from watercooler_mcp.sync.file_lock import file_lock
 
 logger = logging.getLogger(__name__)
+
+# Cross-process advisory lock timeouts. Daemon ticks acquiring these
+# locks are not in a hot path; 30 s is generous enough to ride out a
+# slow compaction or checkpoint write by a peer process while still
+# failing fast on a stuck holder. Findings and checkpoints have
+# distinct constants so each can be tuned without affecting the other.
+_FINDINGS_LOCK_TIMEOUT_S = 30.0
+_CHECKPOINT_LOCK_TIMEOUT_S = 30.0
+
+
+def _findings_lock_path(daemon_name: str, namespace: str = "") -> Path:
+    """Return the per-daemon-namespace cross-process lock sentinel path."""
+    return _daemon_dir(daemon_name, namespace=namespace) / ".findings.lock"
+
+
+def _checkpoint_lock_path(daemon_name: str, namespace: str = "") -> Path:
+    """Return the per-daemon-namespace checkpoint cross-process lock path."""
+    return _daemon_dir(daemon_name, namespace=namespace) / ".checkpoint.lock"
+
 
 # Default storage root
 _DEFAULT_DAEMONS_DIR = Path.home() / ".watercooler" / "daemons"
@@ -168,7 +189,9 @@ class ThreadCheckpoint:
     def from_dict(cls, d: Dict[str, Any]) -> "ThreadCheckpoint":
         dropped = set(d.keys()) - set(cls.__dataclass_fields__)
         if dropped:
-            logger.debug("ThreadCheckpoint.from_dict: dropping unknown keys: %s", dropped)
+            logger.debug(
+                "ThreadCheckpoint.from_dict: dropping unknown keys: %s", dropped
+            )
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
@@ -229,8 +252,13 @@ class DaemonCheckpoint:
     def from_dict(cls, d: Dict[str, Any]) -> "DaemonCheckpoint":
         ts_raw = d.get("thread_state", {})
         skip = {"thread_state", "extras"}
-        obj = cls(**{k: v for k, v in d.items()
-                     if k in cls.__dataclass_fields__ and k not in skip})
+        obj = cls(
+            **{
+                k: v
+                for k, v in d.items()
+                if k in cls.__dataclass_fields__ and k not in skip
+            }
+        )
         obj.thread_state = {
             k: ThreadCheckpoint.from_dict(v) if isinstance(v, dict) else v
             for k, v in ts_raw.items()
@@ -245,21 +273,35 @@ class DaemonCheckpoint:
 
 
 def save_checkpoint(checkpoint: DaemonCheckpoint, namespace: str = "") -> None:
-    """Atomically write checkpoint to disk (temp + rename)."""
+    """Atomically write checkpoint to disk (temp + rename, cross-process locked).
+
+    Raises:
+        FileLockError: When the per-daemon checkpoint lock cannot be
+            acquired within the timeout. Callers must wrap or accept
+            propagation. A failed save here means the daemon will
+            reprocess entries on restart and may emit duplicate
+            findings — fail-loud is preferred over silent loss.
+        FileLockUnsupportedError: When neither ``fcntl`` (POSIX) nor
+            ``msvcrt`` (Windows) is available on the platform.
+        OSError: For underlying filesystem failures (disk full,
+            permissions, etc.) propagated from the temp-write/rename.
+    """
     d = _daemon_dir(checkpoint.daemon_name, namespace=namespace)
     path = d / "checkpoint.json"
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(d), suffix=".tmp")
-    try:
-        with os.fdopen(tmp_fd, "w") as f:
-            json.dump(checkpoint.to_dict(), f, indent=2)
-        os.replace(tmp_path, str(path))
-    except Exception:
-        # Clean up temp file on failure
+    lock_path = _checkpoint_lock_path(checkpoint.daemon_name, namespace=namespace)
+    with file_lock(lock_path, timeout=_CHECKPOINT_LOCK_TIMEOUT_S):
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(d), suffix=".tmp")
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(checkpoint.to_dict(), f, indent=2)
+            os.replace(tmp_path, str(path))
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def load_checkpoint(daemon_name: str, namespace: str = "") -> DaemonCheckpoint:
@@ -276,33 +318,102 @@ def load_checkpoint(daemon_name: str, namespace: str = "") -> DaemonCheckpoint:
         return DaemonCheckpoint(daemon_name=daemon_name)
 
 
-# Module-global lock for JSONL writes. A single lock guards all daemons;
-# this is intentional — with the current single-daemon setup there's no
-# contention. Switch to per-file locking if multiple daemons write concurrently.
-_findings_lock = threading.Lock()
+# Per-(daemon, namespace) thread locks for in-process JSONL serialisation.
+# Previously a single module-global lock guarded all daemons; under the new
+# cross-process file_lock contract that meant one daemon blocked on a 30 s
+# file-lock acquire would freeze in-process writes to every other daemon
+# until the timeout elapsed. Per-pair locks keep cross-daemon write paths
+# independent while still serialising threads writing to the same file.
+_findings_locks: Dict[str, threading.Lock] = {}
+_findings_locks_dict_lock = threading.Lock()
+
+
+def _sanitize_namespace_for_key(namespace: str) -> str:
+    """Apply the same sanitisation ``_daemon_dir`` uses for the filesystem.
+
+    Two raw namespaces that collapse to the same sanitised form share
+    the same on-disk directory and lock file; they MUST therefore
+    share the same in-process threading lock as well, otherwise
+    threads from those distinct raw namespaces would pile up on the
+    file lock instead of serialising cheaply in-process.
+    """
+    if not namespace:
+        return ""
+    return re.sub(r"[^A-Za-z0-9_:-]", "_", namespace)
+
+
+def _get_findings_lock(daemon_name: str, namespace: str = "") -> threading.Lock:
+    """Return the in-process ``threading.Lock`` for ``(daemon, namespace)``.
+
+    The lookup itself is guarded by a brief per-process lock so concurrent
+    callers can't double-create a lock for the same key. Once created,
+    locks are cached for the lifetime of the process — daemon names and
+    namespaces are bounded.
+
+    The dict key uses the SANITISED namespace (matching ``_daemon_dir``)
+    so any two callers that resolve to the same on-disk path also
+    resolve to the same threading lock. Without the matching
+    sanitisation a pair of raw namespaces like ``"foo|bar"`` and
+    ``"foo_bar"`` would receive distinct in-process locks but compete
+    on the same lock file — defeating the threading layer's purpose.
+    """
+    safe_ns = _sanitize_namespace_for_key(namespace)
+    key = f"{safe_ns}|{daemon_name}"
+    with _findings_locks_dict_lock:
+        lock = _findings_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _findings_locks[key] = lock
+        return lock
+
 
 # Rotation threshold: compact the JSONL file when it exceeds this many lines.
 _MAX_FINDINGS_LINES = 10_000
 _COMPACT_KEEP_LINES = 5_000
 
 
-def append_findings(daemon_name: str, findings: List[Finding], namespace: str = "") -> None:
-    """Append findings to the JSONL log file (thread-safe).
+def append_findings(
+    daemon_name: str, findings: List[Finding], namespace: str = ""
+) -> None:
+    """Append findings to the JSONL log file.
+
+    Cross-process safe: acquires ``file_lock`` on the per-daemon
+    ``.findings.lock`` sentinel so concurrent MCP server processes
+    cannot interleave appends. Thread safety within a single process
+    is provided by a per-(daemon, namespace) ``threading.Lock`` so
+    a slow file-lock acquire on one daemon does not block in-process
+    writes to other daemons.
 
     Triggers rotation when the file exceeds _MAX_FINDINGS_LINES,
     keeping only the most recent _COMPACT_KEEP_LINES entries.
+
+    Raises:
+        FileLockError: When the per-daemon findings lock cannot be
+            acquired within the timeout. A failed append here means
+            the findings batch is lost; the function fails loud
+            rather than swallow the error so the caller can decide
+            whether to retry on the next tick or surface the
+            failure. Daemon ticks should generally wrap the call in
+            a try/except that logs the loss.
+        FileLockUnsupportedError: When neither ``fcntl`` (POSIX) nor
+            ``msvcrt`` (Windows) is available on the platform.
+        OSError: For underlying filesystem failures (disk full,
+            permissions, etc.) propagated from the JSONL write or
+            rotation step.
     """
     if not findings:
         return
     path = _daemon_dir(daemon_name, namespace=namespace) / "findings.jsonl"
-    with _findings_lock:
-        with open(path, "a") as f:
-            for finding in findings:
-                f.write(json.dumps(finding.to_dict()) + "\n")
-        # Rotate if file has grown too large.
-        # TODO: _maybe_compact re-reads the file to count lines; tracking
-        # line_count in the checkpoint would make this O(1).
-        _maybe_compact(path, daemon_name)
+    lock_path = _findings_lock_path(daemon_name, namespace=namespace)
+    with _get_findings_lock(daemon_name, namespace):
+        with file_lock(lock_path, timeout=_FINDINGS_LOCK_TIMEOUT_S):
+            with open(path, "a") as f:
+                for finding in findings:
+                    f.write(json.dumps(finding.to_dict()) + "\n")
+            # Rotate if file has grown too large.
+            # TODO: _maybe_compact re-reads the file to count lines; tracking
+            # line_count in the checkpoint would make this O(1).
+            _maybe_compact(path, daemon_name)
 
 
 def _maybe_compact(path: Path, daemon_name: str) -> None:
@@ -324,7 +435,9 @@ def _maybe_compact(path: Path, daemon_name: str) -> None:
             os.replace(tmp_path, str(path))
             logger.info(
                 "DAEMON[%s]: compacted findings.jsonl from %d to %d lines",
-                daemon_name, len(lines), len(keep),
+                daemon_name,
+                len(lines),
+                len(keep),
             )
         except Exception:
             try:
@@ -336,19 +449,124 @@ def _maybe_compact(path: Path, daemon_name: str) -> None:
         logger.warning("DAEMON[%s]: findings compaction failed: %s", daemon_name, e)
 
 
+def acknowledge_finding(
+    daemon_name: str,
+    finding_id: str,
+    *,
+    namespace: str = "",
+) -> bool:
+    """Mark a finding acknowledged in its JSONL findings file.
+
+    Reads the file, finds the entry by finding_id, rewrites with
+    acknowledged=True, and uses the same write lock + replace pattern as
+    _maybe_compact() for crash safety.
+
+    Cross-process safe via ``file_lock`` on the per-daemon
+    ``.findings.lock`` sentinel — this prevents the read-modify-rewrite
+    cycle from racing with a concurrent ``append_findings`` or
+    ``_maybe_compact`` in another process.
+
+    Returns:
+        ``True`` on a successful acknowledgement write.
+        ``False`` when the findings file or target id is absent, when
+        the cross-process lock cannot be acquired within the timeout
+        (logged as WARNING), or when the read/write itself fails.
+
+    The bool-only return contract is load-bearing — many callers do
+    ``if not acknowledge_finding(...)`` and expect every failure mode
+    to flow through that path. Lock-acquisition timeouts are caught
+    here rather than propagated.
+    """
+    lock_path = _findings_lock_path(daemon_name, namespace=namespace)
+    with _get_findings_lock(daemon_name, namespace):
+        try:
+            with file_lock(lock_path, timeout=_FINDINGS_LOCK_TIMEOUT_S):
+                path = _daemon_dir(daemon_name, namespace=namespace) / "findings.jsonl"
+                if not path.exists():
+                    return False
+                try:
+                    with open(path) as f:
+                        lines = f.readlines()
+                except Exception as e:
+                    logger.warning(
+                        "DAEMON[%s]: failed to read findings for ack: %s",
+                        daemon_name,
+                        e,
+                    )
+                    return False
+
+                found = False
+                new_lines: List[str] = []
+                for line in lines:
+                    stripped = line.rstrip("\n")
+                    if not stripped:
+                        new_lines.append(line)
+                        continue
+                    try:
+                        data = json.loads(stripped)
+                        if data.get("finding_id") == finding_id:
+                            data["acknowledged"] = True
+                            new_lines.append(json.dumps(data) + "\n")
+                            found = True
+                            continue
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    new_lines.append(line)
+
+                if not found:
+                    return False
+
+                tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+                try:
+                    with os.fdopen(tmp_fd, "w") as f:
+                        f.writelines(new_lines)
+                    os.replace(tmp_path, str(path))
+                except Exception as e:
+                    logger.warning(
+                        "DAEMON[%s]: failed to write ack: %s", daemon_name, e
+                    )
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                    return False
+        except OSError as e:
+            # Preserve the bool-only failure contract. ``FileLockError``
+            # and ``FileLockUnsupportedError`` are both ``OSError``
+            # subclasses; widening the catch to plain ``OSError`` also
+            # absorbs unexpected lock-layer failures (ENOMEM on the
+            # lock file, ENFILE from fd exhaustion, EACCES on a
+            # corrupted lock file's permissions) that would otherwise
+            # propagate and break callers doing
+            # ``if not acknowledge_finding(...)``.
+            logger.warning(
+                "DAEMON[%s]: could not acquire findings lock for ack: %s",
+                daemon_name,
+                e,
+            )
+            return False
+
+    return True
+
+
 def load_findings(
     daemon_name: str,
     *,
-    limit: int = 100,
+    limit: Optional[int] = 100,
     severity: Optional[str] = None,
     category: Optional[str] = None,
     topic: Optional[str] = None,
     unacknowledged_only: bool = False,
     namespace: str = "",
+    order: Literal["newest", "oldest"] = "newest",
 ) -> List[Finding]:
     """Load findings from JSONL log with optional filters.
 
-    Returns findings in reverse chronological order (newest first).
+    Returns findings in reverse chronological order (newest first) by default.
+    Pass ``order="oldest"`` to return oldest findings first.
+    Pass ``limit=None`` to return all matching findings without truncation —
+    needed by progressive-cursor daemons that apply their own batch cap after
+    filtering so the limit does not cut off reachable entries.
 
     Note: Reads the entire JSONL file before filtering. The file is
     automatically compacted by append_findings() when it exceeds
@@ -385,11 +603,14 @@ def load_findings(
                         continue
                     all_findings.append(finding)
                 except (json.JSONDecodeError, TypeError) as e:
-                    logger.warning("DAEMON[%s]: skipping malformed JSONL line: %s", daemon_name, e)
+                    logger.warning(
+                        "DAEMON[%s]: skipping malformed JSONL line: %s", daemon_name, e
+                    )
                     continue
     except Exception as e:
         logger.warning("DAEMON[%s]: failed to load findings: %s", daemon_name, e)
 
-    # Reverse for newest-first, then apply limit
-    all_findings.reverse()
-    return all_findings[:limit]
+    if order != "oldest":
+        # File-append order is chronological; reverse for newest-first.
+        all_findings.reverse()
+    return all_findings if limit is None else all_findings[:limit]

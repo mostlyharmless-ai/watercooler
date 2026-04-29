@@ -15,7 +15,6 @@ This is the graph-first counterpart to the MD-first commands.py.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -71,6 +70,37 @@ class EntryData:
 def _now_iso() -> str:
     """Return current UTC timestamp in ISO format."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def build_entry_topic_index(threads_dir: Path) -> Dict[str, str]:
+    """Build an in-memory entry→topic reverse index by scanning thread directories.
+
+    Returns a dict mapping ``entry_id → thread_topic`` for all entries in the
+    graph. Callers (notably the ProjectCoordinatorDaemon) build this once per
+    tick and pass it to ``_has_xref_decision`` for O(1) cross-thread lookups.
+
+    Fail-open: a scan failure returns whatever was gathered before the error.
+    The caller treats a missing key as "no cross-thread target" — correctness
+    of xref suppression degrades to a false negative (no suppression), never
+    a false positive.
+    """
+    graph_dir = get_graph_dir(threads_dir)
+    index: Dict[str, str] = {}
+    try:
+        for topic in storage.list_thread_topics(graph_dir):
+            entries = storage.load_thread_entries_dict(graph_dir, topic)
+            for node_id in entries:
+                # ``removeprefix`` is a no-op for non-entry-prefixed keys,
+                # so a stray ``thread:…`` or ``edge:…`` id would leak into
+                # the index as a raw key that can never match a real
+                # xref_entry_id (silent wrong-miss). Guard strictly.
+                if not node_id.startswith("entry:"):
+                    continue
+                entry_id = node_id[len("entry:") :]
+                index[entry_id] = topic
+    except Exception as exc:
+        logger.warning("entry_topic_index: scan failed, index is partial: %s", exc)
+    return index
 
 
 # Re-export from storage for backward compatibility
@@ -184,6 +214,7 @@ def upsert_thread_node(
         ann_dict: Optional[Dict[str, Any]] = None
         try:
             from .annotations import load_or_rebuild_state
+
             thread_graph_dir = storage.get_thread_graph_dir(graph_dir, data.topic)
             if thread_graph_dir.exists():
                 ann_states = load_or_rebuild_state(thread_graph_dir, read_only=True)
@@ -250,6 +281,7 @@ def upsert_entry_node(
             _extract_pr_refs,
             _extract_commit_refs,
         )
+
         file_refs = _extract_file_refs(data.body)
         pr_refs = _extract_pr_refs(data.body)
         commit_refs = _extract_commit_refs(data.body)
@@ -409,7 +441,10 @@ def delete_entry_node(
         # Remove edges involving this entry
         edges_to_remove = []
         for edge_id, edge in edges.items():
-            if edge.get("source") == entry_node_id or edge.get("target") == entry_node_id:
+            if (
+                edge.get("source") == entry_node_id
+                or edge.get("target") == entry_node_id
+            ):
                 edges_to_remove.append(edge_id)
 
         for edge_id in edges_to_remove:

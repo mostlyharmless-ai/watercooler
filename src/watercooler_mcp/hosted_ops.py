@@ -279,6 +279,41 @@ def _get_github_client() -> tuple[str | None, GitHubClient | None]:
     return (None, client)
 
 
+def list_topic_dirs_hosted() -> tuple[str | None, list[str]]:
+    """Return raw topic directory names from the threads repository.
+
+    Complements :func:`list_threads_hosted`. Where ``list_threads_hosted``
+    silently skips threads whose ``meta.json`` is missing or malformed, this
+    helper returns the unfiltered directory listing — callers that want to
+    reason about those skipped threads (e.g. surface a ``skipped_topics``
+    signal) can diff this list against a ``load_all_entries_hosted`` result.
+
+    Returns:
+        Tuple of ``(error_message, topic_names)``. On error ``topic_names``
+        is empty.
+    """
+    error, client = _get_github_client()
+    if error or not client:
+        return (error or "Failed to create GitHub client", [])
+
+    with trace_stage("tool.github.list_topic_dirs"):
+        try:
+            items = client.list_files(GRAPH_THREADS_DIR)
+            return (None, sorted(f.name for f in items if f.type == "dir"))
+        except GitHubNotFoundError:
+            log_debug("list_topic_dirs_hosted: threads directory not found")
+            return (None, [])
+        except GitHubAPIError as e:
+            log_error(f"list_topic_dirs_hosted failed: {e}")
+            return (f"GitHub API error: {e}", [])
+        except Exception as e:
+            log_error(
+                f"list_topic_dirs_hosted unexpected error: "
+                f"{type(e).__name__}: {e}"
+            )
+            return (f"Unexpected error: {e}", [])
+
+
 def list_threads_hosted(
     open_only: bool | None = None,
 ) -> tuple[str | None, list[HostedThread]]:
@@ -2913,9 +2948,21 @@ def load_entries_hosted(topic: str) -> tuple[str | None, list[dict]]:
         for line in entries_content.content.strip().split("\n"):
             if line.strip():
                 try:
-                    entries.append(json.loads(line))
+                    parsed = json.loads(line)
                 except json.JSONDecodeError:
-                    pass
+                    continue
+                # Defensive: skip valid-JSON-but-wrong-shape lines (e.g. a
+                # bare array, string, or ``null`` from a corrupted writer).
+                # Consumers downstream assume dict shape and would crash on
+                # ``node.get(...)``. Drop them rather than fail the whole
+                # listing for one malformed entry.
+                if isinstance(parsed, dict):
+                    entries.append(parsed)
+                else:
+                    log_debug(
+                        f"load_entries_hosted: skipping non-dict line in "
+                        f"{topic} (type={type(parsed).__name__})"
+                    )
         return (None, entries)
 
     except GitHubNotFoundError:

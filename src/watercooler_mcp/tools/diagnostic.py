@@ -37,6 +37,49 @@ whoami = None
 RATE_LIMIT_WARNING_THRESHOLD = 0.1
 
 
+# =============================================================================
+# Runtime context (Plan v20 Phase 1)
+# =============================================================================
+#
+# Mirrors the ``_runtime`` module-level pattern in
+# :mod:`watercooler_mcp.tools.memory`. Set from
+# :func:`watercooler_mcp.server_factory.build_mcp_server`.
+# ``watercooler_health`` consults this to resolve capability targets,
+# queue state, and receipt summaries for the ``memory_sync`` block.
+
+_runtime: "ToolRuntime | None" = None  # type: ignore[name-defined]  # noqa: F821
+
+
+def set_runtime(runtime: "ToolRuntime | None") -> None:  # type: ignore[name-defined]  # noqa: F821
+    """Set the module-level runtime context for diagnostic tools."""
+    global _runtime
+    _runtime = runtime
+
+
+def _render_graphiti_warmup_line(state: dict) -> str:
+    """Format the Graphiti warmup status line for the diagnostic surface.
+
+    Pulled out so the render is unit-testable in isolation. Honours the
+    same shape the inline code used: optional duration, topology
+    (db @ host:port) only when both database and host are set, error
+    suffix when present.
+    """
+    state_value = state.get("state", "unknown")
+    duration = state.get("duration_ms", 0)
+    err = state.get("error")
+    host = state.get("host")
+    port = state.get("port")
+    database = state.get("database")
+    detail = f"{state_value}"
+    if duration:
+        detail += f" ({duration}ms)"
+    if database and host:
+        detail += f" db={database} @ {host}:{port}"
+    if err:
+        detail += f" — {err}"
+    return f"  Graphiti Warmup: {detail}"
+
+
 def _get_service_gap_instructions(service_status: dict) -> list[str]:
     """Generate actionable instructions for missing or failed services.
 
@@ -107,6 +150,178 @@ def _get_service_gap_instructions(service_status: dict) -> list[str]:
         instructions.append("  For full setup guide: https://github.com/mostlyharmless-ai/watercooler/blob/main/docs/SETUP.md")
 
     return instructions
+
+
+def _append_memory_sync_block(status_lines: list[str], context: Any) -> None:
+    """Append the ``Memory Sync`` split-surface block to ``status_lines``.
+
+    Plan v20 Phase 1 scaffolding. Reports:
+
+    - resolved capability targets for ``memory_ingest``,
+      ``semantic_similarity``, ``daemon_observe``;
+    - canonical identity quadruple: ``repo_slug``, ``repo_name``,
+      ``project_group_id``, physical ``t1_database`` + ``t2_database``;
+    - mismatch warnings (e.g., local FalkorDB reachable while the T2
+      route is remote — a muddle-producing configuration);
+    - local submission queue depth + receipt counts (Phase 4);
+    - remote handoff receipt counts per backend/stage (Phase 5 + Phase 8);
+    - pointers to hosted-authority tools for scopes this tool does not
+      own.
+
+    ``context`` is the ``ThreadContext`` resolved by
+    :func:`resolve_thread_context` in the caller.
+    """
+    from ..capabilities import HYBRID_DEFAULT_ROUTES
+    from ..config import get_watercooler_config
+    from watercooler.path_resolver import (
+        derive_project_group_id,
+        derive_t1_database_name,
+        derive_t2_database_name,
+    )
+
+    status_lines.extend(["", "Memory Sync:"])
+
+    # --- Resolved capability targets ------------------------------------
+    try:
+        wc_config = get_watercooler_config()
+        transport = wc_config.mcp.transport
+    except Exception:
+        transport = "unknown"
+
+    status_lines.append(f"  Transport: {transport}")
+
+    # Capability targets: surface-level resolution. In hybrid, defaults
+    # come from HYBRID_DEFAULT_ROUTES; explicit user overrides in
+    # ``[mcp.capability_routes]`` win when present.
+    try:
+        capability_routes_override = dict(
+            getattr(wc_config.mcp, "capability_routes", {}) or {}
+        )
+    except Exception:
+        capability_routes_override = {}
+
+    def _resolved_route(name: str) -> str:
+        if transport == "hybrid":
+            return capability_routes_override.get(name) or HYBRID_DEFAULT_ROUTES.get(name, "local")
+        if transport == "stdio":
+            return capability_routes_override.get(name) or "local"
+        if transport == "proxy":
+            return "remote"
+        return capability_routes_override.get(name) or "local"
+
+    status_lines.extend([
+        f"  Routes:",
+        f"    memory_ingest       = {_resolved_route('memory_ingest')}",
+        f"    memory_observe      = {_resolved_route('memory_observe')}",
+        f"    semantic_similarity = {_resolved_route('semantic_similarity')}",
+        f"    daemon_observe      = {_resolved_route('daemon_observe')}",
+    ])
+
+    # --- Canonical identity quadruple -----------------------------------
+    repo_slug = getattr(context, "repo_slug", None) or getattr(context, "code_repo", None)
+    repo_name = getattr(context, "code_repo_name", None)
+    project_group_id = derive_project_group_id(
+        repo_slug=repo_slug,
+        code_repo_name=repo_name,
+    )
+    t1_db = derive_t1_database_name(
+        repo_slug=repo_slug,
+        code_repo_name=repo_name,
+    )
+    t2_db = derive_t2_database_name(
+        repo_slug=repo_slug,
+        code_repo_name=repo_name,
+    )
+    status_lines.extend([
+        f"  Identity:",
+        f"    repo_slug         = {repo_slug or 'n/a'}",
+        f"    repo_name         = {repo_name or 'n/a'}",
+        f"    project_group_id  = {project_group_id}",
+        f"    t1_database       = {t1_db}",
+        f"    t2_database       = {t2_db}",
+    ])
+
+    # --- Local FalkorDB reachability + mismatch warnings ---------------
+    local_falkor_reachable = False
+    try:
+        import socket as _socket
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        try:
+            s.connect(("127.0.0.1", 6379))
+            local_falkor_reachable = True
+        except OSError:
+            local_falkor_reachable = False
+        finally:
+            s.close()
+    except Exception:
+        local_falkor_reachable = False
+
+    status_lines.append(
+        f"  Local FalkorDB (127.0.0.1:6379): "
+        f"{'reachable' if local_falkor_reachable else 'not reachable'}"
+    )
+
+    memory_ingest_route = _resolved_route("memory_ingest")
+    semantic_similarity_route = _resolved_route("semantic_similarity")
+    if transport == "hybrid" and local_falkor_reachable and memory_ingest_route == "remote":
+        status_lines.append(
+            "  ⚠️  Mismatch: hybrid mode with memory_ingest=remote, but a "
+            "local FalkorDB is reachable. Leftover state may shadow the "
+            "hosted path if a code-path regression re-enables in-process "
+            "GraphitiBackend. Track the muddle-fix landing via the "
+            "hybrid-falkordb-state-vs-intent thread."
+        )
+
+    # --- Local submission queue summary (Phase 4) ----------------------
+    queue_line = "  Local submission queue: (not initialised)"
+    try:
+        from ..memory_queue import get_queue as _get_queue
+
+        q = _get_queue()
+        if q is not None:
+            summary = q.status_summary()
+            stats = summary.get("stats", {})
+            queue_line = (
+                f"  Local submission queue: depth={summary.get('queue_depth', 0)}"
+                f", pending={summary.get('by_status', {}).get('pending', 0)}"
+                f", running={summary.get('by_status', {}).get('running', 0)}"
+                f", total_completed={stats.get('total_completed', 0)}"
+                f", total_dead_lettered={stats.get('total_dead_lettered', 0)}"
+            )
+    except Exception:
+        pass
+    status_lines.append(queue_line)
+
+    # --- Remote handoff receipt summary (Phase 5 + Phase 8) ------------
+    handoff_line = "  Remote handoff receipts: (none recorded)"
+    try:
+        from ..handoff_receipts import summary as _handoff_summary
+
+        s = _handoff_summary()
+        total = s.get("total", 0)
+        if total:
+            by_stage = s.get("by_stage", {})
+            by_backend = s.get("by_backend", {})
+            stages = ", ".join(
+                f"{k}={v}" for k, v in sorted(by_stage.items())
+            )
+            backends = ", ".join(
+                f"{k}={v}" for k, v in sorted(by_backend.items())
+            )
+            handoff_line = (
+                f"  Remote handoff receipts: total={total}"
+                f" (stages: {stages}; backends: {backends})"
+            )
+    except Exception:
+        pass
+    status_lines.append(handoff_line)
+
+    # --- Footer pointers to hosted-authority tools ---------------------
+    status_lines.extend([
+        f"  Hosted memory/backend authority: watercooler_diagnose_memory",
+        f"  Hosted premium-daemon authority: watercooler_daemon_status",
+    ])
 
 
 def _describe_storage_mode(threads_dir: Path) -> str:
@@ -655,15 +870,7 @@ def _health_hosted_impl(ctx: Context) -> str:
     # Graphiti warmup state (module-level dict in server_http, no I/O)
     try:
         from ..server_http import _graphiti_warm_state  # type: ignore[attr-defined]
-        state = _graphiti_warm_state.get("state", "unknown")
-        duration = _graphiti_warm_state.get("duration_ms", 0)
-        err = _graphiti_warm_state.get("error")
-        warmup_detail = f"{state}"
-        if duration:
-            warmup_detail += f" ({duration}ms)"
-        if err:
-            warmup_detail += f" — {err}"
-        status_lines.append(f"  Graphiti Warmup: {warmup_detail}")
+        status_lines.append(_render_graphiti_warmup_line(_graphiti_warm_state))
     except ImportError:
         # Not running inside server_http (e.g. stdio mode) — skip
         pass
@@ -855,6 +1062,14 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
                         "failed": "✗",
                         "starting": "⏳",
                     }
+                    # Label reflects which runtime owns these daemons.  Under
+                    # the config-driven registration model any daemon can run
+                    # locally (``DaemonManager``) or hosted
+                    # (``HostedDaemonCoordinator``) depending on deployment —
+                    # the daemon itself is no longer classified per-name, so
+                    # the label is derived once from the runtime type and
+                    # applies to every daemon it owns.
+                    location = "hosted" if isinstance(_d_runtime, HostedDaemonCoordinator) else "local"
                     for dname, dinfo in daemon_statuses.items():
                         dstate = dinfo.get("status", "unknown")
                         dicon = daemon_icons.get(dstate, "?")
@@ -862,9 +1077,6 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
                         ticks = dinfo.get("total_ticks", 0)
                         findings = dinfo.get("total_findings", 0)
                         errors = dinfo.get("error_count", 0)
-                        # Label local vs Railway daemons
-                        from watercooler_mcp.daemons import LOCAL_DAEMON_NAMES
-                        location = "local" if dname in LOCAL_DAEMON_NAMES else "Railway"
 
                         if dstate == "running":
                             status_lines.append(
@@ -878,13 +1090,34 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
                             last_err = dinfo.get("last_error", "")
                             suffix = f" - {last_err}" if last_err else ""
                             status_lines.append(f"  {dicon} {dname} [{location}]: {dstate}{suffix}")
-                    # Note about premium daemons on Railway
-                    if not isinstance(_d_runtime, HostedDaemonCoordinator):
+                    # Hybrid/proxy mode may route premium daemons to the hosted
+                    # coordinator — point operators at the right tool to see
+                    # the full hosted picture (see docs/CONFIGURATION_HOSTED.md).
+                    # ``project_coordinator`` is governed by ``daemon_observe``,
+                    # the capability that decides where
+                    # ``watercooler_daemon_status`` itself runs — so its
+                    # location tells us whether the hint applies.
+                    from watercooler_mcp.daemons import daemon_runtime_location
+
+                    if (
+                        not isinstance(_d_runtime, HostedDaemonCoordinator)
+                        and daemon_runtime_location("project_coordinator") == "hosted"
+                    ):
                         status_lines.append(
-                            "  ℹ Premium daemons run on Railway — use watercooler_daemon_status for full view"
+                            "  ℹ Premium daemons run on the hosted service — "
+                            "use watercooler_daemon_status for full view"
                         )
         except Exception as e:
             status_lines.append(f"\nDaemons: Error - {e}")
+
+        # Add memory-sync split-surface block (Plan v20 Phase 1).
+        # Reports resolved capability routes, canonical identity, and
+        # mismatch warnings for hybrid mode.  Queue depth / receipt
+        # summaries are placeholders here; Phase 5 populates them.
+        try:
+            _append_memory_sync_block(status_lines, context)
+        except Exception as e:
+            status_lines.append(f"\nMemory Sync: Error - {e}")
 
         # Add service telemetry summary
         try:

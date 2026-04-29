@@ -9,19 +9,68 @@ A background reaper thread tears down idle scopes after a configurable TTL.
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from pathlib import Path
+
+from pydantic import ValidationError
 
 from .hosted_worktree import HostedWorktree
 from .manager import DaemonManager
 from .state import Finding
 
+if TYPE_CHECKING:
+    from watercooler.config_schema import DaemonsConfig
+
 logger = logging.getLogger(__name__)
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Merge *override* into a deep copy of *base*; nested dicts combine.
+
+    Only one level of nesting is merged (daemon name -> field dict);
+    leaf values always replace rather than merge.  Does not mutate
+    *base*.
+    """
+    out = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key].update(value)
+        else:
+            out[key] = value
+    return out
+
+
+# Maximum ``X-Daemon-Config`` payload size.  16 KB fits every legitimate
+# per-scope override (the largest DaemonsConfig dump observed in testing
+# is ~2 KB); payloads larger than this are rejected before ``json.loads``
+# to avoid amplification attacks against the hosted coordinator.
+_MAX_DAEMON_CONFIG_BYTES = 16_384
+
+# Maximum accepted nesting depth for parsed override JSON.  ``DaemonsConfig``
+# is flat-ish (``{daemon_name: {field: value}}`` = depth 2) so anything
+# deeper than 4 is almost certainly a structural DoS attempt.
+_MAX_DAEMON_CONFIG_DEPTH = 4
+
+
+def _json_depth(value: Any, current: int = 0) -> int:
+    """Return the maximum container-nesting depth of *value*.
+
+    Used to cheaply reject deeply-nested ``X-Daemon-Config`` payloads
+    before Pydantic validation burns CPU on them.
+    """
+    if isinstance(value, dict):
+        return max((_json_depth(v, current + 1) for v in value.values()), default=current + 1)
+    if isinstance(value, list):
+        return max((_json_depth(v, current + 1) for v in value), default=current + 1)
+    return current
+
 
 # Default idle TTL: 30 minutes
 _DEFAULT_IDLE_TTL = 1800.0
@@ -144,19 +193,23 @@ class HostedDaemonCoordinator:
         # during potentially slow config loading).
         self._register_daemons_for_scope(manager, key, github_token=github_token)
 
-        logger.info("Created daemon scope: %s (%d daemons)",
-                     scope_id, len(manager.daemon_names))
+        logger.info(
+            "Created daemon scope: %s (%d daemons)", scope_id, len(manager.daemon_names)
+        )
         return manager
 
     def _register_daemons_for_scope(
-        self, manager: DaemonManager, key: HostedScopeKey,
+        self,
+        manager: DaemonManager,
+        key: HostedScopeKey,
         github_token: str | None = None,
     ) -> None:
-        """Register the 6 premium daemons into a scoped manager from config.
+        """Register the 7 premium daemons into a scoped manager from config.
 
-        Only premium daemons (t2_indexer, project_coordinator, pulse_snapshot,
-        pulse_report, analysis_snapshot, trend_snapshot) run on Railway.
-        Local daemons run on the developer's machine via init_daemons().
+        Only premium daemons (t2_indexer, project_coordinator,
+        coordinator_refiner, pulse_snapshot, pulse_report, analysis_snapshot,
+        trend_snapshot) run on Railway. Local daemons run on the developer's
+        machine via init_daemons().
 
         Each daemon gets:
         - ``state_namespace`` set to the scope_id for isolated persistence
@@ -169,6 +222,7 @@ class HostedDaemonCoordinator:
 
         # Build scope context for daemon threads.
         from watercooler_mcp.context import HttpRequestContext
+
         scope_ctx = HttpRequestContext(
             user_id=key.user_id,
             repo=key.repo,
@@ -200,7 +254,8 @@ class HostedDaemonCoordinator:
                         threads_dir = None
                 logger.info(
                     "WORKTREE: scope %s using local worktree at %s",
-                    scope_id, threads_dir,
+                    scope_id,
+                    threads_dir,
                 )
             else:
                 logger.warning(
@@ -220,6 +275,7 @@ class HostedDaemonCoordinator:
                 daemon._hosted_worktree = wt
             # Reload checkpoint from the namespaced path.
             from .state import load_checkpoint
+
             daemon._checkpoint = load_checkpoint(daemon.name, namespace=scope_id)
 
         try:
@@ -231,27 +287,65 @@ class HostedDaemonCoordinator:
             # Only premium daemons register in hosted scopes.
             # Local daemons (thread_auditor, decision_detector/extractor,
             # sync_guard, content_scout/refiner) run on the dev machine.
+            # ``daemon_execution_policy`` decides per-daemon; we pass
+            # ``in_hosted_coordinator=True`` so ``route="auto"``
+            # resolves to hosted and ``route="local"`` causes the
+            # hosted path to skip (the local process will own it).
+            from watercooler_mcp.daemons import daemon_execution_policy
 
-            # T2 indexer — requires graphiti backend
-            try:
-                self._try_register_t2_indexer_hosted(manager, _configure)
-            except Exception as exc:
-                logger.warning("Could not register t2_indexer for hosted scope: %s", exc)
+            def _hosted_ok(name: str) -> bool:
+                sub_cfg = getattr(daemons_config, name, None)
+                if sub_cfg is None:
+                    return False
+                return (
+                    daemon_execution_policy(
+                        name, sub_cfg, transport="hybrid", in_hosted_coordinator=True
+                    )
+                    == "hosted"
+                )
 
-            if daemons_config.project_coordinator.enabled:
+            # T2 indexer — requires graphiti backend and the config gate
+            if _hosted_ok("t2_indexer"):
+                try:
+                    self._try_register_t2_indexer_hosted(manager, _configure)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not register t2_indexer for hosted scope: %s", exc
+                    )
+
+            if _hosted_ok("project_coordinator"):
                 from .project_coordinator import ProjectCoordinatorDaemon
-                d = ProjectCoordinatorDaemon(
+                from .base import BaseDaemon
+
+                d: BaseDaemon = ProjectCoordinatorDaemon(
                     interval=daemons_config.project_coordinator.interval,
                     config=daemons_config.project_coordinator,
                 )
                 _configure(d)
                 manager.register(d)
 
-            if daemons_config.pulse_snapshot.enabled:
+            if _hosted_ok("coordinator_refiner"):
+                try:
+                    from .coordinator_refiner import CoordinatorRefinerDaemon
+                except ImportError as exc:
+                    logger.debug(
+                        "CoordinatorRefinerDaemon not available (open-core build): %s", exc
+                    )
+                else:
+                    d = CoordinatorRefinerDaemon(
+                        interval=daemons_config.coordinator_refiner.interval,
+                        config=daemons_config.coordinator_refiner,
+                    )
+                    _configure(d)
+                    manager.register(d)
+
+            if _hosted_ok("pulse_snapshot"):
                 try:
                     from .pulse_snapshot import PulseSnapshotDaemon
                 except ImportError as exc:
-                    logger.debug("PulseSnapshotDaemon not available (open-core build): %s", exc)
+                    logger.debug(
+                        "PulseSnapshotDaemon not available (open-core build): %s", exc
+                    )
                 else:
                     d = PulseSnapshotDaemon(
                         interval=daemons_config.pulse_snapshot.interval,
@@ -260,11 +354,13 @@ class HostedDaemonCoordinator:
                     _configure(d)
                     manager.register(d)
 
-            if daemons_config.pulse_report.enabled:
+            if _hosted_ok("pulse_report"):
                 try:
                     from .pulse_report import PulseReportDaemon
                 except ImportError as exc:
-                    logger.debug("PulseReportDaemon not available (open-core build): %s", exc)
+                    logger.debug(
+                        "PulseReportDaemon not available (open-core build): %s", exc
+                    )
                 else:
                     d = PulseReportDaemon(
                         interval=daemons_config.pulse_report.interval,
@@ -273,11 +369,14 @@ class HostedDaemonCoordinator:
                     _configure(d)
                     manager.register(d)
 
-            if daemons_config.analysis_snapshot.enabled:
+            if _hosted_ok("analysis_snapshot"):
                 try:
                     from .analysis_snapshot import AnalysisSnapshotDaemon
                 except ImportError as exc:
-                    logger.debug("AnalysisSnapshotDaemon not available (open-core build): %s", exc)
+                    logger.debug(
+                        "AnalysisSnapshotDaemon not available (open-core build): %s",
+                        exc,
+                    )
                 else:
                     d = AnalysisSnapshotDaemon(
                         interval=daemons_config.analysis_snapshot.interval,
@@ -286,11 +385,13 @@ class HostedDaemonCoordinator:
                     _configure(d)
                     manager.register(d)
 
-            if daemons_config.trend_snapshot.enabled:
+            if _hosted_ok("trend_snapshot"):
                 try:
                     from .trend_snapshot import TrendSnapshotDaemon
                 except ImportError as exc:
-                    logger.debug("TrendSnapshotDaemon not available (open-core build): %s", exc)
+                    logger.debug(
+                        "TrendSnapshotDaemon not available (open-core build): %s", exc
+                    )
                 else:
                     d = TrendSnapshotDaemon(
                         interval=daemons_config.trend_snapshot.interval,
@@ -302,20 +403,19 @@ class HostedDaemonCoordinator:
             manager.start_all()
 
         except Exception as exc:
-            logger.warning(
-                "Could not register daemons for scope %s: %s", scope_id, exc
-            )
+            logger.warning("Could not register daemons for scope %s: %s", scope_id, exc)
 
     @staticmethod
-    def _hosted_daemon_defaults() -> dict:
-        """Return hosted defaults for the 5 config-gated premium daemons.
+    def _hosted_daemon_defaults() -> dict[str, Any]:
+        """Return hosted defaults for the 6 config-gated premium daemons.
 
         Only premium daemons run on Railway.  Local daemons (thread_auditor,
         decision_detector, decision_extractor, sync_guard, content_scout,
         content_refiner) run on the developer's machine via init_daemons().
 
-        t2_indexer is the 6th premium daemon but auto-registers when the
-        graphiti backend is available — it has no DaemonsConfig toggle.
+        t2_indexer also runs hosted but is additionally gated by the
+        graphiti memory backend — its registration short-circuits
+        internally when graphiti is unavailable.
 
         The schema defaults are ``enabled=False`` (opt-in for local), so
         hosted mode needs its own baseline for the premium set.
@@ -323,65 +423,183 @@ class HostedDaemonCoordinator:
         return {
             "enabled": True,
             "project_coordinator": {"enabled": True},
+            "coordinator_refiner": {"enabled": True},
             "pulse_snapshot": {"enabled": True},
             "pulse_report": {"enabled": True},
             "analysis_snapshot": {"enabled": True},
             "trend_snapshot": {"enabled": True},
+            "t2_indexer": {"enabled": True},
         }
 
     @staticmethod
-    def _resolve_daemon_config():
+    def _parse_daemon_config_header(
+        raw: str,
+    ) -> Optional[dict[str, Any]]:
+        """Parse and validate an ``X-Daemon-Config`` header.
+
+        Returns the parsed override dict on success, or ``None`` if the
+        payload was rejected.  Rejections are logged with
+        ``X-Daemon-Config rejected`` so operators can grep for abuse.
+
+        Enforces:
+          * byte-size cap (``_MAX_DAEMON_CONFIG_BYTES``) before parsing
+          * structural-depth cap (``_MAX_DAEMON_CONFIG_DEPTH``) post-parse
+          * top-level key allowlist — only fields known to
+            ``DaemonsConfig`` are permitted; nested sub-config fields
+            remain ``extra="ignore"`` per existing permissive schema.
+        """
+        from watercooler.config_schema import DaemonsConfig
+
+        size = len(raw.encode("utf-8"))
+        if size > _MAX_DAEMON_CONFIG_BYTES:
+            logger.warning(
+                "X-Daemon-Config rejected (reason=size_cap, size=%d, limit=%d)",
+                size,
+                _MAX_DAEMON_CONFIG_BYTES,
+            )
+            return None
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "X-Daemon-Config rejected (reason=invalid_json, size=%d, error=%s)",
+                size,
+                exc,
+            )
+            return None
+
+        if not isinstance(parsed, dict):
+            logger.warning(
+                "X-Daemon-Config rejected (reason=not_object, size=%d, type=%s)",
+                size,
+                type(parsed).__name__,
+            )
+            return None
+
+        depth = _json_depth(parsed)
+        if depth > _MAX_DAEMON_CONFIG_DEPTH:
+            logger.warning(
+                "X-Daemon-Config rejected (reason=depth_cap, size=%d, depth=%d, limit=%d)",
+                size,
+                depth,
+                _MAX_DAEMON_CONFIG_DEPTH,
+            )
+            return None
+
+        known_fields = set(DaemonsConfig.model_fields)
+        unknown = set(parsed) - known_fields
+        if unknown:
+            logger.warning(
+                "X-Daemon-Config rejected (reason=unknown_keys, size=%d, keys=%s)",
+                size,
+                sorted(unknown),
+            )
+            return None
+
+        return parsed
+
+    @staticmethod
+    def _resolve_daemon_config() -> "DaemonsConfig":
         """Resolve daemon config for hosted scopes.
 
         Builds a config by layering user overrides (sent via
         ``X-Daemon-Config`` header from the hybrid client) onto hosted
-        defaults where all daemons are enabled.
+        defaults where premium daemons are enabled.
 
         The hybrid client sends only explicitly-set values
         (``model_dump(exclude_unset=True)``), so unconfigured daemons
         get the hosted default (enabled) rather than the schema default
         (disabled).  Explicit ``enabled = false`` overrides ARE sent.
 
-        Resolution: hosted defaults ← user overrides ← local config fallback.
+        Resolution (highest priority first):
+          1. ``X-Daemon-Config`` header (hybrid client explicit set),
+             subject to size / depth / allowlist guards in
+             ``_parse_daemon_config_header``.
+          2. Local ``config.toml`` **explicit set** values, layered onto
+             hosted defaults.  This preserves hosted-friendly defaults
+             (``t2_indexer`` on, premium daemons on) when the deployment
+             file omits a stanza — the schema default alone would
+             silently disable background ingestion.
+          3. Hosted defaults only.
         """
-        import json as _json
         from watercooler.config_schema import DaemonsConfig
 
         hosted = HostedDaemonCoordinator._hosted_daemon_defaults()
 
-        # 1. Try user overrides from the request context (hybrid client header)
-        from watercooler_mcp.context import get_effective_context
-        import copy
-        ctx = get_effective_context()
-        if ctx and ctx.daemon_config_json:
-            try:
-                overrides = _json.loads(ctx.daemon_config_json)
-                # Deep merge on a copy: user overrides win over hosted defaults
-                merged = copy.deepcopy(hosted)
-                for key, value in overrides.items():
-                    if isinstance(value, dict) and isinstance(merged.get(key), dict):
-                        merged[key].update(value)
-                    else:
-                        merged[key] = value
-                return DaemonsConfig.model_validate(merged)
-            except Exception as exc:
-                logger.warning("Could not parse X-Daemon-Config header: %s", exc)
+        # Layer 1 (lowest priority): start from hosted defaults.
+        base = hosted
 
-        # 2. Fall back to local config file (if present on this host)
+        # Layer 2: deployment-side ``config.toml`` explicit values.  Apply
+        # *before* the request header so operators can ship config
+        # changes (e.g. ``[mcp.daemons.pulse_report] enabled = false``)
+        # without those being silently overridden every time a hybrid
+        # client happens to send a ``X-Daemon-Config`` header.
+        #
+        # Catches a broad ``Exception`` here intentionally: this fallback
+        # is the safe path that keeps the hosted scope alive when the
+        # local config file is malformed (``ConfigError``), missing,
+        # produces an unexpected shape, or fails validation.  Letting
+        # the exception bubble out would abort the entire scope's
+        # daemon registration, so prefer logging loudly and continuing
+        # with the hosted defaults.
         try:
             from watercooler.config_facade import config
-            return config.full().mcp.daemons
-        except Exception:
-            pass
 
-        # 3. Hosted defaults (premium daemons enabled)
-        return DaemonsConfig.model_validate(hosted)
+            local = config.full().mcp.daemons
+            explicit = local.model_dump(exclude_unset=True)
+            base = _deep_merge(base, explicit)
+        except Exception as exc:  # noqa: BLE001 — see comment above
+            logger.warning(
+                "Deployment config fallback failed (%s: %s); "
+                "using hosted defaults so the scope still gets daemons",
+                type(exc).__name__,
+                exc,
+            )
+
+        # Layer 3 (highest priority): request-scoped header from the
+        # hybrid client.  Layered last so per-request overrides win,
+        # but onto the merged hosted+deployment base — a header that
+        # only sets ``project_coordinator.enabled = false`` should
+        # leave the deployment's other overrides intact.
+        from watercooler_mcp.context import get_effective_context
+
+        ctx = get_effective_context()
+        overrides: Optional[dict[str, Any]] = None
+        if ctx and ctx.daemon_config_json:
+            overrides = HostedDaemonCoordinator._parse_daemon_config_header(
+                ctx.daemon_config_json
+            )
+
+        # Validation: try the full merge first.  On schema violation,
+        # retry WITHOUT the header — hostile / malformed request input
+        # must not be able to discard the operator's deployment layer.
+        # Only if the deployment layer itself validates-fail do we fall
+        # back to hosted defaults alone.
+        if overrides is not None:
+            try:
+                return DaemonsConfig.model_validate(_deep_merge(base, overrides))
+            except ValidationError as exc:
+                logger.warning(
+                    "X-Daemon-Config rejected (reason=schema_violation, error=%s); "
+                    "retrying without header so deployment overrides survive",
+                    exc,
+                )
+
+        try:
+            return DaemonsConfig.model_validate(base)
+        except ValidationError as exc:
+            logger.warning(
+                "Deployment daemon config invalid (reason=schema_violation, error=%s); "
+                "falling back to hosted defaults",
+                exc,
+            )
+            return DaemonsConfig.model_validate(hosted)
 
     @staticmethod
     def _try_register_t2_indexer_hosted(manager: DaemonManager, _configure) -> None:
         """Register T2 indexer in a hosted scope if graphiti is available."""
         import os
-        from typing import Optional
 
         from watercooler.memory_config import (
             get_memory_backend,
@@ -399,12 +617,15 @@ class HostedDaemonCoordinator:
             from watercooler_memory.backends.graphiti import GraphitiBackend
             from watercooler_mcp import memory as mem
         except ImportError:
-            logger.warning("DAEMONS: graphiti imports unavailable, skipping t2_indexer (hosted)")
+            logger.warning(
+                "DAEMONS: graphiti imports unavailable, skipping t2_indexer (hosted)"
+            )
             return
 
         code_root: Optional[Path] = None
         try:
             from watercooler_mcp.config import resolve_thread_context
+
             ctx = resolve_thread_context(Path.cwd())
             code_root = ctx.code_root
         except Exception:
@@ -536,6 +757,18 @@ class HostedDaemonCoordinator:
             for entry in entries:
                 findings.extend(entry.manager.get_all_findings(**kwargs))
         return findings
+
+    def acknowledge_finding(
+        self,
+        scope_id: str | None,
+        daemon_name: str,
+        finding_id: str,
+    ) -> bool:
+        """Acknowledge a finding within a scope's namespace."""
+        from .state import acknowledge_finding as _ack_finding
+
+        namespace = scope_id or ""
+        return _ack_finding(daemon_name, finding_id, namespace=namespace)
 
     # ------------------------------------------------------------------
     # Reaper loop

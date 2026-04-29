@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import threading
 import time
 from typing import Any, Dict, List
-
-import pytest
 
 from watercooler_mcp.daemons.base import BaseDaemon, DaemonStatus
 from watercooler_mcp.daemons.state import Finding
@@ -106,7 +103,12 @@ class TestBaseDaemon:
         )
         daemon = StubDaemon(name="test_pause", interval=0.05)
         daemon.start()
-        time.sleep(0.2)
+        # Poll for first tick instead of a fixed 0.2s sleep — CI runners can
+        # stall well past 200ms of wall time and starve the daemon thread.
+        deadline = time.monotonic() + 2.0
+        while daemon.tick_count < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert daemon.tick_count >= 1
 
         daemon.pause()
         assert daemon.status == DaemonStatus.PAUSED
@@ -118,7 +120,10 @@ class TestBaseDaemon:
         assert daemon.tick_count == count_at_pause
 
         daemon.resume()
-        time.sleep(0.2)
+        # Poll for tick after resume rather than relying on a fixed sleep.
+        deadline = time.monotonic() + 2.0
+        while daemon.tick_count <= count_at_pause and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert daemon.tick_count > count_at_pause
         daemon.stop()
 

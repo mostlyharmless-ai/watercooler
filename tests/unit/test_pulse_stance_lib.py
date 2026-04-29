@@ -6,19 +6,17 @@ from dataclasses import asdict
 
 from watercooler.pulse_stance_lib import (
     AdvisoryAction,
-    StanceAdvisory,
     StanceSignals,
-    StanceVector,
     _READ_ONLY_TOOLS,
     build_stance_advisories,
     extract_stance_signals,
     pulse_to_stance,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 def _minimal_snapshot() -> dict:
     """Snapshot with benign signals — should produce all-L0 advisories."""
@@ -80,6 +78,7 @@ def _elevated_snapshot() -> dict:
 # ---------------------------------------------------------------------------
 # Signal extraction tests
 # ---------------------------------------------------------------------------
+
 
 class TestExtractStanceSignals:
     def test_none_snapshot_degraded_mode(self):
@@ -178,6 +177,7 @@ class TestExtractStanceSignals:
 # pulse_to_stance tests
 # ---------------------------------------------------------------------------
 
+
 class TestPulseToStance:
     def test_unknown_role_raises(self):
         import pytest
@@ -199,7 +199,8 @@ class TestPulseToStance:
     def test_planner_volatility_soft(self):
         """Volatility at soft threshold → L1."""
         signals = StanceSignals(
-            pulse_available=True, volatility_ratio=0.55,
+            pulse_available=True,
+            volatility_ratio=0.55,
         )
         a = pulse_to_stance("planner", signals)
         assert a.level == 1
@@ -209,7 +210,8 @@ class TestPulseToStance:
     def test_planner_volatility_hard(self):
         """Volatility at hard threshold → L2."""
         signals = StanceSignals(
-            pulse_available=True, volatility_ratio=0.75,
+            pulse_available=True,
+            volatility_ratio=0.75,
         )
         a = pulse_to_stance("planner", signals)
         assert a.level == 2
@@ -243,7 +245,8 @@ class TestPulseToStance:
 
     def test_critic_risk_soft(self):
         signals = StanceSignals(
-            pulse_available=True, risk_tag_count=1,
+            pulse_available=True,
+            risk_tag_count=1,
         )
         a = pulse_to_stance("critic", signals)
         assert a.level == 1
@@ -251,7 +254,8 @@ class TestPulseToStance:
 
     def test_critic_risk_hard(self):
         signals = StanceSignals(
-            pulse_available=True, risk_tag_count=4,
+            pulse_available=True,
+            risk_tag_count=4,
         )
         a = pulse_to_stance("critic", signals)
         assert a.level == 2
@@ -275,7 +279,8 @@ class TestPulseToStance:
 
     def test_critic_open_loop_hard(self):
         signals = StanceSignals(
-            pulse_available=True, open_loop_count=7,
+            pulse_available=True,
+            open_loop_count=7,
         )
         a = pulse_to_stance("critic", signals)
         assert a.level == 2
@@ -283,7 +288,8 @@ class TestPulseToStance:
 
     def test_tester_stalled_soft(self):
         signals = StanceSignals(
-            pulse_available=True, stalled_thread_count=3,
+            pulse_available=True,
+            stalled_thread_count=3,
         )
         a = pulse_to_stance("tester", signals)
         assert a.level == 1
@@ -291,7 +297,8 @@ class TestPulseToStance:
 
     def test_tester_stalled_hard(self):
         signals = StanceSignals(
-            pulse_available=True, stalled_thread_count=5,
+            pulse_available=True,
+            stalled_thread_count=5,
         )
         a = pulse_to_stance("tester", signals)
         assert a.level == 2
@@ -343,6 +350,7 @@ class TestPulseToStance:
 # Advisory properties tests
 # ---------------------------------------------------------------------------
 
+
 class TestAdvisoryProperties:
     def test_missing_inputs_degraded_mode(self):
         signals = StanceSignals(pulse_available=False)
@@ -357,7 +365,8 @@ class TestAdvisoryProperties:
 
     def test_threshold_crossings_populated(self):
         signals = StanceSignals(
-            pulse_available=True, volatility_ratio=0.6,
+            pulse_available=True,
+            volatility_ratio=0.6,
         )
         a = pulse_to_stance("planner", signals)
         assert len(a.threshold_crossings) > 0
@@ -391,18 +400,20 @@ class TestAdvisoryProperties:
             advisories = build_stance_advisories(snap, coordinator_findings=findings)
             for a in advisories:
                 for action in a.actions:
-                    assert action.tool in _READ_ONLY_TOOLS, (
-                        f"Non-read-only tool {action.tool!r} in {a.role} advisory"
-                    )
+                    assert (
+                        action.tool in _READ_ONLY_TOOLS
+                    ), f"Non-read-only tool {action.tool!r} in {a.role} advisory"
 
     def test_advisory_action_invalid_tool_raises(self):
         import pytest
+
         with pytest.raises(ValueError, match="_READ_ONLY_TOOLS"):
             AdvisoryAction(phase="pre", tool="watercooler_say", arguments={})
 
     def test_advisory_serialization_roundtrip(self):
         signals = StanceSignals(
-            pulse_available=True, volatility_ratio=0.6,
+            pulse_available=True,
+            volatility_ratio=0.6,
         )
         a = pulse_to_stance("planner", signals)
         d = asdict(a)
@@ -418,10 +429,12 @@ class TestAdvisoryProperties:
 # Advisory signature tests
 # ---------------------------------------------------------------------------
 
+
 class TestAdvisorySignature:
     def test_stable_when_inputs_unchanged(self):
         signals = StanceSignals(
-            pulse_available=True, volatility_ratio=0.6,
+            pulse_available=True,
+            volatility_ratio=0.6,
         )
         a1 = pulse_to_stance("planner", signals)
         a2 = pulse_to_stance("planner", signals)
@@ -443,10 +456,12 @@ class TestAdvisorySignature:
             {"category": "stalled_open_loop"},
         ]
         s_degraded = extract_stance_signals(
-            None, coordinator_findings=coord_findings,
+            None,
+            coordinator_findings=coord_findings,
         )
         s_full = extract_stance_signals(
-            _minimal_snapshot(), coordinator_findings=coord_findings,
+            _minimal_snapshot(),
+            coordinator_findings=coord_findings,
         )
         a_deg = pulse_to_stance("planner", s_degraded)
         a_full = pulse_to_stance("planner", s_full)
@@ -485,13 +500,15 @@ class TestAdvisorySignature:
         """Critic-only signals must not change planner signature (cross-role contamination fix)."""
         # risk_tag_count is a critic-only signal — planner never reads it
         s1 = StanceSignals(pulse_available=True, volatility_ratio=0.55)
-        s2 = StanceSignals(pulse_available=True, volatility_ratio=0.55, risk_tag_count=5)
+        s2 = StanceSignals(
+            pulse_available=True, volatility_ratio=0.55, risk_tag_count=5
+        )
         a1 = pulse_to_stance("planner", s1)
         a2 = pulse_to_stance("planner", s2)
         assert a1.level == a2.level  # same planner level
-        assert a1.advisory_signature == a2.advisory_signature, (
-            "Planner signature must not change when critic-only risk_tag_count crosses threshold"
-        )
+        assert (
+            a1.advisory_signature == a2.advisory_signature
+        ), "Planner signature must not change when critic-only risk_tag_count crosses threshold"
 
         # volatility_ratio is a planner-only signal — critic never reads it
         s3 = StanceSignals(pulse_available=True, risk_tag_count=3)
@@ -499,14 +516,15 @@ class TestAdvisorySignature:
         a3 = pulse_to_stance("critic", s3)
         a4 = pulse_to_stance("critic", s4)
         assert a3.level == a4.level  # same critic level
-        assert a3.advisory_signature == a4.advisory_signature, (
-            "Critic signature must not change when planner-only volatility_ratio crosses threshold"
-        )
+        assert (
+            a3.advisory_signature == a4.advisory_signature
+        ), "Critic signature must not change when planner-only volatility_ratio crosses threshold"
 
 
 # ---------------------------------------------------------------------------
 # build_stance_advisories integration tests
 # ---------------------------------------------------------------------------
+
 
 class TestBuildStanceAdvisories:
     def test_returns_three(self):
@@ -527,7 +545,7 @@ class TestBuildStanceAdvisories:
         advisories = build_stance_advisories(_elevated_snapshot())
         levels = {a.role: a.level for a in advisories}
         # At least one role should be elevated with this snapshot
-        assert any(l > 0 for l in levels.values())
+        assert any(level > 0 for level in levels.values())
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +556,7 @@ class TestBuildStanceAdvisories:
 # P2.1 — new contributor corpus signal transport
 # ---------------------------------------------------------------------------
 
+
 class TestNewContributorStance:
     def test_planner_l1_on_new_contributor(self):
         """2.1.d: new contributor count >= SOFT elevates planner and adds
@@ -547,7 +566,8 @@ class TestNewContributorStance:
         assert a.level >= 1
         assert "coordinator_new_contributor_count" in a.triggered_signals
         nc_actions = [
-            act for act in a.actions
+            act
+            for act in a.actions
             if act.arguments.get("category") == "aware_new_contributor"
         ]
         assert len(nc_actions) == 1
@@ -580,6 +600,7 @@ class TestNewContributorStance:
 # P2.2 — tester action routing
 # ---------------------------------------------------------------------------
 
+
 class TestTesterActionRouting:
     def test_burst_only_points_to_aware_burst(self):
         """2.2.a: burst alone → single action pointing at aware_burst."""
@@ -592,7 +613,8 @@ class TestTesterActionRouting:
     def test_stalled_only_points_to_stalled_open_loop(self):
         """2.2.b: stalled alone → single action pointing at stalled_open_loop."""
         signals = StanceSignals(
-            pulse_available=True, stalled_thread_count=3,
+            pulse_available=True,
+            stalled_thread_count=3,
         )
         a = pulse_to_stance("tester", signals)
         assert a.level >= 1
@@ -640,7 +662,8 @@ class TestTesterActionRouting:
         # stalled-only are distinct signatures.
         a_burst = pulse_to_stance("tester", StanceSignals(coordinator_burst_count=1))
         a_stalled = pulse_to_stance(
-            "tester", StanceSignals(pulse_available=True, stalled_thread_count=3),
+            "tester",
+            StanceSignals(pulse_available=True, stalled_thread_count=3),
         )
         assert a_burst.advisory_signature != a_stalled.advisory_signature
 
@@ -648,7 +671,8 @@ class TestTesterActionRouting:
 class TestSeverityMapping:
     def test_l1_info(self):
         signals = StanceSignals(
-            pulse_available=True, volatility_ratio=0.55,
+            pulse_available=True,
+            volatility_ratio=0.55,
         )
         a = pulse_to_stance("planner", signals)
         assert a.level == 1
@@ -657,7 +681,78 @@ class TestSeverityMapping:
 
     def test_l2_is_higher(self):
         signals = StanceSignals(
-            pulse_available=True, volatility_ratio=0.75,
+            pulse_available=True,
+            volatility_ratio=0.75,
         )
         a = pulse_to_stance("planner", signals)
         assert a.level == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 3c-2 — source_lead_ids field shape + signal→lead map parity
+# ---------------------------------------------------------------------------
+
+
+class TestSourceLeadIdsField:
+    def test_stance_advisory_includes_source_lead_ids(self):
+        """StanceAdvisory exposes source_lead_ids as a tuple[str, ...] defaulting to ()."""
+        advisory = build_stance_advisories(None)[0]
+        # Default populated by pulse_to_stance() when the coordinator does
+        # not pre-enrich — lib stays stdlib-only and never invents IDs.
+        assert isinstance(advisory.source_lead_ids, tuple)
+        assert advisory.source_lead_ids == ()
+
+        # Frozen dataclass: dataclasses.replace() is the enrichment path.
+        from dataclasses import replace
+
+        enriched = replace(advisory, source_lead_ids=("fid-a", "fid-b"))
+        assert enriched.source_lead_ids == ("fid-a", "fid-b")
+        # asdict() preserves tuples (dataclasses.asdict copies tuples as tuples).
+        payload = asdict(enriched)
+        assert payload["source_lead_ids"] == ("fid-a", "fid-b")
+
+    def test_stance_signal_to_lead_categories_covers_all_coordinator_signals(self):
+        """The v1A category map must cover every coordinator_*_count signal on StanceSignals.
+
+        Guards against a signal being added to StanceSignals without a
+        corresponding lead-category mapping — which would silently drop
+        provenance for the new signal when advisories escalate on it.
+        """
+        from watercooler.pulse_stance_lib import (
+            _STANCE_SIGNAL_TO_LEAD_CATEGORIES,
+        )
+
+        coordinator_fields = {
+            name
+            for name in StanceSignals.__dataclass_fields__
+            if name.startswith("coordinator_") and name.endswith("_count")
+        }
+        mapped = set(_STANCE_SIGNAL_TO_LEAD_CATEGORIES.keys())
+        assert coordinator_fields == mapped, (
+            f"signal fields {sorted(coordinator_fields - mapped)} lack a "
+            f"lead-category mapping; stale entries {sorted(mapped - coordinator_fields)}"
+        )
+        # Every mapped value is a non-empty frozenset of category strings
+        for sig, cats in _STANCE_SIGNAL_TO_LEAD_CATEGORIES.items():
+            assert isinstance(
+                cats, frozenset
+            ), f"{sig!r} must map to a frozenset for hashability"
+            assert cats, f"{sig!r} maps to an empty set"
+            assert all(isinstance(c, str) and c for c in cats)
+
+    def test_trend_supersession_rate_wired_into_stance_signals(self):
+        """extract_stance_signals threads trend_supersession_rate onto StanceSignals
+        in both full-pulse and degraded modes."""
+        # Degraded (snapshot=None): trend_supersession_rate should still land
+        degraded = extract_stance_signals(None, trend_supersession_rate=0.42)
+        assert degraded.pulse_available is False
+        assert degraded.trend_supersession_rate == 0.42
+
+        # None by default (no argument)
+        default = extract_stance_signals(None)
+        assert default.trend_supersession_rate is None
+
+        # Full-pulse mode also carries the field through
+        full = extract_stance_signals(_minimal_snapshot(), trend_supersession_rate=0.17)
+        assert full.pulse_available is True
+        assert full.trend_supersession_rate == 0.17

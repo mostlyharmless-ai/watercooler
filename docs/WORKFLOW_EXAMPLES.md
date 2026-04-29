@@ -2,11 +2,15 @@
 
 These are canonical patterns from real Watercooler usage. They are intentionally brief.
 
+For the tool-by-tool reference behind each write action, and for concrete session-start
+snippets, see
+[TOOLS-REFERENCE.md → Common agent workflows](./TOOLS-REFERENCE.md#common-agent-workflows).
+
 ## How write actions work
 
 You don't need to specify write actions explicitly. Tell your agent what to capture
 ("document the plan and hand off to review"), and it selects the appropriate action
-(`say`, `ack`, `handoff`, `set-status`) based on the intent. The write patterns below
+(`say`, `ack`, `handoff`, `set_status`) based on the intent. The write patterns below
 show what the agent chooses internally — they're descriptive, not instructions you have
 to issue.
 
@@ -16,8 +20,12 @@ is enough.
 
 ## Ground rules
 
-- Thread state changes only through explicit write actions: `say`, `ack`, `handoff`,
-  and `set-status`.
+- Thread state changes only through explicit MCP write actions. The
+  routine set is `say`, `ack`, `handoff`, and `set_status`; `annotate`
+  and `remove_annotation` manage durable tags, flags, and pins, which
+  are also part of thread state. Administrative actions (`archive_thread`,
+  `delete_entry`, `delete_thread`) have their own tools — see
+  [TOOLS-REFERENCE.md](./TOOLS-REFERENCE.md).
 - Capture only what needs to stay durable: key plans, decisions, handoffs, blockers,
   and closeout context.
 - Use team-attributable agent names in entries when people share the same client:
@@ -50,9 +58,39 @@ Capture:
 Write pattern:
 - `say` to record the ambiguity and candidate options
 - `say` or `ack` to record clarified constraints
-- `set-status` to `IN_REVIEW` or `OPEN` based on next step
+- `set_status` to `IN_REVIEW` or `OPEN` based on next step
 
-## 3. Multi-agent implementation and review
+## 3. Planner / Critic converging on a design
+
+When to use: Two roles (typically `planner` and `critic`) iterate a
+proposal back and forth until they agree on an approach. The thread
+captures the full exchange so the decision is defensible later.
+
+Capture:
+- Initial proposal with the tradeoffs the planner considered
+- Each critique round: what the critic pushed back on and why
+- Each revision: how the planner addressed the concern (or rebutted)
+- Explicit convergence moment — both roles signal agreement
+
+Write pattern:
+- Planner opens with `say` (`role="planner"`, `entry_type="Plan"`)
+- Critic responds with `say` (`role="critic"`, `entry_type="Note"`) raising
+  concerns or asking for clarification
+- Planner revises with `say` (`role="planner"`) — either a new `Plan` or a
+  `Note` explaining the adjustment
+- Iterate as many rounds as needed; each side's entry should stand alone
+  as a full recap rather than a correction of the previous turn
+- Closing:
+  - If the exchange produces a concrete direction: planner posts
+    `entry_type="Decision"` summarising the agreed approach
+  - If it ends in a dead-end or deferral: planner posts a `Note` or
+    `set_status` to `BLOCKED` with the blocker recorded
+
+Critics do not typically `handoff` — they signal convergence with `ack`
+on the planner's Decision entry, then the planner (or a separate
+implementer) picks up via `handoff` when work starts.
+
+## 4. Multi-agent implementation and review
 
 When to use: Planning, implementation, and critique happen across different agents.
 
@@ -67,7 +105,7 @@ Write pattern:
 - Reviewer posts findings (`say` or `ack`)
 - Implementer posts resolved decision and handoff (`handoff`)
 
-## 4. Blocked or waiting
+## 5. Blocked or waiting
 
 When to use: Progress pauses on dependency, credentials, CI, or external input.
 
@@ -81,7 +119,7 @@ Write pattern:
 - `ack` for heartbeat updates while ownership stays put
 - `handoff` only when next action must move to another person/agent
 
-## 5. Cross-tool or cross-person continuity
+## 6. Cross-tool or cross-person continuity
 
 When to use: Work switches between clients, teammates, or time zones.
 
@@ -95,7 +133,7 @@ Write pattern:
 - `handoff` to tool/person B when action should transfer
 - `ack` from new owner to confirm pickup without changing ball again
 
-## 6. Decision and closure hygiene
+## 7. Decision and closure hygiene
 
 When to use: Scope ships or a thread reaches a meaningful stopping point.
 
@@ -107,11 +145,11 @@ Capture:
 Write pattern:
 - `say` with `entry_type="Decision"` for final technical call
 - `say` with `entry_type="Closure"` for end recap
-- `set-status` to `CLOSED`
+- `set_status` to `CLOSED`
 
 ## Quick chooser
 
 - Use `say` for substantive, durable updates.
 - Use `ack` to acknowledge or checkpoint without default ball transfer.
 - Use `handoff` when the next action should clearly move to someone else.
-- Use `set-status` to mark lifecycle state (`OPEN`, `IN_REVIEW`, `BLOCKED`, `CLOSED`).
+- Use `set_status` to mark lifecycle state (`OPEN`, `IN_REVIEW`, `BLOCKED`, `CLOSED`).

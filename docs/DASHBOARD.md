@@ -5,8 +5,9 @@ faster way to read, triage, and update threads without working directly in
 markdown files, CLI commands, or MCP clients.
 
 The dashboard itself lives in the separate `watercooler-site` app. This
-document covers what the dashboard does, what you should expect to see, and
-how hosted vs self-hosted access works.
+document covers what the dashboard does, what you should expect to see,
+and how to access the hosted deployment at
+[watercoolerdev.com](https://www.watercoolerdev.com).
 
 ## At a glance
 
@@ -161,7 +162,9 @@ manage access.
 
 ## Hosted dashboard
 
-For most users, the hosted dashboard is the right choice.
+The hosted dashboard at [watercoolerdev.com](https://www.watercoolerdev.com)
+is the standard way to use the dashboard. No local setup needed beyond
+signing in and connecting a repo.
 
 ### Quick start
 
@@ -181,55 +184,36 @@ For most users, the hosted dashboard is the right choice.
 If you also want browser-created API keys for agents, use the dashboard's
 **Settings -> Security** area.
 
-## Self-hosting
-
-Self-hosting is supported when you want to run the dashboard yourself.
-
-### What you need
-
-At minimum, configure a session secret in
-`~/.watercooler/credentials.toml`:
-
-```toml
-[dashboard]
-session_secret = "replace-me"
-```
-
-Generate one with:
-
-```bash
-openssl rand -hex 32
-```
-
-### Server-level defaults
-
-For self-hosted deployments, you can set dashboard defaults in the server-side
-config file:
-
-```toml
-[dashboard]
-default_repo = "mostlyharmless-ai/watercooler"
-default_branch = "main"
-poll_interval_active = 15    # seconds
-poll_interval_moderate = 30  # seconds
-poll_interval_idle = 60      # seconds
-expand_threads_by_default = false
-show_closed_threads = false
-```
-
-These settings are server defaults for the self-hosted dashboard only. They do
-**not** control the hosted dashboard at `watercoolerdev.com`, which stores user
-preferences in the hosted app.
-
-### When self-hosting makes sense
-
-- you want full control over deployment and auth
-- your team already runs Watercooler infrastructure
-- you need custom server defaults for repos, branches, or polling behavior
-
 ## First-run expectations
 
-If the dashboard looks empty, that usually means one of these is true:
+### Initial sync after connecting a repo
+
+After connecting a repo, **click the Sync button** to pull existing
+thread history from the `watercooler/threads` orphan branch. Initial
+population does not start automatically — the dashboard stays empty
+until you trigger it.
+
+For repos with substantial prior thread activity, that initial sync can
+take **several minutes** once you start it. During the wait the thread
+list may still look empty; the dashboard header shows a syncing /
+listening indicator, and thread counts climb on refresh as the pull
+progresses.
+
+If the thread list is still empty after the sync completes, move on to
+the troubleshooting checks below.
+
+> **Note:** auto-starting the initial sync on repo connection, and
+> surfacing clearer progress while it runs, are tracked as follow-up
+> work — see [mostlyharmless-ai/watercooler-site#30][initial-sync-ux].
+> Precise timing ranges by thread count are pending measurement there
+> too.
+
+[initial-sync-ux]: https://github.com/mostlyharmless-ai/watercooler-site/issues/30
+
+### Dashboard still looks empty
+
+If the dashboard looks empty after the initial-sync window has passed,
+that usually means one of these is true:
 
 - no repository has been connected yet
 - the selected branch has no synced threads
@@ -242,11 +226,6 @@ Practical first checks:
 2. Confirm you selected the expected repo and branch
 3. Trigger a sync if the dashboard looks stale
 4. Verify the repo actually contains Watercooler thread activity
-
-## Which option should you choose?
-
-- Hosted dashboard: best default for almost everyone
-- Self-hosted dashboard: use when you want to run the web app yourself
 
 ## Related docs
 

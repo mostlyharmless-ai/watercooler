@@ -33,18 +33,20 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 
-VALID_KINDS = frozenset({
-    "reaction",
-    "reaction_remove",
-    "tag",
-    "tag_remove",
-    "flag",
-    "flag_clear",
-    "xref",
-    "xref_remove",
-    "pin",
-    "unpin",
-})
+VALID_KINDS = frozenset(
+    {
+        "reaction",
+        "reaction_remove",
+        "tag",
+        "tag_remove",
+        "flag",
+        "flag_clear",
+        "xref",
+        "xref_remove",
+        "pin",
+        "unpin",
+    }
+)
 
 VALID_TARGET_TYPES = frozenset({"entry", "thread"})
 
@@ -103,15 +105,23 @@ class AnnotationState:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AnnotationState:
-        """Deserialize from dict."""
+        """Deserialize from dict.
+
+        Coerces ``null`` container values to empty collections so callers can
+        rely on the field types without defensive ``or []`` at every use site.
+        """
+        # vote_score is an int field where legitimately negative values
+        # (net downvotes) must survive round-trip. ``x or 0`` would map
+        # -3 → 0; use an explicit None-check to coerce only missing/null.
+        raw_vote = data.get("vote_score")
         return cls(
-            reactions=data.get("reactions", {}),
-            tags=data.get("tags", []),
-            flags=data.get("flags", []),
-            xrefs=data.get("xrefs", []),
-            pinned=data.get("pinned", False),
+            reactions=data.get("reactions") or {},
+            tags=data.get("tags") or [],
+            flags=data.get("flags") or [],
+            xrefs=data.get("xrefs") or [],
+            pinned=bool(data.get("pinned", False)),
             last_touched=data.get("last_touched"),
-            vote_score=data.get("vote_score", 0),
+            vote_score=0 if raw_vote is None else raw_vote,
         )
 
 
@@ -265,15 +275,18 @@ def materialize_state(
                 state.tags.remove(ev.value)
 
         elif ev.kind == "flag":
-            state.flags.append({
-                "agent": ev.actor,
-                "reason": ev.value,
-                "timestamp": ev.timestamp,
-            })
+            state.flags.append(
+                {
+                    "agent": ev.actor,
+                    "reason": ev.value,
+                    "timestamp": ev.timestamp,
+                }
+            )
 
         elif ev.kind == "flag_clear":
             state.flags = [
-                f for f in state.flags
+                f
+                for f in state.flags
                 if not (f.get("agent") == ev.actor and f.get("reason") == ev.value)
             ]
 

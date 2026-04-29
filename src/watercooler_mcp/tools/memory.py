@@ -33,6 +33,7 @@ from mcp.types import TextContent
 
 from ..observability import log_action, log_error, log_warning
 from .. import validation  # Import module for runtime access (enables test patching)
+from ._boost import boost_decision_items, sanitize_boost
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,147 @@ bulk_index = None
 
 # Provenance tools
 get_entry_provenance = None
+
+
+def _ensure_t2_suffix(group_id: str) -> str:
+    """Append ``_t2`` to ``group_id`` if not already present.
+
+    Empty in stays empty out. Plan v20 canonical T2 graph names take the
+    form ``<org>_<repo>_t2``; legacy callers passed ``<org>_<repo>`` (or
+    bare ``<repo>``). This helper makes the suffix idempotent so the
+    canonicalization helper can accept either form without surprise.
+    """
+    if not group_id:
+        return ""
+    if group_id.endswith("_t2"):
+        return group_id
+    return f"{group_id}_t2"
+
+
+def _canonicalize_t2_group_id(caller_group_id: str) -> tuple[str, dict | None]:
+    """Resolve the authoritative T2 graph database name for a hosted write.
+
+    Returns ``(canonical_database_name, error_dict_or_None)``.
+
+    Plan v20 defect #34 fix: the queued-work executor in
+    ``memory_sync.graphiti_executor`` uses ``task.group_id`` directly as
+    the FalkorDB graph database name. To make hosted T2 writes land in
+    the canonical ``<org>_<repo>_t2`` graph (Plan v20 intent), we
+    canonicalize the caller-supplied ``group_id`` here, before
+    enqueueing. Mirrors :func:`watercooler_mcp.tools.semantic._scope_group_id_to_http_ctx`
+    for T1.
+
+    Behaviour:
+
+    - On a hosted request (``http_ctx`` set with ``repo`` header), the
+      canonical T2 database name is derived from ``repo``; caller value
+      is advisory; mismatches log a WARNING and the hosted scope wins.
+    - With ``http_ctx`` set but ``repo`` missing, return a
+      ``scope_resolution_failed`` error rather than fall through.
+    - Off-hosted (stdio / dev, ``http_ctx is None``), caller value is
+      accepted as-is, with ``_t2`` suffix appended idempotently.
+    """
+    try:
+        from ..context import get_effective_context
+    except ImportError:
+        get_effective_context = None  # type: ignore[assignment]
+
+    # Wrap the call too: ``get_effective_context()`` can raise at runtime
+    # (e.g., contextvar lookup error in unusual threading configs). Without
+    # this, the exception would surface as an unhandled error in the
+    # caller rather than a structured ``scope_resolution_failed`` response.
+    if get_effective_context is None:
+        http_ctx = None
+    else:
+        try:
+            http_ctx = get_effective_context()
+        except Exception as _ctx_err:
+            return "", {
+                "success": False,
+                "error": (
+                    f"scope_resolution_failed: get_effective_context() raised "
+                    f"{_ctx_err.__class__.__name__}: {_ctx_err}"
+                ),
+            }
+    if http_ctx is None:
+        # Off-hosted (stdio / dev): caller value is authoritative. Reject
+        # an empty caller value here rather than returning ``("", None)`` —
+        # the executor downstream would otherwise compute
+        # ``canonical_database = "_t2"`` and write to a stub database.
+        canonical = _ensure_t2_suffix(caller_group_id)
+        if not canonical:
+            return "", {
+                "success": False,
+                "error": (
+                    "scope_resolution_failed: empty group_id; the off-hosted "
+                    "T2 path requires a caller-supplied group_id."
+                ),
+            }
+        return canonical, None
+    if not getattr(http_ctx, "repo", None):
+        return "", {
+            "success": False,
+            "error": (
+                "scope_resolution_failed: hosted request arrived without "
+                "an X-Repo header; hosted T2 writes require a resolved "
+                "tenant scope."
+            ),
+        }
+    if "/" not in http_ctx.repo:
+        # Reject malformed slugs explicitly under hosted multi-tenancy:
+        # ``derive_t2_database_name`` would silently fall through to
+        # ``derive_group_id`` and return ``<bare>_t2`` instead of the
+        # canonical ``<org>_<repo>_t2`` — different graph from the one a
+        # well-formed request lands in. Surface the failure instead.
+        return "", {
+            "success": False,
+            "error": (
+                f"scope_resolution_failed: hosted X-Repo header "
+                f"{http_ctx.repo!r} is malformed (expected '<org>/<repo>'); "
+                f"refusing to fall back to a non-canonical database name."
+            ),
+        }
+
+    try:
+        from watercooler.path_resolver import (
+            derive_t2_database_name,
+            get_threads_suffix,
+        )
+
+        # Strip any threads-repo suffix the X-Repo header may carry, same
+        # way _scope_group_id_to_http_ctx does for T1. Use the configured
+        # suffix from path_resolver (default "-threads") rather than a
+        # hardcoded literal so deployments overriding
+        # WATERCOOLER_THREADS_SUFFIX still produce canonical names.
+        owner, repo = http_ctx.repo.split("/", 1)
+        threads_suffix = get_threads_suffix()
+        if threads_suffix and repo.endswith(threads_suffix):
+            repo = repo[: -len(threads_suffix)]
+        if not owner or not repo:
+            return "", {
+                "success": False,
+                "error": (
+                    f"scope_resolution_failed: hosted X-Repo header "
+                    f"{http_ctx.repo!r} has empty owner or repo after "
+                    f"threads-suffix strip (owner={owner!r}, repo={repo!r}); "
+                    f"refusing to fall back to a non-canonical name."
+                ),
+            }
+        scoped = derive_t2_database_name(repo_slug=f"{owner}/{repo}")
+    except Exception as e:
+        return "", {
+            "success": False,
+            "error": f"scope_resolution_failed: {e}",
+        }
+
+    caller_canonical = _ensure_t2_suffix(caller_group_id)
+    if caller_canonical and caller_canonical != scoped:
+        logger.warning(
+            "HOSTED_T2: caller-supplied group_id %r (canonical %r) does not "
+            "match http_ctx-derived %r; using hosted scope (tenant isolation).",
+            caller_group_id, caller_canonical, scoped,
+        )
+    return scoped, None
 
 # Runtime context (set by register_memory_tools)
 _runtime: "ToolRuntime | None" = None
@@ -261,6 +403,95 @@ async def _get_entity_edge_impl(
         )
 
 
+def _add_canonical_identity_fields(diagnostics: dict, code_path: str = "") -> None:
+    """Augment a diagnostics dict with Plan v20 canonical identity fields.
+
+    Adds ``repo_slug``, ``repo_name``, ``project_group_id``,
+    ``t1_database``, ``t2_database`` via the slug-aware helpers in
+    :mod:`watercooler.path_resolver`. Also adds a ``phase_indicator``
+    field so operators can tell at a glance which split-surface
+    state the deployment is in.
+    """
+    try:
+        from watercooler.path_resolver import (
+            derive_project_group_id,
+            derive_t1_database_name,
+            derive_t2_database_name,
+        )
+    except Exception:
+        return
+
+    # Resolve repo context best-effort. Hybrid/hosted callers may not
+    # have a filesystem code_path, so we rely on the config + http ctx
+    # where available and fall back gracefully.
+    repo_slug = None
+    repo_name = None
+    try:
+        from ..context import get_http_context
+        http_ctx = get_http_context()
+        if http_ctx is not None:
+            repo_slug = getattr(http_ctx, "repo", None)
+    except Exception:
+        repo_slug = None
+
+    try:
+        from watercooler.path_resolver import derive_code_repo_name
+        from pathlib import Path as _Path
+        if code_path:
+            repo_name = derive_code_repo_name(code_path=_Path(code_path))
+    except Exception:
+        pass
+
+    diagnostics["repo_slug"] = repo_slug or "n/a"
+    diagnostics["repo_name"] = repo_name or "n/a"
+    diagnostics["project_group_id"] = derive_project_group_id(
+        repo_slug=repo_slug,
+        code_repo_name=repo_name,
+    )
+    diagnostics["t1_database"] = derive_t1_database_name(
+        repo_slug=repo_slug,
+        code_repo_name=repo_name,
+    )
+    diagnostics["t2_database"] = derive_t2_database_name(
+        repo_slug=repo_slug,
+        code_repo_name=repo_name,
+    )
+    # Plan-state indicator. PR #654 in-PR review round 9 (LOW): the prior
+    # form was hardcoded to ``"phase_1_to_5_pre_split"`` regardless of
+    # runtime state, so operators triaging production issues would always
+    # see stale phase info after Phase 5/6/8 landed. Derive it from the
+    # runtime signals we actually observe:
+    #
+    #   - T1 remote callback registered AND T2 handoff active
+    #     → "phase_8_hybrid_t1_hosted"
+    #   - T2 handoff active (but no T1 remote callback)
+    #     → "phase_5_hybrid_t2_handoff"
+    #   - neither handoff active → "phase_1_local_only"
+    #
+    # Phase 6 is a migration-time change (physical DB rename), not
+    # runtime-observable without a live FalkorDB probe. Callers that
+    # need the split-naming state should query the hosted admin
+    # surface instead.
+    try:
+        from watercooler.baseline_graph.sync import (
+            _t1_remote_upsert_enabled,
+            is_hybrid_t2_handoff_active,
+        )
+        t1_hybrid = _t1_remote_upsert_enabled()
+        t2_handoff = is_hybrid_t2_handoff_active()
+    except Exception:
+        t1_hybrid = False
+        t2_handoff = False
+
+    if t1_hybrid and t2_handoff:
+        phase = "phase_8_hybrid_t1_hosted"
+    elif t2_handoff:
+        phase = "phase_5_hybrid_t2_handoff"
+    else:
+        phase = "phase_1_local_only"
+    diagnostics["phase_indicator"] = phase
+
+
 def _diagnose_memory_hosted_impl(ctx: Context, code_path: str = "") -> ToolResult:
     """Memory diagnostics for hosted mode — skips filesystem checks."""
     import sys
@@ -270,6 +501,7 @@ def _diagnose_memory_hosted_impl(ctx: Context, code_path: str = "") -> ToolResul
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "threads_source": "GitHub API (hosted)",
     }
+    _add_canonical_identity_fields(diagnostics, code_path=code_path)
 
     # Check watercooler_memory import
     try:
@@ -380,6 +612,7 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
             "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
             "python_executable": sys.executable,
         }
+        _add_canonical_identity_fields(diagnostics, code_path=code_path)
 
         # Check watercooler_memory import and path
         try:
@@ -592,6 +825,19 @@ async def _graphiti_add_episode_impl(
                 }, indent=2)
             )])
 
+        # Plan v20 defect #34 fix: canonicalize the caller-supplied
+        # ``group_id`` to ``<org>_<repo>_t2`` before enqueueing. The
+        # graphiti_executor in ``memory_sync.py`` uses ``task.group_id``
+        # directly as the FalkorDB database name; canonicalizing here
+        # ensures hosted writes land in the canonical T2 graph.
+        canonical_group_id, scope_err = _canonicalize_t2_group_id(group_id)
+        if scope_err is not None:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps(scope_err, indent=2)
+            )])
+        group_id = canonical_group_id
+
         # Import memory module (lazy-load)
         try:
             from .. import memory as mem
@@ -613,6 +859,43 @@ async def _graphiti_add_episode_impl(
                 text=json.dumps({
                     "success": False,
                     "error": "Graphiti not enabled. Set WATERCOOLER_GRAPHITI_ENABLED=1",
+                    "episode_uuid": None,
+                }, indent=2)
+            )])
+
+        # Plan v20 defect #34 fix (PR #660 review): align ``config.database``
+        # with the canonical ``group_id`` resolved above so the fire-and-forget
+        # fallback path lands in the same physical FalkorDB database the
+        # queue path would have written to. Without this, the fallback's
+        # ``backend.add_episode_direct`` would have used ``config.database``
+        # (derived from ``code_path``) while passing the canonical
+        # ``group_id`` as partition key — splitting writes across two
+        # physical databases for the same logical call.
+        # ``GraphitiConfig`` is a non-frozen dataclass and ``load_graphiti_config``
+        # returns a fresh instance per call, so direct assignment is safe and
+        # also works in tests that pass a ``MagicMock`` config.
+        try:
+            config.database = group_id
+        except (AttributeError, TypeError) as _set_err:
+            # Fail closed: under hosted multi-tenancy, falling through with
+            # the original ``config.database`` would write the caller's
+            # data to a different physical database than intended, with
+            # no visibility. Surface a structured error to the caller and
+            # log loudly rather than silently miswriting.
+            log_error(
+                f"MEMORY: cannot align config.database with canonical group_id "
+                f"{group_id!r} (set raised {_set_err.__class__.__name__}: "
+                f"{_set_err}); refusing to write to a non-canonical database."
+            )
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": (
+                        "graphiti_config_immutable: cannot route write to canonical "
+                        f"database {group_id!r}. Refusing to fall back to a "
+                        "non-canonical name (Plan v20 multi-tenant guard)."
+                    ),
                     "episode_uuid": None,
                 }, indent=2)
             )])
@@ -662,13 +945,57 @@ async def _graphiti_add_episode_impl(
                     }, indent=2)
                 )])
 
-        # Fire-and-forget: spawn background task for the slow LLM+graph work.
-        # The graphiti pipeline (DeepSeek LLM calls + FalkorDB writes) takes
-        # 60-120s, which exceeds the middleware's default 50s tool timeout.
-        # Cancellation mid-flight corrupts FalkorDB connections and causes
-        # socket disconnects. By returning immediately, we avoid the timeout
-        # while matching the fire-and-forget pattern used by middleware memory
-        # sync (sync_to_memory_backend via ThreadPoolExecutor).
+        # Plan v20 Phase 4: durable hosted ingest. When the memory queue is
+        # initialised, enqueue so the worker owns the slow Graphiti pipeline
+        # (DeepSeek LLM calls + FalkorDB writes, 60–120s) and a terminal
+        # receipt is persisted. Callers poll via
+        # watercooler_memory_task_status using the returned task_id as
+        # their ``remote_task_id``.
+        try:
+            from ..memory_queue import enqueue_memory_task, get_queue
+            queue_available = get_queue() is not None
+        except Exception:
+            queue_available = False
+            enqueue_memory_task = None  # type: ignore[assignment]
+
+        if queue_available and enqueue_memory_task is not None:
+            try:
+                task_id = enqueue_memory_task(
+                    entry_id=entry_id or "",
+                    topic="",
+                    group_id=group_id,
+                    content=content,
+                    title=episode_title,
+                    timestamp=timestamp,
+                    source_description=source_desc,
+                    backend="graphiti",
+                    code_path=code_path,
+                )
+            except Exception as e:
+                log_error(f"MEMORY: enqueue failed, falling back to fire-and-forget: {e}")
+                task_id = None
+
+            if task_id:
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "status": "queued",
+                        "task_id": task_id,
+                        "remote_task_id": task_id,
+                        "group_id": group_id,
+                        "entry_id": entry_id if entry_id else None,
+                        "message": (
+                            "Episode enqueued for durable processing. Poll "
+                            "watercooler_memory_task_status(task_id=...) for "
+                            "terminal receipt."
+                        ),
+                    }, indent=2)
+                )])
+
+        # Fire-and-forget fallback: used when the queue is unavailable
+        # (e.g., stdio-only deployments without a worker). Matches the
+        # original middleware memory-sync pattern.
         async def _do_add_episode():
             try:
                 result = await backend.add_episode_direct(
@@ -1152,6 +1479,130 @@ async def _leanrag_run_pipeline_impl(
         )])
 
 
+def _apply_decision_boost_evidence(
+    evidence: list[dict[str, Any]],
+    boost: float,
+) -> bool:
+    """Multiply score on Decision evidence items and re-sort in place.
+
+    Returns True if any item was boosted. Only affects T1 items (the only
+    tier whose evidence carries ``metadata.entry_type``); T2 facts/entities
+    and T3 summaries don't expose entry_type reliably and are left untouched.
+    Delegates to :func:`boost_decision_items` so the ranking behaviour stays
+    in sync with ``watercooler_search``.
+    """
+    return boost_decision_items(evidence, boost) > 0
+
+
+def _resolve_t2_provenance(
+    result: Any,
+    code_path_resolved: Path | None,
+) -> dict[str, int]:
+    """Apply 3-hop T2 backtrace, populating ``thread_entry_id`` on T2 evidence.
+
+    Mutates each ``result.evidence[i].provenance`` dict in place. Returns a
+    stats dict with ``attempted/succeeded/failed/not_applicable`` counts.
+    Shared between hosted and non-hosted ``smart_query`` paths.
+    """
+    from watercooler_memory.tier_strategy import Tier
+
+    not_applicable_count = 0
+    for e in result.evidence:
+        if e.tier == Tier.T2 and not e.provenance.get("edge_uuid"):
+            e.provenance["provenance_resolution_status"] = "not_applicable"
+            not_applicable_count += 1
+
+    t2_evidence = [
+        e for e in result.evidence
+        if e.tier == Tier.T2 and e.provenance.get("edge_uuid")
+    ]
+    prov_stats = {
+        "attempted": len(t2_evidence),
+        "succeeded": 0,
+        "failed": 0,
+        "not_applicable": not_applicable_count,
+    }
+
+    if not t2_evidence:
+        return prov_stats
+
+    try:
+        from ..memory import load_graphiti_config
+        from watercooler_memory.entry_episode_index import IndexConfig
+
+        graphiti_config = load_graphiti_config(code_path=code_path_resolved)
+        if graphiti_config is None:
+            for ev in t2_evidence:
+                ev.provenance["provenance_resolution_status"] = "config_unavailable"
+            prov_stats["failed"] = len(t2_evidence)
+            return prov_stats
+
+        index_path = (
+            graphiti_config.entry_episode_index_path
+            or IndexConfig(backend="graphiti").index_path
+        )
+        prov_index = _get_cached_provenance_index(index_path)
+        for ev in t2_evidence:
+            episodes = ev.provenance.get("episodes") or []
+            if not episodes:
+                ev.provenance["provenance_resolution_status"] = "no_episodes"
+                prov_stats["failed"] += 1
+                continue
+            ep_uuid = episodes[0]
+            try:
+                entry_id = prov_index.get_entry(ep_uuid)
+                if entry_id:
+                    ev.provenance["thread_entry_id"] = entry_id
+                    ev.provenance["episode_uuid"] = ep_uuid
+                    ev.provenance["provenance_resolution_status"] = "resolved"
+                    prov_stats["succeeded"] += 1
+                else:
+                    ev.provenance["provenance_resolution_status"] = "index_miss"
+                    prov_stats["failed"] += 1
+            except Exception as lookup_exc:
+                ev.provenance["provenance_resolution_status"] = "lookup_error"
+                prov_stats["failed"] += 1
+                logger.debug(
+                    "resolve_provenance: index lookup failed for %s: %s",
+                    ep_uuid,
+                    lookup_exc,
+                )
+    except Exception as setup_exc:
+        logger.debug("resolve_provenance: setup failed: %s", setup_exc)
+        for ev in t2_evidence:
+            if "provenance_resolution_status" not in ev.provenance:
+                ev.provenance["provenance_resolution_status"] = "setup_error"
+        prov_stats["failed"] = len(t2_evidence) - prov_stats["succeeded"]
+
+    return prov_stats
+
+
+def _build_smart_query_response(
+    result: Any,
+    available: list[Any],
+    prov_stats: dict[str, int] | None,
+    prioritize_decisions: bool,
+    decision_boost: float,
+) -> dict:
+    """Format ``TierResult`` into the smart_query JSON response shape.
+
+    Shared between hosted and non-hosted paths. Applies the decision boost
+    in place on the response evidence list.
+    """
+    response = result.to_dict()
+    response["available_tiers"] = [t.value for t in available]
+    if prov_stats is not None:
+        response["provenance_resolution_stats"] = prov_stats
+
+    safe_boost = sanitize_boost(decision_boost)
+    if prioritize_decisions and _apply_decision_boost_evidence(
+        response.get("evidence", []), safe_boost
+    ):
+        response["decisions_prioritized"] = True
+        response["decision_boost"] = safe_boost
+    return response
+
+
 async def _smart_query_impl(
     query: str,
     ctx: Context,
@@ -1161,6 +1612,8 @@ async def _smart_query_impl(
     force_tier: str | None = None,
     group_ids: list[str] | None = None,
     resolve_provenance: bool = False,
+    prioritize_decisions: bool = True,
+    decision_boost: float = 1.5,
 ) -> ToolResult:
     """Auto-escalating multi-tier query for open-ended natural-language questions
     (T1->T2->T3). Use when you don't know which tier has the answer.
@@ -1295,42 +1748,119 @@ async def _smart_query_impl(
                     code_root=str(code_path_resolved) if code_path_resolved else None,
                 )
 
-        # Hosted mode: try T2/T3 if available, fall back to hosted T1 search
+        # Convert force_tier string to Tier enum upfront so the hosted and
+        # non-hosted paths share the same validation flow.
+        force_tier_enum: Tier | None = None
+        if force_tier:
+            try:
+                force_tier_enum = Tier(force_tier.upper())
+            except ValueError:
+                return ToolResult(content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "query": query,
+                        "result_count": 0,
+                        "error": f"Invalid tier: {force_tier}",
+                        "valid_tiers": ["T1", "T2", "T3"],
+                        "message": f"Invalid tier '{force_tier}'. Valid options: T1, T2, T3",
+                    }, indent=2)
+                )])
+
+        # Hosted mode: try Graphiti T2/T3 first (canonical <org>_<repo>_t2
+        # derived from the request's X-Repo header). Fall back to GitHub-API
+        # T1 keyword search only when the orchestrator can't service the
+        # request *and* the caller did not explicitly pin to T2/T3.
         if threads_dir_resolved == validation.HOSTED_MODE_SENTINEL:
             from ..hosted_ops import search_entries_hosted
             log_action("memory.smart_query.hosted_mode", query=query)
 
-            # Try TierOrchestrator with T2/T3 (skip T1 — no local graph)
-            try:
-                config = load_tier_config(
-                    threads_dir=None,  # disables T1
-                    code_path=code_path_resolved,
-                )
-                _cap_tiers_by_profile(config)
-                config.max_tiers = min(max(1, max_tiers), 3)
-                orchestrator = TierOrchestrator(config)
-                available = orchestrator.available_tiers
+            # T1 in hosted mode means the GitHub keyword endpoint — skip
+            # the orchestrator and fall straight through to the fallback.
+            if force_tier_enum != Tier.T1:
+                try:
+                    config = load_tier_config(
+                        threads_dir=None,  # disables orchestrator T1
+                        code_path=code_path_resolved,
+                    )
+                    _cap_tiers_by_profile(config)
+                    config.max_tiers = min(max(1, max_tiers), 3)
+                    orchestrator = TierOrchestrator(config)
+                    available = orchestrator.available_tiers
 
-                if available:
-                    log_action(
-                        "memory.smart_query.hosted_mode.t2t3",
-                        available_tiers=[str(t) for t in available],
-                    )
-                    result = await asyncio.to_thread(
-                        orchestrator.query, query,
-                        max_tiers=config.max_tiers,
-                        resolve_provenance=resolve_provenance,
-                    )
-                    if result and result.get("evidence"):
+                    if force_tier_enum and force_tier_enum not in available:
                         return ToolResult(content=[TextContent(
                             type="text",
-                            text=json.dumps(result, indent=2, default=str),
+                            text=json.dumps({
+                                "query": query,
+                                "result_count": 0,
+                                "error": f"Tier {force_tier} not available",
+                                "available_tiers": [t.value for t in available],
+                                "message": (
+                                    f"Requested tier {force_tier} is not "
+                                    "available in hosted mode"
+                                ),
+                            }, indent=2)
                         )])
-            except Exception as exc:
-                log_action(
-                    "memory.smart_query.hosted_mode.t2t3_fallback",
-                    error=str(exc),
-                )
+
+                    if available:
+                        log_action(
+                            "memory.smart_query.hosted_mode.t2t3",
+                            available_tiers=[t.value for t in available],
+                            force_tier=force_tier,
+                        )
+                        result = await asyncio.to_thread(
+                            orchestrator.query,
+                            query,
+                            group_ids=group_ids,
+                            force_tier=force_tier_enum,
+                        )
+
+                        if result.evidence:
+                            prov_stats = (
+                                _resolve_t2_provenance(result, code_path_resolved)
+                                if resolve_provenance
+                                else None
+                            )
+                            response = _build_smart_query_response(
+                                result,
+                                available,
+                                prov_stats,
+                                prioritize_decisions,
+                                decision_boost,
+                            )
+                            return ToolResult(content=[TextContent(
+                                type="text",
+                                text=json.dumps(response, indent=2),
+                            )])
+
+                        # Caller pinned to T2/T3: return the empty result
+                        # rather than masking it with a keyword fallback.
+                        if force_tier_enum is not None:
+                            response = _build_smart_query_response(
+                                result, available, None,
+                                prioritize_decisions, decision_boost,
+                            )
+                            return ToolResult(content=[TextContent(
+                                type="text",
+                                text=json.dumps(response, indent=2),
+                            )])
+                except Exception as exc:
+                    log_action(
+                        "memory.smart_query.hosted_mode.t2t3_fallback",
+                        error=str(exc),
+                    )
+                    if force_tier_enum is not None:
+                        # Pinned to T2/T3 — surface the failure instead of
+                        # silently degrading to GitHub keyword search.
+                        return ToolResult(content=[TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "query": query,
+                                "result_count": 0,
+                                "error": "Tier query failed",
+                                "message": str(exc),
+                            }, indent=2)
+                        )])
 
             # Fallback: hosted T1 keyword search via GitHub API
             err, result = search_entries_hosted(query=query, limit=20)
@@ -1368,19 +1898,27 @@ async def _smart_query_impl(
                         "timestamp": item.get("timestamp", ""),
                     },
                 })
+            safe_boost = sanitize_boost(decision_boost)
+            boosted = False
+            if prioritize_decisions:
+                boosted = _apply_decision_boost_evidence(evidence, safe_boost)
+            payload = {
+                "query": query,
+                "result_count": len(evidence),
+                "tiers_queried": ["T1"],
+                "primary_tier": "T1",
+                "escalation_reason": None,
+                "sufficient": len(evidence) >= 3,
+                "evidence": evidence,
+                "message": f"Found {len(evidence)} results from hosted T1 search",
+                "source": "hosted_github_api",
+            }
+            if boosted:
+                payload["decisions_prioritized"] = True
+                payload["decision_boost"] = safe_boost
             return ToolResult(content=[TextContent(
                 type="text",
-                text=json.dumps({
-                    "query": query,
-                    "result_count": len(evidence),
-                    "tiers_queried": ["T1"],
-                    "primary_tier": "T1",
-                    "escalation_reason": None,
-                    "sufficient": len(evidence) >= 3,
-                    "evidence": evidence,
-                    "message": f"Found {len(evidence)} results from hosted T1 search",
-                    "source": "hosted_github_api",
-                }, indent=2)
+                text=json.dumps(payload, indent=2)
             )])
 
         # Load configuration
@@ -1414,33 +1952,18 @@ async def _smart_query_impl(
                 }, indent=2)
             )])
 
-        # Convert force_tier string to Tier enum
-        force_tier_enum = None
-        if force_tier:
-            try:
-                force_tier_enum = Tier(force_tier.upper())
-                if force_tier_enum not in available:
-                    return ToolResult(content=[TextContent(
-                        type="text",
-                        text=json.dumps({
-                            "query": query,
-                            "result_count": 0,
-                            "error": f"Tier {force_tier} not available",
-                            "available_tiers": [t.value for t in available],
-                            "message": f"Requested tier {force_tier} is not available",
-                        }, indent=2)
-                    )])
-            except ValueError:
-                return ToolResult(content=[TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "query": query,
-                        "result_count": 0,
-                        "error": f"Invalid tier: {force_tier}",
-                        "valid_tiers": ["T1", "T2", "T3"],
-                        "message": f"Invalid tier '{force_tier}'. Valid options: T1, T2, T3",
-                    }, indent=2)
-                )])
+        # Validate force_tier_enum (parsed earlier) against available tiers
+        if force_tier_enum is not None and force_tier_enum not in available:
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=json.dumps({
+                    "query": query,
+                    "result_count": 0,
+                    "error": f"Tier {force_tier} not available",
+                    "available_tiers": [t.value for t in available],
+                    "message": f"Requested tier {force_tier} is not available",
+                }, indent=2)
+            )])
 
         # Execute query
         log_action(
@@ -1459,97 +1982,18 @@ async def _smart_query_impl(
                 force_tier=force_tier_enum,
             )
 
-            # Optionally enrich T2 evidence with thread_entry_id via 3-hop backtrace
-            prov_stats: dict[str, int] | None = None
-            if resolve_provenance:
-                # Tag T2 entity nodes upfront — they have node_uuid but no edge_uuid
-                # and cannot be resolved. Malformed fact records (no edge_uuid, no
-                # node_uuid) also land here as "not_applicable" — acceptable since
-                # they can't be resolved anyway.
-                not_applicable_count = 0
-                for e in result.evidence:
-                    if e.tier == Tier.T2 and not e.provenance.get("edge_uuid"):
-                        e.provenance["provenance_resolution_status"] = "not_applicable"
-                        not_applicable_count += 1
-
-                t2_evidence = [
-                    e for e in result.evidence
-                    if e.tier == Tier.T2 and e.provenance.get("edge_uuid")
-                ]
-                # Initialize stats — emitted even if t2_evidence is empty so callers
-                # can distinguish resolve_provenance=True (field present) from False
-                # (field absent).
-                prov_stats = {
-                    "attempted": len(t2_evidence),
-                    "succeeded": 0,
-                    "failed": 0,
-                    "not_applicable": not_applicable_count,
-                }
-
-                if t2_evidence:
-                    try:
-                        from ..memory import load_graphiti_config
-                        from watercooler_memory.entry_episode_index import IndexConfig
-
-                        graphiti_config = load_graphiti_config(
-                            code_path=code_path_resolved
-                        )
-                        if graphiti_config:
-                            index_path = (
-                                graphiti_config.entry_episode_index_path
-                                or IndexConfig(backend="graphiti").index_path
-                            )
-                            prov_index = _get_cached_provenance_index(index_path)
-                            for ev in t2_evidence:
-                                # episodes is now present in T2 provenance from
-                                # search_memory_facts() — no extra DB round-trip needed.
-                                episodes = ev.provenance.get("episodes") or []
-                                if not episodes:
-                                    ev.provenance["provenance_resolution_status"] = "no_episodes"
-                                    prov_stats["failed"] += 1
-                                    continue
-                                ep_uuid = episodes[0]
-                                try:
-                                    entry_id = prov_index.get_entry(ep_uuid)
-                                    if entry_id:
-                                        ev.provenance["thread_entry_id"] = entry_id
-                                        ev.provenance["episode_uuid"] = ep_uuid
-                                        ev.provenance["provenance_resolution_status"] = "resolved"
-                                        prov_stats["succeeded"] += 1
-                                    else:
-                                        ev.provenance["provenance_resolution_status"] = "index_miss"
-                                        prov_stats["failed"] += 1
-                                except Exception as lookup_exc:
-                                    ev.provenance["provenance_resolution_status"] = "lookup_error"
-                                    prov_stats["failed"] += 1
-                                    logger.debug(
-                                        "resolve_provenance: index lookup failed"
-                                        " for %s: %s",
-                                        ep_uuid,
-                                        lookup_exc,
-                                    )
-                        else:
-                            # Graphiti not configured — load_graphiti_config returned None
-                            for ev in t2_evidence:
-                                ev.provenance["provenance_resolution_status"] = "config_unavailable"
-                            prov_stats["failed"] = len(t2_evidence)
-                    except Exception as setup_exc:
-                        logger.debug("resolve_provenance: setup failed: %s", setup_exc)
-                        # Tag any untagged items — "setup_error" signals a runtime/
-                        # import/init failure, distinct from "config_unavailable"
-                        # (graphiti_config is None) and "index_miss" (lookup failed).
-                        for ev in t2_evidence:
-                            if "provenance_resolution_status" not in ev.provenance:
-                                ev.provenance["provenance_resolution_status"] = "setup_error"
-                        # Preserve invariant: attempted == succeeded + failed, even if
-                        # some items resolved before the exception was raised.
-                        prov_stats["failed"] = len(t2_evidence) - prov_stats["succeeded"]
-
-            # Build response
-            response = result.to_dict()
-            response["available_tiers"] = [t.value for t in available]
-            if prov_stats is not None:
-                response["provenance_resolution_stats"] = prov_stats
+            prov_stats = (
+                _resolve_t2_provenance(result, code_path_resolved)
+                if resolve_provenance
+                else None
+            )
+            response = _build_smart_query_response(
+                result,
+                available,
+                prov_stats,
+                prioritize_decisions,
+                decision_boost,
+            )
 
             return ToolResult(content=[TextContent(
                 type="text",
@@ -1651,17 +2095,42 @@ async def _memory_task_status_impl(
         # Specific task lookup
         if task_id:
             task = queue.get_task(task_id)
-            if task is None:
+            if task is not None:
+                return ToolResult([TextContent(
+                    type="text",
+                    text=json.dumps(task.to_dict(), indent=2),
+                )])
+
+            # Plan v20 Phase 4: task not in active queue — check the receipt
+            # sidecar so terminal outcomes (completed / dead_lettered) remain
+            # queryable after the active record has been removed. Also accept
+            # a hosted ``remote_task_id`` so clients in hybrid mode can poll
+            # using either the local stage-A id or the hosted stage-B id.
+            receipt = queue.get_receipt(task_id)
+            if receipt is None:
+                receipt = queue.get_receipt_by_remote_task_id(task_id)
+            if receipt is not None:
                 return ToolResult([TextContent(
                     type="text",
                     text=json.dumps({
-                        "error": f"Task {task_id} not found in active queue",
-                        "hint": "Completed tasks are removed from the active queue",
-                    }),
+                        "task_id": receipt.get("task_id"),
+                        "remote_task_id": receipt.get("remote_task_id"),
+                        "status": receipt.get("terminal_state"),
+                        "terminal": True,
+                        "source": "receipt",
+                        "receipt": receipt,
+                    }, indent=2),
                 )])
+
             return ToolResult([TextContent(
                 type="text",
-                text=json.dumps(task.to_dict(), indent=2),
+                text=json.dumps({
+                    "error": f"Task {task_id} not found in active queue or receipt store",
+                    "hint": (
+                        "Completed and dead-lettered tasks persist as receipts "
+                        "for a bounded window; older terminal outcomes fall off"
+                    ),
+                }),
             )])
 
         # Queue summary
@@ -1713,9 +2182,101 @@ async def _bulk_index_hosted_impl(
             )])
         all_topics = [t.topic for t in thread_list]
 
-    # Derive group_id from effective context (HTTP request or worker)
+    # Plan v20 Phase 6: derive the canonical <org>_<repo> group_id via the
+    # slug-aware helper instead of reusing the raw HTTP ``repo`` header
+    # (which may still carry a ``-threads`` suffix or arbitrary casing).
+    #
+    # PR #654 in-PR review round 7 (MEDIUM): normalise ``-threads`` suffix
+    # on the repo portion before derivation, matching the scoping in
+    # tools/graph.py::_resolve_hosted_t1_target and tools/semantic.py::
+    # _scope_group_id_to_http_ctx. Without this, X-Repo="org/repo-threads"
+    # would produce group_id="org_repo_threads", so bulk-indexed T2
+    # episodes would land under a different database than semantic
+    # search / find_similar look in — entries permanently invisible to
+    # semantic queries with no error signal.
     http_ctx = get_effective_context()
-    group_id = http_ctx.repo if http_ctx else "unknown"
+    # Round 15 (HIGH): refuse when there's no effective context at all.
+    # Prior form left group_id="unknown" and enqueued into unknown_t2,
+    # invisible to any query.
+    if http_ctx is None or not getattr(http_ctx, "repo", None):
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({
+                "error": "unresolved_repo_scope",
+                "message": (
+                    "Hosted bulk_index requires an HTTP context with X-Repo "
+                    "(authenticated request). No scope resolved → refusing "
+                    "rather than writing to an 'unknown' database."
+                ),
+            }),
+        )])
+    # Round 18 (MEDIUM): no ``"unknown"`` seed here. The guard above
+    # returns before we reach this block unless ``http_ctx`` and
+    # ``http_ctx.repo`` are both truthy, so the seed was dead today —
+    # but any future refactor that relaxes the early-return could
+    # silently fall through with ``group_id="unknown"`` and route
+    # every episode to ``unknown_t2``. Keep ``group_id`` unbound until
+    # derivation assigns it, so a regression fails noisily rather than
+    # silently.
+    group_id: str
+    raw_slug = http_ctx.repo
+    # Round 12 (MEDIUM): X-Repo without an ``<org>/<repo>`` shape is an
+    # unscoped request. ``derive_project_group_id`` would silently fall
+    # through to its repo-only default and route episodes to the wrong
+    # graph. Reject rather than pollute the wrong database.
+    if "/" not in raw_slug:
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({
+                "error": "invalid_repo_scope",
+                "message": (
+                    f"X-Repo header {raw_slug!r} has no '<org>/<repo>' "
+                    "form; hosted bulk_index requires a scoped repo."
+                ),
+            }),
+        )])
+    try:
+        # Plan v20 defect #34 fix: derive the canonical T2 database name
+        # (``<org>_<repo>_t2``) instead of the bare project_group_id
+        # (``<org>_<repo>``). The graphiti_executor uses ``task.group_id``
+        # directly as the FalkorDB database, so this MUST be the
+        # canonical suffix-included form for hosted writes to land in
+        # the canonical T2 graph.
+        from watercooler.path_resolver import (
+            derive_t2_database_name,
+            get_threads_suffix,
+        )
+        _owner, _repo = raw_slug.split("/", 1)
+        _threads_suffix = get_threads_suffix()
+        if _threads_suffix and _repo.endswith(_threads_suffix):
+            _repo = _repo[: -len(_threads_suffix)]
+        if not _owner or not _repo:
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "invalid_repo_scope",
+                    "message": (
+                        f"X-Repo header {raw_slug!r} has empty owner or "
+                        f"repo after threads-suffix strip "
+                        f"(owner={_owner!r}, repo={_repo!r}); refusing to "
+                        f"fall back to a non-canonical database name."
+                    ),
+                }),
+            )])
+        group_id = derive_t2_database_name(
+            repo_slug=f"{_owner}/{_repo}",
+        )
+    except Exception as _e:
+        # Round 13 (MEDIUM): fail closed rather than fall back to the
+        # raw ``http_ctx.repo`` (which contained a ``/`` and wasn't a
+        # valid FalkorDB database name anyway).
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({
+                "error": "group_id_derivation_failed",
+                "message": f"Could not derive group_id from {raw_slug!r}: {_e}",
+            }),
+        )])
 
     # Load entry-episode index for dedup (if graphiti backend)
     already_indexed = 0
@@ -1886,8 +2447,20 @@ async def _bulk_index_impl(
             selected = [t.strip() for t in threads.split(",")]
             all_topics = [t for t in all_topics if t in selected]
 
-        # Derive group_id using canonical function (consistent with search tools)
-        group_id = derive_group_id(threads_dir=threads_dir)
+        # Derive canonical T2 group_id (Plan v20 defect #34): for ``backend ==
+        # "graphiti"`` the queue task's ``group_id`` IS the FalkorDB database
+        # name and MUST end in ``_t2`` or the executor's defense-in-depth
+        # assertion (memory_sync.py:graphiti_executor) will reject the task
+        # with PermanentTaskError. ``derive_group_id`` returns the bare
+        # ``<repo>`` form; ``derive_t2_database_name`` returns ``<org>_<repo>_t2``
+        # (or ``<repo>_t2`` when no slug is available) which is canonical-safe.
+        # LeanRAG/baseline backends keep the bare form because the executor
+        # guard is graphiti-specific.
+        from watercooler.path_resolver import derive_t2_database_name
+        if backend == "graphiti":
+            group_id = derive_t2_database_name(threads_dir=threads_dir, code_path=code_path)
+        else:
+            group_id = derive_group_id(threads_dir=threads_dir)
 
         # Load index once for pre-flight dedup (Graphiti only — LeanRAG has no entry-episode index;
         # the LeanRAG queue file is its dedup mechanism).

@@ -14,6 +14,7 @@ This daemon is findings-only — it never writes to thread files.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,11 @@ _KEYWORD_FIELDS = ("title", "body", "summary")
 def _make_finding_id() -> str:
     """Generate a unique, time-sortable finding ID (ULID)."""
     return str(ULID())
+
+
+def _topic_excluded(topic: str, patterns: list[str]) -> bool:
+    """Return True if the topic matches any exclude pattern (fnmatch)."""
+    return any(fnmatch.fnmatchcase(topic, pat) for pat in patterns)
 
 
 def _compute_search_hit(entry: dict[str, Any]) -> bool:
@@ -186,6 +192,13 @@ class DetectDecisionsDaemon(BaseDaemon):
         for topic in topics:
             if len(findings) >= cfg.max_findings_per_run:
                 break
+
+            # Skip excluded topic patterns (test/demo/scratch threads)
+            if cfg.exclude_topic_patterns and _topic_excluded(
+                topic, cfg.exclude_topic_patterns
+            ):
+                skipped += 1
+                continue
 
             # Optionally skip closed threads
             if not cfg.scan_closed_threads:
@@ -351,6 +364,13 @@ class DetectDecisionsDaemon(BaseDaemon):
         for topic in topics:
             if len(findings) >= cfg.max_findings_per_run:
                 break
+
+            # Skip excluded topic patterns (test/demo/scratch threads)
+            if cfg.exclude_topic_patterns and _topic_excluded(
+                topic, cfg.exclude_topic_patterns
+            ):
+                skipped += 1
+                continue
 
             # Optionally skip closed threads
             if not cfg.scan_closed_threads:

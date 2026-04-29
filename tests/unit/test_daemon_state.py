@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import time
-from pathlib import Path
-
-import pytest
 
 from watercooler_mcp.daemons.state import (
     DaemonCheckpoint,
     Finding,
     ThreadCheckpoint,
+    acknowledge_finding,
     append_findings,
     load_checkpoint,
     load_findings,
     save_checkpoint,
 )
-
 
 # ------------------------------------------------------------------ #
 # Finding
@@ -277,3 +273,94 @@ class TestPersistence:
         )
         loaded = load_findings("nonexistent")
         assert loaded == []
+
+    def test_load_findings_order_oldest_returns_oldest_slice(
+        self, tmp_path, monkeypatch
+    ):
+        """With order="oldest", the truncation keeps the oldest N (not newest)."""
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path
+        )
+        findings = [
+            Finding(
+                finding_id=f"f{i}",
+                daemon_name="test",
+                severity="info",
+                category="c",
+                topic="t",
+                created_at=float(i),
+            )
+            for i in range(10)
+        ]
+        append_findings("test", findings)
+
+        # Default newest-first: limit=3 returns f9, f8, f7
+        newest = load_findings("test", limit=3)
+        assert [f.finding_id for f in newest] == ["f9", "f8", "f7"]
+
+        # order="oldest": limit=3 returns f0, f1, f2 — NOT dropped by the limit.
+        oldest = load_findings("test", limit=3, order="oldest")
+        assert [f.finding_id for f in oldest] == ["f0", "f1", "f2"]
+
+        # limit=None: all 10 returned (no truncation).
+        all_loaded = load_findings("test", limit=None)
+        assert len(all_loaded) == 10
+
+
+class TestAcknowledgeFinding:
+    def _seed(self, tmp_path, monkeypatch, finding_ids: list) -> None:
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path
+        )
+        findings = [
+            Finding(
+                finding_id=fid,
+                daemon_name="test",
+                severity="info",
+                category="test_cat",
+                topic="t",
+            )
+            for fid in finding_ids
+        ]
+        append_findings("test", findings)
+
+    def test_acknowledge_finding_marks_acknowledged(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch, ["f1", "f2"])
+        ok = acknowledge_finding("test", "f1")
+        assert ok is True
+        loaded = load_findings("test", unacknowledged_only=False)
+        acked = {f.finding_id: f.acknowledged for f in loaded}
+        assert acked["f1"] is True
+        assert acked["f2"] is False
+
+    def test_acknowledge_finding_returns_false_for_missing_id(
+        self, tmp_path, monkeypatch
+    ):
+        self._seed(tmp_path, monkeypatch, ["f1"])
+        ok = acknowledge_finding("test", "no-such-id")
+        assert ok is False
+
+    def test_acknowledge_finding_is_idempotent(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch, ["f1"])
+        assert acknowledge_finding("test", "f1") is True
+        assert acknowledge_finding("test", "f1") is True
+        loaded = load_findings("test", unacknowledged_only=False)
+        assert loaded[0].acknowledged is True
+
+    def test_acknowledge_finding_preserves_other_lines(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch, ["f1", "f2", "f3"])
+        acknowledge_finding("test", "f2")
+        loaded = load_findings("test", unacknowledged_only=False)
+        by_id = {f.finding_id: f for f in loaded}
+        assert by_id["f1"].acknowledged is False
+        assert by_id["f2"].acknowledged is True
+        assert by_id["f3"].acknowledged is False
+
+    def test_acknowledge_finding_returns_false_when_no_file(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path
+        )
+        ok = acknowledge_finding("no_such_daemon", "f1")
+        assert ok is False

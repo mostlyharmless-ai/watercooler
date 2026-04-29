@@ -486,6 +486,234 @@ class TestValidateGateConsistency:
 
 
 # ---------------------------------------------------------------------------
+# Tests — Fix #481: g3_quotable=false must reject even when quotes validate
+# ---------------------------------------------------------------------------
+
+
+class TestG3QuotableEnforcement:
+    def test_g3_false_rejects_even_with_local_quote_match(self):
+        """LLM says not quotable — honor that judgment.
+
+        Previously the extractor ignored ``g3_quotable.passed=false`` when the
+        returned quotes happened to substring-match the source body. That let
+        the LLM's own judgment be overridden by a coincidental local match and
+        produced low-quality Decision entries. See issue #481.
+        """
+        entry = _make_entry(
+            body="We decided to use PostgreSQL for session storage.",
+        )
+        gates = _all_gates_pass()
+        gates["g3_quotable"] = {"passed": False, "reason": "not quotable"}
+        response = _full_llm_response(
+            confidence=4,
+            gates=gates,
+            quotes=["We decided to use PostgreSQL"],  # matches the body
+        )
+        result = extract_decision(
+            entry,
+            "recent context",
+            llm_complete=_mock_llm(response),
+        )
+        assert result.passed is False
+        assert result.rejection_reason == "g3_quotable_failed"
+
+    def test_g3_true_allows_passage(self):
+        """Sanity check: g3_quotable=true still passes."""
+        entry = _make_entry()
+        response = _full_llm_response(confidence=4)  # gates all pass by default
+        result = extract_decision(
+            entry,
+            "recent context",
+            llm_complete=_mock_llm(response),
+        )
+        assert result.passed is True
+
+    def test_g3_omitted_rejects_as_not_evaluated(self):
+        """A missing g3_quotable gate defaults to passed=False (fail-closed)
+        and must be rejected with a distinct ``g3_quotable_not_evaluated``
+        reason so telemetry can tell the omitted case apart from an explicit
+        ``passed=false`` verdict.
+        """
+        entry = _make_entry()
+        gates = _all_gates_pass()
+        del gates["g3_quotable"]  # LLM omits the gate entirely
+        response = _full_llm_response(confidence=4, gates=gates)
+        result = extract_decision(
+            entry,
+            "recent context",
+            llm_complete=_mock_llm(response),
+        )
+        assert result.passed is False
+        assert result.rejection_reason == "g3_quotable_not_evaluated"
+
+    @pytest.mark.parametrize(
+        "g3_value",
+        [
+            [],           # empty list
+            ["passed"],   # non-empty list
+            False,        # bool — has no .get()
+            "bad",        # string
+            42,           # int
+        ],
+        ids=["empty_list", "list", "bool", "string", "int"],
+    )
+    def test_g3_non_mapping_value_rejects_as_malformed(
+        self, g3_value, monkeypatch
+    ):
+        """Defense-in-depth: a present-but-non-mapping ``g3_quotable`` value
+        (``[]``, ``False``, ``"bad"``, etc.) must reject as malformed rather
+        than crash on ``g3.get(...)`` or ``"passed" not in g3``.
+
+        Same parser-drift class the hardening defends against — if the
+        parser ever hands us a non-dict gate value, the guard has to
+        classify and reject, not blow up inside the very branch meant to
+        enforce fail-closed semantics.
+        """
+        from watercooler.decision_extraction import LLMExtraction
+        import watercooler.decision_extraction as dex
+
+        def _parser_non_mapping_g3(raw: str):
+            gates = {
+                f"g{i}_{name}": {"passed": True, "reason": "ok"}
+                for i, name in enumerate(
+                    ["commitment", "not_superseded", "rationale",
+                     "scope", "temporal", "authority", "self_contained"],
+                    start=1,
+                )
+                if f"g{i}_{name}" != "g3_quotable"
+            }
+            gates["g3_quotable"] = g3_value  # type: ignore[assignment]
+            return LLMExtraction(
+                gates=gates,
+                confidence=4,
+                decision_statement="x",
+                rationale="x",
+                scope="x",
+                alternatives_considered=None,
+                verbatim_quotes=["matches body"],
+                warning=None,
+            )
+
+        monkeypatch.setattr(dex, "_parse_llm_response", _parser_non_mapping_g3)
+
+        result = extract_decision(
+            _make_entry(body="matches body"),
+            "context",
+            llm_complete=_mock_llm(_full_llm_response()),
+        )
+        assert result.passed is False
+        assert result.rejection_reason == "g3_quotable_malformed"
+
+    def test_g3_present_but_missing_passed_key_rejects_as_malformed(self, monkeypatch):
+        """Defense-in-depth: if the parser hands us a ``g3_quotable`` entry
+        that lacks the ``passed`` key entirely, the guard must still
+        fail-closed (reject) rather than raise ``KeyError``.
+
+        This is the same drift scenario as the missing-gate case, one
+        level deeper — current parser shape keeps this unreachable, but
+        any future change that returns a malformed gate dict must not
+        let the extraction through.
+        """
+        from watercooler.decision_extraction import LLMExtraction
+        import watercooler.decision_extraction as dex
+
+        def _parser_malformed_g3(raw: str):
+            gates = {
+                f"g{i}_{name}": {"passed": True, "reason": "ok"}
+                for i, name in enumerate(
+                    ["commitment", "not_superseded", "rationale",
+                     "scope", "temporal", "authority", "self_contained"],
+                    start=1,
+                )
+                if f"g{i}_{name}" != "g3_quotable"
+            }
+            # g3 present but lacks ``passed`` — simulated parser drift.
+            gates["g3_quotable"] = {"reason": "missing passed"}
+            return LLMExtraction(
+                gates=gates,
+                confidence=4,
+                decision_statement="x",
+                rationale="x",
+                scope="x",
+                alternatives_considered=None,
+                verbatim_quotes=["matches body"],
+                warning=None,
+            )
+
+        monkeypatch.setattr(dex, "_parse_llm_response", _parser_malformed_g3)
+
+        result = extract_decision(
+            _make_entry(body="matches body"),
+            "context",
+            llm_complete=_mock_llm(_full_llm_response()),
+        )
+        assert result.passed is False
+        assert result.rejection_reason == "g3_quotable_malformed"
+
+    def test_g3_missing_from_gates_rejects_as_missing(self, monkeypatch):
+        """Defense-in-depth: if the parser's default-injection ever stops
+        running and ``extraction.gates`` literally lacks ``g3_quotable``,
+        the rejection branch must still fire (fail-closed) rather than
+        fall through to quote validation.
+
+        Patches ``_parse_llm_response`` to return an extraction whose
+        ``gates`` dict has no ``g3_quotable`` key at all — the state the
+        current parser can't produce but a future change could.
+        """
+        from watercooler.decision_extraction import LLMExtraction
+        import watercooler.decision_extraction as dex
+
+        def _parser_without_g3(raw: str):
+            return LLMExtraction(
+                gates={
+                    f"g{i}_{name}": {"passed": True, "reason": "ok"}
+                    for i, name in enumerate(
+                        ["commitment", "not_superseded", "rationale",
+                         "scope", "temporal", "authority", "self_contained"],
+                        start=1,
+                    )
+                    if f"g{i}_{name}" != "g3_quotable"
+                },
+                confidence=4,
+                decision_statement="x",
+                rationale="x",
+                scope="x",
+                alternatives_considered=None,
+                verbatim_quotes=["matches body"],
+                warning=None,
+            )
+
+        monkeypatch.setattr(dex, "_parse_llm_response", _parser_without_g3)
+
+        result = extract_decision(
+            _make_entry(body="matches body"),
+            "context",
+            llm_complete=_mock_llm(_full_llm_response()),
+        )
+        assert result.passed is False
+        assert result.rejection_reason == "g3_quotable_missing"
+
+
+# ---------------------------------------------------------------------------
+# Tests — Prompt hardening: CANDIDATE_ENTRY quote provenance
+# ---------------------------------------------------------------------------
+
+
+class TestPromptProvenance:
+    def test_system_prompt_forbids_thread_context_quotes(self):
+        """The SYSTEM_PROMPT must instruct the LLM to quote only from
+        CANDIDATE_ENTRY — not THREAD_CONTEXT. This is the mechanical defense
+        against ``hallucinated_quote`` rejections where the model quoted from
+        surrounding context instead of the candidate itself.
+        """
+        assert "CANDIDATE_ENTRY" in SYSTEM_PROMPT
+        # The prompt must explicitly forbid THREAD_CONTEXT as a quote source.
+        assert "never from THREAD_CONTEXT" in SYSTEM_PROMPT
+        # And explicitly instruct the LLM on what to do when no quote exists.
+        assert "verbatim_quotes: []" in SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
 # Tests — Fix #2: Long-body summary/quote validation mismatch
 # ---------------------------------------------------------------------------
 

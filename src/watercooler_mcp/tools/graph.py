@@ -49,6 +49,8 @@ from ..hosted_ops import (
 )
 from watercooler.path_resolver import derive_group_id
 
+from ._boost import boost_decision_items, sanitize_boost
+
 logger = logging.getLogger(__name__)
 
 
@@ -948,6 +950,44 @@ def _baseline_graph_stats_impl(
         return f"Error getting baseline graph stats: {str(e)}"
 
 
+def _apply_decision_boost(result_json: str, boost: float) -> str:
+    """Post-rank Decision entries by multiplying their score.
+
+    Operates on the JSON envelope returned by ``route_search``. Silently
+    no-ops when the payload lacks the expected shape so we never break a
+    valid search result over ranking concerns. Shares core logic with the
+    ``smart_query`` evidence path via :func:`boost_decision_items`, which
+    sanitizes the multiplier (NaN/inf/negative/non-numeric → 1.0) so
+    those pathological values cannot corrupt ranking here.
+    """
+    safe_boost = sanitize_boost(boost)
+    if safe_boost == 1.0:
+        return result_json
+    try:
+        data = json.loads(result_json)
+    except (json.JSONDecodeError, TypeError):
+        return result_json
+    if not isinstance(data, dict):
+        return result_json
+    results = data.get("results")
+    if not isinstance(results, list) or not results:
+        return result_json
+
+    boosted = boost_decision_items(
+        results, safe_boost, type_path=("entry", "entry_type")
+    )
+    if boosted:
+        data["decisions_prioritized"] = True
+        data["decision_boost"] = safe_boost
+
+    try:
+        return json.dumps(data, indent=2)
+    except (TypeError, ValueError):
+        # Non-serialisable upstream value — fall back to the un-boosted
+        # envelope rather than dropping the whole search result.
+        return result_json
+
+
 async def _search_graph_impl(
     ctx: Context,
     code_path: str = "",
@@ -974,6 +1014,8 @@ async def _search_graph_impl(
     active_only: bool = False,
     superseded_start: str = "",
     superseded_end: str = "",
+    prioritize_decisions: bool = True,
+    decision_boost: float = 1.5,
 ) -> str:
     """Structured search with tier-aware routing and filter control (role, time,
     thread_topic, semantic). Use when you know what backend/tier you want.
@@ -1108,9 +1150,92 @@ async def _search_graph_impl(
         if context is None or not context.threads_dir:
             return "Error: Unable to resolve threads directory."
 
-        # Hosted mode: keyword search via GitHub API
+        # Hosted mode
         if is_hosted_context(context):
             limit = _validate_limit(limit, default=10)
+            hosted_mode = infer_search_mode(mode, query, semantic)
+
+            # T2 modes — route to the canonical <org>_<repo>_t2 Graphiti
+            # graph. PR #660 made load_graphiti_config resolve the database
+            # name from http_ctx.repo per request, so the same _search_graphiti_*
+            # impls used by the local path work correctly in hosted mode.
+            # The threads_dir argument is ignored inside those functions
+            # (they only use code_path for config + the backend for the query),
+            # so HOSTED_MODE_SENTINEL is safe to pass.
+            if hosted_mode in ("entities", "facts", "episodes"):
+                try:
+                    if hosted_mode == "entities":
+                        return await _search_graphiti_nodes_impl(
+                            ctx=ctx,
+                            threads_dir=validation.HOSTED_MODE_SENTINEL,
+                            query=query,
+                            code_path=code_path,
+                            limit=limit,
+                        )
+                    if hosted_mode == "episodes":
+                        return await _search_graphiti_episodes_impl(
+                            ctx=ctx,
+                            threads_dir=validation.HOSTED_MODE_SENTINEL,
+                            query=query,
+                            code_path=code_path,
+                            limit=limit,
+                            start_time=start_time,
+                            end_time=end_time,
+                        )
+                    # facts
+                    return await _search_graphiti_impl(
+                        ctx=ctx,
+                        threads_dir=validation.HOSTED_MODE_SENTINEL,
+                        query=query,
+                        code_path=code_path,
+                        limit=limit,
+                        mode="facts",
+                        active_only=active_only,
+                        start_time=start_time,
+                        end_time=end_time,
+                        superseded_start=superseded_start,
+                        superseded_end=superseded_end,
+                    )
+                except RuntimeError as e:
+                    # Mirror local-mode discipline: auto-inferred facts
+                    # gracefully degrade to entries; explicit T2 modes
+                    # surface the failure rather than silently falling back.
+                    if mode == "auto" and hosted_mode == "facts":
+                        logger.info(
+                            "auto-inferred facts mode falling back to "
+                            "hosted entries (Graphiti unavailable: %s)", e,
+                        )
+                        hosted_mode = "entries"
+                    else:
+                        return json.dumps({
+                            "error": "graphiti_unavailable_hosted",
+                            "message": str(e),
+                            "mode": hosted_mode,
+                            "results": [],
+                        }, indent=2)
+
+            # Plan v20 Phase 8: semantic entry search runs against hosted
+            # T1 FalkorDB HNSW. Mode="entries" + semantic=True goes through
+            # _search_entries_hosted_semantic; keyword entries falls through
+            # to the GitHub-API path.
+            if hosted_mode == "entries" and semantic:
+                threshold = _validate_threshold(semantic_threshold, default=0.5)
+                # Codex re-review: preserve filter parity with the
+                # keyword-hosted path (search_entries_hosted) so
+                # semantic=True does not silently drop role / entry_type /
+                # agent / start_time / end_time filters.
+                return _search_entries_hosted_semantic(
+                    context=context,
+                    query=query,
+                    thread_topic=thread_topic,
+                    limit=limit,
+                    similarity_threshold=threshold,
+                    role=role,
+                    entry_type=entry_type,
+                    agent=agent,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
             err, result = search_entries_hosted(
                 query=query,
                 thread_topic=thread_topic,
@@ -1165,7 +1290,7 @@ async def _search_graph_impl(
         # active_only is an explicit parameter on route_search and _search_graphiti_impl.
         # It is applied as a post-filter on entity edges (Graphiti only). It is a
         # no-op on baseline and leanrag backends, which have no bi-temporal supersession.
-        return await route_search(
+        result = await route_search(
             ctx=ctx,
             threads_dir=threads_dir,
             query=query,
@@ -1193,9 +1318,190 @@ async def _search_graph_impl(
             superseded_start=superseded_start,
             superseded_end=superseded_end,
         )
+        # Post-rank Decision entries when the caller asks for it. Skipped for
+        # facts/entities/episodes modes — those shapes don't carry `entry_type`.
+        if prioritize_decisions and resolved_mode == "entries":
+            result = _apply_decision_boost(result, decision_boost)
+        return result
 
     except Exception as e:
         return f"Error searching graph: {str(e)}"
+
+
+def _resolve_hosted_t1_target(context: Any) -> tuple[str, str]:
+    """Derive ``(t1_database, project_group_id)`` from a hosted ThreadContext.
+
+    Codex re-review (01KPZ367CBHGCZZ6JWWM36KFE6): the hosted context
+    constructed by ``_require_context_hosted`` carries ``code_repo`` (the
+    ``<org>/<repo>`` slug from the X-Repo header) — not ``repo_slug`` or
+    ``project_group_id``. Derive both from ``code_repo``; normalise the
+    ``-threads`` suffix so a threads-repo X-Repo value still resolves the
+    correct canonical ``<org>_<repo>`` group id and ``<org>_<repo>_t1``
+    database.
+
+    Returns ``("", "")`` if neither attribute is available.
+    """
+    slug = (
+        getattr(context, "repo_slug", None)
+        or getattr(context, "code_repo", None)
+        or ""
+    )
+    if not slug or "/" not in slug:
+        return "", ""
+    owner, repo = slug.split("/", 1)
+    if repo.endswith("-threads"):
+        repo = repo.removesuffix("-threads")
+    canonical_slug = f"{owner}/{repo}"
+
+    try:
+        from watercooler.path_resolver import (
+            derive_project_group_id,
+            derive_t1_database_name,
+        )
+    except ImportError:
+        return "", ""
+
+    group_id = derive_project_group_id(repo_slug=canonical_slug)
+    t1_db = derive_t1_database_name(repo_slug=canonical_slug)
+    return t1_db, group_id
+
+
+def _search_entries_hosted_semantic(
+    *,
+    context: Any,
+    query: str,
+    thread_topic: str,
+    limit: int,
+    similarity_threshold: float,
+    role: str = "",
+    entry_type: str = "",
+    agent: str = "",
+    start_time: str = "",
+    end_time: str = "",
+) -> str:
+    """Hosted semantic entry search against `<org>_<repo>_t1` FalkorDB HNSW.
+
+    Plan v20 Phase 8 (c). Called from the hosted `watercooler_search` branch
+    when ``mode="entries"`` + ``semantic=True``. Embeds the query via the
+    local embedding client (available on the hosted service) and runs an
+    HNSW KNN lookup. Supports filter parity with the hosted keyword path
+    (``role``, ``entry_type``, ``agent``, ``start_time``, ``end_time``).
+    """
+    if not query or not query.strip():
+        return json.dumps({
+            "error": "missing_query",
+            "message": "Semantic entry search requires a non-empty query.",
+            "results": [],
+        }, indent=2)
+
+    t1_db, group_id = _resolve_hosted_t1_target(context)
+    if not t1_db or not group_id:
+        return json.dumps({
+            "error": "hosted_semantic_unresolved_target",
+            "message": (
+                "Could not derive hosted T1 database name and group_id from "
+                "context.code_repo / context.repo_slug."
+            ),
+            "results": [],
+        }, indent=2)
+
+    try:
+        from watercooler.baseline_graph.sync import generate_embedding
+    except ImportError as e:
+        return json.dumps({
+            "error": "embedding_module_missing",
+            "message": str(e),
+            "results": [],
+        }, indent=2)
+
+    try:
+        query_vec = generate_embedding(query)
+        if query_vec is None:
+            return json.dumps({
+                "error": "embedding_unavailable",
+                "message": "Embedding service is not configured on the hosted side.",
+                "results": [],
+            }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "error": "embedding_failed",
+            "message": str(e),
+            "results": [],
+        }, indent=2)
+
+    try:
+        from watercooler_mcp.hosted_semantic import search_semantic_entries
+    except ImportError as e:
+        return json.dumps({
+            "error": "hosted_semantic_module_missing",
+            "message": str(e),
+            "results": [],
+        }, indent=2)
+
+    result = search_semantic_entries(
+        database=t1_db,
+        query_embedding=list(query_vec),
+        group_id=group_id,
+        limit=limit,
+        similarity_threshold=similarity_threshold,
+        thread_topic=thread_topic or None,
+        role=role or None,
+        entry_type=entry_type or None,
+        agent=agent or None,
+        start_time=start_time or None,
+        end_time=end_time or None,
+    )
+    return json.dumps(result, indent=2)
+
+
+def _find_similar_hosted(
+    *,
+    context: Any,
+    entry_id: str,
+    limit: int,
+    similarity_threshold: float,
+) -> str:
+    """Hosted-mode find_similar against the canonical T1 FalkorDB HNSW index.
+
+    Plan v20 Phase 8 (d). Opens a per-call connection to the hosted FalkorDB,
+    fetches the source embedding by entry_id, then runs a KNN query via the
+    HNSW vector index. The `watercooler_semantic_upsert_embedding` tool is
+    responsible for populating both the embedding node and the index.
+
+    Errors are returned as a structured JSON payload rather than raised, so
+    the caller (``_find_similar_entries_impl``) can report the failure as a
+    tool result.
+    """
+    t1_db, group_id = _resolve_hosted_t1_target(context)
+    if not t1_db or not group_id:
+        return json.dumps({
+            "error": "hosted_find_similar_unresolved_target",
+            "message": (
+                "Could not derive hosted T1 database name from "
+                "context.code_repo / context.repo_slug."
+            ),
+            "source_entry_id": entry_id,
+            "results": [],
+        }, indent=2)
+
+    try:
+        from watercooler_mcp.hosted_semantic import find_similar_t1
+    except ImportError as e:
+        return json.dumps({
+            "error": "hosted_find_similar_module_missing",
+            "message": str(e),
+            "source_entry_id": entry_id,
+            "results": [],
+        }, indent=2)
+
+    result = find_similar_t1(
+        database=t1_db,
+        entry_id=entry_id,
+        group_id=group_id,
+        limit=limit,
+        similarity_threshold=similarity_threshold,
+    )
+    return json.dumps(result, indent=2)
 
 
 def _find_similar_entries_impl(
@@ -1234,15 +1540,27 @@ def _find_similar_entries_impl(
         # Hosted mode: embedding similarity requires the local baseline
         # graph which is not available in hosted deployments.
         if is_hosted_context(context):
-            return json.dumps({
-                "error": "not_supported_hosted",
-                "message": (
-                    "find_similar requires the local baseline graph for "
-                    "embedding similarity. Use watercooler_search instead."
-                ),
-                "source_entry_id": entry_id,
-                "results": [],
-            }, indent=2)
+            # Plan v20 Phase 8: hosted find_similar is now real. Delegates to
+            # the hosted semantic retrieval against the canonical
+            # <org>_<repo>_t1 FalkorDB HNSW index. Missing embeddings for
+            # ``entry_id`` return a structured "no_embedding" error rather
+            # than the prior "not_supported_hosted" stub.
+            try:
+                return _find_similar_hosted(
+                    context=context,
+                    entry_id=entry_id,
+                    limit=_validate_limit(limit, default=5, max_value=50),
+                    similarity_threshold=_validate_threshold(
+                        similarity_threshold, default=0.5
+                    ),
+                )
+            except Exception as e:
+                return json.dumps({
+                    "error": "hosted_find_similar_failed",
+                    "message": str(e),
+                    "source_entry_id": entry_id,
+                    "results": [],
+                }, indent=2)
 
         threads_dir = context.threads_dir
         if not threads_dir.exists():
@@ -2437,9 +2755,16 @@ def _build_hybrid_search_wrapper(runtime):
     @functools.wraps(_search_graph_impl)
     async def _hybrid_search(ctx, **kwargs):
         mode = kwargs.get("mode", "auto")
+        query = kwargs.get("query", "")
+        semantic = kwargs.get("semantic", False)
         # Infer actual mode for capability resolution
-        resolved_mode = infer_search_mode(mode, kwargs.get("query", ""), kwargs.get("semantic", False))
-        capability = resolve_search_capability(resolved_mode)
+        resolved_mode = infer_search_mode(mode, query, semantic)
+        # Codex review: pass ``semantic`` through so that semantic entry
+        # search resolves to ``semantic_similarity`` (remote in hybrid)
+        # rather than falling back to ``baseline_search`` (local).
+        capability = resolve_search_capability(
+            resolved_mode, query=query, semantic=semantic
+        )
         target = runtime.capability_profile.resolve_execution_target(
             capability,
             local_available=True,

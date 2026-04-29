@@ -2,8 +2,19 @@
 
 Zero to first thread entry in under 10 minutes.
 
+> **How Watercooler stores threads.** Thread data lives on an
+> [orphan branch](./GLOSSARY.md#orphan-branch) called
+> `watercooler/threads` inside your existing repository. Reads and
+> writes go through a local [worktree](./GLOSSARY.md#worktree) at
+> `~/.watercooler/worktrees/<repo>/`, which holds the
+> [baseline graph](./GLOSSARY.md#baseline-graph) (JSON — the source of
+> truth for reads) and markdown projections. Both are created
+> automatically on first write. If you want the full picture before
+> continuing, read [ARCHITECTURE.md](./ARCHITECTURE.md) (~5 minutes).
+
 ## Prerequisites
 
+- A git repository (Watercooler stores threads as an orphan branch inside it)
 - Python 3.10 or later
 - `uv` package manager
 
@@ -24,14 +35,25 @@ pip install uv
 
 ## Step 1: Authenticate
 
+Watercooler only needs credentials for the git remote your thread branch will
+push to. If your repository is hosted on GitHub:
+
 ```bash
 gh auth login
 gh auth setup-git
 ```
 
 These two commands set up GitHub authentication for both git operations and the MCP
-server. For other auth methods (PAT, environment variable, SSH), see
-[AUTHENTICATION.md](./AUTHENTICATION.md).
+server.
+
+If your repository is on GitLab, Gitea, a self-hosted server, or any other
+non-GitHub remote, skip the `gh` commands and use your remote's credentials
+instead — PAT, SSH key, or `GITHUB_TOKEN`-style environment variable. See
+[AUTHENTICATION.md](./AUTHENTICATION.md) for each option.
+
+> The hosted [Watercooler Dashboard](https://watercoolerdev.com) currently
+> assumes GitHub for OAuth sign-in and repo access. The core CLI and MCP
+> server are remote-agnostic — the dashboard is the GitHub-specific piece.
 
 ---
 
@@ -71,18 +93,47 @@ After restarting Claude Code, ask your agent:
 The agent will call `watercooler_health(code_path=".")`, which reports the status of
 git auth, the MCP server, and your threads directory.
 
-> **First run:** Watercooler automatically downloads and starts local LLM and
-> embedding services for thread enrichment (summaries and semantic search).
-> This is a one-time download (~2.5 GB total):
+> **Health is a sanity check, not a gate.** `watercooler_health` is
+> optional — you can skip straight to Step 4 and post your first thread
+> without running it. Thread actions (`say`, `ack`, `handoff`,
+> `set_status`) do not block on enrichment services, and entries are
+> indexed asynchronously once the local LLM + embedding models are
+> ready. The health check is useful for diagnosing setup problems up
+> front and for kicking off the one-time model download below.
+
+> **About the first-run download (~1.7 GB, local LLM services).**
+>
+> Watercooler enriches thread entries with auto-generated summaries and
+> embedding vectors for semantic search. These are part of the open-core
+> feature set — not premium add-ons.
+>
+> **Why local-first by default.** Out of the box, Watercooler runs the
+> enrichment LLM and embedding model on your own machine rather than
+> calling a third-party API. That means:
+>
+> - **Privacy** — entry text never leaves your machine
+> - **Zero-config** — no API keys to provision before you can post a
+>   thread entry
+> - **No per-token cost** — local inference is free to run
+>
+> **What gets downloaded** (one-time, on first `watercooler_health`):
 >
 > - **llama-server** binary (~50 MB) from llama.cpp releases
-> - **LLM model** (~2 GB GGUF) for generating entry summaries
-> - **Embedding model** (~500 MB GGUF) for semantic search vectors
+> - **LLM summarizer model** (~1.1 GB GGUF — default `qwen3:1.7b`
+>   quantised to Q4_K_M) for generating entry summaries
+> - **Embedding model** (~600 MB GGUF — default `bge-m3` quantised to
+>   Q8_0) for semantic search vectors
 >
-> The first health check may take several minutes while these download. Subsequent
-> starts are fast. To disable local models and use an external OpenAI-compatible
-> endpoint instead, set `auto_start_services = false` in
-> `~/.watercooler/config.toml` under `[mcp.graph]`.
+> **When it happens.** The first health check triggers the download and
+> may take several minutes. Subsequent starts are fast.
+>
+> **If you'd rather use an external API** (OpenAI-compatible endpoint,
+> a self-hosted inference server, etc.), set `auto_start_services = false`
+> in `~/.watercooler/config.toml` under `[mcp.graph]` and point the
+> summarizer/embedding base URLs at your endpoint. See
+> [CONFIGURATION — `[mcp.graph]`](./CONFIGURATION.md#mcpgraph--baseline-graph-enrichment)
+> for the full option list. Thread ops (`say`, `ack`, `handoff`, etc.)
+> work with or without enrichment configured.
 
 > If the health check reports any issues, stop here. See
 > [TROUBLESHOOTING.md — server not loading](./TROUBLESHOOTING.md#server-not-loading)
@@ -92,13 +143,15 @@ git auth, the MCP server, and your threads directory.
 
 ## Step 3.5: Set your team identity (recommended)
 
-If multiple people on your team use the same client (for example, two Codex users),
-set your identity so entries stay attributable. Ask your agent:
+If multiple people on your team use the same client (for example, two Claude Code
+users), set your identity so entries stay attributable. Ask your agent:
 
-> "Please create a watercooler config file with my agent set to Codex and my tag set to jay."
+> "Please create a watercooler config file with my agent set to my current MCP
+> client and my tag set to jay."
 
 The agent will create `~/.watercooler/config.toml` with your identity. Each person
-should use a unique tag — entries then show as `Codex (jay)`, `Codex (caleb)`, etc.
+should use a unique tag — entries then show as `Claude (jay)`, `Claude (caleb)`,
+`Codex (jay)`, etc., depending on the client.
 
 See [CONFIGURATION.md](./CONFIGURATION.md) for all available options.
 
@@ -122,7 +175,7 @@ Watercooler has six roles for entries: `planner`, `pm`, `implementer`, `tester`,
 can specify one explicitly.
 
 Thread state changes only through explicit write actions (`say`, `ack`, `handoff`,
-`set-status`). Watercooler does not passively log all agent activity.
+`set_status`). Watercooler does not passively log all agent activity.
 
 **What's worth capturing:** key decisions, design proposals, handoffs, status changes,
 and PR links. Routine file edits and iterative debugging don't need thread entries.
@@ -132,18 +185,25 @@ See [TOOLS-REFERENCE.md](./TOOLS-REFERENCE.md) for the full tool list and
 
 > **What watercooler creates on first write**
 >
-> The first `say` or `init-thread` call automatically creates:
+> The first `say` or `init-thread` call automatically creates the
+> orphan branch, the worktree, and the project-level `.watercooler/`
+> directory described in the storage callout at the top of this page.
+> See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full picture.
 >
-> - **Orphan branch** (`watercooler/threads`) — a branch in your git repo with no
->   shared history with your code branches. All thread data lives here.
-> - **Git worktree** (`~/.watercooler/worktrees/<repo>/`) — a local checkout of the
->   orphan branch used for reads and writes.
-> - **`.watercooler/` directory** (in repo root) — holds project-level config overrides
->   (`config.toml`) and optional role customizations (`roles.toml`). Distinct from
->   `~/.watercooler/` (your user-level config in your home directory).
->
-> If the orphan branch or worktree ever gets into a bad state, ask your agent to run
+> If the orphan branch or worktree ever gets into a bad state, ask your
+> agent to run
 > `watercooler_sync_repair(code_path=".", diagnose_only=True)`.
+
+> **Optional: scaffold custom roles ahead of time**
+>
+> Run `watercooler roles init` from your project root before your first
+> thread write to drop a copy of the bundled `roles.toml` (with all six
+> canonical roles and their annotations) into `.watercooler/roles.toml`.
+> This makes the role catalog visible and immediately editable — useful
+> if you want to add custom roles like `security-audit` or
+> `data-analyst` before contributors start posting. The command is
+> idempotent (use `--force` to overwrite an existing file).
+> See [ROLES_CREATION.md](./ROLES_CREATION.md) for the full guide.
 
 ---
 
@@ -176,13 +236,19 @@ For self-hosting options and detailed configuration, see
 
 ## Upgrade path
 
-`uvx` caches the package and checks for updates automatically. To force a fresh pull:
+`uvx` normally resolves a new version from the configured git ref on launch, but
+the resolution is cache-dependent — if `uv` still has a valid cached archive for
+`@main`, it will reuse it rather than re-pull. To force a fresh version:
 
 ```bash
 uv cache clean watercooler
 ```
 
-Then restart your MCP client so the server picks up the new version.
+Then restart your MCP client completely so the server picks up the new version.
+
+If `watercooler --version` still shows an old release after this, see
+[TROUBLESHOOTING — Stale install after upgrade](./TROUBLESHOOTING.md#stale-install-after-upgrade),
+which covers refreshing both the MCP server (`uvx`) and the CLI (`uv tool install`).
 
 > **Stability:** `main` is maintained as the stable release branch. `uvx` pulls from
 > `@main`, giving you the latest released version.

@@ -106,6 +106,11 @@ def load_roles(code_path: Optional[str | Path] = None) -> dict[str, RoleDefiniti
 
     Returns:
         Dict of role name → RoleDefinition, with project entries overriding bundled ones.
+
+    Raises:
+        ValueError: If the project's ``.watercooler/roles.toml`` is present but cannot
+            be parsed (syntax error, permission error, etc.). The message names the
+            file and the underlying error so the user can fix and retry.
     """
     defaults = _load_bundled_defaults()
 
@@ -119,9 +124,11 @@ def load_roles(code_path: Optional[str | Path] = None) -> dict[str, RoleDefiniti
     try:
         raw = project_file.read_bytes()
         overrides = _parse_roles(_load_toml_bytes(raw))
-    except Exception:
-        # Malformed project file — fall back to defaults rather than crashing
-        return defaults
+    except Exception as exc:
+        raise ValueError(
+            f"Could not load project roles from {project_file}: {exc}. "
+            f"Fix the file and retry, or remove it to use bundled defaults."
+        ) from exc
 
     merged = dict(defaults)
     merged.update(overrides)

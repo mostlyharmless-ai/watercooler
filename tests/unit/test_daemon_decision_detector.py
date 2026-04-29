@@ -10,6 +10,7 @@ from watercooler.baseline_graph import storage
 from watercooler_mcp.daemons.decision_detector import (
     DetectDecisionsDaemon,
     _compute_search_hit,
+    _topic_excluded,
 )
 
 
@@ -97,7 +98,13 @@ def _make_daemon(
     threads_dir: Path | None = None,
     **config_overrides: Any,
 ) -> DetectDecisionsDaemon:
-    """Create a daemon with test config, monkeypatching daemons dir."""
+    """Create a daemon with test config, monkeypatching daemons dir.
+
+    Defaults ``exclude_topic_patterns=[]`` so fixtures using topic names like
+    ``test-topic`` are not filtered by the production default (``test-*``).
+    Exclusion-specific tests override this explicitly.
+    """
+    config_overrides.setdefault("exclude_topic_patterns", [])
     cfg = DecisionDetectorConfig(**config_overrides)
     return DetectDecisionsDaemon(
         config=cfg,
@@ -441,6 +448,61 @@ class TestDetectDecisionsDaemon:
         assert "last_tick_skipped_threads" in summary
         assert summary["last_tick_scored"] >= 1
         assert summary["last_tick_findings"] >= 1
+
+
+class TestExcludeTopicPatterns:
+    """Cover the ``exclude_topic_patterns`` filter (test/demo/scratch threads).
+
+    These threads score as decisions in baseline scoring but have no real
+    quotable content, so they burn extractor budget without yielding decisions.
+    """
+
+    def test_topic_excluded_matches_test_prefix(self):
+        assert _topic_excluded("test-sync-refactor-08", ["test-*"]) is True
+
+    def test_topic_excluded_matches_testing_prefix(self):
+        assert _topic_excluded("testing-windows11-wsl2-test2", ["testing-*"]) is True
+
+    def test_topic_excluded_matches_scratch_suffix(self):
+        assert _topic_excluded("feature-x-scratch", ["*-scratch"]) is True
+
+    def test_topic_excluded_case_sensitive(self):
+        """fnmatch.fnmatchcase keeps case-sensitivity — watercooler topics are
+        lowercased by convention, so patterns stay simple."""
+        assert _topic_excluded("TEST-foo", ["test-*"]) is False
+
+    def test_topic_excluded_rejects_unrelated(self):
+        assert (
+            _topic_excluded(
+                "production-v0-2-20-smoke-test",
+                ["test-*", "testing-*", "demo-*", "*-scratch"],
+            )
+            is False
+        )
+
+    def test_detector_skips_excluded_topics(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        threads_dir = tmp_path / "threads"
+        _write_graph_thread(
+            threads_dir, "test-sync-refactor-08",
+            entries=[_decision_entry()],
+        )
+        _write_graph_thread(
+            threads_dir, "real-feature",
+            entries=[_decision_entry(entry_id="01REAL")],
+        )
+        daemon = _make_daemon(
+            tmp_path,
+            threads_dir=threads_dir,
+            min_score=1,
+            exclude_topic_patterns=["test-*"],
+        )
+        findings = daemon.tick()
+        topics = {f.topic for f in findings}
+        assert "test-sync-refactor-08" not in topics
+        assert "real-feature" in topics
 
 
 class TestComputeSearchHit:

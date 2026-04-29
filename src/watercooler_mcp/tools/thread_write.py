@@ -134,7 +134,7 @@ def _say_impl(
             Thread entries should explicitly reference any files changed, using file paths
             (e.g., `src/watercooler_mcp/server.py`, `docs/README.md`) to maintain clear
             traceability of what was modified.
-        role: Your role - planner, critic, implementer, tester, pm, or scribe (default: implementer)
+        role: Your role — call watercooler_role_details for the active catalog (default: implementer)
         entry_type: Entry type - Note, Plan, Decision, PR, or Closure (default: Note)
         create_if_missing: Whether to create the thread if it doesn't exist (default: False, but threads are auto-created by commands.say)
         code_path: Path to the code repository directory containing the files most immediately

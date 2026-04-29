@@ -73,6 +73,12 @@ class ExtractionResult:
 # Constants
 # ---------------------------------------------------------------------------
 
+# Annotation tag values written by ExtractDecisionsDaemon, read by consumers
+# of decision metadata (e.g. watercooler_list_decisions). Kept here so writer
+# and reader cannot drift on spelling.
+DECISION_EXTRACTED_TAG = "decision_extracted"
+HAS_DECISIONS_TAG = "has_decisions"
+
 _CRITICAL_GATES = frozenset({"g1_commitment", "g2_not_superseded", "g7_authority", "g8_self_contained"})
 _EXPECTED_GATES = frozenset({
     "g1_commitment", "g2_not_superseded", "g3_quotable", "g4_rationale",
@@ -155,6 +161,16 @@ do not emit.
 - **1**: Speculative, no clear decision point
 - **0**: Not a decision
 
+## Quote Provenance (CRITICAL)
+
+`verbatim_quotes` MUST be byte-exact substrings of the CANDIDATE_ENTRY body
+only — never from THREAD_CONTEXT, summary text, or any surrounding material.
+If you cannot find supporting text in CANDIDATE_ENTRY, return
+`verbatim_quotes: []` and set `g3_quotable.passed: false`. Do not paraphrase,
+reformat, or repair quotes. Copy them character-for-character from the
+CANDIDATE_ENTRY body between the [[[CANDIDATE_ENTRY_START]]] and
+[[[CANDIDATE_ENTRY_END]]] delimiters.
+
 ## Response Format
 
 Respond with ONLY a JSON object matching this schema:
@@ -176,7 +192,7 @@ Respond with ONLY a JSON object matching this schema:
   "rationale": "Why this decision was made",
   "scope": "What this applies to",
   "alternatives_considered": "Alternatives that were rejected (or null)",
-  "verbatim_quotes": ["Exact quotes from the entry supporting this decision"],
+  "verbatim_quotes": ["Exact quotes copied from CANDIDATE_ENTRY body only"],
   "warning": null
 }
 ```
@@ -466,6 +482,51 @@ def extract_decision(
             gate_results=extraction.gates,
             decision_body=None,
             rejection_reason=gate_rejection,
+            extraction=extraction,
+            llm_tokens_used=approx_tokens,
+        )
+
+    # 1b. g3_quotable enforcement (issue #481)
+    #
+    # Fail-closed: the gate must be an affirmative pass verdict. Every
+    # non-affirmative shape lands in rejection, classified for telemetry:
+    #   - "g3_quotable_missing":    gate key absent from ``extraction.gates``
+    #   - "g3_quotable_malformed":  gate present but not a dict, OR a dict
+    #                               without a ``passed`` key (parser drift
+    #                               — neither shape can be safely read)
+    #   - "g3_quotable_not_evaluated": parser default injection in place
+    #                               (``passed=false, reason="not evaluated"``)
+    #   - "g3_quotable_failed":     LLM explicitly reported ``passed=false``
+    #
+    # ``_parse_llm_response`` currently normalises every expected gate to a
+    # ``{passed, reason}`` dict, so the missing/malformed branches are
+    # unreachable today. They exist because this whole block is the
+    # defense-in-depth guard against a future parser change — every shape
+    # the parser could hand us must be classified, not crashed on.
+    g3 = extraction.gates.get("g3_quotable")
+    reason: str | None
+    if g3 is None:
+        reason = "g3_quotable_missing"
+    elif not isinstance(g3, dict) or "passed" not in g3:
+        reason = "g3_quotable_malformed"
+    elif not g3["passed"]:
+        reason = (
+            "g3_quotable_not_evaluated"
+            if g3.get("reason") == "not evaluated"
+            else "g3_quotable_failed"
+        )
+    else:
+        reason = None  # gate affirmatively satisfied — fall through
+
+    if reason is not None:
+        return ExtractionResult(
+            entry_id=entry_id,
+            topic=topic,
+            passed=False,
+            confidence=extraction.confidence,
+            gate_results=extraction.gates,
+            decision_body=None,
+            rejection_reason=reason,
             extraction=extraction,
             llm_tokens_used=approx_tokens,
         )

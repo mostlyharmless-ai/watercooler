@@ -2,7 +2,7 @@
 
 Git-native collaboration threads for human-AI coding teams.
 
-Hosted version coming soon at [watercoolerdev.com](https://watercoolerdev.com)
+Hosted version available at [watercoolerdev.com](https://watercoolerdev.com).
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/) [![MCP](https://img.shields.io/badge/MCP-enabled-green.svg)](https://modelcontextprotocol.io)
 
@@ -15,6 +15,9 @@ Hosted version coming soon at [watercoolerdev.com](https://watercoolerdev.com)
 ## What is Watercooler?
 
 Watercooler is an MCP server with a git-backed coordination and shared memory layer for agentic coding teams.
+
+> **Git stores what changed. Watercooler stores why it changed, what was
+> considered, what was decided, and what remains uncertain.**
 
 Collaboration was already difficult before agents entered the loop. Doing it well
 requires intent, attention, judgment, and enough shared context for people to
@@ -76,7 +79,7 @@ leads to rework, repeated assumptions, and weaker critique loops.
 Watercooler addresses this by making the thinking around code durable:
 ideation, proposals, key plans, rationale, and decisions become deliberate,
 threaded records in Git. That gives teams shared context they can revisit,
-query, and build on, with clear provenance for what was proposed, what was
+query, and build on, with a clear record of what was proposed, what was
 decided, and why.
 
 ---
@@ -85,17 +88,28 @@ decided, and why.
 
 ### 1. Authenticate
 
+If your repository is hosted on GitHub:
+
 ```bash
 gh auth login
 gh auth setup-git
 ```
 
-For other methods (PAT, SSH, environment variable), see [AUTHENTICATION.md](docs/AUTHENTICATION.md).
+If your repository is on a non-GitHub remote (GitLab, Gitea, a self-hosted
+server, etc.), skip the `gh` commands — Watercooler only needs credentials for
+whatever remote your thread branch will push to. See
+[AUTHENTICATION.md](docs/AUTHENTICATION.md) for PAT, SSH, and environment-variable
+setups.
+
+> The hosted dashboard at [watercoolerdev.com](https://watercoolerdev.com)
+> currently assumes GitHub for sign-in and repo access. The core CLI and MCP
+> server work with any git remote.
 
 ### 2. Connect your MCP client
 
 See [MCP-CLIENTS.md](docs/MCP-CLIENTS.md) for Claude Code, Codex, and Cursor.
-After connecting, call `watercooler_health` to verify the setup.
+`watercooler_health` is a recommended sanity check after connecting, but it is
+optional — you can skip straight to posting your first thread.
 
 ### 3. Create your first thread
 
@@ -113,23 +127,25 @@ Most collaborators work entirely through their MCP client:
 
 ## Documentation
 
-1. **[QUICKSTART.md](docs/QUICKSTART.md)** — Install, authenticate, connect your MCP
-   client, and post your first thread entry in under 10 minutes.
-2. **[WORKFLOW_EXAMPLES.md](docs/WORKFLOW_EXAMPLES.md)** — Canonical, condensed
-   collaboration patterns
-   for single-agent, multi-agent, team, and async handoff workflows.
-3. **[AUTHENTICATION.md](docs/AUTHENTICATION.md)** — All authentication methods: GitHub
-   CLI, environment variable, credentials file, and SSH.
-4. **[MCP-CLIENTS.md](docs/MCP-CLIENTS.md)** — Connect Claude Code, Codex, or Cursor.
-   Each section is self-contained with copy-pasteable config.
-5. **[CONFIGURATION.md](docs/CONFIGURATION.md)** — Config and credentials files, key
-   settings, environment variable reference, and custom roles.
-6. **[TOOLS-REFERENCE.md](docs/TOOLS-REFERENCE.md)** — Unified reference for all CLI
-   commands and MCP tools, with safety annotations and worked examples.
-7. **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** — Setup flowchart and top 10 issues
-   with diagnosis and fix instructions.
-8. **[TRADEMARK_POLICY.md](docs/TRADEMARK_POLICY.md)** — Rules for using the Watercooler
-   name, logos, and brand assets in forks, services, and integrations.
+**Start here.** Read in this order the first time through:
+
+1. **[QUICKSTART.md](docs/QUICKSTART.md)** — Zero to first entry in under 10 minutes.
+2. **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Where threads live, how reads and writes differ, branch scoping. Read once; referenced by everything below.
+3. **[MCP-CLIENTS.md](docs/MCP-CLIENTS.md)** — Claude Code, Codex, and Cursor setup.
+4. **[CONFIGURATION.md](docs/CONFIGURATION.md)** — Full config and environment variable reference.
+
+**Then, as needed:**
+
+5. **[WORKFLOW_EXAMPLES.md](docs/WORKFLOW_EXAMPLES.md)** — Canonical collaboration patterns for single-agent, multi-agent, team, and async handoff workflows.
+6. **[AUTHENTICATION.md](docs/AUTHENTICATION.md)** — GitHub CLI, PAT, environment variable, and SSH setup.
+7. **[TOOLS-REFERENCE.md](docs/TOOLS-REFERENCE.md)** — Unified reference for every CLI command and MCP tool, with safety annotations and worked examples.
+8. **[DAEMONS.md](docs/DAEMONS.md)** — Opt-in background workers (thread auditor, sync guard, decision detection, decision extraction) and finding-acknowledgement tools.
+9. **[FEDERATION.md](docs/FEDERATION.md)** — Searching across multiple repositories from a single MCP server.
+10. **[ROLES_CREATION.md](docs/ROLES_CREATION.md)** — The six canonical roles and how to add custom ones via `.watercooler/roles.toml`.
+11. **[DASHBOARD.md](docs/DASHBOARD.md)** — The browser UI companion.
+12. **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** — Setup flowchart and top issues with fixes.
+13. **[GLOSSARY.md](docs/GLOSSARY.md)** — Term definitions (ball, orphan branch, worktree, finding, namespace, …).
+14. **[TRADEMARK_POLICY.md](docs/TRADEMARK_POLICY.md)** — Rules for using the Watercooler name, logos, and brand assets.
 
 ---
 

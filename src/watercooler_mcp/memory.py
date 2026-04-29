@@ -15,7 +15,7 @@ from typing import Any, Mapping, Optional, Sequence
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
-from .observability import log_debug, log_warning, log_warning_once
+from .observability import log_debug, log_error, log_warning, log_warning_once
 
 # Import unified config helpers
 from watercooler.memory_config import (
@@ -187,10 +187,88 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
     # Get reranker algorithm
     reranker = get_graphiti_reranker()
 
-    # Derive database name from code_path (or use env override)
-    database = os.getenv("WATERCOOLER_GRAPHITI_DATABASE")
+    # Derive the canonical T2 database name. Resolution precedence:
+    #
+    # 1. Active hosted ``http_ctx.repo`` — per-request multi-tenant routing.
+    #    On a hosted Railway deployment a single MCP process serves
+    #    multiple ``<org>/<repo>`` tenants; the database name MUST come
+    #    from the request's ``X-Repo`` header so reads target the same
+    #    tenant graph that the write-side ``_canonicalize_t2_group_id``
+    #    routes to. This is the multi-tenant correctness invariant from
+    #    Plan v20 ("Multi-org hosted users already exist (Caleb + Jay)").
+    # 2. ``WATERCOOLER_GRAPHITI_DATABASE`` env var — single-tenant escape
+    #    hatch for stdio / dev / single-org self-hosted deployments.
+    # 3. ``derive_t2_database_name(code_path=...)`` — final fallback that
+    #    resolves the canonical ``<org>_<repo>_t2`` from a real local
+    #    code repository when one is available.
+    from watercooler.path_resolver import derive_t2_database_name
+
+    database: str | None = None
+    http_ctx = None
+    try:
+        from .context import get_effective_context
+        http_ctx = get_effective_context()
+    except ImportError:
+        http_ctx = None
+    except Exception as _ctx_err:
+        # Runtime error from get_effective_context() (rare — contextvar
+        # access in unusual threading configs). Log at ERROR before
+        # falling back so the silent fallback doesn't hide a real
+        # multi-tenant issue.
+        log_error(
+            f"MEMORY: get_effective_context() raised "
+            f"{_ctx_err.__class__.__name__}: {_ctx_err}; falling back to "
+            f"env/code_path resolution (off-hosted mode assumed)."
+        )
+        http_ctx = None
+    if http_ctx is not None and getattr(http_ctx, "repo", None):
+        # Hosted multi-tenant invariant: when an HTTP request context is
+        # active, the database MUST come from ``X-Repo`` per request. We
+        # refuse to fall back to a process-wide env var / code_path here
+        # — a silent fallback under hosted multi-tenancy would let one
+        # tenant's reads target another tenant's graph (or a shared default).
+        # Malformed headers (no ``/``, empty owner, or empty repo after
+        # the threads-suffix strip) are rejected so callers see a
+        # structured "graphiti unavailable" rather than silently
+        # writing/reading from the wrong place.
+        raw = http_ctx.repo
+        if "/" not in raw:
+            log_error(
+                f"MEMORY: hosted http_ctx.repo={raw!r} is malformed (no '/'); "
+                f"refusing to silently fall back to a single-tenant database. "
+                f"Graphiti config unavailable for this request."
+            )
+            return None
+        owner, repo_part = raw.split("/", 1)
+        # Use ``get_threads_suffix()`` rather than a hardcoded ``"-threads"``
+        # so deployments that override ``WATERCOOLER_THREADS_SUFFIX`` derive
+        # the same canonical name as the writer-side helper.
+        from watercooler.path_resolver import get_threads_suffix
+        threads_suffix = get_threads_suffix()
+        if threads_suffix and repo_part.endswith(threads_suffix):
+            repo_part = repo_part[: -len(threads_suffix)]
+        if not owner or not repo_part:
+            log_error(
+                f"MEMORY: hosted http_ctx.repo={raw!r} has empty owner or "
+                f"repo after threads-suffix strip (owner={owner!r}, "
+                f"repo={repo_part!r}); refusing to fall back to a "
+                f"non-canonical database name. Graphiti config unavailable."
+            )
+            return None
+        try:
+            database = derive_t2_database_name(repo_slug=f"{owner}/{repo_part}")
+        except Exception as e:
+            log_error(
+                f"MEMORY: derive_t2_database_name failed for http_ctx.repo={raw!r}: {e}; "
+                f"refusing to fall back to env/code_path under hosted ctx. "
+                f"Graphiti config unavailable for this request."
+            )
+            return None
+
     if not database:
-        database = _derive_database_name(code_path)
+        database = os.getenv("WATERCOOLER_GRAPHITI_DATABASE")
+    if not database:
+        database = derive_t2_database_name(code_path=code_path)
 
     # Return backend's GraphitiConfig with all fields
     # For localhost endpoints without keys, pass a sentinel placeholder
@@ -359,6 +437,29 @@ def get_graphiti_backend(config: GraphitiConfig) -> Any:
             "MEMORY: watercooler_memory not installed — T2 features disabled",
         )
         return {"error": "import_failed", "details": "watercooler_memory not installed"}
+
+    # Plan v20 Phase 5: hybrid must never live-write T2 locally. If the
+    # module-level runtime reports ``local_hybrid``, refuse to construct
+    # a local Graphiti backend so the submission path has no silent
+    # local fallback.
+    try:
+        from .memory_sync import get_runtime as _get_sync_runtime
+        runtime = _get_sync_runtime()
+    except Exception:
+        runtime = None
+    if runtime is not None and getattr(runtime, "surface", None) == "local_hybrid":
+        log_warning_once(
+            "graphiti_hybrid_refused",
+            "MEMORY: refusing to construct local Graphiti backend in local_hybrid — "
+            "T2 submission must route via premium_client.",
+        )
+        return {
+            "error": "hybrid_refused",
+            "details": (
+                "Local Graphiti backend construction is blocked in local_hybrid "
+                "(Plan v20 Phase 5). Route via premium_client."
+            ),
+        }
 
     try:
         from watercooler_memory.backends import GraphitiBackend  # type: ignore[attr-defined]

@@ -15,6 +15,9 @@ from watercooler.path_resolver import (
     derive_code_repo_from_threads,
     derive_code_repo_name,
     derive_group_id,
+    derive_project_group_id,
+    derive_t1_database_name,
+    derive_t2_database_name,
     derive_threads_repo_name,
     discover_git_info,
     get_threads_suffix,
@@ -608,3 +611,71 @@ class TestRoundTripDerivation:
 
         assert recovered == original
         assert threads_name == "my-project-wc"
+
+
+class TestDeriveProjectGroupId:
+    """Tests for slug-aware derive_project_group_id (Plan v20 Phase 1)."""
+
+    def test_slug_joined_with_underscore(self):
+        """repo_slug='<org>/<repo>' produces '<org>_<repo>' sanitised."""
+        assert (
+            derive_project_group_id(repo_slug="mostlyharmless-ai/watercooler")
+            == "mostlyharmless_ai_watercooler_cloud"
+        )
+
+    def test_slug_preferred_over_repo_only(self):
+        """When both are provided, repo_slug wins."""
+        assert (
+            derive_project_group_id(
+                repo_slug="org/repo",
+                code_repo_name="something-else",
+            )
+            == "org_repo"
+        )
+
+    def test_repo_only_falls_through(self):
+        """Without repo_slug, matches derive_group_id behavior."""
+        assert derive_project_group_id(code_repo_name="watercooler-cloud") == "watercooler_cloud"
+
+    def test_empty_inputs_fallback(self):
+        """Empty inputs return the default 'watercooler' fallback."""
+        assert derive_project_group_id() == "watercooler"
+
+    def test_invalid_slug_falls_through(self):
+        """Slug without '/' is treated as repo-only (falls to derive_group_id)."""
+        # When no '/', _split_slug returns (None, None), so we fall through.
+        # code_repo_name is None, so we hit the 'watercooler' fallback.
+        assert derive_project_group_id(repo_slug="just-repo-no-org") == "watercooler"
+
+    def test_slug_lowercased(self):
+        """Uppercase in slug gets lowercased."""
+        assert derive_project_group_id(repo_slug="Org-Name/Repo-Name") == "org_name_repo_name"
+
+
+class TestDeriveT1T2DatabaseNames:
+    """Tests for derive_t1_database_name / derive_t2_database_name."""
+
+    def test_t1_adds_suffix(self):
+        assert (
+            derive_t1_database_name(repo_slug="mostlyharmless-ai/watercooler")
+            == "mostlyharmless_ai_watercooler_cloud_t1"
+        )
+
+    def test_t2_adds_suffix(self):
+        assert (
+            derive_t2_database_name(repo_slug="mostlyharmless-ai/watercooler")
+            == "mostlyharmless_ai_watercooler_cloud_t2"
+        )
+
+    def test_t1_t2_differ_only_in_suffix(self):
+        t1 = derive_t1_database_name(repo_slug="org/repo")
+        t2 = derive_t2_database_name(repo_slug="org/repo")
+        assert t1.endswith("_t1")
+        assert t2.endswith("_t2")
+        assert t1[:-3] == t2[:-3]
+
+    def test_repo_only_also_suffixed(self):
+        assert (
+            derive_t1_database_name(code_repo_name="watercooler-cloud")
+            == "watercooler_cloud_t1"
+        )

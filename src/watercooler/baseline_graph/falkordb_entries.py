@@ -246,16 +246,32 @@ class FalkorDBEntryStore:
         entry_id: str,
         thread_topic: str,
         embedding: list[float],
+        *,
+        role: str = "",
+        entry_type: str = "",
+        agent: str = "",
+        timestamp: str = "",
     ) -> None:
         """Store or update an entry embedding.
 
         Creates or updates an Entry node with the given embedding vector.
         Uses MERGE to upsert based on entry_id.
 
+        Plan v20 Phase 8 + Codex re-review (01KPZ47AYVR56NF0PTNAK4NQWH §1):
+        the T1 schema now materialises ``role``, ``entry_type``, ``agent``,
+        and ``timestamp`` so hosted semantic search can filter on them with
+        parity against the hosted keyword path. Callers that do not have the
+        metadata at hand can omit these kwargs — the properties default to
+        empty strings and filtered queries simply exclude those rows.
+
         Args:
             entry_id: Entry ULID (primary key)
             thread_topic: Thread topic for filtering
             embedding: Embedding vector (must match embedding_dim)
+            role: Agent role (``implementer``, ``planner``, ...).
+            entry_type: Entry type (``Note``, ``Plan``, ...).
+            agent: Author name as recorded in the header.
+            timestamp: ISO-8601 timestamp string, stored raw for range scans.
 
         Raises:
             RuntimeError: If not connected.
@@ -271,11 +287,15 @@ class FalkorDBEntryStore:
             )
 
         # MERGE upserts the Entry node by entry_id
-        # SET updates all properties including embedding
+        # SET updates all properties including embedding + metadata
         query = """
             MERGE (n:Entry {entry_id: $entry_id})
             SET n.thread_topic = $thread_topic,
                 n.group_id = $group_id,
+                n.role = $role,
+                n.entry_type = $entry_type,
+                n.agent = $agent,
+                n.timestamp = $timestamp,
                 n.embedding = vecf32($embedding)
             RETURN n.entry_id
         """
@@ -286,6 +306,10 @@ class FalkorDBEntryStore:
                 "entry_id": entry_id,
                 "thread_topic": thread_topic,
                 "group_id": self.group_id,
+                "role": role or "",
+                "entry_type": entry_type or "",
+                "agent": agent or "",
+                "timestamp": timestamp or "",
                 "embedding": embedding,
             },
         )
@@ -822,10 +846,31 @@ class FalkorDBEntryStoreSync:
         entry_id: str,
         thread_topic: str,
         embedding: list[float],
+        *,
+        role: str = "",
+        entry_type: str = "",
+        agent: str = "",
+        timestamp: str = "",
     ) -> None:
-        """Store or update an entry embedding."""
+        """Store or update an entry embedding.
+
+        Sync wrapper around :meth:`FalkorDBEntryStore.store_embedding`.
+        Codex re-review 01KPZ5ZH65WQM503HBB06EWEVA widened this to forward
+        the metadata kwargs (role / entry_type / agent / timestamp) the
+        async store accepts; without it, callers on the stdio/local T1
+        path would raise ``TypeError: unexpected keyword argument`` and
+        silently fall back to the JSONL index.
+        """
         _run_async(
-            self._async_store.store_embedding(entry_id, thread_topic, embedding)
+            self._async_store.store_embedding(
+                entry_id,
+                thread_topic,
+                embedding,
+                role=role,
+                entry_type=entry_type,
+                agent=agent,
+                timestamp=timestamp,
+            )
         )
 
     def search_similar(

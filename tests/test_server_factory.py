@@ -57,7 +57,10 @@ class TestMemoryToolsForSurface:
     def test_local_full_gets_all_memory(self):
         rt = ToolRuntime(surface="local_full")
         result = memory_tools_for_surface(rt)
-        migration = {"watercooler_migration_preflight", "watercooler_migrate_to_memory_backend"}
+        migration = {
+            "watercooler_migration_preflight",
+            "watercooler_migrate_to_memory_backend",
+        }
         assert result == REMOTE_CAPABLE_MEMORY_TOOL_NAMES - migration
 
     def test_local_hybrid_excludes_remote_mount_and_disabled(self):
@@ -98,6 +101,16 @@ class TestMountableRemoteTools:
     def test_non_hybrid_returns_empty(self):
         rt = ToolRuntime(surface="local_full")
         assert mountable_remote_tools_for_hybrid(rt) == set()
+
+    def test_mountable_remote_tools_for_hybrid_includes_acknowledge_finding(self):
+        profile = CapabilityProfile(routes=HYBRID_DEFAULT_ROUTES)
+        rt = ToolRuntime(
+            surface="local_hybrid",
+            capability_profile=profile,
+            premium_client=MagicMock(),
+        )
+        result = mountable_remote_tools_for_hybrid(rt)
+        assert "watercooler_acknowledge_finding" in result
 
 
 # ---------------------------------------------------------------------------
@@ -167,9 +180,9 @@ class TestPremiumContainment:
         full_names = _tool_names(full_mcp)
         premium_names = _tool_names(premium_mcp)
         assert premium_names, "Premium surface should have at least one tool"
-        assert premium_names.issubset(full_names), (
-            f"Premium tools not in full: {premium_names - full_names}"
-        )
+        assert premium_names.issubset(
+            full_names
+        ), f"Premium tools not in full: {premium_names - full_names}"
 
 
 class TestReindexHostedAbsence:

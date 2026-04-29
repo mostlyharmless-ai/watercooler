@@ -107,6 +107,17 @@ class MemoryTask:
     next_retry_at: float = 0.0
     last_error: str = ""
 
+    # Plan v20 Phase 4/5: execution-target + remote-handoff metadata for
+    # hybrid submission. ``execution_target="local"`` means this task is
+    # executed by the local queue worker (stdio/local modes). ``"remote"``
+    # means the local queue is a submission queue — the worker's job is
+    # to hand the task off to the hosted MCP and record the returned
+    # ``remote_task_id`` here; the actual Graphiti/T1-Falkor write runs
+    # on the hosted side's queue. See docs/MCP-CLIENTS.md on the
+    # two-stage lifecycle.
+    execution_target: str = "local"
+    remote_task_id: str = ""
+
     # Result data (populated on success)
     episode_uuid: str = ""
     entities_extracted: list[str] = field(default_factory=list)

@@ -150,6 +150,8 @@ class DaemonLLMClient:
         prompt: str,
         system: str = "",
         max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        timeout: Optional[float] = None,
     ) -> Optional[str]:
         """Send a chat completion request to the configured LLM.
 
@@ -157,6 +159,8 @@ class DaemonLLMClient:
             prompt: User message content.
             system: Optional system message.
             max_tokens: Override max_tokens from config.
+            temperature: Override sampling temperature (default 0.3 if None).
+            timeout: Override HTTP timeout in seconds (default cfg.timeout).
 
         Returns:
             LLM response text, or None on any failure (connection,
@@ -170,6 +174,11 @@ class DaemonLLMClient:
 
         cfg = self._config
         _is_anthropic = is_anthropic_url(cfg.api_base)
+
+        effective_temperature = temperature if temperature is not None else 0.3
+        effective_timeout = timeout if timeout is not None else cfg.timeout
+        if effective_timeout is None:
+            effective_timeout = 60.0
 
         # Model-aware max_tokens — thinking models need a higher floor
         from watercooler.models import get_min_max_tokens
@@ -194,7 +203,7 @@ class DaemonLLMClient:
                 "model": cfg.model,
                 "max_tokens": effective_max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
+                "temperature": effective_temperature,
             }
             if system:
                 payload["system"] = system
@@ -221,7 +230,7 @@ class DaemonLLMClient:
                 "model": cfg.model,
                 "messages": messages,
                 "max_tokens": effective_max_tokens,
-                "temperature": 0.3,
+                "temperature": effective_temperature,
             }
             headers = {"Content-Type": "application/json"}
             if cfg.api_key and cfg.api_key not in AUTH_SKIP_SENTINELS:
@@ -234,7 +243,7 @@ class DaemonLLMClient:
         sem = _get_localhost_semaphore(cfg.api_base) if self._is_localhost else None
         acquired = False
         if sem is not None:
-            sem_timeout = min((cfg.timeout if cfg.timeout is not None else 60.0) * 2, 120.0)
+            sem_timeout = min((effective_timeout if effective_timeout is not None else 60.0) * 2, 120.0)
             acquired = sem.acquire(timeout=sem_timeout)
             if not acquired:
                 logger.warning(
@@ -246,7 +255,7 @@ class DaemonLLMClient:
         from .telemetry import track_call, SVC_LLM
 
         try:
-            with httpx.Client(timeout=cfg.timeout) as client, \
+            with httpx.Client(timeout=effective_timeout) as client, \
                  track_call(SVC_LLM) as t:
                 response = client.post(url, json=payload, headers=headers)
                 response.raise_for_status()

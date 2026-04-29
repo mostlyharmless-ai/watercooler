@@ -263,6 +263,11 @@ def _cli_write_with_sync(
                     file=sys.stderr,
                 )
         return result
+    except ValueError as exc:
+        # Surface validation errors (bad role, malformed .watercooler/roles.toml,
+        # etc.) cleanly instead of tracebacking out of the CLI.
+        print(f"❌ {exc}", file=sys.stderr)
+        sys.exit(1)
     finally:
         if wt_lock:
             wt_lock.release()
@@ -385,7 +390,7 @@ def main(argv: list[str] | None = None) -> None:
     p_say.add_argument("topic")
     p_say.add_argument("--threads-dir")
     p_say.add_argument("--agent", help="Agent name (defaults to Team)")
-    p_say.add_argument("--role", help="Agent role (planner, critic, implementer, tester, pm, scribe)")
+    p_say.add_argument("--role", help="Agent role — see project's .watercooler/roles.toml or call watercooler_role_details for the active catalog (default: implementer)")
     p_say.add_argument("--title", required=True, help="Entry title")
     p_say.add_argument("--type", dest="entry_type", default="Note", help="Entry type (Note, Plan, Decision, PR, Closure)")
     p_say.add_argument("--body", required=True, help="Entry body text or @file path")
@@ -399,7 +404,7 @@ def main(argv: list[str] | None = None) -> None:
     p_ack.add_argument("topic")
     p_ack.add_argument("--threads-dir")
     p_ack.add_argument("--agent", help="Agent name (defaults to Team)")
-    p_ack.add_argument("--role", help="Agent role (planner, critic, implementer, tester, pm, scribe)")
+    p_ack.add_argument("--role", help="Agent role — see project's .watercooler/roles.toml or call watercooler_role_details for the active catalog")
     p_ack.add_argument("--title", help="Entry title (default: Ack)")
     p_ack.add_argument("--type", dest="entry_type", default="Note", help="Entry type (Note, Plan, Decision, PR, Closure)")
     p_ack.add_argument("--body", help="Entry body text or @file path (default: ack)")
@@ -463,6 +468,28 @@ def main(argv: list[str] | None = None) -> None:
     p_install_hooks.add_argument("--hooks-dir", help="Git hooks directory (default: .git/hooks)")
     p_install_hooks.add_argument("--force", action="store_true", help="Overwrite existing hooks")
 
+    # Roles commands
+    p_roles = sub.add_parser("roles", help="Roles management")
+    roles_sub = p_roles.add_subparsers(dest="roles_cmd")
+
+    p_roles_init = roles_sub.add_parser(
+        "init",
+        help="Scaffold .watercooler/roles.toml from bundled defaults",
+    )
+    p_roles_init.add_argument(
+        "--project-path",
+        help="Project directory (default: current directory)",
+    )
+    p_roles_init.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing roles.toml",
+    )
+
+    # Memory-tier migration: stdio ↔ hybrid
+    from watercooler.migration.cli import add_migrate_parser
+    add_migrate_parser(sub)
+
     # Config commands
     p_config = sub.add_parser("config", help="Configuration management")
     config_sub = p_config.add_subparsers(dest="config_cmd")
@@ -498,7 +525,7 @@ def main(argv: list[str] | None = None) -> None:
     p_append.add_argument("topic")
     p_append.add_argument("--threads-dir")
     p_append.add_argument("--agent", required=True, help="Agent name")
-    p_append.add_argument("--role", required=True, help="Agent role (planner, critic, implementer, tester, pm, scribe)")
+    p_append.add_argument("--role", required=True, help="Agent role — see project's .watercooler/roles.toml or call watercooler_role_details for the active catalog")
     p_append.add_argument("--title", required=True, help="Entry title")
     p_append.add_argument("--type", dest="entry_type", default="Note", help="Entry type (Note, Plan, Decision, PR, Closure)")
     p_append.add_argument("--body", required=True, help="Entry body text or @file path")
@@ -860,6 +887,22 @@ def main(argv: list[str] | None = None) -> None:
         result = install_hooks(code_root=code_root, hooks_dir=hooks_dir, force=args.force)
         print(result)
         sys.exit(0)
+
+    if args.cmd == "roles":
+        roles_cmd = getattr(args, "roles_cmd", None)
+        if not roles_cmd:
+            p_roles.print_help()
+            sys.exit(1)
+        if roles_cmd == "init":
+            from pathlib import Path
+            from .commands import roles_init
+
+            project_path = Path(args.project_path) if args.project_path else Path.cwd()
+            sys.exit(roles_init(project_path=project_path, force=args.force))
+
+    if args.cmd == "migrate":
+        from watercooler.migration.cli import cmd_migrate
+        sys.exit(cmd_migrate(args))
 
     if args.cmd == "config":
         from pathlib import Path

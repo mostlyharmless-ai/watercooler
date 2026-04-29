@@ -222,9 +222,14 @@ def load_thread_entries(graph_dir: Path, topic: str) -> Iterator[Dict[str, Any]]
         for line in f:
             if line.strip():
                 try:
-                    yield json.loads(line)
+                    parsed = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                # Defensive: skip valid-JSON-but-wrong-shape lines (e.g.
+                # a bare array, string, or ``null`` from a corrupted writer
+                # or partial merge). Consumers downstream assume dict shape.
+                if isinstance(parsed, dict):
+                    yield parsed
 
 
 def load_thread_entries_dict(graph_dir: Path, topic: str) -> Dict[str, Dict[str, Any]]:

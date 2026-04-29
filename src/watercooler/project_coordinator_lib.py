@@ -1,7 +1,9 @@
-"""Project Coordinator shared library — pure detection logic.
+"""Project Coordinator shared library — detection logic.
 
-Stdlib-only, fully testable.  All five v1A detectors live here as
-stateless functions that the daemon calls each tick.
+All five v1A detectors live here as stateless functions that the daemon calls
+each tick.  ``_has_xref_decision`` performs a shallow graph read (Phase 3b-2)
+but is guarded by the ``threads_dir`` optional so the rest of the module
+remains testable without a real threads directory.
 
 Type definitions (``EntryView``, ``BurstBaseline``, ``CoordinatorExtras``)
 enforce typed boundaries between the daemon and these detectors.
@@ -9,11 +11,13 @@ enforce typed boundaries between the daemon and these detectors.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, TypedDict
 
 from watercooler.pulse_stance_lib import AdvisoryAction, CoordinatorLead
@@ -205,27 +209,204 @@ def entries_to_views(raw_entries: list[dict[str, Any]]) -> list[EntryView]:
     return views
 
 
-def _check_suppression(
+def _suppression_details(
     thread_tags: set[str],
     suppression_tags: set[str],
-) -> tuple[str, dict[str, str]]:
-    """Check whether a thread is suppressed by annotation tags.
+) -> dict[str, str]:
+    """Return a ``suppressed_by`` marker if a suppression tag matches.
 
-    Returns:
-        (severity, extra_details) — severity is "info" if suppressed,
-        "warning" otherwise.  extra_details contains "suppressed_by" key
-        when suppressed, empty dict otherwise.
+    The tag-match primitive shared by ``stalled_*`` (which downgrades
+    ``warning`` to ``info`` on match) and ``aware_*`` (which is already
+    ``info`` and only annotates the finding).
+
+    Returns an empty dict when no tag matches.
     """
     matched = thread_tags & suppression_tags
     if matched:
         tag = sorted(matched)[0]
-        return "info", {"suppressed_by": f"tag:{tag}"}
+        return {"suppressed_by": f"tag:{tag}"}
+    return {}
+
+
+def _check_suppression(
+    thread_tags: set[str],
+    suppression_tags: set[str],
+) -> tuple[str, dict[str, str]]:
+    """Severity downgrade helper for ``stalled_*`` detectors.
+
+    Returns ``("info", {"suppressed_by": ...})`` if a suppression tag
+    matches the thread's annotation tags, else ``("warning", {})``.
+
+    ``aware_*`` detectors should call ``_suppression_details()`` directly
+    so their base ``info`` severity is preserved (see Phase 3a-3).
+    """
+    details = _suppression_details(thread_tags, suppression_tags)
+    if details:
+        return "info", details
     return "warning", {}
 
 
 # ---------------------------------------------------------------------------
 # Detector 1: stalled_open_loop
 # ---------------------------------------------------------------------------
+
+
+# Defensive caps on xref fan-out. An annotation can legitimately reference a
+# handful of entries; thousands is either runaway growth or adversarial input.
+# Two independent ceilings keep traversal bounded without affecting any
+# realistic use case:
+#
+# * ``_MAX_XREFS_PER_STATE`` — per-annotation-state truncation. Protects
+#   against a single state carrying an unbounded xref list.
+# * ``_MAX_XREFS_TOTAL`` — total unique xref fetches per ``_has_xref_decision``
+#   call, summed across all annotation states on the source thread. Protects
+#   against a thread with many annotation states each carrying xrefs near the
+#   per-state cap, which the per-state cap alone cannot bound.
+#
+# Current production observation (2026-04-19, 413 threads): max xrefs per state
+# = 7, p99 = 3, max distinct xrefs per thread ≈ 15. 50 per state / 500 total
+# gives ~7×/30× headroom over observed peaks and bounds read-amplification at
+# 500 cross-thread reads per affected tick — a defense-in-depth control.
+_MAX_XREFS_PER_STATE = 50
+_MAX_XREFS_TOTAL = 500
+
+
+def _load_thread_annotation_states(
+    threads_dir: Path, topic: str
+) -> dict[str, Any] | None:
+    """Load a thread's annotation states, or return ``None`` on any read error.
+
+    Scoped to a single thread — cost grows with that thread's annotation file,
+    not with the graph. Used by ``detect_stalled_open_loops`` to gate the
+    reverse-index scan on actual xref presence before paying whole-repo cost.
+    """
+    try:
+        from watercooler.baseline_graph.annotations import load_or_rebuild_state
+        from watercooler.baseline_graph.storage import (
+            get_graph_dir,
+            get_thread_graph_dir,
+        )
+
+        graph_dir = get_graph_dir(threads_dir)
+        thread_dir = get_thread_graph_dir(graph_dir, topic)
+        return load_or_rebuild_state(thread_dir, read_only=True)
+    except Exception as exc:
+        # Fail-open per Phase 3b-2 contract: any read/parse/shape error here
+        # (OSError from IO, JSONDecodeError from a truncated cache,
+        # AttributeError/TypeError from a malformed cached state like
+        # {"entry-1": 123} where from_dict() assumes a dict, etc.) must not
+        # abort the tick. Returning None makes the xref traversal a no-op
+        # for this thread and lets the detector fall through to its normal
+        # stalled_open_loop path. exc_info preserves the trace for ops.
+        logger.debug(
+            "_load_thread_annotation_states: load failed for %s: %s",
+            topic,
+            exc,
+            exc_info=True,
+        )
+        return None
+
+
+def _states_have_any_xrefs(states: dict[str, Any]) -> bool:
+    """True if any annotation state in *states* carries at least one xref."""
+    for ann in states.values():
+        if ann.xrefs:
+            return True
+    return False
+
+
+def _has_xref_decision(
+    threads_dir: Path,
+    topic: str,
+    entry_topic_index: dict[str, str],
+    *,
+    states: dict[str, Any] | None = None,
+) -> str | None:
+    """Return the resolving xref entry ID if any xref from *topic*'s annotations
+    resolves to a cross-thread Decision entry, otherwise None.
+
+    Fail-open: any read error silently returns None so a corrupt or missing
+    annotation file never blocks the detector.  Only cross-thread targets are
+    checked — same-thread Decision entries are already caught by the
+    ``has_resolution`` guard inside ``detect_stalled_open_loops``.
+
+    Args:
+        threads_dir: Root threads directory passed through from the daemon tick.
+        topic: The source thread's topic identifier.
+        entry_topic_index: Pre-built ``entry_id → thread_topic`` mapping. The
+            daemon builds this once per tick via
+            ``watercooler.baseline_graph.writer.build_entry_topic_index`` and
+            reuses it across all topics.
+        states: Pre-loaded annotation states for *topic*. When omitted, the
+            function loads them itself; callers that already gated on xref
+            presence pass them in to avoid a redundant read.
+
+    Returns:
+        The target entry ID that resolved to a cross-thread Decision, or None
+        if not found or on any read error (fail-open).
+    """
+    if states is None:
+        loaded = _load_thread_annotation_states(threads_dir, topic)
+        if loaded is None:
+            return None
+        states = loaded
+
+    from watercooler.baseline_graph.writer import get_entry_node_from_graph
+
+    # Per-traversal dedup — a specific entry never needs to be fetched twice
+    # on the same call. Dedup MUST be by xref_entry_id (the actual fetch key
+    # used by get_entry_node_from_graph), NOT by target_topic: two different
+    # entries in the same target topic can legitimately differ in entry_type
+    # (Note vs Decision), so topic-level dedup would mark the topic "checked"
+    # after inspecting a Note and silently skip a subsequent Decision in the
+    # same topic, producing a false-negative stalled_open_loop. Iteration
+    # order over annotation states is nondeterministic (materialize_all_states
+    # builds order from a set), so topic-dedup is a live intermittent bug,
+    # not a theoretical one.
+    #
+    # ``_MAX_XREFS_TOTAL`` bounds the total number of *distinct* cross-thread
+    # fetches across all states on this thread — the per-state cap alone
+    # cannot bound a thread with many annotation states. We stop once
+    # ``len(checked_entries)`` (which only grows on new entry IDs after the
+    # dedup check) reaches the ceiling.
+    checked_entries: set[str] = set()
+    try:
+        for ann in states.values():
+            if len(checked_entries) >= _MAX_XREFS_TOTAL:
+                break
+            xrefs = (ann.xrefs or [])[:_MAX_XREFS_PER_STATE]
+            for xref_entry_id in xrefs:
+                if xref_entry_id in checked_entries:
+                    continue
+                if len(checked_entries) >= _MAX_XREFS_TOTAL:
+                    break
+                checked_entries.add(xref_entry_id)
+                target_topic = entry_topic_index.get(xref_entry_id)
+                if target_topic is None or target_topic == topic:
+                    # Missing from index (genuinely absent) or same-thread xref
+                    # (caught by has_resolution in detect_stalled_open_loops).
+                    continue
+                try:
+                    target = get_entry_node_from_graph(
+                        threads_dir, xref_entry_id, topic=target_topic
+                    )
+                except (OSError, KeyError, ValueError, json.JSONDecodeError):
+                    continue
+                if not target:
+                    continue
+                if target.get("thread_topic") == topic:
+                    continue
+                if target.get("entry_type") == "Decision":
+                    return xref_entry_id
+    except Exception as exc:
+        logger.debug(
+            "_has_xref_decision: traversal failed for %s: %s",
+            topic,
+            exc,
+            exc_info=True,
+        )
+        return None
+    return None
 
 
 def detect_stalled_open_loops(
@@ -235,11 +416,40 @@ def detect_stalled_open_loops(
     suppression_tags: set[str],
     thread_tags: set[str],
     tick_time: float = 0.0,
+    *,
+    threads_dir: Path | None = None,
+    entry_topic_index: dict[str, str] | Callable[[], dict[str, str]] | None = None,
 ) -> CoordinatorFinding | None:
     """Detect threads with Plan entries but no Decision or Closure.
 
     A staleness gate ensures threads with recent activity (< OPEN_LOOP_MIN_STALE_DAYS)
     are not flagged — a Plan posted yesterday isn't "stalled."
+
+    Args:
+        entries: Entry views for the thread being evaluated.
+        thread_topic: The thread's topic identifier.
+        thread_status: Raw status string from the graph (e.g. "OPEN", "CLOSED").
+        suppression_tags: Global suppression tag set from daemon config.
+        thread_tags: Tags present on this specific thread.
+        tick_time: Unix timestamp of the current daemon tick; 0 disables the
+            staleness gate (backward-compatible default).
+        threads_dir: When provided, performs a cross-thread xref traversal:
+            if any annotation xref from this thread resolves to a Decision entry
+            in another thread, ``xref_resolves_to`` is populated in the returned
+            finding's details and the finding severity/shape are unchanged.
+            Omit to skip the traversal (e.g. in unit tests that do not need a
+            real threads dir).
+        entry_topic_index: Pre-built ``entry_id → thread_topic`` mapping, or
+            a zero-arg callable that returns one on demand. Daemons pass a
+            memoized callable so the whole-repo scan only runs when a stalled
+            thread actually needs the xref lookup — healthy ticks never pay
+            the cost. If ``None`` and ``threads_dir`` is provided, the index
+            is built locally (CLI/test convenience).
+
+    Returns:
+        A ``CoordinatorFinding`` when the thread matches the stalled-open-loop
+        pattern (optionally annotated with ``xref_resolves_to`` if a
+        cross-thread Decision was found), otherwise ``None``.
     """
     from watercooler.fs import is_closed
 
@@ -269,6 +479,50 @@ def detect_stalled_open_loops(
             days_stale = (tick_time - newest_ts) / 86400.0
             if days_stale < OPEN_LOOP_MIN_STALE_DAYS:
                 return None
+
+    # Cross-thread xref suppression: if any xref from this thread resolves to a
+    # Decision entry in another thread, the open loop is externally resolved.
+    # Emits a coordinator_xref_suppression info finding instead of
+    # stalled_open_loop for observability parity with tag suppression — agents
+    # and operators can see that the thread would have been flagged.
+    #
+    # Cost gate: load *this* thread's annotation states first (scoped cost,
+    # grows with thread-local state). Only when xrefs are actually present
+    # do we resolve the whole-repo reverse index. A stale thread with no
+    # xrefs never triggers a graph-wide scan.
+    xref_resolver: str | None = None
+    if threads_dir is not None:
+        source_states = _load_thread_annotation_states(threads_dir, thread_topic)
+        if source_states is not None and _states_have_any_xrefs(source_states):
+            if entry_topic_index is None:
+                from watercooler.baseline_graph.writer import build_entry_topic_index
+
+                resolved_index = build_entry_topic_index(threads_dir)
+            elif callable(entry_topic_index):
+                resolved_index = entry_topic_index()
+            else:
+                resolved_index = entry_topic_index
+            xref_resolver = _has_xref_decision(
+                threads_dir, thread_topic, resolved_index, states=source_states
+            )
+        if xref_resolver is not None:
+            return CoordinatorFinding(
+                category="coordinator_xref_suppression",
+                topic=thread_topic,
+                severity="info",
+                message=(
+                    f"Thread '{thread_topic}' has {plan_count} Plan entries "
+                    f"but is resolved by cross-thread Decision "
+                    f"(xref {xref_resolver})"
+                ),
+                details={
+                    "plan_count": plan_count,
+                    "entry_count": len(entries),
+                    "xref_resolves_to": xref_resolver,
+                    "suppressed_by": f"xref:{xref_resolver}",
+                },
+                dedup_signature=f"coordinator_xref_suppression|{thread_topic}",
+            )
 
     severity, suppression_details = _check_suppression(thread_tags, suppression_tags)
     suffix = ""
@@ -397,8 +651,17 @@ def detect_aware_burst(
     thread_topic: str,
     baseline: BurstBaseline | None,
     tick_time: float,
+    *,
+    suppression_tags: set[str] | frozenset[str] = frozenset(),
+    thread_tags: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[CoordinatorFinding | None, BurstBaseline]:
-    """Detect sudden spikes in entry volume relative to thread baseline."""
+    """Detect sudden spikes in entry volume relative to thread baseline.
+
+    When ``suppression_tags`` intersects ``thread_tags`` the finding is
+    still emitted at base severity ``info`` with a ``suppressed_by``
+    marker in ``details`` so downstream consumers can filter suppressed
+    findings without losing observability (Phase 3a-3).
+    """
     # Filter to entries with valid timestamps
     dated: list[tuple[EntryView, float]] = []
     for entry in entries:
@@ -472,6 +735,21 @@ def detect_aware_burst(
         window_start_date = datetime.fromtimestamp(
             window_start, tz=timezone.utc
         ).strftime("%Y-%m-%d")
+        suppression_details = _suppression_details(
+            set(thread_tags), set(suppression_tags)
+        )
+        details: dict[str, Any] = {
+            "current_rate": round(current_rate, 2),
+            "baseline_rate": round(baseline.baseline_rate, 2),
+            "multiplier": round(multiplier, 2),
+            "new_entries": new_entries,
+            **suppression_details,
+        }
+        suffix = (
+            f" (suppressed by {suppression_details['suppressed_by']})"
+            if suppression_details
+            else ""
+        )
         return (
             CoordinatorFinding(
                 category="aware_burst",
@@ -480,14 +758,9 @@ def detect_aware_burst(
                 message=(
                     f"Activity burst in '{thread_topic}': {current_rate:.1f} entries/day "
                     f"vs baseline {baseline.baseline_rate:.1f} entries/day "
-                    f"({multiplier:.1f}x)"
+                    f"({multiplier:.1f}x){suffix}"
                 ),
-                details={
-                    "current_rate": round(current_rate, 2),
-                    "baseline_rate": round(baseline.baseline_rate, 2),
-                    "multiplier": round(multiplier, 2),
-                    "new_entries": new_entries,
-                },
+                details=details,
                 dedup_signature=f"aware_burst|{thread_topic}|{window_start_date}",
             ),
             updated_baseline,
@@ -599,8 +872,16 @@ def detect_role_concentration(
     entries: list[EntryView],
     thread_topic: str,
     thread_status: str,
+    *,
+    suppression_tags: set[str] | frozenset[str] = frozenset(),
+    thread_tags: set[str] | frozenset[str] = frozenset(),
 ) -> CoordinatorFinding | None:
-    """Detect threads dominated by a single role."""
+    """Detect threads dominated by a single role.
+
+    When ``suppression_tags`` intersects ``thread_tags`` the finding is
+    still emitted at base severity ``info`` with a ``suppressed_by``
+    marker in ``details`` (Phase 3a-3).
+    """
     from watercooler.fs import is_closed
 
     if is_closed(thread_status):
@@ -626,9 +907,15 @@ def detect_role_concentration(
         return None
 
     # Identify missing canonical roles
-    canonical_roles = {"planner", "critic", "implementer", "tester", "pm", "scribe"}
     present_roles = set(role_counter.keys())
-    missing_roles = sorted(canonical_roles - present_roles)
+    missing_roles = sorted(_CANONICAL_ROLES - present_roles)
+
+    suppression_details = _suppression_details(set(thread_tags), set(suppression_tags))
+    suffix = (
+        f" (suppressed by {suppression_details['suppressed_by']})"
+        if suppression_details
+        else ""
+    )
 
     return CoordinatorFinding(
         category="aware_role_concentration",
@@ -636,7 +923,7 @@ def detect_role_concentration(
         severity="info",
         message=(
             f"Thread '{thread_topic}' is {concentration:.0%} {dominant_role} "
-            f"({dominant_count}/{total_named} entries)"
+            f"({dominant_count}/{total_named} entries){suffix}"
         ),
         details={
             "dominant_role": dominant_role,
@@ -644,6 +931,7 @@ def detect_role_concentration(
             "role_distribution": dict(role_counter),
             "entry_count": len(entries),
             "missing_roles": missing_roles,
+            **suppression_details,
         },
         dedup_signature=f"aware_role_concentration|{thread_topic}|{dominant_role}",
     )
@@ -659,7 +947,12 @@ _LEAD_TRIGGER_CATEGORIES: frozenset[str] = frozenset(
         "aware_role_concentration",
         "stalled_dropout",
         "aware_burst",
+        "connect_role_complement",
     }
+)
+
+_CANONICAL_ROLES: frozenset[str] = frozenset(
+    {"planner", "critic", "implementer", "tester", "pm", "scribe"}
 )
 
 
@@ -678,12 +971,14 @@ def _build_t2_context(
     self-contained on the public pure function so future callers in other
     daemons cannot regress it silently.
 
-    Returns a dict with ``schema_version=1``.
+    Returns a dict with ``schema_version=2``.  v1 used ``stalled``; v2 renames
+    it to ``analysis_stalled`` to make clear it reflects the analysis window's
+    staleness verdict, not a global coordinator judgment.
     """
     wf = thread_analysis.get("workflow_shape") or {}
     return {
-        "schema_version": 1,
-        "stalled": bool(thread_analysis.get("stalled", False)),
+        "schema_version": 2,
+        "analysis_stalled": bool(thread_analysis.get("stalled", False)),
         "days_since_last": thread_analysis.get("days_since_last"),
         "workflow_shape_id": wf.get("id"),
         "workflow_shape_name": wf.get("name"),
@@ -786,6 +1081,25 @@ def _build_lead_for_finding(
         )
         tags = ("pm",)
 
+    elif category == "connect_role_complement":
+        missing_role = d.get("missing_role", "unknown")
+        related_topic = d.get("related_thread_topic", "unknown")
+        role_count = d.get("related_thread_role_entry_count", 0)
+        summary = (
+            f"Thread '{topic}' has no active {missing_role}; "
+            f"related thread '{related_topic}' has {role_count} {missing_role} entries"
+        )
+        action = AdvisoryAction(
+            phase="pre",
+            tool="watercooler_read_thread",
+            arguments={"topic": related_topic, "summary_only": True},
+            reason=(
+                f"Read related thread '{related_topic}' to understand "
+                f"its active {missing_role} contribution"
+            ),
+        )
+        tags = (missing_role, "pm") if missing_role != "pm" else ("pm",)
+
     else:  # pragma: no cover -- defensive; covered by _LEAD_TRIGGER_CATEGORIES filter
         return None
 
@@ -867,6 +1181,10 @@ def generate_leads_for_thread(
         suppressed_by = source_cf.details.get("suppressed_by")
         if suppressed_by:
             details["suppressed_by"] = suppressed_by
+        # Propagate relation_evidence for connect_role_complement reviewability.
+        relation_evidence = source_cf.details.get("relation_evidence")
+        if relation_evidence:
+            details["relation_evidence"] = relation_evidence
 
         leads.append(
             CoordinatorFinding(
@@ -880,3 +1198,306 @@ def generate_leads_for_thread(
             )
         )
     return leads
+
+
+# ---------------------------------------------------------------------------
+# Detector 6: connect_role_complement (Phase 3d-1)
+# ---------------------------------------------------------------------------
+
+
+def _build_xref_topic_graph(
+    threads_dir: Path,
+    all_topics: list[str],
+    entry_topic_index: dict[str, str],
+) -> dict[frozenset[str], dict[str, Any]]:
+    """Build bidirectional xref evidence map across *all_topics*.
+
+    Returns a mapping from ``frozenset({topic_a, topic_b})`` to the first
+    xref edge found between them::
+
+        {
+            "source_topic": str,     # topic whose annotation carries the xref
+            "source_entry_id": str,  # annotation state key (entry in source_topic)
+            "target_entry_id": str,  # xref target entry (in other topic)
+        }
+
+    Fail-open: annotation load failure for any topic silently skips it.
+    Only topics present in *all_topics* are considered.
+
+    Note: ``_MAX_XREFS_TOTAL`` applies per source-topic (``seen`` is reset
+    each iteration), so the whole-graph cap is ``N_topics × _MAX_XREFS_TOTAL``.
+    """
+    pairs: dict[frozenset[str], dict[str, Any]] = {}
+    topic_set = set(all_topics)
+
+    for source_topic in all_topics:
+        states = _load_thread_annotation_states(threads_dir, source_topic)
+        if not states:
+            continue
+        seen: set[str] = set()
+        try:
+            for state_key, ann in states.items():
+                if len(seen) >= _MAX_XREFS_TOTAL:
+                    break
+                xrefs = (ann.xrefs or [])[:_MAX_XREFS_PER_STATE]
+                for target_entry_id in xrefs:
+                    if target_entry_id in seen:
+                        continue
+                    if len(seen) >= _MAX_XREFS_TOTAL:
+                        break
+                    seen.add(target_entry_id)
+                    target_topic = entry_topic_index.get(target_entry_id)
+                    if not target_topic or target_topic == source_topic:
+                        continue
+                    if target_topic not in topic_set:
+                        continue
+                    pair_key: frozenset[str] = frozenset({source_topic, target_topic})
+                    if pair_key not in pairs:
+                        pairs[pair_key] = {
+                            "source_topic": source_topic,
+                            "source_entry_id": state_key,
+                            "target_entry_id": target_entry_id,
+                        }
+        except Exception as exc:
+            logger.debug(
+                "_build_xref_topic_graph: traversal failed for %s: %s",
+                source_topic,
+                exc,
+                exc_info=True,
+            )
+
+    return pairs
+
+
+def _extract_shape_name(entry: Any) -> str | None:
+    """Safely extract ``workflow_shape.name`` from an analysis entry.
+
+    Tolerates schema drift at every level: non-dict entries, non-dict
+    ``workflow_shape`` values, and non-string ``name`` values all yield
+    ``None`` rather than raising.
+    """
+    if not isinstance(entry, dict):
+        return None
+    shape = entry.get("workflow_shape")
+    if not isinstance(shape, dict):
+        return None
+    name = shape.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _resolve_related_threads(
+    thread_topic: str,
+    all_active_tags: dict[str, set[str]],
+    xref_pairs: dict[frozenset[str], dict[str, Any]],
+    analysis_by_topic: dict[str, Any] | None,
+    risk_clusters: list[tuple[str, str, frozenset[str]]] | None,
+    pair_tag_prefix: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """For thread A, find all related threads B with their relation evidence.
+
+    Returns ``{related_topic: [evidence_items]}``.  Each evidence item has a
+    ``tier`` key from ``{"xref", "pair_tag", "pulse_block+workflow_shape"}``.
+
+    Combination rules (per addendum):
+    - Tier 1 (xref) alone → related.
+    - Tier 2 (pair_tag) alone → related.
+    - Tier 3 (risk cluster) ∩ Tier 4 (shared workflow shape) → related.
+    - Either Tier 3 or Tier 4 alone → not related.
+
+    Tier 3+4 evidence requires a fresh pulse_block snapshot (``risk_clusters``
+    is ``None`` when unavailable) AND analysis context (``analysis_by_topic``
+    is ``None`` when the snapshot was not loaded).  Both ``None`` cases are
+    valid, intentional no-ops — not bugs.
+    """
+    related: dict[str, list[dict[str, Any]]] = {}
+    a_tags = all_active_tags.get(thread_topic, set())
+
+    # Tier 1: explicit xref linkage
+    for other_topic in all_active_tags:
+        if other_topic == thread_topic:
+            continue
+        pair_key: frozenset[str] = frozenset({thread_topic, other_topic})
+        edge = xref_pairs.get(pair_key)
+        if edge is None:
+            continue
+        direction = "a_to_b" if edge["source_topic"] == thread_topic else "b_to_a"
+        ev: dict[str, Any] = {
+            "tier": "xref",
+            "source_entry_id": edge["source_entry_id"],
+            "target_entry_id": edge["target_entry_id"],
+            "direction": direction,
+        }
+        related.setdefault(other_topic, []).append(ev)
+
+    # Tier 2: shared pairing tag
+    a_pair_tags = {t for t in a_tags if t.startswith(pair_tag_prefix)}
+    if a_pair_tags:
+        for other_topic, other_tags in all_active_tags.items():
+            if other_topic == thread_topic:
+                continue
+            shared = a_pair_tags & other_tags
+            if shared:
+                related.setdefault(other_topic, []).append(
+                    {"tier": "pair_tag", "tags": sorted(shared)}
+                )
+
+    # Tier 3 ∩ Tier 4: pulse_block co-affected + shared workflow shape (combined only)
+    if risk_clusters is not None and analysis_by_topic is not None:
+        a_shape_name = _extract_shape_name(analysis_by_topic.get(thread_topic))
+        if a_shape_name:
+            shape_peers = {
+                t
+                for t, ta in analysis_by_topic.items()
+                if t != thread_topic
+                and _extract_shape_name(ta) == a_shape_name
+                and t in all_active_tags
+            }
+            for rule_id, risk_text, cluster_topics in risk_clusters:
+                if thread_topic not in cluster_topics:
+                    continue
+                qualifying = (cluster_topics & shape_peers) - {thread_topic}
+                for other_topic in qualifying:
+                    related.setdefault(other_topic, []).append(
+                        {
+                            "tier": "pulse_block+workflow_shape",
+                            "risk_rule_id": rule_id,
+                            "risk_text": risk_text,
+                            "workflow_shape_name": a_shape_name,
+                        }
+                    )
+
+    return related
+
+
+def detect_role_complement(
+    all_active_entries: dict[str, list[EntryView]],
+    all_active_tags: dict[str, set[str]],
+    threads_dir: Path | None,
+    entry_topic_index: dict[str, str],
+    analysis_by_topic: dict[str, Any] | None,
+    risk_clusters: list[tuple[str, str, frozenset[str]]] | None,
+    *,
+    monitored_roles: list[str],
+    max_per_thread: int = 3,
+    pair_tag_prefix: str = "pair:",
+    min_role_entries_in_related: int = 2,
+) -> list[CoordinatorFinding]:
+    """Detect threads missing a role that is actively exercised in a related thread.
+
+    Ships disabled by default — the call site guards on
+    ``role_complement_enabled``.  This function is always safe to call; it
+    returns an empty list if *monitored_roles* is empty or no qualifying
+    pairs are found.
+
+    Fail-open: any exception during xref graph building or relation resolution
+    is caught and logged; the detector returns partial results rather than
+    raising to the tick scheduler.
+    """
+    if not monitored_roles:
+        return []
+
+    all_topics = list(all_active_entries.keys())
+
+    # Build xref pair graph once per call (fail-open to empty dict)
+    xref_pairs: dict[frozenset[str], dict[str, Any]] = {}
+    if threads_dir is not None and all_topics:
+        try:
+            xref_pairs = _build_xref_topic_graph(threads_dir, all_topics, entry_topic_index)
+        except Exception as exc:
+            logger.warning(
+                "detect_role_complement: xref graph build failed — Tier 1 evidence disabled: %s",
+                exc,
+                exc_info=True,
+            )
+
+    # Pre-compute role counters for all active threads
+    role_counts: dict[str, Counter[str]] = {}
+    for topic, entries in all_active_entries.items():
+        c: Counter[str] = Counter()
+        for e in entries:
+            r = e["role"]
+            if r:
+                c[r] += 1
+        role_counts[topic] = c
+
+    findings: list[CoordinatorFinding] = []
+
+    for thread_topic, entries in all_active_entries.items():
+        a_counts = role_counts[thread_topic]
+        missing_roles = [r for r in monitored_roles if a_counts.get(r, 0) == 0]
+        if not missing_roles:
+            continue
+
+        try:
+            related = _resolve_related_threads(
+                thread_topic,
+                all_active_tags,
+                xref_pairs,
+                analysis_by_topic,
+                risk_clusters,
+                pair_tag_prefix,
+            )
+        except Exception as exc:
+            logger.debug(
+                "detect_role_complement: relation resolution failed for %s: %s",
+                thread_topic,
+                exc,
+                exc_info=True,
+            )
+            continue
+
+        if not related:
+            continue
+
+        # Collect all (role, thread) candidates globally before capping so that
+        # weakest-first truncation is applied across roles, not per-role sequentially.
+        # Tier rank: 0=xref (strongest), 1=pair_tag, 2=pulse_block+workflow_shape (weakest).
+        all_candidates: list[tuple[int, str, str, list[dict[str, Any]], int]] = []
+        for missing_role in missing_roles:
+            for b_topic, evidence in related.items():
+                count_in_b = role_counts.get(b_topic, Counter()).get(missing_role, 0)
+                if count_in_b < min_role_entries_in_related:
+                    continue
+                if any(e["tier"] == "xref" for e in evidence):
+                    tier_rank = 0
+                elif any(e["tier"] == "pair_tag" for e in evidence):
+                    tier_rank = 1
+                else:
+                    tier_rank = 2
+                all_candidates.append((tier_rank, missing_role, b_topic, evidence, count_in_b))
+
+        # Sort strongest-first; break ties by monitored_roles order then b_topic for determinism.
+        role_order = {r: i for i, r in enumerate(missing_roles)}
+        all_candidates.sort(key=lambda c: (c[0], role_order.get(c[1], 999), c[2]))
+
+        truncated = len(all_candidates) > max_per_thread
+        thread_findings: list[CoordinatorFinding] = []
+        for _tier_rank, missing_role, b_topic, evidence, count_in_b in all_candidates[
+            :max_per_thread
+        ]:
+            thread_findings.append(
+                CoordinatorFinding(
+                    category="connect_role_complement",
+                    topic=thread_topic,
+                    severity="info",
+                    message=(
+                        f"Thread '{thread_topic}' has no active {missing_role}; "
+                        f"related thread '{b_topic}' has an active {missing_role}."
+                    ),
+                    details={
+                        "missing_role": missing_role,
+                        "thread_topic": thread_topic,
+                        "related_thread_topic": b_topic,
+                        "related_thread_role_entry_count": count_in_b,
+                        "relation_evidence": evidence,
+                    },
+                    dedup_signature=f"{thread_topic}|{missing_role}|{b_topic}",
+                )
+            )
+
+        if truncated and thread_findings:
+            thread_findings[0].details["role_complement_truncated"] = True
+
+        findings.extend(thread_findings)
+
+    return findings

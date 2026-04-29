@@ -36,11 +36,16 @@ Run `watercooler_health` from your MCP client to jump straight to step G.
    ```
    If not found, install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
-2. Verify the server starts manually:
+2. Verify the server starts manually (use the same `[local]` extra your
+   MCP client is configured with, so you're testing the exact install
+   path that's failing):
+
    ```bash
-   uvx --from git+https://github.com/mostlyharmless-ai/watercooler@main watercooler-mcp
+   uvx --from 'git+https://github.com/mostlyharmless-ai/watercooler@main[local]' watercooler-mcp
    ```
-   If it errors, the issue is with the `uvx` invocation or network access.
+
+   If it errors, the issue is with the `uvx` invocation, the package
+   install, or network access.
 
 3. Restart your MCP client after fixing the config.
 
@@ -48,6 +53,66 @@ Run `watercooler_health` from your MCP client to jump straight to step G.
 - Claude Code: `~/.claude/logs/mcp-*.log`
 - Cursor: Output panel → MCP dropdown
 - Codex: `~/.codex/logs/`
+
+---
+
+### First-run model download stalled {#first-run-download-stalled}
+
+**Symptom:** `watercooler_health` hangs for a long time on first launch,
+or returns an error like `download failed` / `timed out fetching model`
+before the LLM or embedding service ever reaches `running`.
+
+**Cause:** On first run Watercooler fetches the `llama-server` binary
+(~50 MB) plus two GGUF models (~2.5 GB total). A flaky connection,
+corporate proxy, or low disk space can leave the download stalled or
+partially written.
+
+**Fix:**
+
+1. Confirm disk space (need ~3 GB free under `~/.watercooler/` and
+   `~/.cache/`):
+
+   ```bash
+   df -h ~/.watercooler ~/.cache
+   ```
+
+2. Clean any partial downloads and retry:
+
+   ```bash
+   rm -rf ~/.watercooler/models/*.part
+   ```
+
+3. If you're behind a proxy, set `HTTP_PROXY` / `HTTPS_PROXY` before
+   relaunching your MCP client so `curl` / `urllib` picks it up.
+
+4. If the download is genuinely unreliable, skip local models entirely
+   and point Watercooler at an externally-managed OpenAI-compatible
+   endpoint:
+
+   ```toml
+   # ~/.watercooler/config.toml
+   [mcp.graph]
+   auto_start_services = false
+   summarizer_api_base = "https://api.example.com/v1"
+   summarizer_model = "gpt-4o-mini"
+   embedding_api_base = "https://api.example.com/v1"
+   embedding_model = "text-embedding-3-small"
+   ```
+
+   See
+   [CONFIGURATION — `[mcp.graph]`](./CONFIGURATION.md#mcpgraph--baseline-graph-enrichment)
+   for the full option list.
+
+5. To run threads without summaries or semantic search at all:
+
+   ```toml
+   [mcp.graph]
+   generate_summaries = false
+   generate_embeddings = false
+   auto_start_services = false
+   ```
+
+   Threads still work; only the enrichment features are disabled.
 
 ---
 
@@ -295,9 +360,13 @@ watercooler config show --sources    # see which files were loaded
 watercooler config validate          # check for syntax errors
 ```
 
-Common public sections include: `[common]`, `[mcp]`, `[dashboard]`,
-`[validation]`, and `[federation]`. Unknown section names (for example
-`[threads]` or `[agent]`) will be silently ignored by the Pydantic model.
+Common valid top-level sections: `[common]`, `[mcp]`, `[dashboard]`,
+`[validation]`, `[memory]`, and `[federation]`. Unknown section names
+(for example `[threads]` or `[agent]`) are silently ignored — Pydantic
+models default to `extra="ignore"`, so a typo like `[threeads]` will
+not fail validation but also won't take effect. `watercooler config
+show --sources` will list exactly which files were read; anything you
+expected to appear that doesn't is a typo or a misplaced section.
 
 User config location: `~/.watercooler/config.toml`
 Project config location: `<project>/.watercooler/config.toml`
@@ -332,19 +401,32 @@ ls ~/.watercooler/worktrees/
 
 ---
 
-### Stale install after upgrade
+### Stale install after upgrade {#stale-install-after-upgrade}
 
 **Symptom:** New MCP tools aren't available, or `watercooler --version` shows an old
 version after upgrading.
 
-**Cause:** `uv` cached the previous version and didn't re-download.
+**Cause:** `uv` cached the previous version. There are two independent artifacts
+that may need to be refreshed — the `uvx`-run MCP server and the installed
+`watercooler` CLI — and they are updated with different commands.
 
-**Fix:**
+**Fix — MCP server (served by `uvx`):**
 
 ```bash
 uv cache clean watercooler
+```
+
+This clears the `uvx` archive cache. The next time your MCP client launches the
+server, `uvx` will re-resolve from git and pull the latest `@main`.
+
+**Fix — `watercooler` CLI (installed as a uv tool):**
+
+```bash
 uv tool install --from 'git+https://github.com/mostlyharmless-ai/watercooler@main[local]' watercooler
 ```
+
+This reinstalls the CLI tool itself. Running only `uv cache clean` does not
+update an already-installed tool binary.
 
 > **Note:** Use the positional argument form (`uv cache clean watercooler`
 > without `--package`). The `--package` flag syntax differs between subcommands.

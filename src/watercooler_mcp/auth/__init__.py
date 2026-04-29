@@ -44,7 +44,7 @@ import urllib.error
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, Callable, List, Tuple
 
-from .request_trace import trace_stage
+from ..request_trace import trace_stage
 
 logger = logging.getLogger(__name__)
 
@@ -606,3 +606,35 @@ def extract_request_context(
         repo=query_params.get("repo"),
         branch=query_params.get("branch"),
     )
+
+
+# ----------------------------------------------------------------------- #
+# Move 1 — scope authority
+#
+# Re-exports the authoritative scope-resolution API from auth.scope so
+# callers can write ``from watercooler_mcp.auth import resolve_scope``
+# alongside the existing ``is_hosted_mode``/``get_github_token`` imports.
+# ----------------------------------------------------------------------- #
+
+from .scope import ResolvedScope as ResolvedScope  # noqa: E402,F401
+from .scope import ScopeResolutionError as ScopeResolutionError  # noqa: E402,F401
+from .scope import canonical_repo as canonical_repo  # noqa: E402,F401
+from .scope import compute_namespace as compute_namespace  # noqa: E402,F401
+from .scope import (  # noqa: E402,F401
+    derive_stdio_namespace as derive_stdio_namespace,
+)
+from .scope import resolve_scope as resolve_scope  # noqa: E402,F401
+from .scope import resolve_scope_or_none as resolve_scope_or_none  # noqa: E402,F401
+from .scope import (  # noqa: E402,F401
+    resolve_scope_or_off_hosted as resolve_scope_or_off_hosted,
+)
+from .scope import (  # noqa: E402,F401
+    resolve_unscoped_or_error as resolve_unscoped_or_error,
+)
+from .scope import strict_mode as strict_mode  # noqa: E402,F401
+from .scope import (  # noqa: E402,F401
+    strip_url_credentials as strip_url_credentials,
+)
+from .scope import (  # noqa: E402,F401
+    warn_caller_hint_mismatch as warn_caller_hint_mismatch,
+)

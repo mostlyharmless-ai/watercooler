@@ -623,6 +623,21 @@ def check_http_dependencies() -> bool:
         return False
 
 
+# Module-level so `from .server_http import _graphiti_warm_state` (used by
+# the diagnostic display in tools/diagnostic.py) actually resolves. The
+# warmup thread inside create_http_app() mutates this dict in place rather
+# than rebinding it, so both the /health closure and the diagnostic import
+# observe the same state.
+_graphiti_warm_state: dict = {
+    "state": "disabled",
+    "duration_ms": 0,
+    "error": None,
+    "host": None,
+    "port": None,
+    "database": None,
+}
+
+
 def create_http_app():
     """Create FastAPI application wrapping the MCP server.
 
@@ -713,7 +728,16 @@ def create_http_app():
     # Initializes the backend in a background thread so the first tool
     # call doesn't pay the cold-start cost. Non-blocking — does not
     # delay app startup or health check readiness.
-    _graphiti_warm_state = {"state": "disabled", "duration_ms": 0, "error": None}
+    # Mutate the module-level dict in place (don't rebind) so the
+    # diagnostic display sees the same state via its module import.
+    _graphiti_warm_state.update({
+        "state": "disabled",
+        "duration_ms": 0,
+        "error": None,
+        "host": None,
+        "port": None,
+        "database": None,
+    })
 
     if _deployment_availability and _deployment_availability.effective_profile in ("t2", "t2t3"):
         import threading
@@ -726,6 +750,9 @@ def create_http_app():
                 from .memory import load_graphiti_config
                 config = load_graphiti_config()
                 if config:
+                    _graphiti_warm_state["host"] = config.falkordb_host
+                    _graphiti_warm_state["port"] = config.falkordb_port
+                    _graphiti_warm_state["database"] = config.database
                     from .tools.graph import _get_or_create_graphiti_backend
                     _get_or_create_graphiti_backend(config)
                     _graphiti_warm_state["state"] = "ready"
@@ -735,12 +762,21 @@ def create_http_app():
             except Exception as e:
                 _graphiti_warm_state["state"] = "failed"
                 _graphiti_warm_state["error"] = str(e)
-                logger.warning("Graphiti warmup failed: %s", e)
+                logger.warning(
+                    "Graphiti warmup failed (host=%s:%s db=%s): %s",
+                    _graphiti_warm_state.get("host"),
+                    _graphiti_warm_state.get("port"),
+                    _graphiti_warm_state.get("database"),
+                    e,
+                )
             _graphiti_warm_state["duration_ms"] = round((time.monotonic() - start) * 1000)
             logger.info(
-                "Graphiti warmup: %s in %dms",
+                "Graphiti warmup: %s in %dms (host=%s:%s db=%s)",
                 _graphiti_warm_state["state"],
                 _graphiti_warm_state["duration_ms"],
+                _graphiti_warm_state.get("host"),
+                _graphiti_warm_state.get("port"),
+                _graphiti_warm_state.get("database"),
             )
 
         warmup_thread = threading.Thread(target=_warmup_graphiti, daemon=True)
@@ -855,7 +891,17 @@ def create_http_app():
                 "graphiti_available": _deployment_availability.graphiti_available,
                 "leanrag_available": _deployment_availability.leanrag_available,
                 "degraded_reasons": _deployment_availability.degraded_reasons,
-                "graphiti_warmup": _graphiti_warm_state,
+                # Redact infrastructure topology from the unauthenticated
+                # /health surface — host/port/database are only exposed in
+                # the auth-gated MCP diagnostic tool. The `error` string
+                # is also redacted (replaced with a boolean) because
+                # connection-failure exceptions from redis/socket libs
+                # routinely embed host:port in the message.
+                "graphiti_warmup": {
+                    "state": _graphiti_warm_state.get("state"),
+                    "duration_ms": _graphiti_warm_state.get("duration_ms"),
+                    "has_error": _graphiti_warm_state.get("error") is not None,
+                },
             }
 
         if hosted:

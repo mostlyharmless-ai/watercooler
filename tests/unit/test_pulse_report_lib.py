@@ -1220,27 +1220,47 @@ def _minimal_pulse_block_dict(**overrides) -> dict:
 
 def test_parse_pulse_block_null_confidence_coordination_risk():
     """confidence=None in coordination_risks does not raise TypeError."""
-    raw = _minimal_pulse_block_dict(coordination_risks=[
-        {"rule_id": "r1", "text": "some risk", "confidence": None, "affected_threads": []},
-    ])
+    raw = _minimal_pulse_block_dict(
+        coordination_risks=[
+            {
+                "rule_id": "r1",
+                "text": "some risk",
+                "confidence": None,
+                "affected_threads": [],
+            },
+        ]
+    )
     block = _parse_pulse_block(raw)
     assert block.coordination_risks[0].confidence == 0.0
 
 
 def test_parse_pulse_block_null_confidence_top_action():
     """confidence=None in top_actions does not raise TypeError."""
-    raw = _minimal_pulse_block_dict(top_actions=[
-        {"rule_id": "a1", "text": "some action", "confidence": None, "priority": "high"},
-    ])
+    raw = _minimal_pulse_block_dict(
+        top_actions=[
+            {
+                "rule_id": "a1",
+                "text": "some action",
+                "confidence": None,
+                "priority": "high",
+            },
+        ]
+    )
     block = _parse_pulse_block(raw)
     assert block.top_actions[0].confidence == 0.0
 
 
 def test_parse_pulse_block_null_days_since_last():
     """days_since_last=None in stalled_threads does not raise TypeError."""
-    raw = _minimal_pulse_block_dict(stalled_threads=[
-        {"topic": "some-thread", "days_since_last": None, "last_entry_timestamp": None},
-    ])
+    raw = _minimal_pulse_block_dict(
+        stalled_threads=[
+            {
+                "topic": "some-thread",
+                "days_since_last": None,
+                "last_entry_timestamp": None,
+            },
+        ]
+    )
     block = _parse_pulse_block(raw)
     assert block.stalled_threads[0].days_since_last == 0
 
@@ -1294,9 +1314,7 @@ def test_assemble_report_omits_enrichment_section_when_none():
 def test_build_enrichment_section_tolerates_partial_fields():
     from watercooler.pulse_report_lib import _build_enrichment_section
 
-    md = _build_enrichment_section(
-        {"situation_trajectory": "Only a trajectory."}
-    )
+    md = _build_enrichment_section({"situation_trajectory": "Only a trajectory."})
     assert "## Snapshot analysis" in md
     assert "Only a trajectory." in md
     assert "**Tension signals:**" not in md
@@ -1315,10 +1333,12 @@ def test_build_enrichment_section_empty_dict_collapses_to_placeholder():
 def test_build_enrichment_section_drops_empty_list_items():
     from watercooler.pulse_report_lib import _build_enrichment_section
 
-    md = _build_enrichment_section({
-        "tension_signals": ["real tension", "", "   "],
-        "coordination_risks": [],
-    })
+    md = _build_enrichment_section(
+        {
+            "tension_signals": ["real tension", "", "   "],
+            "coordination_risks": [],
+        }
+    )
     assert "- real tension" in md
     # Empty items should not render as bullets
     assert md.count("- ") == 1
@@ -1346,10 +1366,7 @@ def test_sanitize_enrichment_text_strips_list_and_rule_breakers():
 def test_sanitize_enrichment_text_collapses_multiline_content():
     from watercooler.pulse_report_lib import _sanitize_enrichment_text
 
-    assert (
-        _sanitize_enrichment_text("foo\n\n## Bar")
-        == "foo ## Bar"
-    )
+    assert _sanitize_enrichment_text("foo\n\n## Bar") == "foo ## Bar"
     # Embedded newlines flattened to single spaces
     assert _sanitize_enrichment_text("line one\nline two") == "line one line two"
     assert _sanitize_enrichment_text("a\t\tb\n  c") == "a b c"
@@ -1400,12 +1417,14 @@ def test_sanitize_enrichment_text_neutralizes_inline_links():
 def test_build_enrichment_section_defuses_injection_payloads():
     from watercooler.pulse_report_lib import _build_enrichment_section
 
-    md = _build_enrichment_section({
-        "situation_trajectory": "## Fake heading\n\nmore text",
-        "recommended_focus": "> ## smuggled",
-        "tension_signals": ["- already bulleted", "---", "line\nbreak"],
-        "coordination_risks": ["normal risk"],
-    })
+    md = _build_enrichment_section(
+        {
+            "situation_trajectory": "## Fake heading\n\nmore text",
+            "recommended_focus": "> ## smuggled",
+            "tension_signals": ["- already bulleted", "---", "line\nbreak"],
+            "coordination_risks": ["normal risk"],
+        }
+    )
     # No spurious headings beyond the section title itself
     assert md.count("## ") == 1
     assert "## Snapshot analysis" in md
@@ -1489,7 +1508,9 @@ def test_render_coordination_insights_empty_relevance_tags_fallback():
 def test_render_coordination_insights_respects_display_cap():
     """Test 13: 15 leads provided → only _INSIGHTS_DISPLAY_CAP (10) rendered."""
     leads = [
-        _make_lead_dict(topic=f"thread-{i}", summary=f"summary {i}", relevance_tags=["pm"])
+        _make_lead_dict(
+            topic=f"thread-{i}", summary=f"summary {i}", relevance_tags=["pm"]
+        )
         for i in range(15)
     ]
     output = _render_coordination_insights(leads)
@@ -1504,12 +1525,12 @@ def test_render_coordination_insights_with_t2_context():
         topic="enriched-thread",
         summary="enriched summary",
         t2_context={
-            "schema_version": 1,
+            "schema_version": 2,
             "days_since_last": 12,
             "workflow_shape_name": "waterfall",
             "workflow_shape_id": "wf1",
             "workflow_confidence": 0.85,
-            "stalled": False,
+            "analysis_stalled": False,
             "has_decision": False,
             "has_closure": False,
             "entry_count_total": 8,
@@ -1572,8 +1593,8 @@ def test_render_coordination_insights_sanitizes_injection_in_t2_shape_name():
         summary="normal summary",
         relevance_tags=["implementer"],
         t2_context={
-            "schema_version": 1,
-            "stalled": False,
+            "schema_version": 2,
+            "analysis_stalled": False,
             "days_since_last": 5.0,
             "workflow_shape_id": "wf-1",
             "workflow_shape_name": "## Injected Shape",
@@ -1587,3 +1608,28 @@ def test_render_coordination_insights_sanitizes_injection_in_t2_shape_name():
     output = _render_coordination_insights([lead])
     assert "## Injected Shape" not in output
     assert "t2-topic" in output
+
+
+def test_render_coordination_insights_accepts_v2_t2_context():
+    """Test 20 — 3b-1: v2 t2_context with analysis_stalled renders without error."""
+    lead = _make_lead_dict(
+        topic="v2-thread",
+        summary="v2 context test",
+        t2_context={
+            "schema_version": 2,
+            "analysis_stalled": True,
+            "days_since_last": 20,
+            "workflow_shape_name": "linear",
+            "workflow_shape_id": "wf2",
+            "workflow_confidence": 0.75,
+            "has_decision": False,
+            "has_closure": False,
+            "entry_count_total": 12,
+            "recommendation_rule_ids": ["R01"],
+        },
+    )
+    output = _render_coordination_insights([lead])
+    assert "v2-thread" in output
+    assert "20d since last entry" in output
+    assert "linear" in output
+    assert "R01" in output

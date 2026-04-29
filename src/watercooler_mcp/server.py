@@ -307,10 +307,17 @@ def _run_hybrid(transport_config: dict) -> None:
     # Start local T1 services only.
     # LLM: baseline graph enrichment (summaries, graph_enrich).
     # Embedding: baseline semantic search.
-    # FalkorDB is NOT started — T2/T3 is hosted on Railway.
+    # FalkorDB is NOT started — T2/T3 is hosted on Railway. Mark its
+    # service status explicitly so the health surface reports
+    # "disabled" instead of the initial "unknown" state (defect #29).
     check_first_run()
     ensure_llm_running()
     ensure_embedding_running()
+    from .startup import _update_service_status, ServiceState
+    _update_service_status(
+        "falkordb", ServiceState.DISABLED,
+        message="Hosted FalkorDB owns T1/T2 (transport=hybrid)",
+    )
 
     # Build hybrid server and start daemons
     hybrid_mcp = build_mcp_server(runtime)
@@ -480,7 +487,15 @@ Environment variables:
         _warm_cache()
         sys.exit(0)
 
-    # Get transport configuration from unified config system
+    # Get transport configuration from unified config system.
+    #
+    # Naming caveat: the `transport` key here is an execution-routing mode,
+    # NOT the MCP agent↔mcp stdio pipe (which is always stdio). Values:
+    #   stdio  — run every tool call in-process (fall-through below)
+    #   proxy  — forward every tool call to a remote hosted MCP endpoint
+    #   hybrid — local threads + baseline + local daemons; premium calls proxied
+    #   http   — this process itself serves HTTP (hosted Railway deployment)
+    # See docs/MCP-CLIENTS.md for the full table and naming-overlap caveat.
     from .config import get_mcp_transport_config
 
     transport_config = get_mcp_transport_config()

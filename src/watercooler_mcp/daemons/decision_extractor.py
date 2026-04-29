@@ -27,7 +27,11 @@ from watercooler.baseline_graph.writer import (
     get_thread_from_graph,
 )
 from watercooler.config_schema import DecisionExtractorConfig
-from watercooler.decision_extraction import extract_decision
+from watercooler.decision_extraction import (
+    DECISION_EXTRACTED_TAG,
+    HAS_DECISIONS_TAG,
+    extract_decision,
+)
 
 from .base import BaseDaemon
 from .daemon_write import daemon_write_entry
@@ -82,7 +86,7 @@ def _build_decision_annotation_hook(
                 target_id=source_entry_id,
                 target_type="entry",
                 kind="tag",
-                value="decision_extracted",
+                value=DECISION_EXTRACTED_TAG,
                 actor=actor,
                 timestamp=now,
             ),
@@ -109,7 +113,7 @@ def _build_decision_annotation_hook(
                 target_id=topic,
                 target_type="thread",
                 kind="tag",
-                value="has_decisions",
+                value=HAS_DECISIONS_TAG,
                 actor=actor,
                 timestamp=now,
             ),

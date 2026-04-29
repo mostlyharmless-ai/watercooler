@@ -15,7 +15,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
 
 from .state import Finding
 
@@ -42,7 +41,7 @@ class FindingStore(ABC):
         """Query findings with optional filters."""
 
     @abstractmethod
-    def acknowledge(self, finding_id: str) -> bool:
+    def acknowledge(self, daemon_name: str, finding_id: str) -> bool:
         """Mark a finding as acknowledged. Returns True on success."""
 
 
@@ -58,6 +57,7 @@ class LocalFindingStore(FindingStore):
 
     def append_or_refresh(self, finding: Finding) -> None:
         from .state import append_findings
+
         append_findings(finding.daemon_name, [finding], namespace=self._namespace)
 
     def query(
@@ -70,6 +70,7 @@ class LocalFindingStore(FindingStore):
         unacknowledged_only: bool = False,
     ) -> list[Finding]:
         from .state import load_findings
+
         if not daemon_name:
             return []
         return load_findings(
@@ -82,9 +83,10 @@ class LocalFindingStore(FindingStore):
             namespace=self._namespace,
         )
 
-    def acknowledge(self, finding_id: str) -> bool:
+    def acknowledge(self, daemon_name: str, finding_id: str) -> bool:
         from .state import acknowledge_finding
-        return acknowledge_finding(finding_id)
+
+        return acknowledge_finding(daemon_name, finding_id, namespace=self._namespace)
 
 
 class HostedFindingStore(FindingStore):
@@ -100,7 +102,43 @@ class HostedFindingStore(FindingStore):
     duplicates.
     """
 
-    def __init__(self, api_url: str, api_key: str = "", vercel_bypass_secret: str = "") -> None:
+    def __init__(
+        self, api_url: str, api_key: str = "", vercel_bypass_secret: str = ""
+    ) -> None:
+        # Move 3 PR α (security consolidation plan v5.1): observation
+        # window before deletion. The audit confirmed zero production
+        # callers of HostedFindingStore — only test code instantiates
+        # it. This WARNING + telemetry counter runs for one
+        # minor-version cycle so PR β (deletion in Sprint 3) can
+        # commit-message-document the negative-instantiation result
+        # before removing the class. Bumping the counter rather than
+        # raising keeps the test surface intact for the observation
+        # period.
+        logger.warning(
+            "HostedFindingStore instantiated — this class is scheduled "
+            "for removal in the security-consolidation Move 3 PR β "
+            "(no production callers expected). If you see this in "
+            "production logs, surface it to the security thread "
+            "before the next minor-version cut."
+        )
+        try:
+            from ..auth.scope import strip_url_credentials
+            from ..observability import log_action
+
+            # ``api_url`` is caller-supplied and may embed credentials
+            # (e.g., ``https://user:token@host``). Strip them before
+            # the value reaches telemetry — the same primitive the
+            # canonical-stdio-namespace pipeline uses for git remotes.
+            log_action(
+                "security.consolidation.m3.hosted_finding_store_init",
+                outcome="observed",
+                api_url=strip_url_credentials(api_url),
+            )
+        except Exception:  # noqa: BLE001
+            # Telemetry must never break construction; observability
+            # may be partially initialised in some test paths.
+            pass
+
         self._api_url = api_url.rstrip("/")
         self._api_key = api_key
         self._vercel_bypass_secret = vercel_bypass_secret
@@ -162,8 +200,10 @@ class HostedFindingStore(FindingStore):
             logger.warning("HostedFindingStore query failed: %s", exc)
             return []
 
-    def acknowledge(self, finding_id: str) -> bool:
-        url = f"{self._api_url}/api/mcp/daemon-findings/{urllib.parse.quote(finding_id)}"
+    def acknowledge(self, daemon_name: str, finding_id: str) -> bool:
+        url = (
+            f"{self._api_url}/api/mcp/daemon-findings/{urllib.parse.quote(finding_id)}"
+        )
         payload = json.dumps({"acknowledged": True}).encode("utf-8")
         req = urllib.request.Request(url, data=payload, method="PATCH")
         for k, v in self._headers().items():
