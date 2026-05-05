@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from .state import (
     DaemonCheckpoint,
     Finding,
+    _findings_strict_namespace,
     append_findings,
     load_checkpoint,
     load_findings,
@@ -81,7 +82,24 @@ class BaseDaemon(ABC):
         self._wake = threading.Event()
         self._paused = threading.Event()
         self._paused.set()  # Not paused initially
-        self._checkpoint = load_checkpoint(name, namespace=state_namespace)
+        # Defer checkpoint load when constructed without a namespace under
+        # WATERCOOLER_FINDINGS_STRICT_NAMESPACE=1 — this is the hosted
+        # construction-pre-_configure path. The hosted coordinator's
+        # _configure() step (hosted_coordinator.py:_register_daemons_for_scope)
+        # sets state_namespace = scope_id and re-loads the checkpoint with
+        # the correct namespace before manager.start_all(). Without this
+        # defer, every premium-daemon's __init__ throws under strict mode
+        # because load_checkpoint(name, namespace="") fails the strict
+        # gate at state._daemon_dir() (Plan v5.1 Move 3 strict-mode contract).
+        # Local mode (strict off, namespace empty) keeps the eager load —
+        # local single-tenant operates with empty namespace by design and
+        # the load returns a fresh checkpoint.
+        if state_namespace or not _findings_strict_namespace():
+            self._checkpoint: Optional[DaemonCheckpoint] = load_checkpoint(
+                name, namespace=state_namespace
+            )
+        else:
+            self._checkpoint = None
         self._last_error: Optional[str] = None
         self._total_ticks: int = 0
         self._total_findings: int = 0
@@ -192,6 +210,20 @@ class BaseDaemon(ABC):
 
     def _loop(self) -> None:
         """Main daemon loop (runs in background thread)."""
+        # Defense-in-depth: catch the deferred-checkpoint contract violation
+        # (BaseDaemon constructed with empty namespace under STRICT_NAMESPACE,
+        # then start()ed without _configure() having injected a scope and
+        # re-loaded the checkpoint). Without this assert, the contract
+        # violation surfaces as AttributeError on `self._checkpoint.last_run`
+        # mid-tick — much harder to trace than a clear failure here.
+        # See base.py:97-102 for the deferred-load rationale.
+        assert self._checkpoint is not None, (
+            f"DAEMON[{self.name}]: _checkpoint not initialized before _loop. "
+            "Hosted scopes must call _configure() before manager.start_all(); "
+            "local mode must use a non-empty state_namespace or run with "
+            "WATERCOOLER_FINDINGS_STRICT_NAMESPACE off."
+        )
+
         # Install scope context on this daemon thread so hosted data layers
         # can resolve user/repo/token via get_effective_context().
         # contextvars do not propagate to plain threading.Thread workers,

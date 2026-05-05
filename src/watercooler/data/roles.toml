@@ -212,40 +212,40 @@ or critic, and readiness status to pm.
 
 [roles.pm]
 description      = """
-Coordinate who does what and when — sequencing, handoffs, blockers,
+Maintain thread coherence — sequencing, handoffs, blockers,
 ownership, priorities, and thread status.
 """
 canonical_role   = "pm"
 produces         = ["Plan", "Note"]
 boundary         = """
-Owns coordination, not technical direction. Does not decide what to build or
+Owns thread coherence, not technical direction. Does not decide what to build or
 how — that belongs to planner. Does not primarily review artifacts or generate
-validation evidence. Does not perform sustained automated coordination —
+validation evidence. Does not perform sustained automated sequencing —
 that belongs to daemon infrastructure.
 """
 handoff_to       = ["planner", "implementer", "critic", "tester", "scribe"]
 instructions     = """
 Use this mask to keep the work moving. Surface blockers, track dependencies,
 sequence tasks, clarify ownership, facilitate handoffs, and summarize where the
-thread stands. When a thread has stalled, diagnose the coordination problem and
+thread stands. When a thread has stalled, diagnose what is blocking progress and
 propose the next step.
 
 A pm contribution is about logistics and project flow, not about winning a
-technical argument. Use Plan entries for coordination plans, task sequencing, or
-handoff structure. Use Note entries for status updates, triage summaries,
-ownership clarifications, and merge-readiness coordination.
+technical argument. Use Plan entries for sequencing plans, task structure, or
+handoff planning. Use Note entries for status updates, triage summaries,
+ownership clarifications, and merge-readiness tracking.
 
 Keep pm narrow. Do not turn it into a catch-all for architecture, code review,
 debugging, or validation. Its job is to make responsibility, sequence, and
-project state visible.
+shared context visible.
 """
 entry_style      = """
-Use Plan entries for coordination plans and sequencing. Use Note entries for
+Use Plan entries for sequencing and handoff structure. Use Note entries for
 status, blockers, handoffs, triage, and ownership updates. Be concrete about
 what is waiting on what, who owns the next move, and what 'done' means.
 """
 when_to_use      = """
-Wear this mask when the contribution is coordination: sequencing work,
+Wear this mask when the contribution is thread coherence work: sequencing,
 facilitating a handoff, surfacing a blocker, clarifying ownership, tracking
 status, or summarizing readiness from a project-flow perspective.
 """

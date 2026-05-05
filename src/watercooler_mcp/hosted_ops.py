@@ -1374,15 +1374,19 @@ def _get_hosted_api_url() -> str:
         return ""
 
 
-def _is_slack_sync_enabled() -> bool:
-    """Check if Slack sync via watercooler-site is configured.
+def _slack_sync_secret() -> str:
+    """Resolve the slack-sync shared secret.
 
-    Requires both hosted API URL and WATERCOOLER_INTERNAL_SECRET.
+    Move 2.5 (security consolidation plan v5.1) split the env-var
+    purpose: the slack-sync ``X-Watercooler-Secret`` header reads
+    exclusively from ``WATERCOOLER_SLACK_SYNC_SECRET``. The legacy
+    fallback to the now-retired global secret was removed during
+    that rollout — both Cloud (Railway) and Site (Vercel) have been
+    on the new var since PRs #722, #723, #724 plus the 2026-05-01
+    rotation cycle, and the global-secret HMAC verifier itself was
+    deleted in #733.
     """
-    site_url = _get_hosted_api_url()
-    # Secret must be env-only for security
-    secret = os.getenv("WATERCOOLER_INTERNAL_SECRET", "")
-    return bool(site_url) and bool(secret)
+    return os.getenv("WATERCOOLER_SLACK_SYNC_SECRET", "")
 
 
 def _sync_entry_to_slack_site(
@@ -1417,14 +1421,31 @@ def _sync_entry_to_slack_site(
     Returns:
         True if synced successfully, False otherwise.
     """
-    if not _is_slack_sync_enabled():
+    # PR #722 round 1 MED + PR #723 round 2 dead-code observation:
+    # resolve the secret once per sync. The env-var split is
+    # specifically designed so the resolver could later fetch from a
+    # remote secrets store — at which point any duplicate per-sync
+    # call would be a real performance and consistency hazard. Inline
+    # the enable-check against the same resolved value here. (The
+    # earlier ``_is_slack_sync_enabled`` helper that wrapped this
+    # check was deleted in PR #723 since this is its only caller.)
+    #
+    # PR #723 round 3 MED: gate the URL check FIRST so an operator
+    # without a hosted API URL (slack-sync never configured) doesn't
+    # incur unnecessary work resolving the slack-sync secret. The
+    # old ``_is_slack_sync_enabled`` had this short-circuit for
+    # free via ``and``; the inlined check preserves that ordering.
+    site_url = _get_hosted_api_url()
+    if not site_url:
+        log_debug("Slack sync not enabled (missing hosted API URL)")
+        return False
+    secret = _slack_sync_secret()
+    if not secret:
         log_debug(
-            "Slack sync not enabled (missing hosted API URL or WATERCOOLER_INTERNAL_SECRET)"
+            "Slack sync not enabled (missing WATERCOOLER_SLACK_SYNC_SECRET)"
         )
         return False
-
-    site_url = _get_hosted_api_url().rstrip("/")
-    secret = os.getenv("WATERCOOLER_INTERNAL_SECRET", "")
+    site_url = site_url.rstrip("/")
 
     url = f"{site_url}/api/slack/sync-entry"
 

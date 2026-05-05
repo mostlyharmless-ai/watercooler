@@ -403,12 +403,14 @@ class ExtractDecisionsDaemon(BaseDaemon):
             limit=50_000,
             unacknowledged_only=True,
             category="decision_candidate",
+            namespace=self.state_namespace,
         )
         if self._ticks_since_gc >= _CURSOR_GC_INTERVAL:
             gc_findings = load_findings(
                 "decision_detector",
                 limit=50_000,
                 category="decision_candidate",
+                namespace=self.state_namespace,
             )
             if gc_findings:
                 live_ids = {f.finding_id for f in gc_findings}

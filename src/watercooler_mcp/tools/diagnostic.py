@@ -63,10 +63,24 @@ def _render_graphiti_warmup_line(state: dict) -> str:
     same shape the inline code used: optional duration, topology
     (db @ host:port) only when both database and host are set, error
     suffix when present.
+
+    Non-success states (``"skipped"``, ``"failed"``) include the
+    ``reason`` field when set so operators reading ``/health`` see
+    *why* the warmup didn't reach ``"ready"`` (e.g.,
+    ``"multi-tenant scope-bound; warmup deferred to first per-scope
+    request"`` for hosted deployments).
+
+    When both ``error`` and ``reason`` are set (the ``"failed"`` shape),
+    ``error`` wins — it carries the raw exception string the operator
+    needs to diagnose an outage. ``reason`` is the fallback for states
+    like ``"skipped"`` where there is no exception to surface.
+    Review #737 round 1 LOW: prior code preferred the curated ``reason``
+    and silently dropped the raw exception on ``/health``.
     """
     state_value = state.get("state", "unknown")
     duration = state.get("duration_ms", 0)
     err = state.get("error")
+    reason = state.get("reason")
     host = state.get("host")
     port = state.get("port")
     database = state.get("database")
@@ -75,8 +89,9 @@ def _render_graphiti_warmup_line(state: dict) -> str:
         detail += f" ({duration}ms)"
     if database and host:
         detail += f" db={database} @ {host}:{port}"
-    if err:
-        detail += f" — {err}"
+    suffix = err or reason
+    if suffix:
+        detail += f" — {suffix}"
     return f"  Graphiti Warmup: {detail}"
 
 

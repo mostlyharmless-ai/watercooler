@@ -143,6 +143,85 @@ def test_render_graphiti_warmup_line_appends_error_suffix():
     assert "db=test_db_t2 @ falkordb.railway.internal:6379" in line
 
 
+def test_render_graphiti_warmup_line_skipped_includes_reason():
+    """Hosted multi-tenant skip surfaces the reason instead of a misleading 'failed'.
+
+    Issue #734 fix: PR #660's startup warmup probe set ``state: failed``
+    in hosted mode because no ``http_ctx`` is set at startup. The new
+    behaviour explicitly initialises the state to ``skipped`` with a
+    human-readable ``reason`` so operators reading ``/health`` see the
+    real cause and don't think the backend is broken.
+    """
+    from watercooler_mcp.tools.diagnostic import _render_graphiti_warmup_line
+
+    line = _render_graphiti_warmup_line({
+        "state": "skipped",
+        "duration_ms": 0,
+        "error": None,
+        "reason": "multi-tenant scope-bound; warmup deferred to first per-scope request",
+        "host": None,
+        "port": None,
+        "database": None,
+    })
+
+    assert "skipped" in line
+    assert "— multi-tenant scope-bound" in line
+    # Topology block omitted because host/database aren't set.
+    assert "db=" not in line
+    assert "@" not in line
+
+
+def test_render_graphiti_warmup_line_failed_prefers_raw_error_over_reason():
+    """When both reason and error are set, the raw error wins on /health.
+
+    Review #737 round 1 LOW: the prior implementation preferred the
+    curated ``reason`` string and silently dropped the raw exception
+    when both were present. That hides the diagnostic signal an operator
+    needs during an outage. The renderer now prefers ``error`` and falls
+    back to ``reason`` (so ``"skipped"`` — which has no error — still
+    surfaces its multi-tenant explanation).
+    """
+    from watercooler_mcp.tools.diagnostic import _render_graphiti_warmup_line
+
+    line = _render_graphiti_warmup_line({
+        "state": "failed",
+        "duration_ms": 12,
+        "error": "ConnectionError: redis timed out",
+        "reason": "load_graphiti_config returned None",
+        "host": None,
+        "port": None,
+        "database": None,
+    })
+
+    assert "failed" in line
+    assert "— ConnectionError: redis timed out" in line
+    # Curated reason hidden when raw error is more informative.
+    assert "load_graphiti_config returned None" not in line
+
+
+def test_render_graphiti_warmup_line_skipped_falls_back_to_reason():
+    """For 'skipped' there is no error; the renderer falls back to reason.
+
+    Companion to the ``failed``-prefers-error test: the new precedence
+    must NOT regress the hosted-skipped path, which only has ``reason``
+    populated.
+    """
+    from watercooler_mcp.tools.diagnostic import _render_graphiti_warmup_line
+
+    line = _render_graphiti_warmup_line({
+        "state": "skipped",
+        "duration_ms": 0,
+        "error": None,
+        "reason": "multi-tenant scope-bound; warmup deferred to first per-scope request",
+        "host": None,
+        "port": None,
+        "database": None,
+    })
+
+    assert "skipped" in line
+    assert "— multi-tenant scope-bound" in line
+
+
 def test_health_endpoint_redacts_falkordb_topology_and_error():
     """/health exposes only state/duration_ms/has_error, not topology or err string.
 

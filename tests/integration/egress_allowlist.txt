@@ -1,0 +1,35 @@
+# Class P egress site allowlist (PR #707 baseline).
+#
+# Format: one ``rel/path/to/file.py:line`` per line, where the
+# path is relative to the repo root and uses POSIX forward
+# slashes. Comments begin with ``#`` and blank lines are
+# ignored. See ``parse_allowlist`` in
+# ``src/watercooler_mcp/audit/egress_inventory.py`` for the
+# full grammar.
+#
+# Every Class P site (annotated with ``# egress-class: primary``
+# in production code) MUST appear in this file. New Class P
+# sites without an allowlist entry will be rejected by
+# ``evaluate_inventory`` once
+# ``WATERCOOLER_EGRESS_INVENTORY_STRICT=1`` is flipped in
+# Sprint 4. The integration test at
+# ``tests/integration/test_egress_inventory_allowlist.py``
+# enforces this contract.
+#
+# To add a new Class P site:
+#   1. Annotate the call site with ``# egress-class: primary``
+#      on the same line or the line immediately above (must be
+#      a real comment, not a string literal — the scanner uses
+#      Python's tokenize stream).
+#   2. Add ``rel/path:line`` to this file.
+#   3. Run ``uv run pytest tests/integration/test_egress_inventory_allowlist.py``
+#      to confirm classification.
+
+# Thread-entry projection write surface. Sole caller is
+# ``watercooler.commands.say`` which writes user-authored entry
+# markdown to the orphan-branch worktree before commit.
+src/watercooler/fs.py:42
+
+# Pulse-report markdown export — summarises thread state,
+# decisions, and per-topic activity. Working-tree only.
+src/watercooler_mcp/daemons/pulse_report.py:760

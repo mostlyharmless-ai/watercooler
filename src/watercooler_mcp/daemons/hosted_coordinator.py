@@ -93,12 +93,20 @@ class HostedScopeKey:
 
 @dataclass
 class _ScopeEntry:
-    """Internal bookkeeping for a live scope."""
+    """Internal bookkeeping for a live scope.
+
+    `registration_errors` accumulates structured per-daemon failures from
+    `_register_daemons_for_scope`. Each entry is `{"daemon": str, "error": str}`.
+    Surfaced via `watercooler_daemon_status` so MCP clients can see why a
+    daemon didn't register without paging through Railway logs (replaces the
+    pre-2026-05-04 silent `try/except Exception` pattern).
+    """
 
     key: HostedScopeKey
     manager: DaemonManager
     last_touched: float = field(default_factory=time.monotonic)
     worktree: HostedWorktree | None = None
+    registration_errors: list[dict[str, str]] = field(default_factory=list)
 
 
 class HostedDaemonCoordinator:
@@ -278,42 +286,69 @@ class HostedDaemonCoordinator:
 
             daemon._checkpoint = load_checkpoint(daemon.name, namespace=scope_id)
 
+        # Capture per-daemon registration failures here; flushed onto
+        # entry.registration_errors after the loop so daemon_status can
+        # surface them. Replaces the pre-2026-05-04 silent
+        # `try/except Exception` pattern that converted ValueError
+        # (e.g., from STRICT_NAMESPACE) into "your daemons didn't
+        # register and you have no way to know why". Filed against
+        # thread `hosted-premium-daemons-zero-registration-2026-05-04`.
+        registration_errors: list[dict[str, str]] = []
+
+        def _record_failure(daemon_name: str, exc: BaseException) -> None:
+            """Log + record a per-daemon registration failure."""
+            msg = str(exc)
+            registration_errors.append({"daemon": daemon_name, "error": msg})
+            logger.warning(
+                "Could not register daemon %s for hosted scope %s: %s",
+                daemon_name,
+                scope_id,
+                msg,
+            )
+
         try:
             daemons_config = self._resolve_daemon_config()
+        except Exception as exc:
+            # Config-resolution failure isn't per-daemon — record it as a
+            # synthetic "_config" entry so daemon_status surfaces something
+            # actionable, then return early (no daemons can be registered
+            # without a config).
+            _record_failure("_config", exc)
+            self._publish_registration_errors(scope_id, registration_errors)
+            return
 
-            if not daemons_config.enabled:
-                return
+        if not daemons_config.enabled:
+            return
 
-            # Only premium daemons register in hosted scopes.
-            # Local daemons (thread_auditor, decision_detector/extractor,
-            # sync_guard, content_scout/refiner) run on the dev machine.
-            # ``daemon_execution_policy`` decides per-daemon; we pass
-            # ``in_hosted_coordinator=True`` so ``route="auto"``
-            # resolves to hosted and ``route="local"`` causes the
-            # hosted path to skip (the local process will own it).
-            from watercooler_mcp.daemons import daemon_execution_policy
+        # Only premium daemons register in hosted scopes.
+        # Local daemons (thread_auditor, decision_detector/extractor,
+        # sync_guard, content_scout/refiner) run on the dev machine.
+        # ``daemon_execution_policy`` decides per-daemon; we pass
+        # ``in_hosted_coordinator=True`` so ``route="auto"``
+        # resolves to hosted and ``route="local"`` causes the
+        # hosted path to skip (the local process will own it).
+        from watercooler_mcp.daemons import daemon_execution_policy
 
-            def _hosted_ok(name: str) -> bool:
-                sub_cfg = getattr(daemons_config, name, None)
-                if sub_cfg is None:
-                    return False
-                return (
-                    daemon_execution_policy(
-                        name, sub_cfg, transport="hybrid", in_hosted_coordinator=True
-                    )
-                    == "hosted"
+        def _hosted_ok(name: str) -> bool:
+            sub_cfg = getattr(daemons_config, name, None)
+            if sub_cfg is None:
+                return False
+            return (
+                daemon_execution_policy(
+                    name, sub_cfg, transport="hybrid", in_hosted_coordinator=True
                 )
+                == "hosted"
+            )
 
-            # T2 indexer — requires graphiti backend and the config gate
-            if _hosted_ok("t2_indexer"):
-                try:
-                    self._try_register_t2_indexer_hosted(manager, _configure)
-                except Exception as exc:
-                    logger.warning(
-                        "Could not register t2_indexer for hosted scope: %s", exc
-                    )
+        # T2 indexer — requires graphiti backend and the config gate
+        if _hosted_ok("t2_indexer"):
+            try:
+                self._try_register_t2_indexer_hosted(manager, _configure)
+            except Exception as exc:
+                _record_failure("t2_indexer", exc)
 
-            if _hosted_ok("project_coordinator"):
+        if _hosted_ok("project_coordinator"):
+            try:
                 from .project_coordinator import ProjectCoordinatorDaemon
                 from .base import BaseDaemon
 
@@ -323,87 +358,123 @@ class HostedDaemonCoordinator:
                 )
                 _configure(d)
                 manager.register(d)
+            except Exception as exc:
+                _record_failure("project_coordinator", exc)
 
-            if _hosted_ok("coordinator_refiner"):
+        if _hosted_ok("coordinator_refiner"):
+            try:
+                from .coordinator_refiner import CoordinatorRefinerDaemon
+            except ImportError as exc:
+                logger.debug(
+                    "CoordinatorRefinerDaemon not available (open-core build): %s", exc
+                )
+            else:
                 try:
-                    from .coordinator_refiner import CoordinatorRefinerDaemon
-                except ImportError as exc:
-                    logger.debug(
-                        "CoordinatorRefinerDaemon not available (open-core build): %s", exc
-                    )
-                else:
                     d = CoordinatorRefinerDaemon(
                         interval=daemons_config.coordinator_refiner.interval,
                         config=daemons_config.coordinator_refiner,
                     )
                     _configure(d)
                     manager.register(d)
+                except Exception as exc:
+                    _record_failure("coordinator_refiner", exc)
 
-            if _hosted_ok("pulse_snapshot"):
+        if _hosted_ok("pulse_snapshot"):
+            try:
+                from .pulse_snapshot import PulseSnapshotDaemon
+            except ImportError as exc:
+                logger.debug(
+                    "PulseSnapshotDaemon not available (open-core build): %s", exc
+                )
+            else:
                 try:
-                    from .pulse_snapshot import PulseSnapshotDaemon
-                except ImportError as exc:
-                    logger.debug(
-                        "PulseSnapshotDaemon not available (open-core build): %s", exc
-                    )
-                else:
                     d = PulseSnapshotDaemon(
                         interval=daemons_config.pulse_snapshot.interval,
                         config=daemons_config.pulse_snapshot,
                     )
                     _configure(d)
                     manager.register(d)
+                except Exception as exc:
+                    _record_failure("pulse_snapshot", exc)
 
-            if _hosted_ok("pulse_report"):
+        if _hosted_ok("pulse_report"):
+            try:
+                from .pulse_report import PulseReportDaemon
+            except ImportError as exc:
+                logger.debug(
+                    "PulseReportDaemon not available (open-core build): %s", exc
+                )
+            else:
                 try:
-                    from .pulse_report import PulseReportDaemon
-                except ImportError as exc:
-                    logger.debug(
-                        "PulseReportDaemon not available (open-core build): %s", exc
-                    )
-                else:
                     d = PulseReportDaemon(
                         interval=daemons_config.pulse_report.interval,
                         config=daemons_config.pulse_report,
                     )
                     _configure(d)
                     manager.register(d)
+                except Exception as exc:
+                    _record_failure("pulse_report", exc)
 
-            if _hosted_ok("analysis_snapshot"):
+        if _hosted_ok("analysis_snapshot"):
+            try:
+                from .analysis_snapshot import AnalysisSnapshotDaemon
+            except ImportError as exc:
+                logger.debug(
+                    "AnalysisSnapshotDaemon not available (open-core build): %s",
+                    exc,
+                )
+            else:
                 try:
-                    from .analysis_snapshot import AnalysisSnapshotDaemon
-                except ImportError as exc:
-                    logger.debug(
-                        "AnalysisSnapshotDaemon not available (open-core build): %s",
-                        exc,
-                    )
-                else:
                     d = AnalysisSnapshotDaemon(
                         interval=daemons_config.analysis_snapshot.interval,
                         config=daemons_config.analysis_snapshot,
                     )
                     _configure(d)
                     manager.register(d)
+                except Exception as exc:
+                    _record_failure("analysis_snapshot", exc)
 
-            if _hosted_ok("trend_snapshot"):
+        if _hosted_ok("trend_snapshot"):
+            try:
+                from .trend_snapshot import TrendSnapshotDaemon
+            except ImportError as exc:
+                logger.debug(
+                    "TrendSnapshotDaemon not available (open-core build): %s", exc
+                )
+            else:
                 try:
-                    from .trend_snapshot import TrendSnapshotDaemon
-                except ImportError as exc:
-                    logger.debug(
-                        "TrendSnapshotDaemon not available (open-core build): %s", exc
-                    )
-                else:
                     d = TrendSnapshotDaemon(
                         interval=daemons_config.trend_snapshot.interval,
                         config=daemons_config.trend_snapshot,
                     )
                     _configure(d)
                     manager.register(d)
+                except Exception as exc:
+                    _record_failure("trend_snapshot", exc)
 
+        # Always attempt start_all — even if some daemons failed registration,
+        # the ones that succeeded should run. Pre-2026-05-04 this was inside
+        # the outer try-block, so one daemon's failure aborted start_all and
+        # nothing started.
+        try:
             manager.start_all()
-
         except Exception as exc:
-            logger.warning("Could not register daemons for scope %s: %s", scope_id, exc)
+            _record_failure("_start_all", exc)
+
+        # Publish registration errors onto the scope entry for daemon_status.
+        self._publish_registration_errors(scope_id, registration_errors)
+
+    def _publish_registration_errors(
+        self, scope_id: str, errors: list[dict[str, str]]
+    ) -> None:
+        """Attach registration errors to the live scope entry for surfacing
+        via `watercooler_daemon_status`. Idempotent under lock."""
+        if not errors:
+            return
+        with self._lock:
+            entry = self._scopes.get(scope_id)
+            if entry is not None:
+                entry.registration_errors = list(errors)
 
     @staticmethod
     def _hosted_daemon_defaults() -> dict[str, Any]:
@@ -706,7 +777,13 @@ class HostedDaemonCoordinator:
         scope_id: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
-        """Return status for one or more scopes."""
+        """Return status for one or more scopes.
+
+        ``registration_errors`` is included on every per-scope payload so
+        ``watercooler_daemon_status`` can surface daemons that failed to
+        register (e.g., STRICT_NAMESPACE ValueError before scope was
+        configured) without requiring callers to page through Railway logs.
+        """
         with self._lock:
             if scope_id:
                 entry = self._scopes.get(scope_id)
@@ -716,6 +793,7 @@ class HostedDaemonCoordinator:
                     "scope_id": scope_id,
                     "daemons": entry.manager.status_all(),
                     "idle_seconds": time.monotonic() - entry.last_touched,
+                    "registration_errors": list(entry.registration_errors),
                 }
             if user_id:
                 result: dict[str, Any] = {}
@@ -724,6 +802,7 @@ class HostedDaemonCoordinator:
                         result[sid] = {
                             "daemons": entry.manager.status_all(),
                             "idle_seconds": time.monotonic() - entry.last_touched,
+                            "registration_errors": list(entry.registration_errors),
                         }
                 return result
             # All scopes
@@ -734,6 +813,7 @@ class HostedDaemonCoordinator:
                         "user_id": e.key.user_id,
                         "repo": e.key.repo,
                         "idle_seconds": time.monotonic() - e.last_touched,
+                        "registration_errors": list(e.registration_errors),
                     }
                     for sid, e in self._scopes.items()
                 },

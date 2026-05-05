@@ -150,6 +150,7 @@ Canonical roles: `planner`, `critic`, `implementer`, `tester`, `pm`, `scribe`.
 | `watercooler_smart_query` | read-only |
 | `watercooler_find_similar` | read-only |
 | `watercooler_federated_search` | read-only |
+| `watercooler_follow_xref` | read-only |
 | `watercooler_graph_recover` | instruction-only |
 | `watercooler_reindex` | idempotent |
 | `watercooler_say` | mutating |
@@ -659,6 +660,32 @@ Read annotations for an entry or thread.
 **Example:**
 ```python
 watercooler_get_annotations(topic="feature-auth", code_path=".")
+```
+
+### `watercooler_follow_xref`
+
+Resolve an entry's annotation xrefs into entry summaries in a single call.
+Bundles `watercooler_get_annotations` + per-xref `watercooler_get_thread_entry`
+into one round-trip. Output ordering mirrors `annotation_state.xrefs`.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `topic` | string | yes | Thread topic that contains the source entry |
+| `target_id` | string | yes | Entry ID (ULID, with or without `entry:` prefix) whose xrefs should be resolved |
+| `code_path` | string | no | Path to code repo root (ignored in hosted mode) |
+
+**Returns:** JSON with `{schema_version, topic, target_id, count, xrefs: [...]}`.
+Each xref record is `{entry_id, topic, title, type, role, agent, timestamp, summary}`.
+Unresolved xrefs (entry_id not found anywhere) appear as placeholders with
+`missing: true` and a human-readable `note`, never a 500.
+
+**Example:**
+```python
+watercooler_follow_xref(
+    topic="feat-option-b",
+    target_id="DEC1234567890ABCDEFGHJKMNP",
+    code_path=".",
+)
 ```
 
 ## Destructive tools

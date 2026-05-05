@@ -41,6 +41,7 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
+from collections import OrderedDict as _OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, Callable, List, Tuple
 
@@ -61,6 +62,7 @@ STALE_EXTENSION_FACTOR = int(os.getenv("WATERCOOLER_STALE_EXTENSION_FACTOR", "6"
 @dataclass
 class CachedToken:
     """Token with cache metadata for TTL-based eviction."""
+
     token_info: "GitHubTokenInfo"
     cached_at: float = field(default_factory=time.time)
 
@@ -70,7 +72,9 @@ class CachedToken:
 
     def is_stale_expired(self) -> bool:
         """Check if the stale-while-revalidate window has also expired."""
-        return (time.time() - self.cached_at) > (TOKEN_CACHE_TTL * STALE_EXTENSION_FACTOR)
+        return (time.time() - self.cached_at) > (
+            TOKEN_CACHE_TTL * STALE_EXTENSION_FACTOR
+        )
 
 
 # Cache for GitHub tokens (cache_key -> CachedToken)
@@ -83,8 +87,8 @@ _github_token_cache: Dict[str, CachedToken] = {}
 # =============================================================================
 
 # Circuit breaker states
-_CB_CLOSED = "closed"      # Normal operation
-_CB_OPEN = "open"          # Failing, reject requests
+_CB_CLOSED = "closed"  # Normal operation
+_CB_OPEN = "open"  # Failing, reject requests
 _CB_HALF_OPEN = "half_open"  # Testing if service recovered
 
 # Circuit breaker thresholds (configurable via env)
@@ -105,7 +109,9 @@ class _CircuitBreakerState:
     last_failure_time: float = 0.0
     last_success_time: float = 0.0
     _half_open_probe_active: bool = False
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     def record_success(self) -> None:
         """Record a successful call — reset to closed."""
@@ -121,7 +127,10 @@ class _CircuitBreakerState:
             self.failure_count += 1
             self.last_failure_time = time.time()
             self._half_open_probe_active = False
-            if self.state == _CB_HALF_OPEN or self.failure_count >= _CB_FAILURE_THRESHOLD:
+            if (
+                self.state == _CB_HALF_OPEN
+                or self.failure_count >= _CB_FAILURE_THRESHOLD
+            ):
                 self.state = _CB_OPEN
                 logger.warning(
                     f"Token service circuit breaker OPEN after {self.failure_count} failures"
@@ -143,7 +152,9 @@ class _CircuitBreakerState:
                     self._half_open_probe_active = True
                     self.state = _CB_HALF_OPEN
                     self.failure_count = 0
-                    logger.info("Token service circuit breaker HALF-OPEN, testing recovery")
+                    logger.info(
+                        "Token service circuit breaker HALF-OPEN, testing recovery"
+                    )
                     return True
             return False
 
@@ -161,6 +172,361 @@ class GitHubTokenInfo:
     scopes: Optional[str] = None
     expires_at: Optional[str] = None
     capabilities: Optional[List[str]] = None  # Bundled from credentials response
+    # Move 2 Phase 2a (security consolidation plan v5.1): authoritative
+    # set of canonical ``<org>/<repo>`` slugs the token-issuing service
+    # permits this token to act on. The states are:
+    #
+    # - ``None`` — claim absent (dashboard has not yet populated).
+    #   Warn-mode logs ``repo_claim_absent`` and accepts; enforce-mode
+    #   rejects.
+    # - ``frozenset()`` — claim explicitly empty OR malformed (parse
+    #   logged ``repo_claim_malformed`` in the latter case). Both
+    #   shapes mean "zero authorised repos" — reject in BOTH modes.
+    # - ``frozenset({...})`` — populated; X-Repo must canonicalise
+    #   into this set in BOTH modes.
+    #
+    # ``frozenset`` (rather than ``List``) is load-bearing: per-call
+    # membership tests are O(1) and there is no per-request
+    # ``set(token_info.repos)`` allocation. ``_normalise_repos_claim``
+    # is the single normalisation site at parse time.
+    repos: Optional[frozenset[str]] = None
+
+
+# =============================================================================
+# Move 2 Phase 2a — repos-claim parsing + enforcement
+# =============================================================================
+
+
+# Module-level cache of "we've already warned about this token" so the
+# WARN log fires once per token rather than once per request.
+#
+# ``OrderedDict`` rather than ``set`` is load-bearing: under adversarial
+# unique-token flood, ``set.pop()`` evicts an arbitrary element — so
+# legitimate cached tokens get cycled out and re-fire warnings, masking
+# genuine signal in telemetry. ``OrderedDict`` with LRU semantics
+# (touch on hit, evict oldest) keeps regularly-accessed legitimate
+# tokens in the cache while the flood rotates among itself.
+#
+# Bounded size keeps long-running processes from accumulating
+# unbounded state. The lock guards check-and-add atomicity so
+# concurrent callers cannot both pass the size guard and both fire
+# the WARN log for the same token.
+_repo_claim_warn_cache: "_OrderedDict[str, None]" = _OrderedDict()
+_repo_claim_warn_cache_lock = threading.Lock()
+_REPO_CLAIM_WARN_CACHE_MAX = 1024
+
+
+def _claim_first_seen(cache_key: str) -> bool:
+    """Atomically test-and-record a token in the warn-once cache.
+
+    Returns True on first observation of ``cache_key`` (caller emits
+    the WARN log + telemetry). Returns False on subsequent calls for
+    the same key (suppress the log to avoid per-request spam).
+
+    Eviction is LRU: when the cache is full, the OLDEST (least-
+    recently observed) key is evicted. A cached key's position is
+    refreshed on every hit so legitimate tokens that are accessed
+    regularly are protected from eviction even under adversarial
+    flood. ``set.pop()`` (the previous form) was non-deterministic
+    and could evict legitimate tokens at random, defeating the
+    warn-once guarantee.
+    """
+    with _repo_claim_warn_cache_lock:
+        if cache_key in _repo_claim_warn_cache:
+            # LRU touch: move to the end so this key is now the
+            # most-recently-observed and is last to be evicted.
+            _repo_claim_warn_cache.move_to_end(cache_key)
+            return False
+        if len(_repo_claim_warn_cache) >= _REPO_CLAIM_WARN_CACHE_MAX:
+            # Evict the OLDEST key. ``last=False`` means popitem
+            # from the start (the LRU end).
+            _repo_claim_warn_cache.popitem(last=False)
+        _repo_claim_warn_cache[cache_key] = None
+        return True
+
+
+def _normalise_repos_claim(raw: Any) -> Optional[frozenset[str]]:
+    """Normalise a ``repos`` claim from the token-issuing service.
+
+    Returns:
+        ``None`` — claim is absent (raw is None). Caller distinguishes
+            this from "malformed" or "empty" so warn/enforce mode and
+            telemetry can branch accordingly.
+        ``frozenset()`` — claim is empty OR malformed. Both fail-close
+            at ``check_repo_claim`` (zero authorised repos). Malformed
+            input emits a distinct ``repo_claim_malformed`` telemetry
+            counter at parse time so monitoring can distinguish a
+            broken token-service response from a deployment that
+            simply hasn't populated the field yet.
+        ``frozenset({...})`` — populated claim, each entry canonicalised
+            via ``auth.scope.canonical_repo`` (case-folded, ``.git``
+            and ``-threads`` stripped). ``frozenset`` is the load-
+            bearing choice: ``check_repo_claim`` does an O(1)
+            membership test and constructs no per-call set.
+
+    Telemetry: ``security.consolidation.m2.repo_claim_malformed``
+    fires once per parse where ``raw`` is not None and not a list,
+    so a token-service regression that ships ``repos`` as a string
+    or dict produces a separate signal from the warn-mode
+    ``repo_claim_absent`` telemetry. Malformed claims fail closed
+    in BOTH modes (no warn-mode permissivity) — a malformed claim
+    isn't "claim absent", it's "claim is broken."
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        # Token service contract violation. Fail closed AND emit a
+        # distinct telemetry signal so monitoring can react.
+        #
+        # Order matters: emit the human-readable WARNING via the
+        # plain ``logger`` BEFORE calling ``log_action``. The
+        # latter goes through ``observability._get_logger()`` which
+        # lazily initialises logging — that init can flip
+        # ``watercooler_mcp.propagate`` to False (when a file
+        # handler is configured), which would prevent the
+        # subsequent ``logger.warning`` from reaching tests'
+        # ``caplog`` handler. Logging the WARN first preserves
+        # caplog's view of the regression.
+        logger.warning(
+            "repo_claim_malformed: token service returned ``repos`` as "
+            "%s, expected list — failing closed regardless of mode.",
+            type(raw).__name__,
+        )
+        try:
+            from ..observability import log_action
+
+            log_action(
+                "security.consolidation.m2.repo_claim_malformed",
+                outcome="rejected",
+                raw_type=type(raw).__name__,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return frozenset()
+    canonised: List[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        canon = _canonical_repo_for_claim(item)
+        # Reject malformed shapes that can't be a real ``<org>/<repo>``:
+        # empty string, no separator, leading/trailing slash. The
+        # earlier ``"/" not in canon`` check passed inputs like
+        # ``"org/-threads"`` (canon → ``"org/"`` after suffix strip) —
+        # the slash is present but the name segment is empty, which
+        # would create a same-canonical match for any other empty-
+        # name claim entry. Reject the whole class up-front.
+        if not canon or "/" not in canon:
+            continue
+        if canon.startswith("/") or canon.endswith("/"):
+            continue
+        canonised.append(canon)
+    return frozenset(canonised)
+
+
+def _canonical_repo_for_claim(raw: str) -> str:
+    """Strict canonical form for ``repos``-claim and X-Repo enforcement.
+
+    Distinct from ``auth.scope.canonical_repo`` because the latter
+    strips a trailing ``-threads`` suffix for backward compatibility
+    with legacy hosted X-Repo headers that pointed at the now-
+    obsolete ``<repo>-threads`` orphan-storage path. Watercooler no
+    longer uses separate ``-threads`` repos (threads live on the
+    ``watercooler/threads`` orphan branch of the same repo), so the
+    legacy strip is a downstream-compat accommodation in scope-
+    derivation only — NOT a security primitive.
+
+    For the ``repos`` claim, the strip is incorrect: a token
+    authorised for ``["org/repo-threads"]`` (a real GitHub repo
+    whose name happens to end in ``-threads``) would canonicalise
+    to ``"org/repo"`` and falsely match X-Repo ``org/repo`` (a
+    different repo). Conversely, a token authorised for
+    ``["org/repo"]`` would falsely match an X-Repo of
+    ``org/repo-threads``. Both directions invert the issuer's
+    intent.
+
+    This function therefore only:
+    - lower-cases (case-insensitive matching across header casings),
+    - strips a trailing ``.git`` suffix.
+
+    The repo-name segment is preserved verbatim. If a future feature
+    needs the legacy ``-threads`` accommodation, it should opt into
+    ``auth.scope.canonical_repo`` explicitly rather than reach the
+    claim path.
+    """
+    s = raw.strip().lower()
+    if "/" in s:
+        owner, name = s.split("/", 1)
+        if name.endswith(".git"):
+            name = name.removesuffix(".git")
+        return f"{owner}/{name}"
+    if s.endswith(".git"):
+        s = s.removesuffix(".git")
+    return s
+
+
+def repo_claim_mode() -> str:
+    """Return the configured repo-claim enforcement mode.
+
+    ``warn`` (default for v2.0): claim absent → log + accept; claim
+    present → enforce membership.
+
+    ``enforce`` (default for v2.1 after dashboard rollout): claim
+    absent → 403; claim present → enforce membership.
+    """
+    raw = os.getenv("WATERCOOLER_REQUIRE_REPO_CLAIM", "warn").lower()
+    if raw in ("enforce", "1", "true", "yes", "on"):
+        return "enforce"
+    return "warn"
+
+
+def check_repo_claim(
+    token_info: GitHubTokenInfo, x_repo: Optional[str]
+) -> Optional[str]:
+    """Check ``X-Repo`` against the token's ``repos`` claim.
+
+    Returns ``None`` when the request should proceed (claim absent
+    in warn mode, or X-Repo matches a canonicalised entry in the
+    claim). Returns an error string suitable for a 403 response body
+    when the request should be rejected.
+
+    ``x_repo`` is canonicalised via ``auth.scope.canonical_repo``
+    before comparison so case-insensitive + ``.git``-stripped
+    matching produces the right answer regardless of how the
+    caller spelled the header.
+
+    Telemetry: emits ``security.consolidation.m2.repo_claim_absent``
+    once per token when the claim is missing (warn mode) and
+    ``security.consolidation.m2.repo_claim_mismatch`` on every
+    rejection (enforce mode and present-claim-mismatch).
+    """
+    mode = repo_claim_mode()
+
+    if token_info.repos is None:
+        # Claim absent. Warn-once-per-token (atomic check-and-add)
+        # then fall through to the mode gate.
+        #
+        # Use ``sha256(token)`` as the cache key rather than a
+        # ``user_id|github_username|expires_at`` string. The earlier
+        # form was collision-prone: a token where both
+        # ``github_username`` and ``expires_at`` are absent shared a
+        # key with any other absent-fields token for the same
+        # ``user_id``, AND a malicious ``user_id`` containing ``|``
+        # (e.g., ``"alice|bob|"``) could collide with a legitimate
+        # ``("alice", "bob", "")`` triple. Hashing the token itself
+        # is collision-resistant by construction.
+        import hashlib as _hashlib
+
+        cache_key = _hashlib.sha256(token_info.token.encode("utf-8")).hexdigest()
+        if _claim_first_seen(cache_key):
+            logger.warning(
+                "repo_claim_absent: token for user_id=%s lacks ``repos`` "
+                "claim; mode=%s. Phase 2a-observe will accept; Phase 2a-"
+                "enforce rejects.",
+                token_info.user_id,
+                mode,
+            )
+            try:
+                from ..observability import log_action
+
+                log_action(
+                    "security.consolidation.m2.repo_claim_absent",
+                    outcome="observed",
+                    user_id=token_info.user_id,
+                    mode=mode,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        if mode == "enforce":
+            return (
+                "repo_claim_absent: hosted token lacks the ``repos`` "
+                "claim; this deployment requires it (Phase 2a-enforce)."
+            )
+        return None
+
+    # Claim present (could be empty list).
+    #
+    # Empty list = "zero authorised repos". Reject up-front in BOTH
+    # modes regardless of whether ``x_repo`` is supplied — without
+    # this check, a token with ``repos=[]`` and no X-Repo would
+    # early-return through the ``x_repo is None`` gate below and slip
+    # past the auth boundary, even though the claim explicitly
+    # states the token has nothing to act on.
+    if not token_info.repos:
+        try:
+            from ..observability import log_action
+
+            log_action(
+                "security.consolidation.m2.repo_claim_empty",
+                outcome="rejected",
+                user_id=token_info.user_id,
+                mode=mode,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return (
+            "repo_claim_empty: token's ``repos`` claim is explicitly "
+            "empty — the token-issuing service has authorised zero "
+            "repos for this token. No request can proceed."
+        )
+
+    # Claim present and non-empty. Enforce membership in BOTH modes
+    # (warn-mode is specifically about how to handle ABSENT claims,
+    # not present-but-mismatched ones).
+    #
+    # ``token_info.repos`` is a ``frozenset`` of canonical entries
+    # (``_normalise_repos_claim`` is the single normalisation site).
+    # ``check_repo_claim`` only canonicalises ``x_repo`` (the
+    # caller-supplied untrusted input).
+    if x_repo is None:
+        # Claim is non-empty but the request supplied no X-Repo.
+        # Fail closed: a token whose claim names specific repos must
+        # not reach any tool without specifying which one. Letting
+        # this through would let a token restricted to ``["org/a"]``
+        # operate on session-derived state for ``org/b`` — fail-open
+        # is the wrong default at the auth boundary.
+        try:
+            from ..observability import log_action
+
+            log_action(
+                "security.consolidation.m2.repo_claim_x_repo_required",
+                outcome="rejected",
+                user_id=token_info.user_id,
+                mode=mode,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return (
+            "repo_claim_x_repo_required: token's ``repos`` claim names "
+            "specific repos but the request supplied no X-Repo header. "
+            "Hosted requests must include X-Repo so the auth boundary "
+            "can verify membership against the claim."
+        )
+    # Use the strict claim-canonical (no ``-threads`` strip) so the
+    # X-Repo and the claim entries are compared on the same surface.
+    # ``auth.scope.canonical_repo`` is intentionally avoided here —
+    # see ``_canonical_repo_for_claim`` docstring for why.
+    canon_request = _canonical_repo_for_claim(x_repo)
+    if canon_request in token_info.repos:
+        return None
+
+    try:
+        from ..observability import log_action
+
+        log_action(
+            "security.consolidation.m2.repo_claim_mismatch",
+            outcome="rejected",
+            user_id=token_info.user_id,
+            mode=mode,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return (
+        "repo_claim_mismatch: X-Repo is not in the token's authorised "
+        "``repos`` claim. The token-issuing service determines which "
+        "repos this token may act on; X-Repo can only narrow within "
+        "that set."
+    )
 
 
 # =============================================================================
@@ -286,6 +652,7 @@ def get_auth_config() -> Dict[str, str]:
     # Fall back to legacy WATERCOOLER_AUTH_MODE for backwards compatibility
     try:
         from watercooler.config_facade import config as wc_config
+
         mode = wc_config.get_mode()
     except Exception:
         mode = os.getenv("WATERCOOLER_MODE", "local")
@@ -294,7 +661,11 @@ def get_auth_config() -> Dict[str, str]:
     # WATERCOOLER_MODE is absent from the environment. If WATERCOOLER_MODE
     # is explicitly set (even to "local"), the legacy alias is ignored —
     # otherwise it could silently override an explicit mode choice.
-    if mode == "local" and not os.getenv("WATERCOOLER_MODE") and os.getenv("WATERCOOLER_AUTH_MODE"):
+    if (
+        mode == "local"
+        and not os.getenv("WATERCOOLER_MODE")
+        and os.getenv("WATERCOOLER_AUTH_MODE")
+    ):
         legacy = os.getenv("WATERCOOLER_AUTH_MODE", "").lower().strip()
         if legacy in ("local", "hosted"):
             mode = legacy
@@ -319,7 +690,11 @@ def _get_service_config() -> Tuple[str, str, str]:
         (api_url, api_key, vercel_bypass_secret) — any may be empty.
     """
     config = get_auth_config()
-    return config["token_api_url"], config["token_api_key"], config["vercel_bypass_secret"]
+    return (
+        config["token_api_url"],
+        config["token_api_key"],
+        config["vercel_bypass_secret"],
+    )
 
 
 def _build_service_headers(api_key: str, vercel_bypass_secret: str) -> Dict[str, str]:
@@ -386,9 +761,12 @@ def get_github_token(
 
     url = (
         f"{api_url.rstrip('/')}/api/github/token?{urllib.parse.urlencode({'userId': user_id})}"
-        if api_url and api_key else ""
+        if api_url and api_key
+        else ""
     )
-    headers = _build_service_headers(api_key, vercel_bypass) if api_url and api_key else {}
+    headers = (
+        _build_service_headers(api_key, vercel_bypass) if api_url and api_key else {}
+    )
 
     def _parse(data: Dict[str, Any]) -> Optional[GitHubTokenInfo]:
         token = data.get("token")
@@ -400,6 +778,7 @@ def get_github_token(
             github_username=data.get("githubUsername"),
             scopes=data.get("scopes"),
             expires_at=data.get("expiresAt"),
+            repos=_normalise_repos_claim(data.get("repos")),
         )
         logger.info(
             f"Retrieved GitHub token for user {user_id} "
@@ -437,6 +816,7 @@ def resolve_api_key(api_key: str) -> Optional[GitHubTokenInfo]:
         return None
 
     import hashlib
+
     cache_key = f"apikey:{hashlib.sha256(api_key.encode()).hexdigest()}"
 
     api_url, service_key, vercel_bypass = _get_service_config()
@@ -461,6 +841,7 @@ def resolve_api_key(api_key: str) -> Optional[GitHubTokenInfo]:
             scopes=data.get("scopes"),
             expires_at=data.get("expiresAt"),
             capabilities=data.get("capabilities"),
+            repos=_normalise_repos_claim(data.get("repos")),
         )
         cap_count = len(info.capabilities) if info.capabilities else 0
         logger.info(f"Resolved API key to user {user_id} ({cap_count} capabilities)")
@@ -517,11 +898,13 @@ def get_circuit_breaker_status() -> Dict[str, Any]:
         "failure_count": _circuit_breaker.failure_count,
         "last_failure_age_s": (
             round(time.time() - _circuit_breaker.last_failure_time, 1)
-            if _circuit_breaker.last_failure_time > 0 else None
+            if _circuit_breaker.last_failure_time > 0
+            else None
         ),
         "last_success_age_s": (
             round(time.time() - _circuit_breaker.last_success_time, 1)
-            if _circuit_breaker.last_success_time > 0 else None
+            if _circuit_breaker.last_success_time > 0
+            else None
         ),
     }
 

@@ -172,7 +172,12 @@ class DetectDecisionsDaemon(BaseDaemon):
         # Bootstrap or periodically re-sync dedup set from disk
         self._ticks_since_resync += 1
         if not self._existing_keys or self._ticks_since_resync >= _DEDUP_RESYNC_INTERVAL:
-            existing = load_findings(self.name, limit=_DEDUP_LIMIT, unacknowledged_only=True)
+            existing = load_findings(
+                self.name,
+                limit=_DEDUP_LIMIT,
+                unacknowledged_only=True,
+                namespace=self.state_namespace,
+            )
             if len(existing) >= _DEDUP_LIMIT:
                 logger.warning(
                     "DAEMON[decision_detector]: dedup cache truncated at %d findings; "
@@ -350,7 +355,12 @@ class DetectDecisionsDaemon(BaseDaemon):
         # Bootstrap or periodically re-sync dedup set from disk
         self._ticks_since_resync += 1
         if not self._existing_keys or self._ticks_since_resync >= _DEDUP_RESYNC_INTERVAL:
-            existing = load_findings(self.name, limit=_DEDUP_LIMIT, unacknowledged_only=True)
+            existing = load_findings(
+                self.name,
+                limit=_DEDUP_LIMIT,
+                unacknowledged_only=True,
+                namespace=self.state_namespace,
+            )
             self._existing_keys = {
                 (f.topic, f.category, f.entry_id or "") for f in existing
             }

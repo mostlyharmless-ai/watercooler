@@ -45,7 +45,7 @@ The following five daemons ship in the open-source build:
 | Decision Stance | `decision_stance` | 10 min | No | No |
 
 Additional daemons (content scouting, project pulse, cross-thread
-coordination, T2 indexing) ship only in premium and hosted deployments.
+analysis, T2 indexing) ship only in premium and hosted deployments.
 Configuring them in an open-source install has no effect — the daemon
 entries are absent from the registry.
 

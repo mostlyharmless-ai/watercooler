@@ -296,7 +296,10 @@ class ProjectCoordinatorDaemon(BaseDaemon):
             or self._ticks_since_resync >= _DEDUP_RESYNC_INTERVAL
         ):
             existing = load_findings(
-                self.name, limit=_DEDUP_LIMIT, unacknowledged_only=True
+                self.name,
+                limit=_DEDUP_LIMIT,
+                unacknowledged_only=True,
+                namespace=self.state_namespace,
             )
             if len(existing) >= _DEDUP_LIMIT:
                 logger.warning(
@@ -1220,6 +1223,7 @@ class ProjectCoordinatorDaemon(BaseDaemon):
                 category="coordinator_lead",
                 unacknowledged_only=True,
                 limit=_DEDUP_LIMIT,
+                namespace=self.state_namespace,
             )
         except Exception as exc:
             logger.debug(

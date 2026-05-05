@@ -98,10 +98,20 @@ class DaemonManager:
                 )
             # Daemon not registered in this process — read from disk
             # (cross-process case: another process owns the daemon PID lock).
-            # Uses root namespace ("") which is correct for local mode.
-            # In hosted mode, the HostedDaemonCoordinator has its own
-            # findings path that reads from the scoped namespace — this
-            # fallback is not reached in hosted mode.
+            # Local single-tenant mode only: the
+            # HostedDaemonCoordinator owns the hosted-mode findings
+            # read path with explicit scope, so this fallback should
+            # never be reached in a multi-tenant deployment.
+            #
+            # PR #730 round 1 MED: explicitly opt out of the strict
+            # namespace gate via ``_allow_unscoped=True`` (the
+            # documented escape hatch — see
+            # ``state._daemon_dir`` docstring). Underscore prefix
+            # makes the audit gate greppable so a future reader
+            # can review every escape-hatch call site. Asserting
+            # we're not in hosted mode would be too late (the
+            # hosted-mode coordinator binding is set elsewhere); the
+            # cross-process-fallback contract is documented above.
             return load_findings(
                 daemon,
                 limit=limit,
@@ -109,7 +119,7 @@ class DaemonManager:
                 category=category,
                 topic=topic,
                 unacknowledged_only=unacknowledged_only,
-                namespace="",
+                _allow_unscoped=True,
             )
 
         all_findings: List[Finding] = []

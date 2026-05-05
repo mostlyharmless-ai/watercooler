@@ -14,6 +14,7 @@ This package contains tool implementations organized by category:
 Each module provides a register_*_tools(mcp) function to register its tools.
 """
 
+from .annotations_xref import register_annotations_xref_tools
 from .decisions import register_decisions_tools
 from .diagnostic import register_diagnostic_tools
 from .thread_query import register_thread_query_tools
@@ -42,10 +43,12 @@ def register_all_tools(mcp):
     register_federation_tools(mcp)
     register_role_tools(mcp)
     register_decisions_tools(mcp)
+    register_annotations_xref_tools(mcp)
 
 
 __all__ = [
     "register_all_tools",
+    "register_annotations_xref_tools",
     "register_decisions_tools",
     "register_diagnostic_tools",
     "register_thread_query_tools",

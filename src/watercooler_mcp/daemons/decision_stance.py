@@ -174,6 +174,7 @@ class DecisionStanceDaemon(BaseDaemon):
             self.name,
             limit=_DEDUP_LIMIT,
             category="stance_advisory",
+            namespace=self.state_namespace,
         )
         # ``load_findings`` returns newest-first by default — first hit per
         # topic is its current head; everything older is superseded.
@@ -197,6 +198,7 @@ class DecisionStanceDaemon(BaseDaemon):
             self.name,
             limit=200,
             category="stance_advisory",
+            namespace=self.state_namespace,
         )
         seen: set[str] = set()
         # ``load_findings`` returns newest-first, so the first hit per role
@@ -258,6 +260,7 @@ class DecisionStanceDaemon(BaseDaemon):
                 "decision_detector",
                 limit=_DEDUP_LIMIT,
                 category="decision_candidate",
+                namespace=self.state_namespace,
             )
             if f.created_at >= cutoff
         ]
@@ -271,7 +274,11 @@ class DecisionStanceDaemon(BaseDaemon):
                 "details": f.details,
                 "created_at": f.created_at,
             }
-            for f in load_findings("decision_extractor", limit=_DEDUP_LIMIT)
+            for f in load_findings(
+                "decision_extractor",
+                limit=_DEDUP_LIMIT,
+                namespace=self.state_namespace,
+            )
             if f.created_at >= cutoff
         ]
 

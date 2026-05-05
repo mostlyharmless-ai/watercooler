@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from watercooler.config_facade import config
 
@@ -85,6 +85,405 @@ _logger_lock = threading.Lock()
 _session_lock = threading.Lock()  # Separate lock for session timestamp to avoid deadlock
 _session_start: Optional[str] = None  # Lazy initialization to avoid import-time side effects
 _cached_logging_config: Optional[Dict[str, Any]] = None  # Cache to avoid repeated config lookups
+
+
+# ---------------------------------------------------------------------- #
+# Move 4 / Move 6: RedactingFilter — final defense for any token-shaped
+# string that escapes into a log line. Applies ``redact_value`` from the
+# secrets gateway to:
+#
+#   - the formatted message (``record.getMessage()`` covering both
+#     ``record.msg`` and ``record.args`` interpolation)
+#   - ``record.exc_info`` formatted to text (so exception messages
+#     and tracebacks containing tokens are also redacted — PR #727
+#     round 1 MED #1)
+#   - ``record.stack_info`` (frame stacks captured via
+#     ``logger.foo(..., stack_info=True)``)
+#
+# Attached at the LOGGER level (not handler level) so it runs exactly
+# once per record before dispatch to any handler — eliminates the
+# cross-handler-mutation aliasing concern (PR #727 round 1 MED #3).
+# Filters that raise kill the log pipeline; every redact path is
+# wrapped in try/except and falls through to the original record so
+# a redaction failure can never drop a log line.
+# ---------------------------------------------------------------------- #
+
+
+# PR #727 round 1 MED #2: import ``redact_value`` once at module load
+# rather than per-filter-call. If the import fails (test isolation,
+# circular import edge case, packaging error), warn LOUDLY once and
+# operate as a no-op filter — silently failing forever with no
+# observable signal would defeat the "last-line defense" claim.
+def _emit_redact_import_failure_warning(
+    exc: BaseException, *, logger_name: str = LOGGER_NAME
+) -> None:
+    """Emit the loud-warning side of the redact-import failure path.
+
+    Extracted to a helper so PR #727 round 2 LOW #3's testability
+    concern can be addressed: the warning is normally emitted at
+    module-import time before any handler is attached (so caplog
+    can't reliably observe it). This helper lets a test assert
+    the warning message + level by invoking it directly with a
+    synthetic exception, decoupling test coverage from import
+    timing.
+
+    PR #727 round 12 L1: ALSO write to ``sys.stderr`` directly.
+    The logger.warning path is best-effort — at module-import time
+    no handlers are attached, so the record propagates to the root
+    logger which silently discards it (default behaviour without a
+    ``basicConfig`` call). The stderr write guarantees an
+    operator-visible signal regardless of the logging configuration.
+    Duplication is acceptable: the dead-defense state is bad enough
+    that we want both surfaces to fire.
+    """
+    message = (
+        f"RedactingFilter: failed to import secrets.gateway.redact_value "
+        f"({type(exc).__name__}: {exc}); the log-egress redaction filter "
+        f"will be a no-op for this process. Token-shaped strings in log "
+        f"lines WILL leak. Investigate the import path and restart."
+    )
+    # Logger surface (testable via caplog when handlers are attached).
+    logging.getLogger(logger_name).warning(
+        "%s",
+        message,
+    )
+    # Stderr surface (guaranteed visibility at import time before any
+    # logging configuration is applied). Mirrors the existing
+    # ``_get_log_file_path`` print-to-stderr pattern for log-dir
+    # creation failures.
+    print(f"WARNING: {message}", file=sys.stderr, flush=True)
+
+
+try:
+    from .secrets.gateway import redact_value as _redact_value
+except Exception as _redact_import_exc:  # noqa: BLE001 — re-emit explicitly
+    _redact_value = None  # type: ignore[assignment]
+    _emit_redact_import_failure_warning(_redact_import_exc)
+    del _redact_import_exc
+
+
+# Stateless module-private formatter used to render exc_info /
+# stack_info into text so we can run redact_value over it. Safe to
+# share across calls because we don't mutate it.
+_EXC_FORMATTER = logging.Formatter()
+
+
+def _exc_chain_reveals_secret(
+    root_exc: BaseException,
+    redact_fn: Callable[[str], str],
+) -> bool:
+    """Walk an exception's ``__cause__`` / ``__context__`` chain and
+    return True if ``str()`` of any node contains a secret-shaped
+    string, OR if any step of the walk cannot be verified (a
+    ``str()`` call raises, ``redact_fn`` raises, or a malformed
+    chain object is encountered).
+
+    Used by ``_RedactingFilter`` to cross-check the live exception
+    surface when the cached ``exc_text`` may not faithfully
+    represent the exception object's payload — a pre-existing
+    ``record.exc_text`` could be a sanitised form, while the live
+    object's ``args`` (or chained exceptions) still carry the raw
+    token. Downstream handlers (Sentry, GCP CloudLoggingHandler,
+    structlog JSON renderer) walk the cause chain and would
+    re-surface tokens this filter previously redacted from
+    ``exc_text``.
+
+    Fail-safe semantics: any uncertainty resolves to ``True``
+    (assume secret present, conservatively null the surface).
+    Confidentiality is preferred over preserving exc_info on a
+    pathological exception whose ``__str__`` raises or whose chain
+    we cannot traverse.
+    """
+    seen: set[int] = set()
+    exc: Optional[BaseException] = root_exc
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        try:
+            node_str = str(exc)
+        except Exception:
+            return True  # cannot verify → conservative null
+        if node_str:
+            try:
+                if redact_fn(node_str) != node_str:
+                    return True
+            except Exception:
+                return True  # cannot verify → conservative null
+        # Walk the chain. ``__cause__`` is set by ``raise X from Y``;
+        # ``__context__`` is set automatically by an exception
+        # raised inside an except handler.
+        #
+        # PR #727 round 15 M2: match CPython's
+        # ``TracebackException.from_exception`` chain-iteration
+        # logic — when ``__cause__`` is set or ``__suppress_context__``
+        # is True (the latter is auto-set by ``raise X from <expr>``
+        # for any expr including ``None``), the implicit
+        # ``__context__`` is suppressed from rendered output. Walking
+        # it anyway produces false positives: a clean exception
+        # raised inside an except block that previously caught a
+        # token-bearing exception has the token-bearing one as
+        # ``__context__``, but stdlib / structlog / Sentry render
+        # only the new exception. Wrongly nulling ``exc_info`` for
+        # those cases breaks Sentry/GCP grouping for benign
+        # exceptions (I5 violation).
+        try:
+            cause = getattr(exc, "__cause__", None)
+            if cause is not None:
+                exc = cause
+            elif getattr(exc, "__suppress_context__", False):
+                # Explicit suppression: ``raise X from Y`` or
+                # ``raise X from None``. Stop the walk here.
+                exc = None
+            else:
+                exc = getattr(exc, "__context__", None)
+        except Exception:
+            return True  # malformed chain → conservative null
+    return False
+
+
+class _RedactingFilter(logging.Filter):
+    """Apply pattern-based secret redaction at log egress.
+
+    Design contract (six invariants pinned by tests):
+      I1. Never drop a record. ``filter()`` always returns ``True``.
+      I2. No token-bearing surface reaches a downstream handler.
+          The four mutable record surfaces — ``msg``, ``exc_text``,
+          ``exc_info``, ``stack_info`` — are each independently
+          inspected and redacted or nullified.
+      I3. Sections are independent. A failure in section 1 (msg)
+          must not skip section 2 (exc) or section 3 (stack). Each
+          section has its own try/except boundary.
+      I4. Redact failures fall SAFE, not OPEN. When ``redact_fn``
+          raises on a value we'd have written, replace with a
+          ``[REDACTING-FILTER FAILURE: ...]`` placeholder and null
+          the matching surface (no silent leak of the un-redacted
+          input).
+      I5. Preserve ``exc_info`` for non-secret exceptions so
+          downstream routing (Sentry exception-type, GCP grouping,
+          structlog chained-cause walking) keeps working. Null
+          ``exc_info`` only when redaction actually mutated the
+          formatted text OR the live exception chain reveals a
+          secret OR verification was impossible.
+      I6. Don't pre-populate ``record.exc_text`` for non-secret
+          exceptions. CPython's ``Formatter.format`` short-circuits
+          its own ``formatException`` call when ``exc_text`` is
+          set; pre-populating defeats downstream Formatter
+          subclasses that override ``formatException``
+          (structured-JSON, Sentry breadcrumb, colorized handlers).
+
+    Section map:
+      Section 1 — ``record.msg`` / ``record.args``.
+      Section 2 — ``record.exc_info`` is real: format (or use
+          cached) ``exc_text``, redact, gate the write on actual
+          mutation (I6), gate the ``exc_info`` null on actual
+          mutation (I5), cross-check the live exception chain via
+          ``_exc_chain_reveals_secret`` to catch tokens hidden by
+          a pre-existing sanitised ``exc_text`` (e.g., chained
+          causes invisible to the cached form).
+      Section 2.5 — ``record.exc_info`` is None but
+          ``record.exc_text`` is set (orphan). CPython renders
+          ``exc_text`` independently of ``exc_info``; redact in
+          place.
+      Section 3 — ``record.stack_info`` (from
+          ``logger.foo(..., stack_info=True)``).
+
+    Documented scope boundaries (NOT mitigated):
+      - ``exc_info[2]`` frame locals are not walked. A handler that
+        prints frame locals (``cgitb``, ``rich.traceback`` with
+        ``show_locals=True``) on a non-secret exception that has
+        a token bound in a local would leak. Stdlib
+        ``traceback.format_exception`` does not print locals; the
+        deployment surface does not include locals-printing
+        handlers. Documented for any future change that adds one.
+      - The filter is logger-level, not handler-level. A custom
+        logger that bypasses the standard hierarchy
+        (``logging.Logger.callHandlers`` override, etc.) would
+        skip filters entirely.
+
+    Architectural note: attached at the LOGGER level via
+    ``Logger.addFilter`` (not at handler level). Logger filters run
+    exactly once per record before any handler is invoked, so we
+    can safely mutate ``record`` once and have every downstream
+    handler see the redacted form. Handler-level mutation would
+    work today but would alias across multiple handlers, breaking
+    if a third-party handler is added later without the filter.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
+        if _redact_value is None:
+            # Module-load import failed; warning was already emitted
+            # once. Fail open — the filter must never drop a record.
+            return True
+
+        # 1. Redact the formatted message (covers msg + args).
+        # PR #727 round 5 MED: never short-circuit out of the filter
+        # on a section-1 failure — sections 2 (exc_info) and 3
+        # (stack_info) carry independent secret surfaces and must
+        # still be redacted even when ``getMessage`` raises (mis-
+        # matched %s/args) or ``redact_value`` raises on an exotic
+        # input. Scope the try/except to ONLY the msg-mutation path:
+        # on failure leave ``record.msg`` / ``record.args`` alone
+        # and fall through to sections 2 and 3.
+        try:
+            formatted = record.getMessage()
+            redacted = _redact_value(formatted)
+            if redacted != formatted:
+                record.msg = redacted
+                record.args = ()
+        except Exception:
+            # Section 1 failed — getMessage() or redact_value() raised.
+            # PR #727 round 15 M1: ``record.args`` may itself contain
+            # token-bearing strings (e.g.,
+            # ``logger.info("tok=%s", "ghp_…")`` with a malformed
+            # format string that breaks ``getMessage``). The
+            # successful-redaction path already clears ``args`` after
+            # interpolating into ``msg``; the failure path must do
+            # the same — handlers that read ``record.args`` or
+            # ``record.__dict__`` directly (structlog,
+            # python-json-logger, Sentry shims, custom JSON
+            # renderers) bypass the formatted-message path and would
+            # otherwise re-surface the raw token. Clearing args
+            # loses the values, but on a record where ``getMessage``
+            # already raised the args wouldn't have rendered
+            # correctly anyway. Sections 2 and 3 still run below;
+            # their try/except boundaries are independent.
+            try:
+                record.args = ()
+            except Exception:
+                # Pathologically read-only attribute — nothing more
+                # we can do. The Formatter.format call may also
+                # raise on this record; that surfaces the failure.
+                pass
+
+        # 2. Redact exception text (PR #727 round 1 MED #1).
+        # Pre-format and redact so the standard ``Formatter.format``
+        # sees ``record.exc_text`` already populated and skips its
+        # own ``formatException`` call (per Python logging docs).
+        #
+        # PR #727 round 2 MED #1: the bare ``if record.exc_info:``
+        # guard accepted the zero-exception sentinel
+        # ``(None, None, None)``, which ``formatException`` rejects.
+        # Match CPython's own ``Formatter.format`` guard:
+        # ``record.exc_info[0] is not None``.
+        if record.exc_info and record.exc_info[0] is not None:
+            try:
+                # PR #727 round 5 LOW (informational): if
+                # ``record.exc_text`` is already populated by an
+                # earlier filter or by application code, we trust
+                # it as the rendered exception text and run
+                # ``redact_value`` over it. The output is still
+                # redacted, so a pre-poisoned ``exc_text`` cannot
+                # leak via the ``exc_text`` surface itself — though
+                # the live ``exc_info`` is cross-checked separately
+                # below (round 7 LOW).
+                #
+                # PR #727 round 9 M1 (scope boundary, not a bug):
+                # this filter mutates ``record.msg``, ``record.args``,
+                # ``record.exc_text``, ``record.exc_info``, and
+                # ``record.stack_info`` — every text surface the
+                # stdlib Formatter renders. It does NOT walk
+                # ``exc_info[2]`` frame locals. When ``exc_info``
+                # survives (non-secret-bearing exception per the
+                # round-6 gate AND round-7 cross-check), a future
+                # downstream handler that walks frame locals
+                # (``rich.traceback`` with ``show_locals=True``,
+                # Sentry ``before_send`` hooks, ``cgitb``) could
+                # surface a token bound to a local in the failing
+                # frame. Stdlib ``traceback.format_exception`` does
+                # not print locals, so neither the cached-text path
+                # nor the formatException fallback expose them
+                # today. The deployment surface does not include
+                # locals-printing handlers; introducing one without
+                # adding frame-walk redaction here would break the
+                # claim. Documented as a known scope boundary, not
+                # mitigated.
+                exc_text = (
+                    record.exc_text
+                    if record.exc_text
+                    else _EXC_FORMATTER.formatException(record.exc_info)
+                )
+                redacted_exc = _redact_value(exc_text)
+                exc_text_changed = redacted_exc != exc_text
+                # I6: only write ``exc_text`` when redaction actually
+                # changed it. Pre-populating defeats downstream
+                # Formatter subclasses that override ``formatException``
+                # (round 12 M1).
+                if exc_text_changed:
+                    record.exc_text = redacted_exc
+                # I5: null ``exc_info`` only when we have positive
+                # evidence of a secret. Two oracles:
+                #   (a) the cached/formatted ``exc_text`` mutated
+                #       under redact (round 6 MED — primary signal);
+                #   (b) the live exception chain reveals a secret
+                #       via ``str()`` of any node in
+                #       ``__cause__`` / ``__context__`` (round 7
+                #       LOW + round 13 HIGH — catches tokens hidden
+                #       by a pre-existing sanitised ``exc_text``,
+                #       including chained causes the cached form
+                #       omits). The chain helper fails CLOSED:
+                #       any uncertainty (str raises, redact raises,
+                #       malformed chain) returns True.
+                should_null_exc_info = exc_text_changed
+                if not should_null_exc_info:
+                    if _exc_chain_reveals_secret(
+                        record.exc_info[1], _redact_value
+                    ):
+                        should_null_exc_info = True
+                if should_null_exc_info:
+                    record.exc_info = None
+            except Exception:
+                # PR #727 round 3 LOW #3: fail SAFE, not fail OPEN.
+                # The earlier "leave the record alone" path emitted
+                # the original (potentially-secret-containing)
+                # ``exc_text`` if redact_value raised. Since the
+                # record will still be written by the Formatter,
+                # silent-swallow turns a redaction failure into a
+                # silent secret leak. Replace ``exc_text`` with an
+                # operator-visible placeholder so the failure is
+                # surfaced AND no secret survives. Suppressing
+                # ``exc_info`` likewise prevents the Formatter from
+                # re-rendering the unredacted version.
+                record.exc_text = (
+                    "[REDACTING-FILTER FAILURE: exception text "
+                    "suppressed; investigate redact_value]"
+                )
+                record.exc_info = None
+        elif record.exc_text:
+            # PR #727 round 10 MED: orphan exc_text. CPython's
+            # ``Formatter.format`` appends ``record.exc_text``
+            # **independently** of ``record.exc_info`` — the
+            # ``if record.exc_text:`` branch is checked uncondition-
+            # ally even when ``exc_info`` is None. Section 2 above
+            # only runs when ``exc_info`` is set, so a record with
+            # ``exc_info=None`` and ``exc_text="auth failed: ghp_…"``
+            # passed straight through the filter unredacted. Reachable
+            # shapes: application code that sets ``exc_text`` directly
+            # without populating ``exc_info``; a prior filter that
+            # nulled ``exc_info`` (e.g., this filter on a previous
+            # record copied/re-emitted) but left ``exc_text`` intact;
+            # any pipeline that pre-renders the exception text.
+            #
+            # Redact in place. There is no ``exc_info`` to null and
+            # no fast-path ambiguity here — only the cached text.
+            try:
+                record.exc_text = _redact_value(record.exc_text)
+            except Exception:
+                record.exc_text = (
+                    "[REDACTING-FILTER FAILURE: orphan exc_text "
+                    "suppressed; investigate redact_value]"
+                )
+
+        # 3. Redact stack_info (``logger.foo(..., stack_info=True)``).
+        if record.stack_info:
+            try:
+                record.stack_info = _redact_value(record.stack_info)
+            except Exception:
+                # PR #727 round 3 LOW #3: same fail-safe rationale.
+                record.stack_info = (
+                    "[REDACTING-FILTER FAILURE: stack_info suppressed; "
+                    "investigate redact_value]"
+                )
+
+        return True
 
 # Process-global set of keys that have already emitted a WARNING.
 # Never cleared — once a key is warned, subsequent calls log at DEBUG.
@@ -130,6 +529,13 @@ def _reset_logging_state() -> None:
         for namespace in LOGGER_NAMESPACES:
             ns_logger = logging.getLogger(namespace)
             ns_logger.handlers.clear()
+            # PR #727 round 2 MED #2: also clear filters. The
+            # RedactingFilter is now attached at logger level (not
+            # handler level), so a stale filter survives a
+            # handlers-only reset and silently mutates records the
+            # next test produces. Clearing both keeps the reset's
+            # contract — a clean-slate logger.
+            ns_logger.filters.clear()
             ns_logger.propagate = True  # Re-enable propagation for pytest caplog
 
 
@@ -307,6 +713,16 @@ def _get_logger() -> logging.Logger:
                 stream_handler.setLevel(stream_level)
                 handlers.append(stream_handler)
 
+                # PR #727 round 1 MED #3: attach the RedactingFilter at
+                # the LOGGER level (one filter instance per namespace),
+                # not the handler level. Logger filters run exactly
+                # once per record before dispatch to any handler — so
+                # a third-party / late-registered handler will see the
+                # already-redacted record without needing the filter
+                # itself. Handler-level mutation would silently alias
+                # across handlers and break if such a handler appeared.
+                redacting_filter = _RedactingFilter()
+
                 # Configure ALL watercooler logger namespaces with shared handlers
                 # This ensures logging from watercooler, watercooler_mcp, and
                 # watercooler_memory all go to the same place with the same format
@@ -318,6 +734,31 @@ def _get_logger() -> logging.Logger:
                 for namespace in LOGGER_NAMESPACES:
                     ns_logger = logging.getLogger(namespace)
                     ns_logger.handlers.clear()  # Remove any existing handlers
+                    # PR #727 round 2 MED #1 + round 3 MED #1 / LOW #1:
+                    # repeated ``_get_logger`` calls (e.g., test resets)
+                    # would stack duplicate ``_RedactingFilter`` instances
+                    # without dedup; list-replacement
+                    # (``ns_logger.filters = [...]``) is not thread-safe.
+                    # The security gap is asymmetric: a missed handler is
+                    # observable (no log line written) but a missed filter
+                    # pass leaks a secret silently.
+                    #
+                    # Order is load-bearing: ADD first, then REMOVE the
+                    # stale instances. After ``addFilter`` there is at
+                    # least one ``_RedactingFilter`` on the logger; after
+                    # each ``removeFilter`` of a stale instance, the new
+                    # one is still attached. A concurrent log call at any
+                    # point during this loop sees ≥1 filter and gets
+                    # redacted. The reverse order (remove-then-add) had a
+                    # window between the last ``removeFilter`` and
+                    # ``addFilter`` where a concurrent log emitted
+                    # unredacted.
+                    ns_logger.addFilter(redacting_filter)
+                    for stale in [
+                        f for f in ns_logger.filters
+                        if isinstance(f, _RedactingFilter) and f is not redacting_filter
+                    ]:
+                        ns_logger.removeFilter(stale)
                     ns_logger.setLevel(log_level)
                     ns_logger.propagate = not disable_propagation
                     for handler in handlers:

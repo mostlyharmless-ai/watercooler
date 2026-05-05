@@ -531,20 +531,38 @@ class TestEdgeCases:
 
 
 class TestEnsureFalkordbRunningGuard:
-    """Regression tests ensuring ensure_falkordb_running() respects backend setting.
+    """Regression tests ensuring ensure_falkordb_running() respects the
+    T2 backend half of the combined T1-OR-T2 gate.
 
-    These tests guard against silent removal of the backend guard at
-    startup.py:1994-1999 — the guard must return early for any backend
-    other than 'graphiti', including the new 'null' default.
+    Post-`bug-falkordb-startup-gate-t1-2026-05-04` fix (PR #758, Plan v3
+    `01KQTGHGPYXQ51Z1S94BKVZFZJ`), the gate fires DISABLED only when
+    BOTH tiers are off — T1 via ``mcp.graph.generate_embeddings=False``
+    AND T2 via ``memory.backend != "graphiti"``. These tests pin the T2
+    half: with T1 off (``generate_embeddings=False``), the gate must
+    still skip for non-graphiti backends.
     """
 
+    @staticmethod
+    def _t1_off_config():
+        """Return a minimal config with stdio transport and T1 semantic
+        OFF, so the gate's behavior depends purely on the backend."""
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            mcp=SimpleNamespace(
+                transport="stdio",
+                graph=SimpleNamespace(generate_embeddings=False),
+            )
+        )
+
     def test_returns_early_for_null_backend(self):
-        """ensure_falkordb_running returns immediately when backend is 'null'."""
+        """T1 off + null backend → DISABLED (no tier needs FalkorDB)."""
         from watercooler_mcp.startup import ensure_falkordb_running
 
-        # get_memory_backend is imported inline inside ensure_falkordb_running, so
-        # patch at the source module where it is defined.
         with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            return_value=self._t1_off_config(),
+        ), patch(
             "watercooler.memory_config.get_memory_backend",
             return_value="null",
         ), patch(
@@ -559,10 +577,13 @@ class TestEnsureFalkordbRunningGuard:
         assert args[1] == ServiceState.DISABLED
 
     def test_returns_early_for_leanrag_backend(self):
-        """ensure_falkordb_running returns immediately when backend is 'leanrag'."""
+        """T1 off + leanrag backend → DISABLED (no tier needs FalkorDB)."""
         from watercooler_mcp.startup import ensure_falkordb_running
 
         with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            return_value=self._t1_off_config(),
+        ), patch(
             "watercooler.memory_config.get_memory_backend",
             return_value="leanrag",
         ), patch(
@@ -584,16 +605,21 @@ class TestEnsureFalkordbRunningTransportGuard:
     check (so even ``backend=graphiti`` with ``transport=hybrid`` skips).
     """
 
-    def _patched_config(self, transport: str):
+    def _patched_config(self, transport: str, generate_embeddings: bool = True):
+        class _Graph:
+            def __init__(self, ge):
+                self.generate_embeddings = ge
+
         class _Mcp:
-            def __init__(self, t):
+            def __init__(self, t, ge):
                 self.transport = t
+                self.graph = _Graph(ge)
 
         class _Config:
-            def __init__(self, t):
-                self.mcp = _Mcp(t)
+            def __init__(self, t, ge):
+                self.mcp = _Mcp(t, ge)
 
-        return _Config(transport)
+        return _Config(transport, generate_embeddings)
 
     def test_returns_early_for_hybrid_transport(self):
         from watercooler_mcp.startup import ensure_falkordb_running
@@ -634,12 +660,22 @@ class TestEnsureFalkordbRunningTransportGuard:
         assert mock_status.call_args[0][1] == ServiceState.DISABLED
 
     def test_proceeds_for_stdio_transport(self):
-        """stdio is the local-full case — backend guard runs as before."""
+        """stdio is the local-full case — passes the transport guard and
+        proceeds to the inner T1-aware tier gate. With both T1 (via
+        ``generate_embeddings=False``) and T2 (via ``backend=null``) off,
+        the tier gate fires DISABLED with a message that names *both*
+        tiers — distinct from the transport guard's message which names
+        only the transport mode. See thread
+        ``bug-falkordb-startup-gate-t1-2026-05-04`` Plan v3
+        (``01KQTGHGPYXQ51Z1S94BKVZFZJ``) for the gate's intended shape.
+        """
         from watercooler_mcp.startup import ensure_falkordb_running
 
         with patch(
             "watercooler_mcp.config.get_watercooler_config",
-            return_value=self._patched_config("stdio"),
+            return_value=self._patched_config(
+                "stdio", generate_embeddings=False
+            ),
         ), patch(
             "watercooler.memory_config.get_memory_backend",
             return_value="null",
@@ -648,11 +684,23 @@ class TestEnsureFalkordbRunningTransportGuard:
         ) as mock_status:
             ensure_falkordb_running()
 
-        # Backend guard hits ('null' backend) — not the transport guard.
+        # Inner tier gate fires (not the transport guard). The message
+        # must reference both tiers — that's how the gate distinguishes
+        # itself from the older T2-only "Backend is 'null'" message.
         mock_status.assert_called_once()
+        args = mock_status.call_args[0]
+        assert args[0] == "falkordb"
+        assert args[1] == ServiceState.DISABLED
         msg = mock_status.call_args[1].get("message", "")
-        assert "null" in msg.lower(), (
-            f"expected the backend guard to fire for stdio, got message={msg!r}"
+        assert "neither" in msg.lower() or (
+            "t1" in msg.lower() and "t2" in msg.lower()
+        ), (
+            f"expected the tier gate to name both T1 and T2 in its skip "
+            f"message, got message={msg!r}"
+        )
+        # Crucially, the message must NOT be the old T2-only shape.
+        assert msg != "Backend is 'null'", (
+            "tier gate emitted the pre-fix T2-only message — bug regressed"
         )
 
     def test_logs_when_config_resolution_fails(self):

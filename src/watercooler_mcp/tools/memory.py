@@ -426,13 +426,51 @@ def _add_canonical_identity_fields(diagnostics: dict, code_path: str = "") -> No
     # where available and fall back gracefully.
     repo_slug = None
     repo_name = None
+    http_ctx = None
     try:
-        from ..context import get_http_context
-        http_ctx = get_http_context()
+        from ..context import get_effective_context
+        http_ctx = get_effective_context()
         if http_ctx is not None:
             repo_slug = getattr(http_ctx, "repo", None)
     except Exception:
         repo_slug = None
+
+    try:
+        from ..auth import is_hosted_mode
+    except ImportError as _hosted_err:
+        log_error(
+            f"MEMORY: failed to import is_hosted_mode: "
+            f"{_hosted_err.__class__.__name__}: {_hosted_err}; "
+            f"using local diagnostic graph-name derivation and surfacing "
+            f"the auth import error."
+        )
+        diagnostics["hosted_mode_error"] = (
+            f"failed to import is_hosted_mode: {_hosted_err}"
+        )
+        hosted_mode = False
+    except Exception as _hosted_err:
+        log_error(
+            f"MEMORY: failed to import is_hosted_mode: "
+            f"{_hosted_err.__class__.__name__}: {_hosted_err}; "
+            f"refusing diagnostic graph-name fallback because hosted-mode "
+            f"detection could not be loaded safely."
+        )
+        diagnostics["scope_error"] = (
+            "Hosted-mode detection failed while importing auth helpers; "
+            "refusing to derive fallback graph names."
+        )
+        hosted_mode = True
+    else:
+        try:
+            hosted_mode = is_hosted_mode()
+        except Exception as _hosted_err:
+            log_error(
+                f"MEMORY: is_hosted_mode() raised "
+                f"{_hosted_err.__class__.__name__}: {_hosted_err}; refusing "
+                f"diagnostic graph-name fallback because hosted scope safety "
+                f"could not be determined."
+            )
+            hosted_mode = True
 
     try:
         from watercooler.path_resolver import derive_code_repo_name
@@ -444,18 +482,30 @@ def _add_canonical_identity_fields(diagnostics: dict, code_path: str = "") -> No
 
     diagnostics["repo_slug"] = repo_slug or "n/a"
     diagnostics["repo_name"] = repo_name or "n/a"
-    diagnostics["project_group_id"] = derive_project_group_id(
-        repo_slug=repo_slug,
-        code_repo_name=repo_name,
-    )
-    diagnostics["t1_database"] = derive_t1_database_name(
-        repo_slug=repo_slug,
-        code_repo_name=repo_name,
-    )
-    diagnostics["t2_database"] = derive_t2_database_name(
-        repo_slug=repo_slug,
-        code_repo_name=repo_name,
-    )
+    if hosted_mode and not repo_slug:
+        diagnostics["project_group_id"] = "unresolved"
+        diagnostics["t1_database"] = "unresolved_missing_x_repo"
+        diagnostics["t2_database"] = "unresolved_missing_x_repo"
+        diagnostics.setdefault(
+            "scope_error",
+            (
+                "Hosted request has no X-Repo header; refusing to derive a "
+                "fallback graph name."
+            ),
+        )
+    else:
+        diagnostics["project_group_id"] = derive_project_group_id(
+            repo_slug=repo_slug,
+            code_repo_name=repo_name,
+        )
+        diagnostics["t1_database"] = derive_t1_database_name(
+            repo_slug=repo_slug,
+            code_repo_name=repo_name,
+        )
+        diagnostics["t2_database"] = derive_t2_database_name(
+            repo_slug=repo_slug,
+            code_repo_name=repo_name,
+        )
     # Plan-state indicator. PR #654 in-PR review round 9 (LOW): the prior
     # form was hardcoded to ``"phase_1_to_5_pre_split"`` regardless of
     # runtime state, so operators triaging production issues would always
@@ -587,8 +637,57 @@ def _diagnose_memory_impl(ctx: Context, code_path: str = "") -> ToolResult:
         diagnose_memory(code_path="/path/to/project")
     """
     # Hosted mode guard — skip filesystem checks
-    from ..auth import is_hosted_mode
-    if is_hosted_mode():
+    try:
+        from ..auth import is_hosted_mode
+    except ImportError as _hosted_err:
+        log_error(
+            f"MEMORY: failed to import is_hosted_mode: "
+            f"{_hosted_err.__class__.__name__}: {_hosted_err}; cannot "
+            f"determine whether hosted diagnostics are required."
+        )
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps(
+                {
+                    "error": "Hosted mode detection unavailable",
+                    "message": (
+                        "Failed to import hosted-mode auth helpers while "
+                        f"diagnosing memory configuration: {_hosted_err}"
+                    ),
+                },
+                indent=2,
+            ),
+        )])
+    except Exception as _hosted_err:
+        log_error(
+            f"MEMORY: failed to import is_hosted_mode: "
+            f"{_hosted_err.__class__.__name__}: {_hosted_err}; cannot "
+            f"determine whether hosted diagnostics are required."
+        )
+        return ToolResult(content=[TextContent(
+            type="text",
+            text=json.dumps(
+                {
+                    "error": "Hosted mode detection unavailable",
+                    "message": (
+                        "Failed to import hosted-mode auth helpers while "
+                        f"diagnosing memory configuration: {_hosted_err}"
+                    ),
+                },
+                indent=2,
+            ),
+        )])
+    else:
+        try:
+            hosted_mode = is_hosted_mode()
+        except Exception as _hosted_err:
+            log_error(
+                f"MEMORY: is_hosted_mode() raised "
+                f"{_hosted_err.__class__.__name__}: {_hosted_err}; using hosted "
+                f"diagnostic path so graph-name derivation fails closed."
+            )
+            hosted_mode = True
+    if hosted_mode:
         return _diagnose_memory_hosted_impl(ctx, code_path)
 
     try:

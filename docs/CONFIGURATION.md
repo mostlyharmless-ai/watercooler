@@ -259,9 +259,12 @@ see [MCP-CLIENTS.md](./MCP-CLIENTS.md) for the client-side story.
 |---|---|---|
 | `api_url` | `""` | Watercooler hosted API URL. Env: `WATERCOOLER_TOKEN_API_URL`. |
 
-`WATERCOOLER_INTERNAL_SECRET` is env-only (never in TOML) — see
-[CONFIGURATION_HOSTED.md](./CONFIGURATION_HOSTED.md) for hosted-only
-environment variables.
+Hosted-mode auth secrets (HMAC v3 per-key registry,
+`WATERCOOLER_SLACK_SYNC_SECRET`) are env-only (never in TOML) — see
+[CONFIGURATION_HOSTED.md](./CONFIGURATION_HOSTED.md) for the full set.
+The legacy `WATERCOOLER_INTERNAL_SECRET` global key was removed from
+the Railway production runtime in Plan v5.1 Sprint 4 (2026-05-01) and
+is no longer consulted under `WATERCOOLER_HMAC_REQUIRE_V3=enforce`.
 
 ### `[mcp.slack]` — Slack integration
 

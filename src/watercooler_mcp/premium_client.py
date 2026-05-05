@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.client import Client
@@ -21,6 +22,102 @@ from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server import create_proxy
 
 logger = logging.getLogger(__name__)
+
+
+def build_premium_headers(
+    transport_config: dict[str, Any],
+    *,
+    boot_cwd: Path | None = None,
+) -> dict[str, str]:
+    """Build hosted context headers for hybrid/proxy transports.
+
+    Args:
+        transport_config: Dict with ``proxy_repo`` and ``proxy_branch`` keys.
+        boot_cwd: Process cwd captured at MCP startup by the caller.
+
+    Returns:
+        Headers for the hosted premium transport.
+
+    Raises:
+        ValueError: If repo or branch context cannot be resolved.
+    """
+    from watercooler.config_facade import config as wc_config
+
+    headers: dict[str, str] = {}
+    repo = transport_config.get("proxy_repo", "")
+    branch = transport_config.get("proxy_branch", "")
+
+    if not repo or not branch:
+        try:
+            ctx = wc_config.context(boot_cwd)
+            if not repo and ctx.code_repo:
+                repo = ctx.code_repo
+            if not branch and ctx.code_branch:
+                branch = ctx.code_branch
+        except Exception as exc:
+            if not repo and not branch:
+                raise ValueError(
+                    "Hybrid/proxy mode requires a resolvable code repo and "
+                    "code branch. "
+                    f"Detected boot cwd {boot_cwd or '<not provided>'!s}, but "
+                    "git context resolution failed. Set [mcp].proxy_repo = "
+                    "'<owner>/<repo>' and [mcp].proxy_branch in "
+                    "~/.watercooler/config.toml or run the MCP server from "
+                    "inside a git repo."
+                ) from exc
+            elif not repo:
+                raise ValueError(
+                    "Hybrid/proxy mode requires a resolvable code repo. "
+                    f"Detected boot cwd {boot_cwd or '<not provided>'!s}, but "
+                    "git context resolution failed. Set [mcp].proxy_repo = "
+                    "'<owner>/<repo>' in ~/.watercooler/config.toml or run "
+                    "the MCP server from inside a git repo."
+                ) from exc
+            elif not branch:
+                raise ValueError(
+                    "Hybrid/proxy mode could not resolve a code branch. "
+                    f"Detected boot cwd {boot_cwd or '<not provided>'!s}, but "
+                    "git context resolution failed. Set [mcp].proxy_branch "
+                    "in ~/.watercooler/config.toml or run the MCP server "
+                    "from inside a git repo."
+                ) from exc
+
+    if repo:
+        headers["X-Repo"] = repo
+    else:
+        raise ValueError(
+            "Hybrid/proxy mode requires a resolvable code repo. "
+            f"Detected boot cwd {boot_cwd or '<not provided>'!s}, but no "
+            "repository slug could be inferred. Set [mcp].proxy_repo = "
+            "'<owner>/<repo>' in ~/.watercooler/config.toml or run the MCP "
+            "server from inside a git repo."
+        )
+
+    if branch:
+        headers["X-Branch"] = branch
+    else:
+        raise ValueError(
+            "Hybrid/proxy mode could not resolve a code branch. "
+            f"Detected boot cwd {boot_cwd or '<not provided>'!s}, but no "
+            "branch could be inferred. Set [mcp].proxy_branch in "
+            "~/.watercooler/config.toml or run the MCP server from inside a "
+            "git repo with a checked-out branch."
+        )
+
+    # Send the user's daemon config overrides (non-default values only)
+    # so Railway merges them onto hosted defaults (all daemons enabled).
+    try:
+        import json as _json
+
+        full_config = wc_config.full()
+        daemon_cfg = full_config.mcp.daemons
+        overrides = daemon_cfg.model_dump(exclude_unset=True)
+        if overrides:
+            headers["X-Daemon-Config"] = _json.dumps(overrides)
+    except Exception:
+        pass  # Non-fatal: Railway falls back to hosted defaults
+
+    return headers
 
 
 class PremiumToolClient:
@@ -35,7 +132,12 @@ class PremiumToolClient:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_transport_config(cls, transport_config: dict[str, Any]) -> PremiumToolClient:
+    def from_transport_config(
+        cls,
+        transport_config: dict[str, Any],
+        *,
+        boot_cwd: Path | None = None,
+    ) -> PremiumToolClient:
         """Build a ``PremiumToolClient`` from the MCP transport config dict.
 
         Reuses the same repo/branch header resolution logic that
@@ -46,6 +148,8 @@ class PremiumToolClient:
             transport_config: Dict with ``url``, ``proxy_repo``,
                 ``proxy_branch`` keys (as returned by
                 ``get_mcp_transport_config()``).
+            boot_cwd: Process cwd captured at MCP startup. The caller, not
+                this helper, decides when cwd inference is safe.
 
         Returns:
             A configured ``PremiumToolClient``.
@@ -64,37 +168,7 @@ class PremiumToolClient:
 
         api_key = wc_config.get_hosted_api_key()
 
-        # Build context headers (same logic as _run_proxy).
-        headers: dict[str, str] = {}
-        repo = transport_config.get("proxy_repo", "")
-        branch = transport_config.get("proxy_branch", "")
-
-        if not repo or not branch:
-            try:
-                ctx = wc_config.context()
-                if not repo and ctx.code_repo:
-                    repo = ctx.code_repo
-                if not branch and ctx.code_branch:
-                    branch = ctx.code_branch
-            except Exception:
-                pass
-
-        if repo:
-            headers["X-Repo"] = repo
-        if branch:
-            headers["X-Branch"] = branch
-
-        # Send the user's daemon config overrides (non-default values only)
-        # so Railway merges them onto hosted defaults (all daemons enabled).
-        try:
-            import json as _json
-            full_config = wc_config.full()
-            daemon_cfg = full_config.mcp.daemons
-            overrides = daemon_cfg.model_dump(exclude_unset=True)
-            if overrides:
-                headers["X-Daemon-Config"] = _json.dumps(overrides)
-        except Exception:
-            pass  # Non-fatal: Railway falls back to hosted defaults
+        headers = build_premium_headers(transport_config, boot_cwd=boot_cwd)
 
         transport = StreamableHttpTransport(url, headers=headers, auth=api_key)
         client = Client(transport)

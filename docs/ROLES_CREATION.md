@@ -16,7 +16,7 @@ That distinction matters more than it first appears. A `tester` entry doesn't re
 
 This is the deeper point: **roles separate types of thinking**. The hardest challenge in collaborative work — human or AI-assisted — is knowing what *kind* of contribution the moment calls for. Should the next step establish direction, or challenge the direction already there, or execute against it, or verify the execution? Roles make that question explicit and durable. A `planner` entry records that direction-setting mode was active. A `critic` entry records that challenge mode was active. This separation keeps threads from collapsing into undifferentiated discussion, and it keeps agents from doing everything at once — proposing, building, testing, and critiquing in a single response, which makes the record unreadable and the collaboration incoherent.
 
-**Roles also create coordination without presence.** In asynchronous, multi-agent work, you often pick up a thread without knowing what state it's in. The role distribution of recent entries tells you. If the last several entries are `implementer`, execution is in progress. If they're `critic`, something is under review. If they're `pm`, coordination is active. This is orientation without real-time communication — which is exactly what's needed when humans, AI agents, and automated daemons all contribute to the same thread across sessions and time zones.
+**Roles also create coordination without presence.** In asynchronous, multi-agent work, you often pick up a thread without knowing what state it's in. The role distribution of recent entries tells you. If the last several entries are `implementer`, execution is in progress. If they're `critic`, something is under review. If they're `pm`, thread coherence work is active — sequencing, ownership, or status is being managed. This is orientation without real-time communication — which is exactly what's needed when humans, AI agents, and automated daemons all contribute to the same thread across sessions and time zones.
 
 ---
 
@@ -48,7 +48,7 @@ Entry types classify the nature of a thread entry: `Note` for updates and findin
 | `critic` | Review by inspection: issues, risks, quality concerns | Note, Decision | implementer, tester, planner |
 | `implementer` | Implementation: changes made, blockers, PR-ready state | Note, PR | tester, critic, planner |
 | `tester` | Validation: test plans, observed results, coverage, readiness | Plan, Note | implementer, critic, pm |
-| `pm` | Coordination: sequencing, ownership, blockers, status | Plan, Note | all roles, scribe |
+| `pm` | Thread coherence: sequencing, ownership, blockers, status | Plan, Note | all roles, scribe |
 | `scribe` | Record-keeping: decisions captured, summaries, closures | Decision, Closure, Note | (terminus) |
 
 ### planner
@@ -85,11 +85,11 @@ Wear `tester` when the contribution is about verification. Use `Plan` entries fo
 
 ### pm
 
-Coordinates who does what and when — sequencing, handoffs, blockers, ownership, and status.
+Maintains thread coherence — sequencing, handoffs, blockers, ownership, and status.
 
-Wear `pm` to keep work moving: surface blockers, track dependencies, sequence tasks, clarify ownership, and summarize where the thread stands. When a thread stalls, diagnose the coordination problem and propose the next step. Use `Plan` entries for coordination structure; use `Note` entries for status updates and ownership clarifications.
+Wear `pm` to keep work moving: surface blockers, track dependencies, sequence tasks, clarify ownership, and summarize where the thread stands. When a thread stalls, diagnose what is blocking progress and propose the next step. Use `Plan` entries for sequencing structure; use `Note` entries for status updates and ownership clarifications.
 
-**Boundary:** Coordination, not technical direction. `pm` does not decide what to build or how — that's `planner`. It does not substitute for review or validation. Keep `pm` narrow: its job is to make responsibility, sequence, and project state visible.
+**Boundary:** Thread coherence, not technical direction. `pm` does not decide what to build or how — that's `planner`. It does not substitute for review or validation. Keep `pm` narrow: its job is to make responsibility, sequence, and shared context visible.
 
 ### scribe
 
@@ -129,7 +129,7 @@ The common arcs in practice:
 - **Feature development**: `planner` proposes direction → `implementer` builds → `critic` reviews → `implementer` revises → `tester` validates → `pm` confirms readiness → `scribe` records closure.
 - **Design review**: `planner` proposes → `critic` challenges → `planner` revises → repeat until committed.
 - **Bug fix**: `implementer` reports blocker → `critic` diagnoses root cause → `implementer` fixes → `tester` verifies.
-- **Coordination**: `pm` sequences work, routes blockers, and threads through any arc as needed.
+- **Thread coherence**: `pm` sequences work, routes blockers, and threads through any arc as needed.
 
 The `pm` role is unusual because it can appear at any point in the arc — its job is to keep work moving, not to fit into a fixed slot.
 

@@ -356,7 +356,16 @@ default_spec = "general-purpose"
 # Env: WATERCOOLER_TOKEN_API_URL
 # api_url = ""
 
-# Note: WATERCOOLER_INTERNAL_SECRET must be set via env var (not TOML)
+# Hosted-mode auth secrets are env-only (never in TOML). Post Plan v5.1
+# Sprint 4 (2026-05-01), the supported scheme is HMAC v3 via the per-key
+# registry (env vars `WATERCOOLER_HMAC_KEY_<KEY_ID>_SECRET` plus
+# `_TYPE`, `_SERVICE_IDENTITY`, `_DELEGATION`, `_REPOS`), with
+# `WATERCOOLER_HMAC_REQUIRE_V3=enforce` as the production default. The
+# legacy global `WATERCOOLER_INTERNAL_SECRET` was removed from the
+# Railway production runtime; setting it has no effect on enforce-mode
+# verification or on the Slack-sync path (which now reads exclusively
+# from `WATERCOOLER_SLACK_SYNC_SECRET`). See
+# docs/CONFIGURATION_HOSTED.md and docs/HMAC_CALLER_INVENTORY.md.
 
 
 # -----------------------------------------------------------------------------

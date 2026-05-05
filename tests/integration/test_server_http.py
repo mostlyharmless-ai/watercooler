@@ -122,35 +122,38 @@ class TestAuthenticationMiddleware:
         response = client.get("/health")
         assert response.status_code == 200
 
-    def test_hosted_mode_requires_internal_secret(self):
-        """Hosted mode without INTERNAL_SECRET rejects /mcp with 503."""
+    def test_hosted_mode_unauthenticated_returns_401(self):
+        """#733: with the legacy v1/v2 single-secret verifier deleted,
+        an unauthenticated /mcp request in hosted mode falls through
+        to the hosted-identity gate and receives 401. The legacy
+        misconfiguration-503 surface is gone.
+        """
         env = {
             "WATERCOOLER_MODE": "hosted",
             "WATERCOOLER_TOKEN_API_URL": "https://example.com",
             "WATERCOOLER_TOKEN_API_KEY": "test-key",
-            "WATERCOOLER_INTERNAL_SECRET": "",
         }
         with patch.dict(os.environ, env, clear=False):
             app = create_http_app()
             client = TestClient(app, raise_server_exceptions=False)
 
             response = client.post("/mcp/", json={})
-            assert response.status_code == 503
-            assert "HMAC secret required" in response.json()["error"]
+            assert response.status_code == 401
+            assert "HMAC secret required" not in response.json().get("error", "")
 
     def test_hosted_mode_requires_user_id(self):
-        """Hosted mode with INTERNAL_SECRET requires X-User-ID or Bearer."""
+        """Hosted mode requires X-User-ID or Bearer for /mcp."""
         env = {
             "WATERCOOLER_MODE": "hosted",
             "WATERCOOLER_TOKEN_API_URL": "https://example.com",
             "WATERCOOLER_TOKEN_API_KEY": "test-key",
-            "WATERCOOLER_INTERNAL_SECRET": "test-secret",
         }
         with patch.dict(os.environ, env, clear=False):
             app = create_http_app()
             client = TestClient(app, raise_server_exceptions=False)
 
-            # Request without auth headers should require HMAC signature
+            # Request without auth headers receives 401 from the hosted
+            # identity gate (no fallback v2 HMAC verifier exists post-#733)
             response = client.post("/mcp/", json={})
             assert response.status_code == 401
 
@@ -172,6 +175,94 @@ class TestAuthenticationMiddleware:
         # This test requires proper async context for MCP
         # Skip for now as it requires complex lifespan handling
         pytest.skip("MCP endpoint requires async lifespan context")
+
+    def test_startup_logs_identity_mode_policy(self, monkeypatch):
+        """create_http_app() emits a single INFO line naming the
+        configured identity-mode policy.
+
+        PR #748 review round 3 MED: closes the observability gap
+        the reviewer flagged — operators should have a boot-time
+        signal of which mode is active rather than having to grep
+        ``hosted_identity_auth_used`` telemetry. Mirrors the
+        existing HMAC v3 registry-loaded startup log.
+
+        Captures ``logger.info`` directly rather than via caplog —
+        ``observability.log_action`` (called earlier in
+        ``create_http_app``) flips ``watercooler_mcp.propagate`` to
+        False on first call (documented in
+        ``auth/__init__.py:285-291``), which breaks caplog assertions
+        when this test runs alongside prior tests that already
+        triggered the propagation flip.
+        """
+        from watercooler_mcp import server_http as _sh
+
+        captured: list[tuple[str, tuple]] = []
+        original_info = _sh.logger.info
+
+        def _capture_info(msg, *args, **kwargs):
+            captured.append((msg, args))
+            # Forward so other startup INFO lines still surface in
+            # captured stderr for debugging.
+            return original_info(msg, *args, **kwargs)
+
+        monkeypatch.setattr(_sh.logger, "info", _capture_info)
+
+        env = {
+            "WATERCOOLER_MODE": "hosted",
+            "WATERCOOLER_TOKEN_API_URL": "https://example.com",
+            "WATERCOOLER_TOKEN_API_KEY": "test-key",
+            "WATERCOOLER_REQUIRE_HMAC_OR_BEARER": "enforce",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            create_http_app()
+
+        identity_msgs = [
+            (msg, args)
+            for msg, args in captured
+            if "Hosted identity-mode policy" in msg
+        ]
+        assert len(identity_msgs) == 1, (
+            f"expected exactly one identity-mode startup log, got "
+            f"{len(identity_msgs)}: {identity_msgs!r}"
+        )
+        rendered = identity_msgs[0][0] % identity_msgs[0][1]
+        assert "enforce" in rendered, rendered
+        assert "WATERCOOLER_REQUIRE_HMAC_OR_BEARER" in rendered, rendered
+        assert "X-User-ID-only requests rejected with 401" in rendered, rendered
+
+    def test_startup_logs_identity_mode_warn_default(self, monkeypatch):
+        """Default warn-mode emits the equivalent INFO line with
+        warn-mode body. Defends against a future refactor that only
+        logs in enforce mode and silences the default-deployment
+        signal — operators need the boot-time policy signal in
+        BOTH modes."""
+        from watercooler_mcp import server_http as _sh
+
+        captured: list[tuple[str, tuple]] = []
+
+        def _capture_info(msg, *args, **kwargs):
+            captured.append((msg, args))
+
+        monkeypatch.setattr(_sh.logger, "info", _capture_info)
+
+        # Default — env unset.
+        monkeypatch.delenv("WATERCOOLER_REQUIRE_HMAC_OR_BEARER", raising=False)
+        env = {
+            "WATERCOOLER_MODE": "hosted",
+            "WATERCOOLER_TOKEN_API_URL": "https://example.com",
+            "WATERCOOLER_TOKEN_API_KEY": "test-key",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            create_http_app()
+        identity_msgs = [
+            (msg, args)
+            for msg, args in captured
+            if "Hosted identity-mode policy" in msg
+        ]
+        assert len(identity_msgs) == 1
+        rendered = identity_msgs[0][0] % identity_msgs[0][1]
+        assert "warn" in rendered, rendered
+        assert "accepted with telemetry" in rendered, rendered
 
 
 class TestMCPEndpoint:

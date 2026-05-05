@@ -12,6 +12,7 @@ Phase 1A features:
 """
 
 import sys
+from pathlib import Path
 if sys.version_info < (3, 10):
     raise RuntimeError(
         f"Watercooler MCP requires Python 3.10+; found {sys.version.split()[0]}"
@@ -201,7 +202,7 @@ daemon_findings_tool = _daemon_tools.daemon_findings
 # ============================================================================
 
 
-def _run_proxy(transport_config: dict) -> None:
+def _run_proxy(transport_config: dict, *, boot_cwd: Path | None = None) -> None:
     """Run the MCP server in proxy mode.
 
     Forwards all tool calls to a remote hosted MCP endpoint via FastMCP's
@@ -231,29 +232,16 @@ def _run_proxy(transport_config: dict) -> None:
     from fastmcp.client import Client
     from fastmcp.client.transports import StreamableHttpTransport
     from fastmcp.server import create_proxy
+    from .premium_client import build_premium_headers
 
     # Resolve repo/branch for X-Repo / X-Branch headers.
     # The hosted endpoint needs these to scope thread operations.
     # Priority: config/env (proxy_repo, proxy_branch) > local git context.
-    headers: dict[str, str] = {}
-
-    repo = transport_config.get("proxy_repo", "")
-    branch = transport_config.get("proxy_branch", "")
-
-    if not repo or not branch:
-        try:
-            ctx = config.context()
-            if not repo and ctx.code_repo:
-                repo = ctx.code_repo
-            if not branch and ctx.code_branch:
-                branch = ctx.code_branch
-        except Exception:
-            pass
-
-    if repo:
-        headers["X-Repo"] = repo
-    if branch:
-        headers["X-Branch"] = branch
+    try:
+        headers = build_premium_headers(transport_config, boot_cwd=boot_cwd)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     header_info = ", ".join(f"{k}={v}" for k, v in headers.items()) or "no context"
     print(f"Starting Watercooler MCP Proxy → {url} ({header_info})", file=sys.stderr)
@@ -264,7 +252,7 @@ def _run_proxy(transport_config: dict) -> None:
     proxy.run()
 
 
-def _run_hybrid(transport_config: dict) -> None:
+def _run_hybrid(transport_config: dict, *, boot_cwd: Path | None = None) -> None:
     """Run the MCP server in hybrid mode.
 
     Local threads + baseline graph tools execute locally.
@@ -295,7 +283,14 @@ def _run_hybrid(transport_config: dict) -> None:
     profile = CapabilityProfile(routes=routes)
 
     # Build premium client
-    premium_client = PremiumToolClient.from_transport_config(transport_config)
+    try:
+        premium_client = PremiumToolClient.from_transport_config(
+            transport_config,
+            boot_cwd=boot_cwd,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     # Build runtime and server
     runtime = ToolRuntime(
@@ -449,6 +444,8 @@ def main():
     """Entry point for watercooler-mcp command."""
     import argparse
 
+    boot_cwd = Path.cwd()
+
     parser = argparse.ArgumentParser(
         description="Watercooler MCP Server - AI agent collaboration tools",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -504,12 +501,12 @@ Environment variables:
     # Proxy mode: forward all tool calls to a remote hosted MCP endpoint.
     # No local services start — the proxy handles everything.
     if transport == "proxy":
-        _run_proxy(transport_config)
+        _run_proxy(transport_config, boot_cwd=boot_cwd)
         return
 
     # Hybrid mode: local threads + remote premium capabilities.
     if transport == "hybrid":
-        _run_hybrid(transport_config)
+        _run_hybrid(transport_config, boot_cwd=boot_cwd)
         return
 
     # Check for first-run and suggest config initialization

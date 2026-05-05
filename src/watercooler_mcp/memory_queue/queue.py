@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TextIO
 
 from .errors import DuplicateTaskError, QueueFullError, TaskNotFoundError
 from .task import MemoryTask, TaskStatus
@@ -180,7 +180,9 @@ class MemoryTaskQueue:
             self._persist()
 
         logger.debug(
-            "MEMORY_QUEUE: dequeued %s (attempt %d)", task.task_id, task.attempt,
+            "MEMORY_QUEUE: dequeued %s (attempt %d)",
+            task.task_id,
+            task.attempt,
         )
         return task
 
@@ -195,7 +197,9 @@ class MemoryTaskQueue:
         """Mark a task as completed and remove from active queue."""
         with self._lock:
             task = self._get_or_raise(task_id)
-            task.mark_completed(episode_uuid=episode_uuid, entities=entities, facts=facts)
+            task.mark_completed(
+                episode_uuid=episode_uuid, entities=entities, facts=facts
+            )
             self._stats["total_completed"] += 1
             self._append_receipt(task, terminal_state="completed")
             # Remove terminal tasks from active queue (they're done)
@@ -205,8 +209,12 @@ class MemoryTaskQueue:
         logger.debug("MEMORY_QUEUE: completed %s", task_id)
 
     def fail(
-        self, task_id: str, error: str, *,
-        backoff_base: float = 30.0, permanent: bool = False,
+        self,
+        task_id: str,
+        error: str,
+        *,
+        backoff_base: float = 30.0,
+        permanent: bool = False,
     ) -> None:
         """Record a failure.  Task is retried or dead-lettered."""
         with self._lock:
@@ -225,7 +233,9 @@ class MemoryTaskQueue:
 
         logger.debug(
             "MEMORY_QUEUE: failed %s → %s (%s)",
-            task_id, task.status, error[:80],
+            task_id,
+            task.status,
+            error[:80],
         )
 
     def get_task(self, task_id: str) -> Optional[MemoryTask]:
@@ -236,12 +246,16 @@ class MemoryTaskQueue:
     def pending_count(self) -> int:
         """Number of tasks in PENDING state."""
         with self._lock:
-            return sum(1 for t in self._tasks.values() if t.status == TaskStatus.PENDING)
+            return sum(
+                1 for t in self._tasks.values() if t.status == TaskStatus.PENDING
+            )
 
     def running_count(self) -> int:
         """Number of tasks in RUNNING state."""
         with self._lock:
-            return sum(1 for t in self._tasks.values() if t.status == TaskStatus.RUNNING)
+            return sum(
+                1 for t in self._tasks.values() if t.status == TaskStatus.RUNNING
+            )
 
     @property
     def max_depth(self) -> int:
@@ -464,8 +478,51 @@ class MemoryTaskQueue:
 
         if self._tasks:
             logger.info(
-                "MEMORY_QUEUE: loaded %d tasks from disk", len(self._tasks),
+                "MEMORY_QUEUE: loaded %d tasks from disk",
+                len(self._tasks),
             )
+
+    def _open_class_p_append(self, path: Path) -> TextIO:
+        """Open *path* in append mode with 0o600 enforced at creation.
+
+        Class P storage hygiene (Move 6 plan v5.1, PR #705 round 4
+        MED): use ``os.open(O_CREAT|O_APPEND|O_WRONLY, 0o600)`` so
+        the file is created with 0o600 at the kernel level — no
+        TOCTOU window between bare ``open(path, "a")`` and a
+        followup chmod. Pre-existing files are also tightened via
+        ``os.fchmod(fd, 0o600)`` (round 7+2 LOW: switched from
+        ``os.chmod(path, ...)`` so the chmod operates on the open
+        fd's inode and is symlink-immune). On Windows POSIX bits
+        don't apply, so fall back to ``open(path, "a")``.
+
+        PR #705 round 5 MED — fd-leak guard: ``os.fdopen`` takes
+        ownership of the raw fd, but if it raises before the file
+        object is constructed (OOM, invalid fd after a signal,
+        etc.) the fd would leak. Wrap with try/except + os.close
+        so the fd is released on any error path between
+        ``os.open`` and ``os.fdopen``. The chmod failure is
+        logged but does NOT raise, so it cannot cause a leak.
+        """
+        if os.name != "posix":
+            return open(path, "a")
+        fd = os.open(str(path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        try:
+            try:
+                # PR #705 round 7+2 LOW: ``os.fchmod(fd, ...)`` not
+                # ``os.chmod(path, ...)``. The fd already names the
+                # correct inode (the one ``os.open`` resolved);
+                # path-based chmod between ``os.open`` and here
+                # leaves a TOCTOU window where a privileged actor
+                # could swap the path for a symlink and have the
+                # tighten-step apply to a different file. Fd-based
+                # chmod is symlink-immune.
+                os.fchmod(fd, 0o600)
+            except OSError as exc:
+                logger.warning("MEMORY_QUEUE: chmod 0o600 failed for %s: %s", path, exc)
+            return os.fdopen(fd, "a")
+        except BaseException:
+            os.close(fd)
+            raise
 
     def _append_dead_letter(self, task: MemoryTask) -> None:
         """Append a task to dead_letter.jsonl.
@@ -473,7 +530,7 @@ class MemoryTaskQueue:
         Must be called with ``self._lock`` held.
         """
         try:
-            with open(self._dead_letter_file, "a") as f:
+            with self._open_class_p_append(self._dead_letter_file) as f:
                 f.write(task.to_json_line() + "\n")
                 f.flush()
                 os.fsync(f.fileno())
@@ -507,7 +564,7 @@ class MemoryTaskQueue:
             "completed_at": time.time(),
         }
         try:
-            with open(self._receipts_file, "a") as f:
+            with self._open_class_p_append(self._receipts_file) as f:
                 f.write(json.dumps(receipt, separators=(",", ":")) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
@@ -530,7 +587,7 @@ class MemoryTaskQueue:
                 lines = f.readlines()
             if len(lines) <= self._max_receipts:
                 return
-            trimmed = lines[-self._max_receipts:]
+            trimmed = lines[-self._max_receipts :]
             self._atomic_write(self._receipts_file, "".join(trimmed))
         except OSError as e:
             logger.debug("MEMORY_QUEUE: receipt trim failed: %s", e)
@@ -543,7 +600,8 @@ class MemoryTaskQueue:
         return self._find_receipt(lambda r: r.get("task_id") == task_id)
 
     def get_receipt_by_remote_task_id(
-        self, remote_task_id: str,
+        self,
+        remote_task_id: str,
     ) -> Optional[Dict[str, Any]]:
         """Look up a terminal receipt by hosted-side ``remote_task_id``.
 
@@ -551,9 +609,7 @@ class MemoryTaskQueue:
         """
         if not remote_task_id:
             return None
-        return self._find_receipt(
-            lambda r: r.get("remote_task_id") == remote_task_id
-        )
+        return self._find_receipt(lambda r: r.get("remote_task_id") == remote_task_id)
 
     def recent_receipts(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Return the most recent receipts (newest first)."""
@@ -608,7 +664,14 @@ class MemoryTaskQueue:
         return None
 
     def _atomic_write(self, path: Path, content: str) -> None:
-        """Write *content* to *path* via temp-file + fsync + rename."""
+        """Write *content* to *path* via temp-file + fsync + rename.
+
+        Class P storage hygiene (Move 6 plan v5.1): queue files
+        carry scope-tagged primary user data (task payloads,
+        receipts, dead-letter records). The temp file is chmod'd
+        to ``0o600`` before the atomic rename so the final path
+        is owner-read-write only regardless of process umask.
+        """
         try:
             fd, tmp = tempfile.mkstemp(dir=self._dir, suffix=".tmp")
             try:
@@ -616,6 +679,25 @@ class MemoryTaskQueue:
                     f.write(content)
                     f.flush()
                     os.fsync(f.fileno())
+                    # PR #705 round 7+1 MED: chmod the open fd via
+                    # ``os.fchmod`` rather than the path. Path-based
+                    # chmod after the ``with`` block closes the fd
+                    # leaves a brief window where a symlink could
+                    # be swapped in at ``tmp`` between close and
+                    # chmod, downgrading mode bits on whatever the
+                    # symlink points to. ``state.py``'s three
+                    # mkstemp+rename sites already use this
+                    # discipline (round 7); ``_atomic_write`` was
+                    # missed in that round.
+                    if os.name == "posix":
+                        try:
+                            os.fchmod(f.fileno(), 0o600)
+                        except OSError as exc:
+                            logger.warning(
+                                "MEMORY_QUEUE: chmod 0o600 failed for %s: %s",
+                                tmp,
+                                exc,
+                            )
                 os.replace(tmp, path)
             except BaseException:
                 try:

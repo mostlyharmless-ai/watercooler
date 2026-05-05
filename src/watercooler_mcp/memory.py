@@ -76,7 +76,11 @@ def _graphiti_importable() -> bool:
         return False
 
 
-def load_graphiti_config(code_path: str | Path | None = None) -> Optional[GraphitiConfig]:
+def load_graphiti_config(
+    code_path: str | Path | None = None,
+    *,
+    database: str | None = None,
+) -> Optional[GraphitiConfig]:
     """Load Graphiti configuration from unified config system.
 
     Uses the new unified configuration with priority chain:
@@ -92,6 +96,14 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
         code_path: Path to the project directory. Used to derive the database name
             for the unified project graph (e.g., 'watercooler-cloud' -> 'watercooler_cloud').
             If not provided, defaults to 'watercooler'.
+        database: Optional explicit T2 database name override. The trusted
+            "no-request-context" escape hatch for queue workers, the startup
+            warmup probe, and other code paths that run outside an HTTP
+            request. Hosted-request scope (``http_ctx.repo``) ALWAYS dominates
+            this override; a hosted request whose derived database disagrees
+            with this override raises ``RuntimeError`` (fail closed) rather
+            than risk routing one tenant's traffic into another tenant's
+            graph. Empty strings are treated as ``None``.
 
     Configuration Sources:
         TOML (config.toml):
@@ -196,14 +208,23 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
     #    tenant graph that the write-side ``_canonicalize_t2_group_id``
     #    routes to. This is the multi-tenant correctness invariant from
     #    Plan v20 ("Multi-org hosted users already exist (Caleb + Jay)").
-    # 2. ``WATERCOOLER_GRAPHITI_DATABASE`` env var — single-tenant escape
+    # 2. ``database=`` keyword override — trusted no-request-context escape
+    #    hatch for queue workers, the startup warmup probe, and daemon
+    #    threads. Always dominated by (1); a mismatch raises so a buggy
+    #    caller cannot silently route a hosted request into the wrong
+    #    tenant's graph.
+    # 3. ``WATERCOOLER_GRAPHITI_DATABASE`` env var — single-tenant escape
     #    hatch for stdio / dev / single-org self-hosted deployments.
-    # 3. ``derive_t2_database_name(code_path=...)`` — final fallback that
+    # 4. ``derive_t2_database_name(code_path=...)`` — final fallback that
     #    resolves the canonical ``<org>_<repo>_t2`` from a real local
     #    code repository when one is available.
     from watercooler.path_resolver import derive_t2_database_name
 
-    database: str | None = None
+    # Treat empty-string override as absent (defensive — prevents an
+    # accidental empty value from silently bypassing scope under hosted mode).
+    database_override: str | None = database if database else None
+
+    resolved_database: str | None = None
     http_ctx = None
     try:
         from .context import get_effective_context
@@ -212,13 +233,12 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
         http_ctx = None
     except Exception as _ctx_err:
         # Runtime error from get_effective_context() (rare — contextvar
-        # access in unusual threading configs). Log at ERROR before
-        # falling back so the silent fallback doesn't hide a real
-        # multi-tenant issue.
+        # access in unusual threading configs). Log at ERROR before deciding
+        # whether hosted mode must fail closed or local mode may fall back.
         log_error(
             f"MEMORY: get_effective_context() raised "
-            f"{_ctx_err.__class__.__name__}: {_ctx_err}; falling back to "
-            f"env/code_path resolution (off-hosted mode assumed)."
+            f"{_ctx_err.__class__.__name__}: {_ctx_err}; hosted mode will "
+            f"fail closed before env/code_path fallback."
         )
         http_ctx = None
     if http_ctx is not None and getattr(http_ctx, "repo", None):
@@ -256,7 +276,7 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
             )
             return None
         try:
-            database = derive_t2_database_name(repo_slug=f"{owner}/{repo_part}")
+            resolved_database = derive_t2_database_name(repo_slug=f"{owner}/{repo_part}")
         except Exception as e:
             log_error(
                 f"MEMORY: derive_t2_database_name failed for http_ctx.repo={raw!r}: {e}; "
@@ -265,10 +285,66 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
             )
             return None
 
-    if not database:
-        database = os.getenv("WATERCOOLER_GRAPHITI_DATABASE")
-    if not database:
-        database = derive_t2_database_name(code_path=code_path)
+    # Hosted-request scope DOMINATES the explicit ``database=`` override.
+    # If both are set and they disagree, fail closed — never silently route
+    # one tenant's traffic into another tenant's graph. The override is a
+    # trusted escape hatch ONLY for code paths that have no request scope.
+    if resolved_database is not None and database_override is not None and resolved_database != database_override:
+        raise RuntimeError(
+            f"database= override conflicts with hosted request scope: "
+            f"override={database_override!r} but request scope derived "
+            f"{resolved_database!r}; refusing to silently route across tenants"
+        )
+
+    try:
+        from .auth import is_hosted_mode
+    except ImportError as _hosted_err:
+        log_error(
+            f"MEMORY: failed to import is_hosted_mode: "
+            f"{_hosted_err.__class__.__name__}: {_hosted_err}; allowing "
+            f"env/code_path fallback because hosted mode cannot be active "
+            f"without hosted auth helpers."
+        )
+        hosted_mode = False
+    except Exception as _hosted_err:
+        log_error(
+            f"MEMORY: failed to import is_hosted_mode: "
+            f"{_hosted_err.__class__.__name__}: {_hosted_err}; refusing "
+            f"env/code_path fallback because hosted-mode detection could "
+            f"not be loaded safely."
+        )
+        hosted_mode = True
+    else:
+        try:
+            hosted_mode = is_hosted_mode()
+        except Exception as _hosted_err:
+            log_error(
+                f"MEMORY: is_hosted_mode() raised "
+                f"{_hosted_err.__class__.__name__}: {_hosted_err}; refusing "
+                f"env/code_path fallback because hosted scope safety could not "
+                f"be determined."
+            )
+            hosted_mode = True
+
+    # Apply the trusted ``database=`` override BEFORE the hosted-mode
+    # fail-closed guard. Without an active ``http_ctx`` the worker thread
+    # / warmup probe / daemon path has no other source of canonical scope;
+    # the override carries that scope (e.g. ``MemoryTask.group_id``).
+    if not resolved_database and database_override is not None:
+        resolved_database = database_override
+
+    if hosted_mode and not resolved_database:
+        log_error(
+            "MEMORY: hosted mode has no effective X-Repo scope; refusing to "
+            "fall back to WATERCOOLER_GRAPHITI_DATABASE or code_path because "
+            "that would route hosted T2 traffic to a shared/non-canonical graph."
+        )
+        return None
+
+    if not resolved_database:
+        resolved_database = os.getenv("WATERCOOLER_GRAPHITI_DATABASE")
+    if not resolved_database:
+        resolved_database = derive_t2_database_name(code_path=code_path)
 
     # Return backend's GraphitiConfig with all fields
     # For localhost endpoints without keys, pass a sentinel placeholder
@@ -288,7 +364,7 @@ def load_graphiti_config(code_path: str | Path | None = None) -> Optional[Graphi
         falkordb_password=db.password if db.password else None,
         falkordb_socket_timeout=db.socket_timeout,
         reranker=reranker,
-        database=database,
+        database=resolved_database,
     )
 
 

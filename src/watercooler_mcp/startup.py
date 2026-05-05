@@ -2362,12 +2362,35 @@ def _falkordb_startup_worker(host: str, port: int) -> None:
 
 
 def ensure_falkordb_running() -> None:
-    """Start FalkorDB if Graphiti backend is enabled and it's not running.
+    """Start FalkorDB if any FalkorDB-backed tier needs it.
 
-    This is non-blocking - spawns a background thread if FalkorDB needs to start.
-    Check get_service_status()["falkordb"] to see current state.
+    Triggers auto-start when ALL of these hold:
+      - Transport is ``stdio`` (``hybrid``/``proxy`` route to hosted Railway
+        FalkorDB and intentionally skip local auto-start).
+      - At least one tier needs FalkorDB:
+          • T1 baseline semantic — gated by ``mcp.graph.generate_embeddings``
+            (default True). Used by ``FalkorDBEntryStore`` (in
+            ``watercooler.baseline_graph.falkordb_entries``) for embeddings,
+            ``find_similar``, and the HNSW vector index.
+          • T2 graphiti memory — gated by ``memory.backend == "graphiti"``.
+      - FalkorDB host resolves to localhost (``127.0.0.1`` / ``::1`` /
+        ``localhost``).
+      - FalkorDB is not already running on that host:port.
 
-    Requires Docker to be installed and accessible.
+    Non-blocking — spawns a background thread if FalkorDB needs to start.
+    Check ``get_service_status()["falkordb"]`` for current state. Requires
+    Docker to be installed and accessible.
+
+    Edge case: if ``generate_embeddings = False`` but FalkorDB already
+    contains prior embeddings, ``find_similar`` will still work against
+    them. Under this gate, that scenario is treated as "no auto-start";
+    the operator can ``docker start falkordb`` manually if they want to
+    query historical embeddings without generating new ones.
+
+    Note: ``mcp.graph.auto_start_services`` controls LLM / embedding
+    (llama-server) auto-start specifically and does NOT govern FalkorDB.
+    If a separate FalkorDB-control knob is needed, it should be added as
+    its own field rather than overloading ``auto_start_services``.
     """
     try:
         from watercooler.memory_config import get_memory_backend, resolve_database_config
@@ -2393,7 +2416,7 @@ def ensure_falkordb_running() -> None:
             log_error(
                 "STARTUP: failed to resolve transport config; "
                 "falling back to stdio (local FalkorDB auto-start "
-                "may run unexpectedly): %s", cfg_exc,
+                f"may run unexpectedly): {cfg_exc}"
             )
             transport = "stdio"
         if transport in ("hybrid", "proxy"):
@@ -2407,15 +2430,53 @@ def ensure_falkordb_running() -> None:
             )
             return
 
-        # Only auto-start if Graphiti backend is enabled
+        # T1-aware gate: FalkorDB is needed if EITHER T1 baseline semantic
+        # (gated by mcp.graph.generate_embeddings) OR T2 graphiti
+        # (gated by memory.backend == "graphiti") is enabled. The previous
+        # gate only checked T2 and missed T1's separate dependency on
+        # FalkorDBEntryStore (src/watercooler/baseline_graph/falkordb_entries.py),
+        # which left stdio + T1-only users without auto-start. Bug closed by
+        # this change; see thread bug-falkordb-startup-gate-t1-2026-05-04
+        # plan entry 01KQTGHGPYXQ51Z1S94BKVZFZJ.
+        try:
+            from .config import get_watercooler_config
+            needs_falkordb_for_t1 = (
+                get_watercooler_config().mcp.graph.generate_embeddings
+            )
+        except Exception as graph_cfg_exc:
+            # Conservative fallback: assume T1 semantic is on (matches schema
+            # default). Logged so the failure is visible but doesn't lock the
+            # operator out of stdio mode.
+            log_error(
+                "STARTUP: failed to resolve mcp.graph.generate_embeddings; "
+                f"assuming True (schema default): {graph_cfg_exc}"
+            )
+            needs_falkordb_for_t1 = True
+
         try:
             backend = get_memory_backend()
-        except ValueError as exc:
-            log_error("MEMORY config error: %s", exc)
+        except Exception as exc:
+            # Catch broad Exception (matches the surrounding transport-config
+            # and graph-config catches) so a stale import, a missing memory
+            # backend module, or any other runtime error during backend
+            # resolution can't escape to the outer ``except Exception`` and
+            # mark FalkorDB as FAILED. The intent of this gate is the
+            # graceful fallback path — protect it from any exception type,
+            # not just ValueError.
+            log_error(f"MEMORY config error: {exc}")
             return
-        if backend != "graphiti":
-            _update_service_status("falkordb", ServiceState.DISABLED, message=f"Backend is '{backend}'")
-            log_debug(f"Memory backend is '{backend}', skipping FalkorDB auto-start")
+
+        needs_falkordb_for_t2 = (backend == "graphiti")
+
+        if not (needs_falkordb_for_t1 or needs_falkordb_for_t2):
+            reason = (
+                "neither T1 semantic (mcp.graph.generate_embeddings) "
+                f"nor T2 (memory.backend={backend!r}) is enabled"
+            )
+            _update_service_status(
+                "falkordb", ServiceState.DISABLED, message=reason,
+            )
+            log_debug(f"Skipping FalkorDB auto-start: {reason}")
             return
 
         # Get database config

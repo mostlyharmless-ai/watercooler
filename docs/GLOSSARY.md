@@ -114,7 +114,7 @@ are never parsed for reads.
 A structural stance taken by an entry — not a cosmetic label. Roles
 exist so that different cognitive functions in collaborative work stay
 visibly separated: a `planner` proposes, a `critic` challenges, a
-`tester` validates, an `implementer` executes, a `pm` coordinates, a
+`tester` validates, an `implementer` executes, a `pm` maintains thread coherence (sequencing, blockers, ownership), a
 `scribe` records. Six canonical roles ship; projects can extend them via
 `.watercooler/roles.toml`. See [ROLES_CREATION](./ROLES_CREATION.md).
 

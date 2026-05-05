@@ -9,7 +9,7 @@ designed for deployment as:
 The HTTP server integrates:
 - FastMCP with HTTP transport
 - Token-based authentication (via auth.py)
-- HMAC request signing (via WATERCOOLER_INTERNAL_SECRET)
+- HMAC request signing (v3 per-key registry — sole supported scheme)
 - Per-user rate limiting (via WATERCOOLER_RATE_LIMIT_RPM)
 - Request correlation IDs (X-Request-ID)
 - Agent API key auth (Authorization: Bearer)
@@ -21,7 +21,18 @@ Environment variables:
 - WATERCOOLER_MCP_HOST: HTTP host (default: "0.0.0.0")
 - WATERCOOLER_MCP_PORT: HTTP port (default: 8080)
 - WATERCOOLER_MODE: "local" or "hosted"
-- WATERCOOLER_INTERNAL_SECRET: HMAC signing secret for request auth
+- WATERCOOLER_HMAC_REQUIRE_V3: "warn" or "enforce" (Move 2.5 — the
+  HMAC auth scheme; v3 keys live in the per-key registry loaded by
+  ``auth/hmac_keys.py``). The legacy v1/v2 single-secret verification
+  path was deleted (#733); only v3 verification remains.
+- WATERCOOLER_REQUIRE_HMAC_OR_BEARER: "warn" (default) or "enforce".
+  Plan v5.1 verification-audit residual: when "enforce", the hosted
+  ``mode="identity"`` path (X-User-ID without Bearer / HMAC v3) is
+  rejected with a generic 401 before the privileged token-service
+  lookup. Default "warn" preserves existing behaviour and emits
+  ``hosted_identity_auth_used`` telemetry so operators can confirm
+  zero traffic before flipping to "enforce". See
+  ``_identity_auth_mode``.
 - WATERCOOLER_RATE_LIMIT_RPM: Per-user requests per minute (0 = disabled)
 - See auth.py and cache.py for additional env vars
 
@@ -53,8 +64,6 @@ Usage from clients:
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
 import os
 import re
@@ -98,6 +107,7 @@ class _RateLimiter:
             return (True, 0)
 
         import time
+
         now = time.time()
         window_start = now - 60.0
 
@@ -116,7 +126,8 @@ class _RateLimiter:
         if len(self._windows) > _MAX_TRACKED_USERS:
             # Phase 1: evict entries with no recent requests
             stale = [
-                k for k, v in self._windows.items()
+                k
+                for k, v in self._windows.items()
                 if k != user_id and (not v or v[-1] < window_start)
             ]
             for k in stale:
@@ -152,9 +163,27 @@ class _AuthResult:
 
     Carries the resolved auth mode, user identity, and credentials
     through the pipeline so downstream stages don't re-parse headers.
+
+    ``mode`` values:
+        ``"hmac"``     — HMAC v3 signature successfully verified.
+        ``"bearer"``   — `Authorization: Bearer wc_...` resolved by the
+                         token service to a user identity + GitHub token.
+        ``"identity"`` — Hosted X-User-ID + token-lookup path with no
+                         HMAC signature. **Deprecated** under
+                         ``WATERCOOLER_REQUIRE_HMAC_OR_BEARER=enforce``
+                         (plan v5.1 verification audit residual finding;
+                         see ``_identity_auth_mode``). The dashboard
+                         proxy migrated to HMAC v3 in Sprint 3 so this
+                         path has no live legitimate caller; slated for
+                         deletion in a follow-up PR after enforce flips
+                         in production. Until then it is distinct from
+                         ``"hmac"`` so future code that gates on
+                         signature presence cannot misclassify.
+        ``"skip"``     — Non-MCP path (e.g., `/health`) or non-hosted
+                         pass-through.
     """
 
-    mode: str  # "hmac", "bearer", "skip"
+    mode: str  # "hmac", "bearer", "identity", "skip"
     user_id: Optional[str] = None
     github_token: Optional[str] = None
     repo: Optional[str] = None
@@ -178,9 +207,7 @@ def _stage_request_id(request: Any) -> str:
     from .context import _generate_request_id
 
     raw_id = (
-        request.headers.get("X-Request-ID")
-        or request.headers.get("x-request-id")
-        or ""
+        request.headers.get("X-Request-ID") or request.headers.get("x-request-id") or ""
     )
     if raw_id and len(raw_id) <= 128 and re.fullmatch(r"[\w\-.:]+", raw_id):
         return raw_id
@@ -240,50 +267,376 @@ async def _stage_content_validation(
     if len(body) > max_size:
         return JSONResponse(
             status_code=413,
-            content={
-                "error": f"Request too large. Maximum size is {max_size} bytes."
-            },
+            content={"error": f"Request too large. Maximum size is {max_size} bytes."},
             headers={"X-Request-ID": request_id},
         )
     return None
+
+
+async def _attempt_hmac_v3_auth(
+    request: Any,
+    request_id: str,
+    *,
+    auth_header: str,
+    body: bytes,
+    timestamp: str,
+    ctx: Any,
+    require_v3: str,
+    hmac_registry: Optional[Any],
+    get_github_token_fn: Callable,
+) -> Optional[Union["_AuthResult", Any]]:
+    """Try HMAC v3 verification.
+
+    Returns:
+        None — ``parse_v3_authorization_header`` rejected the
+            header (malformed kid, non-hex sig, missing fields).
+            **Caller contract:** when the request reached this
+            function via the ``HMAC-SHA256``-prefixed branch in
+            ``_stage_authenticate``, a ``None`` return MUST
+            result in a 401. The caller MUST NOT fall through
+            to v2 HMAC verification. PR #703 round 7+5 MED: the
+            previous wording said "caller falls through to v2",
+            which was the opposite of the contract the existing
+            caller enforces (and would be an authentication
+            bypass — v2 has no Authorization-header parser, so a
+            malformed v3 request would silently invoke v2
+            processing of unrelated headers).
+        ``_AuthResult`` — v3 verification succeeded.
+        ``JSONResponse`` — v3 attempted but failed (401/403).
+
+    Plan v5.1 reference: Move 2.5 (HMAC v3). The canonical string
+    binds method/path/key_id/X-Repo/X-Branch in addition to the v2
+    fields, so header tampering invalidates the signature. The
+    registry lookup enforces subject-binding (which X-User-ID may
+    sign) and repo-authorisation (which X-Repo may be accessed)
+    independently of the signature verification.
+
+    No ``is_hosted`` gate: v3 is intentionally available in both
+    hosted and non-hosted deployments. Service keys may be
+    configured locally (CI smokes, ops scripts), and per-user keys
+    may be issued by a self-hosted dashboard. The registry's
+    presence (``hmac_registry is None`` → 503) is the only
+    deployment-level gate.
+    """
+    from fastapi.responses import JSONResponse
+
+    from .auth import is_hosted_mode
+    from .auth.hmac_keys import (
+        build_v3_canonical_string,
+        check_repo_authorisation,
+        check_subject_binding,
+        parse_v3_authorization_header,
+        verify_v3_signature,
+    )
+    from .observability import log_action
+
+    parsed = parse_v3_authorization_header(auth_header)
+    if parsed is None:
+        return None
+    key_id, signature_hex = parsed
+
+    if hmac_registry is None:
+        # PR #703 round 6 LOW: 503 + a distinct message would
+        # tell unauthenticated callers whether the v3 registry
+        # is deployed. Collapse to the same 401 + generic message
+        # used by every other v3 pre-auth failure. Operators see
+        # the deployment-misconfiguration in telemetry
+        # (``hmac_v3_no_registry``) rather than via response
+        # fingerprinting.
+        log_action(
+            "hmac_v3_no_registry",
+            request_id=request_id,
+            key_id=key_id,
+        )
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid or missing HMAC v3 credentials"},
+            headers={"X-Request-ID": request_id},
+        )
+
+    # Validate the timestamp BEFORE looking up the key. The lookup
+    # outcome is what the registry leaks — distinguishable error
+    # messages between "unknown kid" and "missing timestamp" let an
+    # unauthenticated probe enumerate registered key_ids by sending
+    # ``Authorization: HMAC-SHA256 v=3 kid=<probe> sig=x`` without a
+    # timestamp. Returning the same generic 401 for both
+    # "missing required field" cases closes that oracle.
+    if not timestamp:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid or missing HMAC v3 credentials"},
+            headers={"X-Request-ID": request_id},
+        )
+
+    # PR #703 round 7+3 MED: the replay-window check used to live
+    # only in the outer ``_stage_authenticate``. ``_attempt_hmac_v3_auth``
+    # took ``timestamp`` as a parameter and assumed the caller had
+    # already enforced the window — an undocumented precondition.
+    # Future callers (a WebSocket transport, a refactored auth
+    # path, a test helper) invoking the function in isolation
+    # would have skipped replay protection silently. Run the
+    # window check inside the function so the precondition is
+    # explicit and the function is safe to call standalone. The
+    # specific ``ts_err`` message ("Request timestamp expired
+    # (347s old, max 300s)") is preserved verbatim — same surface
+    # the v2 path uses, useful for ops debugging clock-skew, and
+    # does not enable key enumeration (the timestamp validity is
+    # caller-controlled, not server state).
+    ts_err = _validate_hmac_timestamp(timestamp)
+    if ts_err:
+        return JSONResponse(
+            status_code=401,
+            content={"error": ts_err},
+            headers={"X-Request-ID": request_id},
+        )
+
+    # PR #709 round 2 HIGH: ``KeyRegistry.lookup`` may delegate to
+    # the ``HttpResolver`` fallback chain, which uses synchronous
+    # ``httpx.Client``. A direct call from this ``async def`` would
+    # block the asyncio event loop for up to ``timeout_s`` (5s)
+    # on every resolver cache miss. Wrap with ``asyncio.to_thread``
+    # so the blocking I/O runs on a worker thread — matches the
+    # discipline already used elsewhere in this file
+    # (``server_http.py`` lines ~482, 612, 773 wrap their blocking
+    # I/O the same way). Cheap when the registry hits in-memory
+    # (no I/O, but the thread-pool dispatch adds maybe 100µs);
+    # essential when the resolver fetches.
+    import asyncio
+
+    key_info = await asyncio.to_thread(hmac_registry.lookup, key_id)
+    if key_info is None:
+        log_action(
+            "hmac_v3_unknown_key",
+            request_id=request_id,
+            key_id=key_id,
+        )
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid or missing HMAC v3 credentials"},
+            headers={"X-Request-ID": request_id},
+        )
+
+    method = (request.method or "").upper()
+    path = request.url.path or ""
+    user_id = ctx.user_id or ""
+    x_repo = request.headers.get("X-Repo") or request.headers.get("x-repo") or ""
+    x_branch = request.headers.get("X-Branch") or request.headers.get("x-branch") or ""
+
+    try:
+        canonical = build_v3_canonical_string(
+            method=method,
+            path=path,
+            timestamp=timestamp,
+            key_id=key_id,
+            user_id=user_id,
+            body=body,
+            x_repo=x_repo,
+            x_branch=x_branch,
+        )
+    except ValueError:
+        # PR #703 round 7+3 LOW: a CR/LF-containing user_id/x_repo/
+        # x_branch (rejected by ``build_v3_canonical_string`` as a
+        # field-boundary-injection guard). Treat as a generic v3
+        # credential failure rather than leak which field offended.
+        log_action(
+            "hmac_v3_canonical_field_invalid",
+            request_id=request_id,
+            key_id=key_id,
+        )
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid or missing HMAC v3 credentials"},
+            headers={"X-Request-ID": request_id},
+        )
+    if not verify_v3_signature(
+        canonical=canonical,
+        signature_hex=signature_hex,
+        secret=key_info.secret,
+    ):
+        # PR #703 round 6 MED: previously returned a distinct
+        # ``"Invalid HMAC v3 signature"`` message that let an
+        # unauthenticated probe distinguish "kid registered,
+        # wrong sig" from "kid unknown" (which used the generic
+        # message). Collapse to the same generic 401 — the
+        # detail lives in telemetry (``hmac_v3_invalid_signature``).
+        log_action(
+            "hmac_v3_invalid_signature",
+            request_id=request_id,
+            key_id=key_id,
+            key_type=key_info.key_type,
+        )
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid or missing HMAC v3 credentials"},
+            headers={"X-Request-ID": request_id},
+        )
+
+    # Subject-binding: who may this key sign for? In multi-tenant mode
+    # we additionally refuse wildcard ``per_user`` keys
+    # (``bound_user_id is None``) — the HTTP-resolver-issued path that
+    # ``hmac_v3_startup_fail_fast_check`` cannot see at startup. PR #741
+    # review.
+    subj_err = check_subject_binding(
+        key=key_info,
+        signed_user_id=user_id,
+        is_multi_tenant=is_hosted_mode(),
+    )
+    if subj_err is not None:
+        # Subject-binding details (per_user vs service-delegation
+        # policy mismatch) leak server-side configuration. Use
+        # the generic credential-failure message; the structured
+        # reason stays in telemetry only.
+        log_action(
+            "hmac_v3_subject_mismatch",
+            request_id=request_id,
+            key_id=key_id,
+            key_type=key_info.key_type,
+            reason=subj_err,
+        )
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid or missing HMAC v3 credentials"},
+            headers={"X-Request-ID": request_id},
+        )
+
+    # Repo-authorisation: bring in the per-user repos claim if applicable.
+    per_user_repo_claim = None
+    token_info = None
+    if key_info.key_type == "per_user":
+        # PR #703 round 7+1 LOW: an empty signed ``X-User-ID`` paired
+        # with the legacy global key (bound_user_id=None wildcard)
+        # passes subject-binding, then short-circuits the token fetch
+        # because ``if user_id:`` is False, then returns a 403 "No
+        # GitHub token found for user". For every other pre-auth
+        # failure (unknown kid, invalid sig) we return a generic 401.
+        # The asymmetry lets a holder of the global secret distinguish
+        # "valid signature over empty user_id" from "invalid sig" by
+        # the status code. Practical impact is negligible (holding
+        # the global secret already implies full access), but
+        # collapse to the same generic 401 for consistency.
+        if not user_id:
+            log_action(
+                "hmac_v3_empty_user_id",
+                request_id=request_id,
+                key_id=key_id,
+                key_type=key_info.key_type,
+            )
+            return JSONResponse(
+                status_code=401,
+                content={"error": "Invalid or missing HMAC v3 credentials"},
+                headers={"X-Request-ID": request_id},
+            )
+        import asyncio
+
+        token_info = await asyncio.to_thread(get_github_token_fn, user_id)
+        if token_info is None:
+            return JSONResponse(
+                status_code=403,
+                content={"error": "No GitHub token found for user"},
+                headers={"X-Request-ID": request_id},
+            )
+        per_user_repo_claim = getattr(token_info, "repos", None)
+
+    repo_err = check_repo_authorisation(
+        key=key_info, x_repo=x_repo, per_user_repo_claim=per_user_repo_claim
+    )
+    if repo_err is not None:
+        # The plan v5.1 warn-mode is meant to absorb expected
+        # mismatches during caller migration — not to paper over
+        # operator misconfigurations that flip the security
+        # posture (empty allow-list, missing repos claim, missing
+        # X-Repo). ``RepoAuthError.fatal=True`` flags the latter
+        # and is rejected unconditionally.
+        if repo_err.fatal or require_v3 == "enforce":
+            # PR #703 round 6 LOW: ``repo_err.message`` includes
+            # the literal X-Repo and structural detail
+            # (``"X-Repo 'org/repo' not in service allow-list"``).
+            # That text leaks server-side allow-list configuration
+            # to the unauthenticated caller. Return a generic
+            # 403 body and keep the detail in telemetry only.
+            log_action(
+                "hmac_v3_repo_unauthorised",
+                request_id=request_id,
+                key_id=key_id,
+                key_type=key_info.key_type,
+                x_repo=x_repo,
+                fatal=repo_err.fatal,
+                reason=repo_err.message,
+            )
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Repo not authorized"},
+                headers={"X-Request-ID": request_id},
+            )
+        # warn-mode + non-fatal: log but accept (Sprint 2 observation window)
+        logger.warning(
+            "HMAC v3 repo-authorisation failure (warn-mode): %s", repo_err.message
+        )
+
+    # Telemetry: successful v3 verification
+    log_action(
+        "hmac_v3_verified",
+        request_id=request_id,
+        key_id=key_id,
+        key_type=key_info.key_type,
+        signature_scheme="v3",
+    )
+
+    github_token = ""
+    if token_info is not None:
+        github_token = getattr(token_info, "token", "") or ""
+
+    return _AuthResult(
+        mode="hmac",
+        user_id=user_id,
+        github_token=github_token,
+        repo=x_repo,
+        branch=x_branch,
+    )
 
 
 async def _stage_authenticate(
     request: Any,
     request_id: str,
     *,
-    internal_secret: str,
     is_hosted: bool,
     resolve_api_key_fn: Callable,
     get_github_token_fn: Callable,
     extract_context_fn: Callable,
+    hmac_registry: Optional[Any] = None,
+    require_v3: str = "",
 ) -> Union["_AuthResult", Any]:
-    """Stage 3: Authenticate the request (HMAC / Bearer / skip).
+    """Stage 3: Authenticate the request (HMAC v3 / Bearer / skip).
 
     Decision tree:
         Non-MCP path? → skip (extract context from headers)
         MCP path + Bearer non-empty? → resolve API key → valid: bearer | invalid: 401
-        MCP path + no Bearer + INTERNAL_SECRET? → verify HMAC → invalid: 401
+        MCP path + ``Authorization: HMAC-SHA256``? → verify v3 → invalid: 401
         MCP path + no Bearer + hosted? → require X-User-ID + token lookup
         Otherwise → skip
+
+    Issue #733 deleted the legacy v1/v2 single-secret HMAC verification
+    path. v3 (``Authorization: HMAC-SHA256 v=3 kid=<id> sig=<hex>``) is
+    the sole supported HMAC scheme.
 
     Args:
         request: Starlette/FastAPI Request object.
         request_id: Correlation ID from stage 1.
-        internal_secret: WATERCOOLER_INTERNAL_SECRET value (may be empty).
         is_hosted: Whether hosted mode is active.
         resolve_api_key_fn: auth.resolve_api_key callable.
         get_github_token_fn: auth.get_github_token callable.
         extract_context_fn: auth.extract_request_context callable.
+        hmac_registry: HMAC v3 per-key registry (None disables v3).
+        require_v3: ``WATERCOOLER_HMAC_REQUIRE_V3`` value
+            (``"warn"`` / ``"enforce"`` / unset).
 
     Returns:
         _AuthResult on success, or JSONResponse(401/403) on failure.
     """
     from fastapi.responses import JSONResponse
 
-    is_mcp_path = (
-        request.url.path in ("/mcp", "/mcp/")
-        or request.url.path.startswith("/mcp/")
+    is_mcp_path = request.url.path in ("/mcp", "/mcp/") or request.url.path.startswith(
+        "/mcp/"
     )
 
     # Extract context from headers (needed for all paths)
@@ -303,8 +656,7 @@ async def _stage_authenticate(
     # --- MCP path: check Bearer first (independent of HMAC) ---
     auth_header_raw = request.headers.get("Authorization") or ""
     has_bearer = (
-        auth_header_raw.startswith("Bearer ")
-        and len(auth_header_raw[7:].strip()) > 0
+        auth_header_raw.startswith("Bearer ") and len(auth_header_raw[7:].strip()) > 0
     )
 
     import asyncio
@@ -313,6 +665,21 @@ async def _stage_authenticate(
         api_key = auth_header_raw[7:].strip()
         token_info = await asyncio.to_thread(resolve_api_key_fn, api_key)
         if token_info:
+            x_repo = headers.get("X-Repo") or headers.get("x-repo")
+            # Move 2 Phase 2a (security consolidation plan v5.1):
+            # check the token's ``repos`` claim against X-Repo.
+            #   - warn-mode + claim absent: log + accept (Phase 2a-observe).
+            #   - warn-mode + claim present + mismatch: 403.
+            #   - enforce-mode: 403 if claim absent OR mismatch.
+            from .auth import check_repo_claim
+
+            claim_err = check_repo_claim(token_info, x_repo)
+            if claim_err is not None:
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": claim_err},
+                    headers={"X-Request-ID": request_id},
+                )
             # Distinguish None (field absent → consult grant service) from
             # empty list (explicit "no capabilities" → deny all gated tools).
             caps = (
@@ -324,7 +691,7 @@ async def _stage_authenticate(
                 mode="bearer",
                 user_id=token_info.user_id,
                 github_token=token_info.token,
-                repo=headers.get("X-Repo") or headers.get("x-repo"),
+                repo=x_repo,
                 branch=headers.get("X-Branch") or headers.get("x-branch"),
                 capabilities=caps,
             )
@@ -334,71 +701,50 @@ async def _stage_authenticate(
             headers={"X-Request-ID": request_id},
         )
 
-    # --- No Bearer: hosted mode REQUIRES INTERNAL_SECRET for HMAC auth ---
-    # Evaluated per-request so env changes take effect without restart.
-    if is_hosted and not internal_secret:
+    # --- No Bearer: HMAC v3 verification (sole supported HMAC scheme) ---
+    # Issue #733 deleted the legacy v1/v2 single-secret verification
+    # path. v3 is detected by Authorization header shape
+    # (``HMAC-SHA256 v=3 kid=<id> sig=<hex>``); a request without a v3
+    # Authorization header proceeds straight to the hosted identity
+    # gate (which 401s any unauthenticated request).
+    timestamp_for_v3 = (
+        request.headers.get("X-Request-Timestamp")
+        or request.headers.get("x-request-timestamp")
+        or ""
+    )
+    if auth_header_raw and auth_header_raw.startswith("HMAC-SHA256 "):
+        # ``Authorization: HMAC-SHA256 ...`` is a v3-exclusive
+        # indicator. We MUST NOT fall through if the v3 parse fails:
+        # the legacy v2 path is gone and there is nothing else to
+        # try (PR #703 round 4 MED — control-flow tightening; the
+        # precondition is now load-bearing rather than just defensive
+        # because no legacy fallback exists).
+        # PR #703 round 7+3 MED: timestamp window check lives
+        # inside ``_attempt_hmac_v3_auth`` so the precondition is
+        # explicit at the inner-function boundary.
+        body_for_v3 = await request.body()
+        v3_outcome = await _attempt_hmac_v3_auth(
+            request,
+            request_id,
+            auth_header=auth_header_raw,
+            body=body_for_v3,
+            timestamp=timestamp_for_v3,
+            ctx=ctx,
+            require_v3=require_v3,
+            hmac_registry=hmac_registry,
+            get_github_token_fn=get_github_token_fn,
+        )
+        if v3_outcome is not None:
+            return v3_outcome
+        # ``_attempt_hmac_v3_auth`` only returns None when
+        # ``parse_v3_authorization_header`` rejects the header
+        # (wrong version, malformed kid, non-hex sig). Reject
+        # the request explicitly.
         return JSONResponse(
-            status_code=503,
-            content={"error": "Service misconfigured: HMAC secret required in hosted mode"},
+            status_code=401,
+            content={"error": "Invalid or missing HMAC v3 credentials"},
             headers={"X-Request-ID": request_id},
         )
-
-    # --- No Bearer: HMAC verification (if secret configured) ---
-    if internal_secret:
-        signature = (
-            request.headers.get("X-Request-Signature")
-            or request.headers.get("x-request-signature")
-        )
-        if not signature:
-            return JSONResponse(
-                status_code=401,
-                content={"error": "X-Request-Signature header required"},
-                headers={"X-Request-ID": request_id},
-            )
-
-        # v2 HMAC includes timestamp for replay protection.
-        # Hosted mode REQUIRES v2 — v1 fallback is only for non-hosted
-        # (local dev) where identity spoofing is not a concern.
-        timestamp = (
-            request.headers.get("X-Request-Timestamp")
-            or request.headers.get("x-request-timestamp")
-            or ""
-        )
-        if not timestamp and is_hosted:
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "error": "X-Request-Timestamp header required in hosted mode"
-                },
-                headers={"X-Request-ID": request_id},
-            )
-        if timestamp:
-            ts_err = _validate_hmac_timestamp(timestamp)
-            if ts_err:
-                return JSONResponse(
-                    status_code=401,
-                    content={"error": ts_err},
-                    headers={"X-Request-ID": request_id},
-                )
-
-        body = await request.body()
-        if not _verify_hmac_signature(
-            body,
-            signature,
-            internal_secret,
-            user_id=ctx.user_id or "",
-            timestamp=timestamp,
-        ):
-            logger.warning(
-                "HMAC verification failed for request %s from user %s",
-                request_id,
-                ctx.user_id or "unknown",
-            )
-            return JSONResponse(
-                status_code=401,
-                content={"error": "Invalid request signature"},
-                headers={"X-Request-ID": request_id},
-            )
 
     # --- Hosted mode: require user identity + GitHub token ---
     if is_hosted:
@@ -406,11 +752,55 @@ async def _stage_authenticate(
             return JSONResponse(
                 status_code=401,
                 content={
-                    "error": "Authentication required: provide X-User-ID header "
-                    "or Authorization: Bearer <api-key>"
+                    "error": "Authentication required: provide "
+                    "Authorization: Bearer <api-key> or HMAC v3"
                 },
                 headers={"X-Request-ID": request_id},
             )
+        # Plan v5.1 verification audit (entry ``01KQNWPX3YJTBWQJGNQGD71CH7``
+        # of ``security-audit-2026-04-28``) flagged the residual identity-
+        # mode path as a HIGH-severity bypass: anyone supplying a victim's
+        # ``X-User-ID`` plus an ``X-Repo`` in the victim's ``repos`` claim
+        # impersonates them, since ``check_repo_claim`` was the only
+        # mitigation and the cloud privately resolves the GitHub token
+        # via the privileged token-service. The dashboard proxy migrated
+        # to HMAC v3 in Sprint 3 (entry ``01KQG74EB1ASGQT89K3N6NYHWC``);
+        # this path has no legitimate live caller.
+        #
+        # Telemetry fires in BOTH modes so warn-mode observation is
+        # meaningful — operators must confirm zero traffic before the
+        # flag flip. The enforce-mode rejection happens BEFORE the
+        # privileged token-service lookup so unauthenticated probes can
+        # neither fingerprint the gate (generic 401, same body as
+        # bearer/v3 failures) nor burn a token-service round-trip per
+        # request.
+        from .observability import log_action
+
+        identity_mode = _identity_auth_mode()
+        log_action(
+            "hosted_identity_auth_used",
+            request_id=request_id,
+            user_id=ctx.user_id,
+            mode=identity_mode,
+        )
+        if identity_mode == "enforce":
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": "Authentication required: provide "
+                    "Authorization: Bearer <api-key> or HMAC v3"
+                },
+                headers={"X-Request-ID": request_id},
+            )
+        # warn-mode: existing behaviour preserved. One-line WARNING so
+        # deploy logs reflect the deprecated path until the flag flips.
+        logger.warning(
+            "hosted identity-mode auth used (request_id=%s, user_id=%s); "
+            "this path is deprecated and rejected under "
+            "WATERCOOLER_REQUIRE_HMAC_OR_BEARER=enforce.",
+            request_id,
+            ctx.user_id,
+        )
         token_info = await asyncio.to_thread(get_github_token_fn, ctx.user_id)
         if not token_info:
             return JSONResponse(
@@ -418,18 +808,43 @@ async def _stage_authenticate(
                 content={"error": "No GitHub token found for user"},
                 headers={"X-Request-ID": request_id},
             )
+        x_repo = headers.get("X-Repo") or headers.get("x-repo")
+        # Move 2 Phase 2a applies to bearer/X-User-ID identified
+        # requests: the repos claim narrows what the authenticated
+        # caller can act on. With v1/v2 HMAC removed (#733), this
+        # branch only fires for requests that present X-User-ID
+        # without an HMAC v3 signature; the v3 path applies its
+        # own X-Repo authorisation inside ``_attempt_hmac_v3_auth``
+        # (signed X-Repo / X-Branch closes the within-claim bypass
+        # the legacy v2 path could not).
+        from .auth import check_repo_claim
+
+        claim_err = check_repo_claim(token_info, x_repo)
+        if claim_err is not None:
+            return JSONResponse(
+                status_code=403,
+                content={"error": claim_err},
+                headers={"X-Request-ID": request_id},
+            )
+        # No HMAC was verified on this branch — only X-User-ID + token
+        # lookup. Use ``mode="identity"`` so downstream code that gates
+        # on signature presence can distinguish this from the verified-
+        # signature ``"hmac"`` path. (PR #741 round 2 review caught the
+        # prior misnomer; the field had no live readers but the wrong
+        # label was a footgun for future code.)
         return _AuthResult(
-            mode="hmac",
+            mode="identity",
             user_id=ctx.user_id,
             github_token=token_info.token,
-            repo=headers.get("X-Repo") or headers.get("x-repo"),
+            repo=x_repo,
             branch=headers.get("X-Branch") or headers.get("x-branch"),
         )
 
-    # No Bearer, non-hosted — pass through.
-    # Use "hmac" mode if HMAC was verified, "skip" otherwise.
+    # No Bearer, no HMAC v3, non-hosted — pass through unauthenticated.
+    # Issue #733 deleted the legacy v2 verifier; ``mode="skip"`` is the
+    # only outcome for a request that reaches this point.
     return _AuthResult(
-        mode="hmac" if internal_secret else "skip",
+        mode="skip",
         user_id=ctx.user_id,
         repo=ctx.repo,
         branch=ctx.branch,
@@ -500,82 +915,32 @@ def _stage_set_context(
     )
 
     # Extract daemon config from hybrid client header (if present)
-    daemon_config_json = (
-        request.headers.get("X-Daemon-Config")
-        or request.headers.get("x-daemon-config")
+    daemon_config_json = request.headers.get("X-Daemon-Config") or request.headers.get(
+        "x-daemon-config"
     )
 
     # Set context variable for MCP tools when we have a GitHub token
     if auth_result.github_token:
         request.state.github_token = auth_result.github_token
-        set_http_context(HttpRequestContext(
-            user_id=auth_result.user_id,
-            repo=auth_result.repo,
-            branch=auth_result.branch,
-            github_token=auth_result.github_token,
-            request_id=request_id,
-            capabilities=auth_result.capabilities,
-            session_id=session_id,
-            daemon_config_json=daemon_config_json,
-        ))
+        set_http_context(
+            HttpRequestContext(
+                user_id=auth_result.user_id,
+                repo=auth_result.repo,
+                branch=auth_result.branch,
+                github_token=auth_result.github_token,
+                request_id=request_id,
+                capabilities=auth_result.capabilities,
+                session_id=session_id,
+                daemon_config_json=daemon_config_json,
+            )
+        )
 
 
 # Maximum age (seconds) for HMAC timestamps. Requests older than this are
-# rejected to prevent replay attacks. Only applies to v2 (timestamped) HMAC.
+# rejected to prevent replay attacks. Used by HMAC v3 (the v1/v2 verifier
+# was deleted in #733; v3 carries its own ``X-Request-Timestamp`` checked
+# inside ``_attempt_hmac_v3_auth``).
 HMAC_WINDOW = int(os.getenv("WATERCOOLER_HMAC_WINDOW", "300"))
-
-
-def _verify_hmac_signature(
-    body: bytes,
-    signature: str,
-    secret: str,
-    *,
-    user_id: str = "",
-    timestamp: str = "",
-) -> bool:
-    """Verify HMAC-SHA256 signature with identity binding and replay protection.
-
-    Supports two formats:
-    - **v2** (when timestamp is non-empty): signs "{user_id}\\n{timestamp}\\n{body_hex}".
-      Binds the signature to the claimed identity and a timestamp, preventing
-      header substitution and replay attacks.
-    - **v1** (legacy fallback): signs raw body bytes only. Used when
-      X-Request-Timestamp header is absent (proxy not yet updated).
-      Logs a deprecation warning.
-
-    Args:
-        body: Raw request body bytes.
-        signature: Hex-encoded HMAC signature from X-Request-Signature.
-        secret: Shared secret (WATERCOOLER_INTERNAL_SECRET).
-        user_id: X-User-ID header value (v2 only).
-        timestamp: X-Request-Timestamp header value, ISO 8601 UTC (v2 only).
-
-    Returns:
-        True if signature is valid.
-    """
-    try:
-        if timestamp:
-            # v2: canonical string includes identity + timestamp + body
-            canonical = f"{user_id}\n{timestamp}\n{body.hex()}".encode("utf-8")
-            expected = hmac.new(
-                secret.encode("utf-8"),
-                canonical,
-                hashlib.sha256,
-            ).hexdigest()
-        else:
-            # v1 legacy: body-only (will be removed once proxy is updated)
-            logger.warning(
-                "HMAC v1 (body-only) used — upgrade proxy to send "
-                "X-Request-Timestamp for identity-bound signatures"
-            )
-            expected = hmac.new(
-                secret.encode("utf-8"),
-                body,
-                hashlib.sha256,
-            ).hexdigest()
-        return hmac.compare_digest(expected, signature)
-    except (TypeError, ValueError):
-        return False
 
 
 def _validate_hmac_timestamp(timestamp: str) -> Optional[str]:
@@ -606,6 +971,74 @@ def _validate_hmac_timestamp(timestamp: str) -> Optional[str]:
     return None
 
 
+# Per-process cache of raw env values we've already logged as
+# unrecognised. Without this, a misconfigured env var would emit one
+# WARNING per request (the helper is on the auth hot path). The set is
+# unbounded by design: the cardinality of distinct typos in any
+# operator's lifetime is small, and the deployment-time-only nature of
+# the env var means production never accumulates entries beyond a
+# handful. Lock-free lookup is intentional — the race ("two concurrent
+# requests both miss the cache and both log") yields at most a few
+# duplicate WARNINGs per misconfiguration, which is preferable to
+# adding a threading import for a self-correcting cosmetic race.
+_identity_auth_unknown_value_warned: set[str] = set()
+
+
+def _identity_auth_mode() -> str:
+    """Return the configured policy for hosted ``mode="identity"`` requests.
+
+    Plan v5.1 verification audit (entry ``01KQNWPX3YJTBWQJGNQGD71CH7`` of
+    ``security-audit-2026-04-28``) flagged the residual identity-mode path
+    in :func:`_stage_authenticate` as a HIGH-severity bypass surface: a
+    request with ``X-User-ID`` but no Bearer / no HMAC v3 still resolves
+    the user's GitHub token via the privileged token-service in hosted
+    mode, with ``check_repo_claim`` as the only mitigation. Per audit
+    entry ``01KQG74EB1ASGQT89K3N6NYHWC`` the dashboard proxy migrated to
+    HMAC v3 in Sprint 3, so the path has no legitimate live caller; the
+    rollout discipline mirrors :func:`repo_claim_mode` (Move 2) and the
+    ``WATERCOOLER_HMAC_REQUIRE_V3`` flag (Move 2.5):
+
+    * ``"warn"`` (default), empty, or unset — identity-mode auth
+      proceeds with telemetry so operators can confirm zero traffic
+      before flipping to enforce.
+    * ``"enforce"`` — identity-mode is rejected with a generic 401
+      BEFORE the privileged token-service lookup, matching the bearer
+      / v3 failure surface so unauthenticated probes cannot fingerprint
+      the gate. The truthy aliases ``"1"``, ``"true"``, ``"yes"``,
+      ``"on"`` are also accepted as ``enforce``; convention inherited
+      from :func:`repo_claim_mode` so an operator setting the var via
+      a generic boolean-flag system gets the secure interpretation.
+
+    PR #748 review (HIGH): an unrecognised value (typo such as
+    ``"enforec"``, or a stale ``"false"`` / ``"0"`` / ``"no"`` /
+    ``"off"`` from an unrelated boolean flag) defaults to ``"warn"``
+    and emits a warn-once-per-process WARNING naming the bad value.
+    Without this branch, an operator who intends to flip enforce but
+    typos the env var would silently get warn-mode — the exact failure
+    mode this gate is designed to prevent. The warn-once cache scope
+    is the helper's process; a redeploy with a corrected value clears
+    it naturally.
+    """
+    raw = os.getenv("WATERCOOLER_REQUIRE_HMAC_OR_BEARER", "warn").strip().lower()
+    if raw in ("enforce", "1", "true", "yes", "on"):
+        return "enforce"
+    if raw not in ("warn", ""):
+        # Unrecognised value — warn-once-per-process. The helper runs
+        # on the auth hot path, so a vanilla unconditional ``logger.warning``
+        # would spam at request rate until the operator notices.
+        if raw not in _identity_auth_unknown_value_warned:
+            _identity_auth_unknown_value_warned.add(raw)
+            logger.warning(
+                "WATERCOOLER_REQUIRE_HMAC_OR_BEARER=%r is not a recognised "
+                "value (accepted: 'warn', 'enforce', or truthy aliases "
+                "'1'/'true'/'yes'/'on'); defaulting to 'warn'. If you "
+                "intended to flip enforce, fix the env var and redeploy "
+                "— the gate is currently NOT active.",
+                raw,
+            )
+    return "warn"
+
+
 def check_http_dependencies() -> bool:
     """Check if HTTP dependencies are installed.
 
@@ -618,6 +1051,7 @@ def check_http_dependencies() -> bool:
     try:
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -635,7 +1069,110 @@ _graphiti_warm_state: dict = {
     "host": None,
     "port": None,
     "database": None,
+    "reason": None,
 }
+
+
+def _initialize_warmup_state(is_hosted: bool) -> None:
+    """Reset the module-level Graphiti warmup state for app startup.
+
+    Mutates ``_graphiti_warm_state`` in place rather than rebinding so the
+    diagnostic surface (which imports the dict) and the warmup thread (which
+    writes into it) observe the same object.
+
+    Hosted multi-tenant deployments do not run a startup warmup probe: the
+    canonical T2 database name comes from per-request ``X-Repo`` and there
+    is no single tenant to warm. The state is set to ``"skipped"`` with a
+    human-readable ``reason`` so ``/health`` doesn't display a misleading
+    ``"failed"``. Self-hosted single-tenant deployments fall through to the
+    pending state so ``_run_warmup_probe`` can fill it in.
+
+    Args:
+        is_hosted: Whether the process is running in hosted multi-tenant mode.
+    """
+    if is_hosted:
+        _graphiti_warm_state.update(
+            {
+                "state": "skipped",
+                "duration_ms": 0,
+                "error": None,
+                "host": None,
+                "port": None,
+                "database": None,
+                "reason": (
+                    "multi-tenant scope-bound; warmup deferred to first "
+                    "per-scope request"
+                ),
+            }
+        )
+    else:
+        _graphiti_warm_state.update(
+            {
+                "state": "disabled",
+                "duration_ms": 0,
+                "error": None,
+                "host": None,
+                "port": None,
+                "database": None,
+                "reason": None,
+            }
+        )
+
+
+def _run_warmup_probe() -> None:
+    """Run the Graphiti warmup probe and update ``_graphiti_warm_state``.
+
+    Pulled out of the previously-nested ``_warmup_graphiti`` closure inside
+    ``create_http_app()`` so it is importable and unit-testable. Behaviour
+    is unchanged from the prior implementation; only callable from
+    self-hosted single-tenant deployments where a single canonical database
+    name is known at startup. Hosted multi-tenant deployments must not call
+    this — see :func:`_initialize_warmup_state` for that path.
+    """
+    import time
+
+    _graphiti_warm_state["state"] = "warming"
+    start = time.monotonic()
+    try:
+        from .memory import load_graphiti_config
+
+        config = load_graphiti_config()
+        if config:
+            _graphiti_warm_state["host"] = config.falkordb_host
+            _graphiti_warm_state["port"] = config.falkordb_port
+            _graphiti_warm_state["database"] = config.database
+            from .tools.graph import _get_or_create_graphiti_backend
+
+            _get_or_create_graphiti_backend(config)
+            _graphiti_warm_state["state"] = "ready"
+        else:
+            _graphiti_warm_state["state"] = "failed"
+            _graphiti_warm_state["error"] = "load_graphiti_config returned None"
+            _graphiti_warm_state["reason"] = (
+                "load_graphiti_config returned None"
+            )
+    except Exception as e:
+        _graphiti_warm_state["state"] = "failed"
+        _graphiti_warm_state["error"] = str(e)
+        _graphiti_warm_state["reason"] = str(e)
+        logger.warning(
+            "Graphiti warmup failed (host=%s:%s db=%s): %s",
+            _graphiti_warm_state.get("host"),
+            _graphiti_warm_state.get("port"),
+            _graphiti_warm_state.get("database"),
+            e,
+        )
+    _graphiti_warm_state["duration_ms"] = round(
+        (time.monotonic() - start) * 1000
+    )
+    logger.info(
+        "Graphiti warmup: %s in %dms (host=%s:%s db=%s)",
+        _graphiti_warm_state["state"],
+        _graphiti_warm_state["duration_ms"],
+        _graphiti_warm_state.get("host"),
+        _graphiti_warm_state.get("port"),
+        _graphiti_warm_state.get("database"),
+    )
 
 
 def create_http_app():
@@ -681,25 +1218,33 @@ def create_http_app():
     # When server_http.py is the entry point (Railway hosted mode), these must
     # run here since we no longer do `from .server import mcp`.
     from .middleware import setup_instrumentation
+
     setup_instrumentation()
 
     from .memory_sync import init_memory_sync_callbacks
+
     init_memory_sync_callbacks()
 
     try:
         from .memory_queue import init_memory_queue
-        from watercooler.memory_config import get_queue_max_workers, get_queue_task_timeout
+        from watercooler.memory_config import (
+            get_queue_max_workers,
+            get_queue_task_timeout,
+        )
+
         init_memory_queue(
             max_workers=get_queue_max_workers(),
             task_timeout=get_queue_task_timeout(),
         )
         from .memory_sync import init_memory_queue_executors
+
         init_memory_queue_executors()
     except Exception as _mq_err:
         logger.warning("Could not initialise memory task queue: %s", _mq_err)
 
     try:
         from .daemons import init_daemons
+
         init_daemons()
     except Exception as _dm_err:
         logger.warning("Could not initialise daemon manager: %s", _dm_err)
@@ -708,87 +1253,73 @@ def create_http_app():
     # The authorizer gates tool execution on hosted surfaces based on
     # per-user capability grants fetched from the watercooler-site API.
     from .capability_auth import CapabilityGrantService, CapabilityAuthorizer
+
     _grant_service = CapabilityGrantService.from_env()
     _authorizer = CapabilityAuthorizer(_grant_service)
 
     # Resolve deployment availability (profile-aware surface building).
     from .deployment_profile import resolve_deployment_availability
+
     _deployment_availability = resolve_deployment_availability()
 
     # Build hosted surfaces via the shared server factory.
     # hosted_full  → /mcp       (dashboard, all tools)
     # hosted_premium → /mcp/premium  (premium graph + memory tools only)
     from .server_factory import build_http_surfaces
+
     hosted_full_mcp, hosted_premium_mcp = build_http_surfaces(
         authorizer=_authorizer,
         deployment_availability=_deployment_availability,
     )
 
-    # Background Graphiti warmup for T2+ profiles.
-    # Initializes the backend in a background thread so the first tool
-    # call doesn't pay the cold-start cost. Non-blocking — does not
-    # delay app startup or health check readiness.
-    # Mutate the module-level dict in place (don't rebind) so the
-    # diagnostic display sees the same state via its module import.
-    _graphiti_warm_state.update({
-        "state": "disabled",
-        "duration_ms": 0,
-        "error": None,
-        "host": None,
-        "port": None,
-        "database": None,
-    })
+    # Background Graphiti warmup for T2+ profiles. Initializes the backend
+    # in a background thread so the first tool call doesn't pay the
+    # cold-start cost. Non-blocking — does not delay app startup or
+    # health-check readiness.
+    #
+    # Hosted multi-tenant deployments DO NOT run a startup warmup probe
+    # (PR #660 regression fix): the canonical T2 database name comes from
+    # per-request ``X-Repo`` so there is no single tenant to warm. The
+    # state is set to ``"skipped"`` so ``/health`` reflects "scope-bound,
+    # not run at startup" instead of a misleading ``"failed"``. The first
+    # per-scope request still pays its own cold-start cost; in practice
+    # this is bounded by FalkorDB pool reuse across same-tenant requests.
+    #
+    # ``_is_hosted`` is captured ONCE so the state initialiser and the
+    # thread-launch gate cannot diverge if ``is_hosted_mode()`` ever
+    # transitions during this section (review #737 round 1, MED #1).
+    _is_hosted = is_hosted_mode()
+    _initialize_warmup_state(is_hosted=_is_hosted)
 
-    if _deployment_availability and _deployment_availability.effective_profile in ("t2", "t2t3"):
+    if (
+        not _is_hosted
+        and _deployment_availability
+        and _deployment_availability.effective_profile in ("t2", "t2t3")
+    ):
         import threading
 
-        def _warmup_graphiti():
-            import time
-            _graphiti_warm_state["state"] = "warming"
-            start = time.monotonic()
-            try:
-                from .memory import load_graphiti_config
-                config = load_graphiti_config()
-                if config:
-                    _graphiti_warm_state["host"] = config.falkordb_host
-                    _graphiti_warm_state["port"] = config.falkordb_port
-                    _graphiti_warm_state["database"] = config.database
-                    from .tools.graph import _get_or_create_graphiti_backend
-                    _get_or_create_graphiti_backend(config)
-                    _graphiti_warm_state["state"] = "ready"
-                else:
-                    _graphiti_warm_state["state"] = "failed"
-                    _graphiti_warm_state["error"] = "load_graphiti_config returned None"
-            except Exception as e:
-                _graphiti_warm_state["state"] = "failed"
-                _graphiti_warm_state["error"] = str(e)
-                logger.warning(
-                    "Graphiti warmup failed (host=%s:%s db=%s): %s",
-                    _graphiti_warm_state.get("host"),
-                    _graphiti_warm_state.get("port"),
-                    _graphiti_warm_state.get("database"),
-                    e,
-                )
-            _graphiti_warm_state["duration_ms"] = round((time.monotonic() - start) * 1000)
-            logger.info(
-                "Graphiti warmup: %s in %dms (host=%s:%s db=%s)",
-                _graphiti_warm_state["state"],
-                _graphiti_warm_state["duration_ms"],
-                _graphiti_warm_state.get("host"),
-                _graphiti_warm_state.get("port"),
-                _graphiti_warm_state.get("database"),
-            )
-
-        warmup_thread = threading.Thread(target=_warmup_graphiti, daemon=True)
+        warmup_thread = threading.Thread(target=_run_warmup_probe, daemon=True)
         warmup_thread.start()
-        logger.info("Graphiti background warmup started (profile=%s)", _deployment_availability.effective_profile)
+        logger.info(
+            "Graphiti background warmup started (profile=%s)",
+            _deployment_availability.effective_profile,
+        )
+    elif _is_hosted:
+        logger.info(
+            "Graphiti background warmup skipped (hosted multi-tenant; "
+            "scope-bound database name resolved per-request)"
+        )
 
     # --- Hosted JSON-RPC adapter (replaces mounted FastMCP http_app sub-apps) ---
     # Instead of mounting FastMCP's StreamableHTTP transport (which has
     # session-manager + task-group requirements that fail under Railway's
     # memory constraints), we use a thin JSON-RPC adapter that calls into
     # the FastMCP surfaces via their public API (list_tools, call_tool, etc.).
-    from .hosted_rpc import HostedSurfaceSpec, dispatch_hosted_request, handle_hosted_delete
+    from .hosted_rpc import (
+        HostedSurfaceSpec,
+        dispatch_hosted_request,
+        handle_hosted_delete,
+    )
 
     _dashboard_spec = HostedSurfaceSpec(
         name="dashboard",
@@ -818,6 +1349,7 @@ def create_http_app():
         # Fall back to TOML config
         try:
             from watercooler.config_facade import config
+
             http_cfg = config.full().mcp.http
 
             if not cors:
@@ -842,14 +1374,63 @@ def create_http_app():
     rate_limit_rpm = int(os.getenv("WATERCOOLER_RATE_LIMIT_RPM", "0"))
     _rate_limiter = _RateLimiter(rpm=rate_limit_rpm)
 
-    # Log startup warning if hosted mode lacks INTERNAL_SECRET.
-    # Enforcement is per-request inside _stage_authenticate (not frozen at startup).
-    if is_hosted_mode() and not os.getenv("WATERCOOLER_INTERNAL_SECRET"):
-        logger.error(
-            "SECURITY: Hosted mode active without WATERCOOLER_INTERNAL_SECRET. "
-            "Non-Bearer /mcp requests will be rejected (503). "
-            "Bearer (agent API key) auth still works independently."
-        )
+    # Move 2.5 (HMAC v3): build the per-key registry and run the
+    # multi-tenant fail-fast invariant check at startup.
+    #
+    # Issue #733 deleted the legacy v1/v2 verification path, so the
+    # server no longer reads the legacy global HMAC secret for request
+    # authentication. The H13 helper signature is preserved for the
+    # unit-test surface but ``has_global_secret=False`` is passed
+    # unconditionally — the legacy secret cannot influence request
+    # auth any more, so that branch of the fail-fast guard is a
+    # tautology at the call site (kept structurally so a future
+    # re-introduction of the env-var read would be caught by the
+    # helper's contract). PR #741 review repurposed the helper to do
+    # real work: it scans the loaded registry for wildcard per_user
+    # keys (``bound_user_id is None``) and refuses to boot if any are
+    # statically configured in multi-tenant mode. HTTP-resolver-issued
+    # wildcards are caught at request time by
+    # ``check_subject_binding(is_multi_tenant=True)``.
+    from .auth.hmac_keys import (
+        hmac_v3_startup_fail_fast_check,
+        load_default_registry,
+    )
+
+    _hmac_require_v3 = os.getenv("WATERCOOLER_HMAC_REQUIRE_V3", "").strip().lower()
+    _hmac_registry = load_default_registry()
+    fail_fast_msg = hmac_v3_startup_fail_fast_check(
+        require_v3=_hmac_require_v3,
+        is_multi_tenant=is_hosted_mode(),
+        has_global_secret=False,
+        registry=_hmac_registry,
+    )
+    if fail_fast_msg is not None:
+        # H13 invariant — refuse to boot.
+        raise RuntimeError(fail_fast_msg)
+
+    # PR #748 review round 3 (MED): log the resolved identity-mode
+    # policy at startup so operators have a single boot-time signal
+    # for "what mode is this process running in", instead of having
+    # to grep ``hosted_identity_auth_used`` telemetry. Mirrors the
+    # ``HMAC v3: registry loaded with N keys`` startup log emitted
+    # from ``load_default_registry``. The mode is still re-read per
+    # request inside ``_identity_auth_mode`` for consistency with
+    # ``repo_claim_mode`` (Move 2) and ``WATERCOOLER_HMAC_REQUIRE_V3``
+    # (Move 2.5) — those flags also re-read per call, and operators
+    # are fluent in the per-call pattern. A live env mutation without
+    # redeploy is unsupported on Railway (env changes auto-redeploy)
+    # and the per-call read keeps tests' ``monkeypatch.setenv`` shape
+    # working without a reset hook.
+    _initial_identity_mode = _identity_auth_mode()
+    logger.info(
+        "Hosted identity-mode policy: %s "
+        "(env WATERCOOLER_REQUIRE_HMAC_OR_BEARER; %s)",
+        _initial_identity_mode,
+        "X-User-ID-only requests rejected with 401"
+        if _initial_identity_mode == "enforce"
+        else "X-User-ID-only requests accepted with telemetry; "
+        "flip to 'enforce' once warn-mode hits drop to zero",
+    )
 
     # Configure CORS for browser-based clients
     # Security: When allow_credentials=True, origins must be explicit (not "*")
@@ -868,7 +1449,16 @@ def create_http_app():
         allow_origins=cors_origins,
         allow_credentials=allow_credentials,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["X-User-ID", "X-Repo", "X-Branch", "X-Request-ID", "X-Request-Signature", "X-Request-Timestamp", "Content-Type", "Authorization"],
+        allow_headers=[
+            "X-User-ID",
+            "X-Repo",
+            "X-Branch",
+            "X-Request-ID",
+            "X-Request-Signature",
+            "X-Request-Timestamp",
+            "Content-Type",
+            "Authorization",
+        ],
         expose_headers=["X-Request-ID"],
     )
 
@@ -879,7 +1469,9 @@ def create_http_app():
         health: dict = {
             "status": "healthy",
             "mode": "hosted" if hosted else "local",
-            "cache": cache.stats() if hasattr(cache, "stats") else {"backend": "unknown"},
+            "cache": (
+                cache.stats() if hasattr(cache, "stats") else {"backend": "unknown"}
+            ),
         }
 
         # Deployment profile (profile-aware surface building)
@@ -954,16 +1546,17 @@ def create_http_app():
             if err:
                 return err
 
-            # Stage 3: Authentication (HMAC / Bearer / skip)
+            # Stage 3: Authentication (HMAC v3 / Bearer / skip)
             with trace_stage("auth.resolve"):
                 auth = await _stage_authenticate(
                     request,
                     request_id,
-                    internal_secret=os.getenv("WATERCOOLER_INTERNAL_SECRET", ""),
                     is_hosted=is_hosted_mode(),
                     resolve_api_key_fn=resolve_api_key,
                     get_github_token_fn=get_github_token,
                     extract_context_fn=extract_request_context,
+                    hmac_registry=_hmac_registry,
+                    require_v3=_hmac_require_v3,
                 )
             if isinstance(auth, JSONResponse):
                 return auth
@@ -1003,7 +1596,9 @@ def create_http_app():
             except asyncio.TimeoutError:
                 return JSONResponse(
                     status_code=504,
-                    content={"error": f"Request timed out after {REQUEST_TIMEOUT} seconds"},
+                    content={
+                        "error": f"Request timed out after {REQUEST_TIMEOUT} seconds"
+                    },
                     headers={"X-Request-ID": request_id},
                 )
         finally:
@@ -1075,7 +1670,9 @@ def run_http_server(
 
     import uvicorn
 
-    print(f"Starting Watercooler MCP HTTP Server on http://{host}:{port}", file=sys.stderr)
+    print(
+        f"Starting Watercooler MCP HTTP Server on http://{host}:{port}", file=sys.stderr
+    )
     print(f"Health check: http://{host}:{port}/health", file=sys.stderr)
     print(f"API docs: http://{host}:{port}/docs", file=sys.stderr)
 

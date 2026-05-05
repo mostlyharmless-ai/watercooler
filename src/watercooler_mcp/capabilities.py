@@ -220,6 +220,7 @@ _TOOL_CAPABILITY_MAP: dict[str, CapabilityId] = {
     "watercooler_annotate": "annotation_admin",
     "watercooler_remove_annotation": "annotation_admin",
     "watercooler_get_annotations": "annotation_admin",
+    "watercooler_follow_xref": "annotation_admin",
     # Baseline search — note: watercooler_search is mode-dependent (see resolve_search_capability)
     "watercooler_baseline_graph_stats": "baseline_search",
     "watercooler_baseline_sync_status": "baseline_search",

@@ -32,7 +32,13 @@ def read(p: Path) -> str:  # placeholder for L1
 
 
 def write(p: Path, s: str) -> None:  # placeholder for L1
+    # Thread-entry projection write surface per plan v5.1. Sole caller
+    # is ``watercooler.commands.say`` which writes user-authored entry
+    # markdown to the orphan-branch worktree before commit. The bytes
+    # here are the full primary user data, intentionally unredacted —
+    # any Class D adapter would defeat the projection's whole purpose.
     p.parent.mkdir(parents=True, exist_ok=True)
+    # egress-class: primary
     p.write_text(s, encoding="utf-8")
 
 

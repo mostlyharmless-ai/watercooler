@@ -15,7 +15,6 @@ Issue #83: This module extracts Graphiti-specific code from baseline_graph/sync.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import hashlib
 import json
 import logging
@@ -1038,6 +1037,41 @@ def init_memory_queue_executors() -> None:
         )
 
 
+def _canonicalize_group_id(group_id: str, *, task_id: str | None = None) -> str:
+    """Return the canonical T2 database name for a queued task's ``group_id``.
+
+    Plan v20 defect #34 defense-in-depth: REMEDIATE non-canonical database
+    names rather than reject them. The earlier draft of PR #660 raised
+    ``PermanentTaskError`` on any task whose ``group_id`` did not end in
+    ``_t2``; review caught the deploy-window data-loss risk where pre-deploy
+    tasks queued under the legacy bare ``<repo>`` form would dead-letter on
+    first executor pass.
+
+    Post-fix tasks should never trigger the remediation branch (caller-side
+    canonicalization is the primary discipline). If it fires post-deploy for
+    a fresh task, the caller bypassed ``_canonicalize_t2_group_id`` —
+    investigate.
+
+    Args:
+        group_id: The raw ``MemoryTask.group_id`` value.
+        task_id: Optional task identifier for the diagnostic log line.
+
+    Returns:
+        The canonical database name (always ends in ``_t2``).
+    """
+    canonical = group_id if group_id.endswith("_t2") else f"{group_id}_t2"
+    if canonical != group_id:
+        from .observability import log_warning as _log_warn
+        _log_warn(
+            f"GRAPHITI_EXECUTOR: task {task_id!r} has non-canonical "
+            f"group_id={group_id!r}; remediating database to "
+            f"{canonical!r} (Plan v20 defect #34 deploy-window guard). "
+            f"If this fires post-deploy for a fresh task, the caller "
+            f"bypassed _canonicalize_t2_group_id — investigate."
+        )
+    return canonical
+
+
 def _register_graphiti_executor(worker: "MemoryTaskWorker") -> None:
     """Register the graphiti executor with the given worker."""
     async def graphiti_executor(task: "MemoryTask") -> Dict[str, Any]:
@@ -1051,44 +1085,37 @@ def _register_graphiti_executor(worker: "MemoryTaskWorker") -> None:
         LeanRAG executor is unaffected — LeanRAGBackend creates per-task
         instances but uses no async connections, so there is no connection
         exhaustion risk there.
+
+        ``task.group_id`` is canonicalized BEFORE the call to
+        ``load_graphiti_config`` so the legacy-shape remediation happens
+        once (no post-call ``dataclasses.replace``) and the worker thread,
+        which has no ``http_ctx``, can supply its scope via the ``database=``
+        override.
         """
         from watercooler_mcp import memory as mem
 
-        config = mem.load_graphiti_config(code_path=task.code_path or None)
-        if config is None:
-            raise RuntimeError("Graphiti config unavailable for queued task")
         if not task.group_id:
             raise RuntimeError("Queued Graphiti task missing group_id")
 
-        # group_id is the canonical database identity for queued work.
-        # task.code_path may be a threads worktree path, not a code repo
-        # root — do not re-derive the database from it.
-        #
-        # Plan v20 defect #34 defense-in-depth: REMEDIATE non-canonical
-        # database names rather than reject them.
-        #
-        # Earlier draft of this PR raised PermanentTaskError on any task
-        # whose ``group_id`` didn't end in ``_t2``. PR #660 review caught
-        # the deploy-window data-loss risk: pre-deploy tasks queued under
-        # the legacy bare ``<repo>`` form would all hit the assertion on
-        # first executor pass and route directly to the dead-letter queue
-        # with no retry path. Post-fix tasks should never trigger this
-        # branch (caller-side canonicalization is the primary discipline);
-        # if they do, log loudly so the regression is visible without
-        # losing data.
-        canonical_database = (
-            task.group_id if task.group_id.endswith("_t2") else f"{task.group_id}_t2"
+        # Remediate any legacy-shape ``group_id`` BEFORE handing it to
+        # ``load_graphiti_config`` so the override carries an already-
+        # canonical name. This replaces the old post-call
+        # ``dataclasses.replace(config, database=canonical_database)``.
+        canonical_database = _canonicalize_group_id(
+            task.group_id, task_id=task.task_id
         )
-        if canonical_database != task.group_id:
-            from .observability import log_warning as _log_warn
-            _log_warn(
-                f"GRAPHITI_EXECUTOR: task {task.task_id} has non-canonical "
-                f"group_id={task.group_id!r}; remediating database to "
-                f"{canonical_database!r} (Plan v20 defect #34 deploy-window "
-                f"guard). If this fires post-deploy for a fresh task, the "
-                f"caller bypassed _canonicalize_t2_group_id — investigate."
-            )
-        config = dataclasses.replace(config, database=canonical_database)
+
+        # ``database=canonical_database`` is the trusted no-request-context
+        # override for this worker thread (no ``http_ctx`` here). Hosted
+        # request-scope, when set, would still dominate and a mismatch would
+        # raise — but worker threads run outside a request, so the override
+        # is the source of canonical scope.
+        config = mem.load_graphiti_config(
+            code_path=task.code_path or None,
+            database=canonical_database,
+        )
+        if config is None:
+            raise RuntimeError("Graphiti config unavailable for queued task")
         state = worker._get_thread_state()
         # Use the remediated ``canonical_database`` (matches
         # ``config.database``) rather than ``task.group_id`` so legacy

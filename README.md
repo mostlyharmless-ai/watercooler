@@ -8,13 +8,13 @@ Hosted version available at [watercoolerdev.com](https://watercoolerdev.com).
 
 [Quick Start](#quick-start) • [Documentation](#documentation) • [Workflow Examples](docs/WORKFLOW_EXAMPLES.md) • [Tools Reference](docs/TOOLS-REFERENCE.md) • [Contributing](CONTRIBUTING.md)
 
-[![Watercooler Cloud](docs/images/hero-banner-v2.png)](https://www.watercoolerdev.com)
+[![Watercooler Cloud](docs/images/hero-banner.png)](https://www.watercoolerdev.com)
 
 ---
 
 ## What is Watercooler?
 
-Watercooler is an MCP server with a git-backed coordination and shared memory layer for agentic coding teams.
+Watercooler is an MCP server with a git-backed shared memory layer for agentic coding teams — durable records of decisions, reasoning, and critique alongside your code.
 
 > **Git stores what changed. Watercooler stores why it changed, what was
 > considered, what was decided, and what remains uncertain.**
@@ -22,8 +22,8 @@ Watercooler is an MCP server with a git-backed coordination and shared memory la
 Collaboration was already difficult before agents entered the loop. Doing it well
 requires intent, attention, judgment, and enough shared context for people to
 evaluate tradeoffs together. Agents make that problem much harder by producing
-code, proposals, and partial solutions faster than a team can review,
-coordinate, and reason about them.
+code, proposals, and partial solutions faster than a team can read,
+evaluate, and reason about them.
 
 Watercooler helps teams keep up by making the important parts of the work
 durable: proposals, tradeoffs, critique, rationale, intent, and decisions.
@@ -35,12 +35,12 @@ the team's shared memory: versioned, searchable, and reviewable alongside the
 code.
 
 **Example workflow:**
-```text
-Jay w/ Codex: "Let's put the new team permissions model at the watercooler."
-   Codex (jay, planner): posts proposal with tradeoffs -> ball passed
-Caleb w/ Claude: reads thread, critiques proposal, suggests revision -> ack
-   Claude (caleb, critic): confirms design, posts Decision -> files GitHub issue
-Git: proposal, critique, rationale, and decision are versioned with the code
+```diff
+  Jay w/ Codex: "Let's put the new team permissions model at the watercooler."
++    Codex (jay, planner): posts proposal with tradeoffs -> ball passed
+  Caleb w/ Claude: reads thread, critiques proposal, suggests revision -> ack
++    Claude (caleb, critic): confirms design, posts Decision -> files GitHub issue
++  Git: proposal, critique, rationale, and decision are versioned with the code
 ```
 
 **You choose what to externalize. The agent writes it. Git keeps it durable.**
@@ -72,9 +72,11 @@ Watercooler is the durable shared memory for reasoning, decisions, and critique 
 
 ### Why Watercooler?
 
-As AI accelerates code generation, the bottleneck shifts from production to
-coordination, review, and decision-making. Faster output without shared context
-leads to rework, repeated assumptions, and weaker critique loops.
+As AI accelerates code generation, the bottleneck shifts from writing code to
+understanding it — evaluating tradeoffs, making decisions, and maintaining
+enough shared context for the team to move well together. Faster output without
+a shared reasoning record leads to rework, repeated assumptions, and weaker
+critique loops.
 
 Watercooler addresses this by making the thinking around code durable:
 ideation, proposals, key plans, rationale, and decisions become deliberate,

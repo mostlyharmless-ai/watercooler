@@ -37,14 +37,24 @@ _FINDINGS_LOCK_TIMEOUT_S = 30.0
 _CHECKPOINT_LOCK_TIMEOUT_S = 30.0
 
 
-def _findings_lock_path(daemon_name: str, namespace: str = "") -> Path:
+def _findings_lock_path(
+    daemon_name: str, namespace: str = "", *, _allow_unscoped: bool = False
+) -> Path:
     """Return the per-daemon-namespace cross-process lock sentinel path."""
-    return _daemon_dir(daemon_name, namespace=namespace) / ".findings.lock"
+    return (
+        _daemon_dir(daemon_name, namespace=namespace, _allow_unscoped=_allow_unscoped)
+        / ".findings.lock"
+    )
 
 
-def _checkpoint_lock_path(daemon_name: str, namespace: str = "") -> Path:
+def _checkpoint_lock_path(
+    daemon_name: str, namespace: str = "", *, _allow_unscoped: bool = False
+) -> Path:
     """Return the per-daemon-namespace checkpoint cross-process lock path."""
-    return _daemon_dir(daemon_name, namespace=namespace) / ".checkpoint.lock"
+    return (
+        _daemon_dir(daemon_name, namespace=namespace, _allow_unscoped=_allow_unscoped)
+        / ".checkpoint.lock"
+    )
 
 
 # Default storage root
@@ -61,18 +71,83 @@ def _daemons_dir() -> Path:
 _DAEMON_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-def _daemon_dir(daemon_name: str, namespace: str = "") -> Path:
+def _findings_strict_namespace() -> bool:
+    """Return True when ``WATERCOOLER_FINDINGS_STRICT_NAMESPACE`` is set
+    to a truthy value.
+
+    Plan v5.1 Sprint 4 enforcement flag for Move 3. In strict mode an
+    empty *namespace* is a hard error rather than a silent fallback to
+    the un-namespaced root path. The plan rationale: a missing scope
+    is the A1 cross-tenant attack surface (findings written to a
+    shared root path lose tenant isolation), so under enforce mode
+    an empty namespace must raise rather than be tolerated.
+
+    Reads the env var on every call so tests can monkeypatch it. The
+    cost is one ``os.getenv`` per ``_daemon_dir`` invocation, which
+    is already on the I/O path (the function does an mkdir).
+    """
+    return os.getenv("WATERCOOLER_FINDINGS_STRICT_NAMESPACE", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _daemon_dir(
+    daemon_name: str,
+    namespace: str = "",
+    *,
+    _allow_unscoped: bool = False,
+) -> Path:
     """Return the storage directory for a specific daemon.
 
     When *namespace* is non-empty the path becomes
     ``<daemons_root>/<sanitised_namespace>/<daemon_name>/``, providing
     per-scope isolation for hosted deployments.
 
+    Args:
+        daemon_name: Daemon identifier (must match
+            ``[A-Za-z0-9_-]+``).
+        namespace: Per-scope namespace. Empty in single-tenant local
+            mode; required (or ``_allow_unscoped=True``) under
+            ``WATERCOOLER_FINDINGS_STRICT_NAMESPACE=1``.
+        _allow_unscoped: Explicit exemption for administrative or
+            diagnostic call sites that legitimately need
+            un-namespaced access (e.g., the ``daemon-reset`` admin
+            tool that operates on a single-tenant local checkpoint
+            outside any user scope). Greppable as the audit anchor
+            — every use should be reviewable. Underscore prefix
+            flags this as an internal escape hatch, not a normal
+            API parameter.
+
     Raises:
-        ValueError: If daemon_name is not a safe identifier.
+        ValueError: If daemon_name is not a safe identifier OR if
+            ``WATERCOOLER_FINDINGS_STRICT_NAMESPACE=1`` is set,
+            *namespace* is empty, AND ``_allow_unscoped=False``
+            (Move 3 strict-mode contract).
     """
     if not _DAEMON_NAME_RE.match(daemon_name):
         raise ValueError(f"Invalid daemon name: {daemon_name!r}")
+    if (
+        not namespace
+        and _findings_strict_namespace()
+        and not _allow_unscoped
+    ):
+        # Plan v5.1 Move 3: a missing scope is an A1 cross-tenant
+        # attack surface in hosted multi-tenant deployments. Under
+        # strict mode the un-namespaced root path is forbidden — the
+        # caller must derive a real namespace from auth context (via
+        # ``derive_namespace`` / ``ResolvedScope``) or pass
+        # ``_allow_unscoped=True`` if the call site is a documented
+        # admin / diagnostic exemption.
+        raise ValueError(
+            "WATERCOOLER_FINDINGS_STRICT_NAMESPACE=1: empty namespace "
+            f"refused for daemon {daemon_name!r}; resolve scope via "
+            "auth.scope.resolve_scope, provide an explicit namespace, "
+            "or pass _allow_unscoped=True if this is a documented "
+            "admin/diagnostic call site"
+        )
     base = _daemons_dir()
     if namespace:
         # Sanitise namespace for filesystem safety: replace unsafe chars
@@ -272,8 +347,15 @@ class DaemonCheckpoint:
 # ------------------------------------------------------------------ #
 
 
-def save_checkpoint(checkpoint: DaemonCheckpoint, namespace: str = "") -> None:
+def save_checkpoint(
+    checkpoint: DaemonCheckpoint,
+    namespace: str = "",
+    *,
+    _allow_unscoped: bool = False,
+) -> None:
     """Atomically write checkpoint to disk (temp + rename, cross-process locked).
+
+    See :func:`_daemon_dir` for ``_allow_unscoped`` semantics.
 
     Raises:
         FileLockError: When the per-daemon checkpoint lock cannot be
@@ -285,18 +367,53 @@ def save_checkpoint(checkpoint: DaemonCheckpoint, namespace: str = "") -> None:
             ``msvcrt`` (Windows) is available on the platform.
         OSError: For underlying filesystem failures (disk full,
             permissions, etc.) propagated from the temp-write/rename.
+        ValueError: Strict-namespace mode rejection (see
+            :func:`_daemon_dir`).
     """
-    d = _daemon_dir(checkpoint.daemon_name, namespace=namespace)
+    d = _daemon_dir(
+        checkpoint.daemon_name, namespace=namespace, _allow_unscoped=_allow_unscoped
+    )
     path = d / "checkpoint.json"
-    lock_path = _checkpoint_lock_path(checkpoint.daemon_name, namespace=namespace)
+    lock_path = _checkpoint_lock_path(
+        checkpoint.daemon_name, namespace=namespace, _allow_unscoped=_allow_unscoped
+    )
     with file_lock(lock_path, timeout=_CHECKPOINT_LOCK_TIMEOUT_S):
         tmp_fd, tmp_path = tempfile.mkstemp(dir=str(d), suffix=".tmp")
         try:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(checkpoint.to_dict(), f, indent=2)
+                # Class P storage hygiene (Move 6 plan v5.1): the
+                # checkpoint carries scope-bound state (entry_id
+                # high-water marks, scan progress). Force 0o600 on
+                # the temp file BEFORE the atomic rename so the final
+                # path inherits the tightened mode regardless of
+                # process umask. ``mkstemp`` itself produces 0o600
+                # on POSIX, but explicit chmod is robust to umask
+                # changes between mkstemp and replace, and to the
+                # already-existing-target overwrite case where mode
+                # bits are inherited from the prior file.
+                #
+                # PR #705 round 7 LOW: chmod the open fd via
+                # ``os.fchmod`` rather than the path. Path-based
+                # chmod after the ``with`` block closes the fd
+                # leaves a brief window where a symlink could be
+                # swapped in at ``tmp_path`` between close and
+                # chmod. The fd-based form is symlink-immune.
+                if os.name == "posix":
+                    try:
+                        os.fchmod(f.fileno(), 0o600)
+                    except OSError as exc:
+                        logger.warning(
+                            "could not set 0o600 on %s: %s", tmp_path, exc
+                        )
             os.replace(tmp_path, str(path))
-        except Exception:
-            # Clean up temp file on failure
+        except BaseException:
+            # PR #705 round 7+5+2 LOW: ``_maybe_compact`` and
+            # ``acknowledge_finding`` were widened to ``except
+            # BaseException:`` so a ``KeyboardInterrupt`` /
+            # ``SystemExit`` mid-replace still triggers tmp-file
+            # cleanup before re-raise. ``save_checkpoint`` was
+            # missed in that pass — same pattern, same fix.
             try:
                 os.unlink(tmp_path)
             except OSError:
@@ -304,9 +421,20 @@ def save_checkpoint(checkpoint: DaemonCheckpoint, namespace: str = "") -> None:
             raise
 
 
-def load_checkpoint(daemon_name: str, namespace: str = "") -> DaemonCheckpoint:
-    """Load checkpoint from disk, returning a fresh one if not found."""
-    path = _daemon_dir(daemon_name, namespace=namespace) / "checkpoint.json"
+def load_checkpoint(
+    daemon_name: str,
+    namespace: str = "",
+    *,
+    _allow_unscoped: bool = False,
+) -> DaemonCheckpoint:
+    """Load checkpoint from disk, returning a fresh one if not found.
+
+    See :func:`_daemon_dir` for ``_allow_unscoped`` semantics.
+    """
+    path = (
+        _daemon_dir(daemon_name, namespace=namespace, _allow_unscoped=_allow_unscoped)
+        / "checkpoint.json"
+    )
     if not path.exists():
         return DaemonCheckpoint(daemon_name=daemon_name)
     try:
@@ -373,7 +501,11 @@ _COMPACT_KEEP_LINES = 5_000
 
 
 def append_findings(
-    daemon_name: str, findings: List[Finding], namespace: str = ""
+    daemon_name: str,
+    findings: List[Finding],
+    namespace: str = "",
+    *,
+    _allow_unscoped: bool = False,
 ) -> None:
     """Append findings to the JSONL log file.
 
@@ -403,13 +535,70 @@ def append_findings(
     """
     if not findings:
         return
-    path = _daemon_dir(daemon_name, namespace=namespace) / "findings.jsonl"
-    lock_path = _findings_lock_path(daemon_name, namespace=namespace)
+    path = (
+        _daemon_dir(daemon_name, namespace=namespace, _allow_unscoped=_allow_unscoped)
+        / "findings.jsonl"
+    )
+    lock_path = _findings_lock_path(
+        daemon_name, namespace=namespace, _allow_unscoped=_allow_unscoped
+    )
     with _get_findings_lock(daemon_name, namespace):
         with file_lock(lock_path, timeout=_FINDINGS_LOCK_TIMEOUT_S):
-            with open(path, "a") as f:
-                for finding in findings:
-                    f.write(json.dumps(finding.to_dict()) + "\n")
+            # Class P storage hygiene (Move 6 plan v5.1): findings
+            # JSONL carries scope-tagged primary user data.
+            # PR #705 round 4 MED fix: open with
+            # ``os.open(O_CREAT|O_APPEND|O_WRONLY, 0o600)`` so the
+            # file is created with 0o600 at the kernel level — no
+            # TOCTOU window where the file briefly exists at the
+            # umask-default mode between ``open(path, "a")`` and
+            # the explicit chmod. Then unconditionally chmod in
+            # case the file pre-dates this hygiene step and was
+            # created at 0o644 under an earlier deployment.
+            if os.name == "posix":
+                fd = os.open(
+                    str(path),
+                    os.O_CREAT | os.O_APPEND | os.O_WRONLY,
+                    0o600,
+                )
+                # PR #705 round 5 MED — fd-leak guard: ``os.fdopen``
+                # takes ownership of the raw fd, but if anything in
+                # this block raises before fdopen completes (chmod
+                # OSError is swallowed so it can't trigger here, but
+                # OOM / invalid-fd-after-signal paths can), the fd
+                # would leak. Wrap with try/except + os.close so the
+                # fd is released on any error path.
+                try:
+                    try:
+                        # PR #705 round 7+2 LOW: ``os.fchmod(fd, ...)``
+                        # rather than ``os.chmod(path, ...)``. The fd
+                        # is already open on the correct file (the
+                        # one ``os.open`` resolved); the path is now
+                        # racy because between ``os.open`` and a
+                        # path-based chmod a privileged actor with
+                        # write to ``.watercooler`` could swap the
+                        # path for a symlink and tighten a different
+                        # file. Fd-based chmod is symlink-immune and
+                        # consistent with the round-7 mkstemp fix.
+                        os.fchmod(fd, 0o600)
+                    except OSError as exc:
+                        logger.warning(
+                            "could not set 0o600 on %s: %s — Class P "
+                            "hygiene depends on filesystem-level controls",
+                            path,
+                            exc,
+                        )
+                    f = os.fdopen(fd, "a")
+                except BaseException:
+                    os.close(fd)
+                    raise
+                with f:
+                    for finding in findings:
+                        f.write(json.dumps(finding.to_dict()) + "\n")
+            else:
+                # Windows: POSIX permission bits don't apply.
+                with open(path, "a") as f:
+                    for finding in findings:
+                        f.write(json.dumps(finding.to_dict()) + "\n")
             # Rotate if file has grown too large.
             # TODO: _maybe_compact re-reads the file to count lines; tracking
             # line_count in the checkpoint would make this O(1).
@@ -432,6 +621,28 @@ def _maybe_compact(path: Path, daemon_name: str) -> None:
         try:
             with os.fdopen(tmp_fd, "w") as f:
                 f.writelines(keep)
+                # Class P storage hygiene (PR #705 round 6 MED): the
+                # ``mkstemp`` default is 0o600 on POSIX, but the
+                # ``save_checkpoint`` comment notes that relying on
+                # that alone is fragile (it varies by platform and
+                # umask interaction with ``os.replace``). Tighten
+                # explicitly before the rename so the surviving file
+                # is unambiguously 0o600 even if the tmp default
+                # drifts in a future Python release.
+                #
+                # PR #705 round 7 LOW: chmod the open fd via
+                # ``os.fchmod`` rather than the path. Path-based
+                # chmod outside the ``with`` block leaves a brief
+                # symlink-swap window between close and chmod.
+                if os.name == "posix":
+                    try:
+                        os.fchmod(f.fileno(), 0o600)
+                    except OSError as exc:
+                        logger.warning(
+                            "DAEMON[%s]: chmod 0o600 on compaction tmp failed: %s",
+                            daemon_name,
+                            exc,
+                        )
             os.replace(tmp_path, str(path))
             logger.info(
                 "DAEMON[%s]: compacted findings.jsonl from %d to %d lines",
@@ -439,7 +650,15 @@ def _maybe_compact(path: Path, daemon_name: str) -> None:
                 len(lines),
                 len(keep),
             )
-        except Exception:
+        except BaseException:
+            # PR #705 round 7+3 LOW: catch ``BaseException`` (not just
+            # ``Exception``) so a ``KeyboardInterrupt`` or
+            # ``SystemExit`` during ``os.replace`` still triggers
+            # the temp-file cleanup. An orphaned ``.tmp`` file in
+            # the daemon directory survives across restarts and
+            # accumulates over time on a flaky disk; closing the
+            # window matches the existing fd-leak-guard pattern at
+            # line 478 (round 5 fix).
             try:
                 os.unlink(tmp_path)
             except OSError:
@@ -454,6 +673,7 @@ def acknowledge_finding(
     finding_id: str,
     *,
     namespace: str = "",
+    _allow_unscoped: bool = False,
 ) -> bool:
     """Mark a finding acknowledged in its JSONL findings file.
 
@@ -477,11 +697,20 @@ def acknowledge_finding(
     to flow through that path. Lock-acquisition timeouts are caught
     here rather than propagated.
     """
-    lock_path = _findings_lock_path(daemon_name, namespace=namespace)
+    lock_path = _findings_lock_path(
+        daemon_name, namespace=namespace, _allow_unscoped=_allow_unscoped
+    )
     with _get_findings_lock(daemon_name, namespace):
         try:
             with file_lock(lock_path, timeout=_FINDINGS_LOCK_TIMEOUT_S):
-                path = _daemon_dir(daemon_name, namespace=namespace) / "findings.jsonl"
+                path = (
+                    _daemon_dir(
+                        daemon_name,
+                        namespace=namespace,
+                        _allow_unscoped=_allow_unscoped,
+                    )
+                    / "findings.jsonl"
+                )
                 if not path.exists():
                     return False
                 try:
@@ -520,16 +749,52 @@ def acknowledge_finding(
                 try:
                     with os.fdopen(tmp_fd, "w") as f:
                         f.writelines(new_lines)
+                        # Class P storage hygiene (PR #705 round 6
+                        # MED): explicit chmod before rename,
+                        # mirroring ``_maybe_compact`` and
+                        # ``save_checkpoint``. ``mkstemp`` default is
+                        # 0o600 on POSIX but depending on it across
+                        # the rename is fragile.
+                        #
+                        # PR #705 round 7 LOW: ``os.fchmod`` on the
+                        # open fd inside the ``with`` block,
+                        # eliminating the brief symlink-swap window
+                        # path-based chmod after close would leave.
+                        if os.name == "posix":
+                            try:
+                                os.fchmod(f.fileno(), 0o600)
+                            except OSError as exc:
+                                logger.warning(
+                                    "DAEMON[%s]: chmod 0o600 on ack tmp failed: %s",
+                                    daemon_name,
+                                    exc,
+                                )
                     os.replace(tmp_path, str(path))
-                except Exception as e:
-                    logger.warning(
-                        "DAEMON[%s]: failed to write ack: %s", daemon_name, e
-                    )
+                except BaseException as e:
+                    # PR #705 round 7+4 MED: catch ``BaseException``
+                    # (not just ``Exception``) so a ``KeyboardInterrupt``
+                    # or ``SystemExit`` mid-replace still triggers the
+                    # tmp-file cleanup. Mirrors the round-7+3
+                    # ``_maybe_compact`` discipline.
+                    #
+                    # Two-branch behaviour: ``Exception`` is logged
+                    # and we return False (preserving the bool-only
+                    # failure contract — callers don't expect
+                    # acknowledge_finding to raise on disk failure).
+                    # KI/SE re-raise after cleanup so process-shutdown
+                    # signals are not swallowed.
                     try:
                         os.unlink(tmp_path)
                     except OSError:
                         pass
-                    return False
+                    if isinstance(e, Exception):
+                        logger.warning(
+                            "DAEMON[%s]: failed to write ack: %s",
+                            daemon_name,
+                            e,
+                        )
+                        return False
+                    raise
         except OSError as e:
             # Preserve the bool-only failure contract. ``FileLockError``
             # and ``FileLockUnsupportedError`` are both ``OSError``
@@ -559,6 +824,7 @@ def load_findings(
     unacknowledged_only: bool = False,
     namespace: str = "",
     order: Literal["newest", "oldest"] = "newest",
+    _allow_unscoped: bool = False,
 ) -> List[Finding]:
     """Load findings from JSONL log with optional filters.
 
@@ -578,7 +844,10 @@ def load_findings(
     state. A reader that opens the file just before compaction may get
     a partial result, which is acceptable for a best-effort query.
     """
-    path = _daemon_dir(daemon_name, namespace=namespace) / "findings.jsonl"
+    path = (
+        _daemon_dir(daemon_name, namespace=namespace, _allow_unscoped=_allow_unscoped)
+        / "findings.jsonl"
+    )
     if not path.exists():
         return []
 

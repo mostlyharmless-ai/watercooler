@@ -1,8 +1,9 @@
 # Architecture
 
-Watercooler is a thin layer on top of git. This document explains where
-thread data lives, how reads and writes differ, and how Watercooler stays
-out of the way of your code.
+Watercooler stores team reasoning alongside your code — decisions, proposals,
+critique, and rationale versioned inside your existing repository as a
+structured graph. This document explains where that data lives, how reads
+and writes differ, and how Watercooler stays out of the way of your code.
 
 Read this once early — most questions about configuration, federation,
 daemons, and troubleshooting become easier once the storage picture is

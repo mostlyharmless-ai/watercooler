@@ -15,7 +15,6 @@ class TestCreateHttpApp:
         """Create the HTTP app with mocked auth."""
         with patch.dict("os.environ", {
             "WATERCOOLER_MODE": "hosted",
-            "WATERCOOLER_INTERNAL_SECRET": "test-secret",
         }):
             from watercooler_mcp.server_http import create_http_app
             return create_http_app()

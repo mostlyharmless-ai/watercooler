@@ -214,3 +214,54 @@ class TestBaseDaemon:
         daemon = StubDaemon(name="test_stop_noop", interval=1.0)
         # Not started — stop should return True
         assert daemon.stop() is True
+
+
+class TestStrictNamespaceConstruction:
+    """Layer 1 of the hosted-premium-daemons-zero-registration-2026-05-04 fix:
+    ``BaseDaemon.__init__`` must defer ``load_checkpoint`` when constructed
+    with an empty namespace under ``WATERCOOLER_FINDINGS_STRICT_NAMESPACE=1``.
+
+    Pre-fix, every premium daemon's ``__init__`` raised ``ValueError`` because
+    ``load_checkpoint(name, namespace="")`` hits the strict gate at
+    ``state._daemon_dir()`` before the hosted coordinator can call
+    ``_configure(d)`` to inject the scope namespace. The hosted coordinator
+    then swallowed the exception in its outer ``try/except`` so the operator
+    saw an empty daemons dict with no error.
+    """
+
+    def test_strict_mode_with_empty_namespace_defers_checkpoint(
+        self, tmp_path, monkeypatch
+    ):
+        """Construction must succeed (checkpoint deferred to ``None``)."""
+        monkeypatch.setenv("WATERCOOLER_FINDINGS_STRICT_NAMESPACE", "1")
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path
+        )
+        # No exception expected — pre-fix this raised ValueError.
+        daemon = StubDaemon(name="test_deferred", interval=10.0, state_namespace="")
+        assert daemon._checkpoint is None
+
+    def test_strict_mode_with_namespace_loads_eagerly(self, tmp_path, monkeypatch):
+        """Non-empty namespace under strict mode keeps the eager load."""
+        monkeypatch.setenv("WATERCOOLER_FINDINGS_STRICT_NAMESPACE", "1")
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path
+        )
+        daemon = StubDaemon(
+            name="test_eager", interval=10.0, state_namespace="u1:org/repo"
+        )
+        assert daemon._checkpoint is not None
+        assert daemon._checkpoint.daemon_name == "test_eager"
+
+    def test_non_strict_with_empty_namespace_loads_eagerly(
+        self, tmp_path, monkeypatch
+    ):
+        """Local single-tenant mode (strict off, namespace empty) keeps the
+        eager load — the load returns a fresh checkpoint."""
+        monkeypatch.delenv("WATERCOOLER_FINDINGS_STRICT_NAMESPACE", raising=False)
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path
+        )
+        daemon = StubDaemon(name="test_local", interval=10.0, state_namespace="")
+        assert daemon._checkpoint is not None
+        assert daemon._checkpoint.daemon_name == "test_local"

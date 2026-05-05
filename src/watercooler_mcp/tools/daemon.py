@@ -753,8 +753,17 @@ def _decision_extractor_reset_impl(
     from datetime import datetime, timezone
 
     daemon_name = "decision_extractor"
+    # Plan v5.1 Move 3: this admin/diagnostic tool legitimately
+    # operates on the un-namespaced checkpoint root (single-tenant
+    # local stdio mode, no auth-derived scope). Pass
+    # ``_allow_unscoped=True`` to opt out of the
+    # ``WATERCOOLER_FINDINGS_STRICT_NAMESPACE=1`` strict-mode check
+    # that the daemon-state module enforces. The audit anchor for
+    # this exemption is the ``_allow_unscoped=True`` literal —
+    # grep -rn '_allow_unscoped=True' src/ to enumerate all
+    # documented bypass call sites.
     try:
-        cp_dir = _daemon_dir(daemon_name)
+        cp_dir = _daemon_dir(daemon_name, _allow_unscoped=True)
         cp_path = cp_dir / "checkpoint.json"
         if not cp_path.exists():
             return json.dumps(
@@ -794,7 +803,7 @@ def _decision_extractor_reset_impl(
         bak_path = cp_dir / f"checkpoint.json.bak-{ts}"
         shutil.copy2(cp_path, bak_path)
 
-        checkpoint = load_checkpoint(daemon_name)
+        checkpoint = load_checkpoint(daemon_name, _allow_unscoped=True)
         extras = checkpoint.extras
         before = {
             "processed_finding_ids": len(extras.get("processed_finding_ids", [])),
@@ -815,7 +824,7 @@ def _decision_extractor_reset_impl(
             extras["llm_extraction_attempts"] = {}
             extras["write_failure_attempts"] = {}
 
-        save_checkpoint(checkpoint)
+        save_checkpoint(checkpoint, _allow_unscoped=True)
 
         return json.dumps(
             {

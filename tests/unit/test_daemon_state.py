@@ -364,3 +364,198 @@ class TestAcknowledgeFinding:
         )
         ok = acknowledge_finding("no_such_daemon", "f1")
         assert ok is False
+
+
+# ------------------------------------------------------------------ #
+# BaseException re-raise contracts (PR #705 round 7+5+2 review)
+# ------------------------------------------------------------------ #
+#
+# The reviewer claimed that ``_maybe_compact``'s ``except BaseException:``
+# handler was missing a trailing ``raise`` and would silently swallow
+# ``KeyboardInterrupt`` / ``SystemExit``. The claim is factually wrong
+# — the ``raise`` is present and KI/SE propagate correctly. These
+# tests pin the actual behaviour so the same false-positive review
+# claim can't recur.
+
+
+class TestMaybeCompactBaseExceptionPropagates:
+    """``_maybe_compact`` must clean up the tmp file AND re-raise on
+    ``KeyboardInterrupt`` / ``SystemExit``. The outer ``except
+    Exception`` handler does NOT catch ``BaseException``, so KI/SE
+    pass through to the caller (typically ``append_findings`` under
+    ``_findings_lock``)."""
+
+    def _force_compaction_setup(self, tmp_path, monkeypatch):
+        from watercooler_mcp.daemons import state as state_mod
+
+        daemons_root = tmp_path / "daemons"
+        monkeypatch.setattr(state_mod, "_DEFAULT_DAEMONS_DIR", daemons_root)
+        monkeypatch.setattr(state_mod, "_MAX_FINDINGS_LINES", 1)
+        monkeypatch.setattr(state_mod, "_COMPACT_KEEP_LINES", 1)
+        # Pre-create a findings file with enough lines that compaction
+        # will run.
+        d = daemons_root / "test"
+        d.mkdir(parents=True)
+        path = d / "findings.jsonl"
+        with path.open("w") as f:
+            for i in range(5):
+                f.write(f'{{"finding_id":"f{i}"}}\n')
+        return state_mod, path
+
+    def test_keyboard_interrupt_during_replace_propagates(
+        self, tmp_path, monkeypatch
+    ):
+        # Simulate Ctrl+C arriving during ``os.replace``. The
+        # ``except BaseException:`` branch must unlink the tmp file
+        # and re-raise; the outer ``except Exception:`` does NOT
+        # catch it (KI is not an Exception subclass).
+        import os
+        import pytest
+
+        state_mod, path = self._force_compaction_setup(tmp_path, monkeypatch)
+
+        def _interrupt(*_a, **_kw):
+            raise KeyboardInterrupt("simulated mid-replace")
+
+        monkeypatch.setattr(os, "replace", _interrupt)
+
+        with pytest.raises(KeyboardInterrupt, match="mid-replace"):
+            state_mod._maybe_compact(path, "test")
+
+        # Tmp files should not be left behind in the daemon dir
+        # (the BaseException branch unlinks before re-raising).
+        leftover = list(path.parent.glob("*.tmp"))
+        assert leftover == [], (
+            f"BaseException branch must unlink tmp file before re-raising; "
+            f"found leftover: {leftover}"
+        )
+
+    def test_system_exit_during_replace_propagates(self, tmp_path, monkeypatch):
+        import os
+        import pytest
+
+        state_mod, path = self._force_compaction_setup(tmp_path, monkeypatch)
+
+        def _exit(*_a, **_kw):
+            raise SystemExit(7)
+
+        monkeypatch.setattr(os, "replace", _exit)
+
+        with pytest.raises(SystemExit) as excinfo:
+            state_mod._maybe_compact(path, "test")
+        assert excinfo.value.code == 7
+
+        leftover = list(path.parent.glob("*.tmp"))
+        assert leftover == [], (
+            f"SystemExit must unlink tmp before re-raising; "
+            f"found leftover: {leftover}"
+        )
+
+    def test_regular_exception_during_replace_logs_and_swallows(
+        self, tmp_path, monkeypatch
+    ):
+        # Regression guard: regular ``Exception`` subclasses (e.g.
+        # ``OSError``) DO get caught by the outer ``except
+        # Exception as e: logger.warning(...)`` block. The bool-only
+        # contract of the surrounding ``append_findings`` call must
+        # be preserved; a disk-full error during compaction must
+        # not raise out of ``_maybe_compact``.
+        import os
+
+        state_mod, path = self._force_compaction_setup(tmp_path, monkeypatch)
+
+        def _disk_full(*_a, **_kw):
+            raise OSError("simulated disk full")
+
+        monkeypatch.setattr(os, "replace", _disk_full)
+
+        # Must not raise.
+        state_mod._maybe_compact(path, "test")
+
+        # Tmp file still cleaned up by the inner BaseException branch.
+        leftover = list(path.parent.glob("*.tmp"))
+        assert leftover == []
+
+
+class TestSaveCheckpointBaseExceptionPropagates:
+    """``save_checkpoint`` must clean up the tmp file AND re-raise
+    on ``KeyboardInterrupt`` / ``SystemExit``. Mirrors the
+    ``_maybe_compact`` and ``acknowledge_finding`` discipline that
+    landed in PR #705 round 7+3 / 7+4. The pre-cleanup PR
+    upgraded those two sites but missed ``save_checkpoint`` —
+    this test class pins the consistency."""
+
+    def test_keyboard_interrupt_during_replace_propagates(
+        self, tmp_path, monkeypatch
+    ):
+        import os
+        import pytest
+
+        from watercooler_mcp.daemons import state as state_mod
+
+        daemons_root = tmp_path / "daemons"
+        monkeypatch.setattr(state_mod, "_DEFAULT_DAEMONS_DIR", daemons_root)
+
+        def _interrupt(*_a, **_kw):
+            raise KeyboardInterrupt("simulated mid-replace")
+
+        monkeypatch.setattr(os, "replace", _interrupt)
+
+        cp = state_mod.DaemonCheckpoint(daemon_name="test")
+        with pytest.raises(KeyboardInterrupt, match="mid-replace"):
+            state_mod.save_checkpoint(cp)
+
+        # Tmp file unlinked before re-raise.
+        leftover = list((daemons_root / "test").glob("*.tmp"))
+        assert leftover == [], (
+            f"save_checkpoint BaseException branch must unlink tmp before "
+            f"re-raise; found leftover: {leftover}"
+        )
+
+    def test_system_exit_during_replace_propagates(self, tmp_path, monkeypatch):
+        import os
+        import pytest
+
+        from watercooler_mcp.daemons import state as state_mod
+
+        daemons_root = tmp_path / "daemons"
+        monkeypatch.setattr(state_mod, "_DEFAULT_DAEMONS_DIR", daemons_root)
+
+        def _exit(*_a, **_kw):
+            raise SystemExit(42)
+
+        monkeypatch.setattr(os, "replace", _exit)
+
+        cp = state_mod.DaemonCheckpoint(daemon_name="test")
+        with pytest.raises(SystemExit) as excinfo:
+            state_mod.save_checkpoint(cp)
+        assert excinfo.value.code == 42
+
+        leftover = list((daemons_root / "test").glob("*.tmp"))
+        assert leftover == []
+
+    def test_oserror_during_replace_unlinks_and_propagates(
+        self, tmp_path, monkeypatch
+    ):
+        # Unlike ``_maybe_compact``, ``save_checkpoint`` doesn't have
+        # an outer log-and-swallow handler — it lets disk failures
+        # raise to the caller. Verify the tmp cleanup still fires.
+        import os
+        import pytest
+
+        from watercooler_mcp.daemons import state as state_mod
+
+        daemons_root = tmp_path / "daemons"
+        monkeypatch.setattr(state_mod, "_DEFAULT_DAEMONS_DIR", daemons_root)
+
+        def _disk_full(*_a, **_kw):
+            raise OSError("simulated disk full")
+
+        monkeypatch.setattr(os, "replace", _disk_full)
+
+        cp = state_mod.DaemonCheckpoint(daemon_name="test")
+        with pytest.raises(OSError, match="disk full"):
+            state_mod.save_checkpoint(cp)
+
+        leftover = list((daemons_root / "test").glob("*.tmp"))
+        assert leftover == []

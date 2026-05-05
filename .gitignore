@@ -134,12 +134,25 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
-.env
-.env.production
-.env.staging
-.env.pipeline
-.envrc
+# Environments — catch-all + explicit allowlist for templates only.
+#
+# Phase 4.1 of the H1 closure plan in this repo's thread
+# security-audit-2026-05-03 (entry 01KQPM5MMJ919Q3X13MP19H5MS). Replaces
+# the narrow specific-name rules below with a catch-all so future env
+# pulls (e.g. .env.test-cjh, .env.vercel.production, additional rotation-
+# script env captures) are excluded by default. The .env.example whitelist
+# preserves any documented template path. Original rules are kept as
+# comments so the intent is obvious to future readers.
+#
+# Original rules (now subsumed by the catch-all):
+#   .env
+#   .env.production
+#   .env.staging
+#   .env.pipeline
+#   .envrc
+#
+.env*
+!.env.example
 .venv
 env/
 venv/

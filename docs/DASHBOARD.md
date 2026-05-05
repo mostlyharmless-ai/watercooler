@@ -131,7 +131,7 @@ The dashboard is designed to feel live, not static:
 - a manual **Sync** action is available when you want to force a refresh from
   GitHub
 
-This reduces the "is the dashboard stale?" problem during active coordination.
+This reduces the "is the dashboard stale?" problem during active work on a thread.
 
 ### 7. Switch to graph view
 

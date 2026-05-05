@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Watercooler: File-based collaboration for agentic coding."""
+"""Watercooler: MCP server with git-backed shared memory for agentic coding teams."""
 
 from importlib.metadata import version, PackageNotFoundError
 

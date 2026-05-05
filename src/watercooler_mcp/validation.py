@@ -243,11 +243,21 @@ def _require_context(code_path: str) -> tuple[str | None, ThreadContext | None]:
         if http_ctx and http_ctx.repo:
             log_debug(f"_require_context: hosted mode detected, using HTTP context")
             return _require_context_hosted(http_ctx)
-        else:
+        if http_ctx is None:
             log_debug("_require_context: hosted mode but no HTTP context available")
             return (
                 "Hosted mode active but HTTP context not available. "
-                "Ensure X-User-ID and X-Repo headers are provided.",
+                "Ensure the client sends hosted session headers including "
+                "X-User-ID and X-Repo.",
+                None,
+            )
+        else:
+            log_debug("_require_context: hosted mode but no X-Repo available")
+            return (
+                "Hosted mode active but repository context not available. "
+                "Ensure the client sends an X-Repo header; hybrid/proxy clients "
+                "should set [mcp].proxy_repo = '<owner>/<repo>' or start the "
+                "MCP server from inside a git repo so X-Repo can be inferred.",
                 None,
             )
 

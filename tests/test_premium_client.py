@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -57,22 +58,100 @@ class TestFromTransportConfig:
 
     @patch("watercooler_mcp.premium_client.Client")
     @patch("watercooler_mcp.premium_client.StreamableHttpTransport")
-    def test_headers_fallback_to_git_context(self, mock_transport_cls, mock_client_cls):
+    def test_headers_fallback_to_git_context(
+        self,
+        mock_transport_cls,
+        mock_client_cls,
+        tmp_path: Path,
+    ):
         with patch("watercooler.config_facade.config") as mock_config:
             mock_config.get_hosted_api_key.return_value = None
             mock_config.context.return_value = MagicMock(
                 code_repo="discovered/repo", code_branch="discovered-branch"
             )
 
-            PremiumToolClient.from_transport_config({
-                "url": "https://example.com/mcp/premium",
-                "proxy_repo": "",
-                "proxy_branch": "",
-            })
+            PremiumToolClient.from_transport_config(
+                {
+                    "url": "https://example.com/mcp/premium",
+                    "proxy_repo": "",
+                    "proxy_branch": "",
+                },
+                boot_cwd=tmp_path,
+            )
 
             headers = mock_transport_cls.call_args[1]["headers"]
             assert headers["X-Repo"] == "discovered/repo"
             assert headers["X-Branch"] == "discovered-branch"
+            mock_config.context.assert_called_once_with(tmp_path)
+
+    def test_missing_resolved_repo_raises_actionable_error(self, tmp_path: Path):
+        with patch("watercooler.config_facade.config") as mock_config:
+            mock_config.get_hosted_api_key.return_value = "test-key"
+            mock_config.context.return_value = MagicMock(
+                code_repo=None,
+                code_branch="main",
+            )
+
+            with pytest.raises(ValueError, match=r"Set \[mcp\]\.proxy_repo"):
+                PremiumToolClient.from_transport_config(
+                    {
+                        "url": "https://example.com/mcp/premium",
+                        "proxy_repo": "",
+                        "proxy_branch": "",
+                    },
+                    boot_cwd=tmp_path,
+                )
+
+    def test_missing_resolved_branch_raises_actionable_error(self, tmp_path: Path):
+        with patch("watercooler.config_facade.config") as mock_config:
+            mock_config.get_hosted_api_key.return_value = "test-key"
+            mock_config.context.return_value = MagicMock(
+                code_repo="org/repo",
+                code_branch=None,
+            )
+
+            with pytest.raises(ValueError, match=r"Set \[mcp\]\.proxy_branch"):
+                PremiumToolClient.from_transport_config(
+                    {
+                        "url": "https://example.com/mcp/premium",
+                        "proxy_repo": "",
+                        "proxy_branch": "",
+                    },
+                    boot_cwd=tmp_path,
+                )
+
+    def test_context_failure_reports_repo_and_branch_when_both_missing(
+        self,
+        tmp_path: Path,
+    ):
+        with patch("watercooler.config_facade.config") as mock_config:
+            mock_config.get_hosted_api_key.return_value = "test-key"
+            mock_config.context.side_effect = RuntimeError("git unavailable")
+
+            with pytest.raises(ValueError, match=r"proxy_repo.*proxy_branch"):
+                PremiumToolClient.from_transport_config(
+                    {
+                        "url": "https://example.com/mcp/premium",
+                        "proxy_repo": "",
+                        "proxy_branch": "",
+                    },
+                    boot_cwd=tmp_path,
+                )
+
+    def test_missing_branch_resolution_raises_when_repo_configured(self, tmp_path: Path):
+        with patch("watercooler.config_facade.config") as mock_config:
+            mock_config.get_hosted_api_key.return_value = "test-key"
+            mock_config.context.side_effect = RuntimeError("git unavailable")
+
+            with pytest.raises(ValueError, match=r"proxy_branch"):
+                PremiumToolClient.from_transport_config(
+                    {
+                        "url": "https://example.com/mcp/premium",
+                        "proxy_repo": "org/repo",
+                        "proxy_branch": "",
+                    },
+                    boot_cwd=tmp_path,
+                )
 
 
 # ---------------------------------------------------------------------------

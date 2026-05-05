@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 # TOML writing requires tomlkit (for preserving comments) or tomli_w
 try:
     import tomlkit
+
     HAS_TOMLKIT = True
 except ImportError:
     tomlkit = None  # type: ignore
@@ -269,7 +270,9 @@ def _migrate_json_to_toml(json_path: Path, toml_path: Path) -> bool:
             if "github_ssh_key" in data or "ssh_key" in data:
                 if "github" not in toml_data:
                     toml_data["github"] = {}
-                toml_data["github"]["ssh_key"] = data.get("github_ssh_key", data.get("ssh_key", ""))
+                toml_data["github"]["ssh_key"] = data.get(
+                    "github_ssh_key", data.get("ssh_key", "")
+                )
 
             if "session_secret" in data:
                 if "dashboard" not in toml_data:
@@ -293,7 +296,11 @@ def _migrate_json_to_toml(json_path: Path, toml_path: Path) -> bool:
             doc = tomlkit.document()
             doc.add(tomlkit.comment(" Watercooler Credentials"))
             doc.add(tomlkit.comment(" Auto-migrated from credentials.json"))
-            doc.add(tomlkit.comment(" Keep this file secure - do not commit to version control"))
+            doc.add(
+                tomlkit.comment(
+                    " Keep this file secure - do not commit to version control"
+                )
+            )
             doc.add(tomlkit.nl())
 
             for section, values in toml_data.items():
@@ -411,7 +418,9 @@ def save_credentials(creds: Credentials) -> Path:
 
     doc = tomlkit.document()
     doc.add(tomlkit.comment(" Watercooler Credentials"))
-    doc.add(tomlkit.comment(" Keep this file secure - do not commit to version control"))
+    doc.add(
+        tomlkit.comment(" Keep this file secure - do not commit to version control")
+    )
     doc.add(tomlkit.nl())
 
     # GitHub section
@@ -481,6 +490,15 @@ def get_github_token() -> Optional[str]:
     # Load from credentials
     creds = load_credentials()
     return creds.github.token or None
+
+
+# NOTE: The Secret-wrapped GitHub-PAT loader lives in
+# ``watercooler_mcp.secrets.gateway`` (function
+# ``load_github_token_secret``), not here. Keeping it out of the
+# core ``watercooler`` package preserves the open-core import
+# direction: ``watercooler_mcp`` depends on ``watercooler``, never
+# the reverse. Callers in ``watercooler_mcp`` that need the
+# Secret-wrapped form should import the gateway helper directly.
 
 
 def get_provider_api_key(provider: str) -> Optional[str]:
@@ -557,5 +575,3 @@ def _load_config() -> Dict[str, Any]:
             return tomllib.load(f)
     except Exception:
         return {}
-
-

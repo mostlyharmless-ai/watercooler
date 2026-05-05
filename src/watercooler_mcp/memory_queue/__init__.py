@@ -56,12 +56,77 @@ __all__ = [
     "TaskNotFoundError",
     # Constants
     "VALID_BACKENDS",
+    # Helpers
+    "truncate_utf8_to_bytes",
     # Singleton API
     "init_memory_queue",
     "get_queue",
     "get_worker",
     "enqueue_memory_task",
 ]
+
+
+def truncate_utf8_to_bytes(s: str, *, max_bytes: int) -> str:
+    """Truncate ``s`` to at most ``max_bytes`` UTF-8 bytes, codepoint-safe.
+
+    PR #745 round 2 review (MED): the previous one-liner
+    ``s.encode('utf-8')[:max_bytes].decode('utf-8', errors='ignore')``
+    has a data-loss failure mode for bodies composed entirely of
+    multi-byte codepoints (CJK, emoji, etc.): if every slice boundary
+    lands mid-codepoint, ``errors='ignore'`` discards every byte and
+    the function returns ``""``. Downstream callers that classify an
+    empty body as a skip then silently drop a non-empty entry.
+
+    This helper drops trailing codepoints (not bytes) until the
+    encoded form fits the cap. Always returns at least one codepoint
+    when the input is non-empty.
+
+    The same fix landed in PR #745 round 3 in two places:
+      - ``scripts/backfill_hosted_t2.py``
+      - ``src/watercooler_mcp/daemons/t2_indexer.py`` (4 call sites)
+    Both now import this helper to prevent drift.
+
+    PR #745 round 4 review (MED): the helper now enforces the byte cap
+    *strictly*. The previous shape always returned at least one
+    codepoint (to avoid the original data-loss bug where a multi-byte
+    body could degrade to ``""``). For typical caps (64 KB / 500 B)
+    that's always within budget — but for a future caller with a
+    strict cap below max-codepoint-size (≤ 4 bytes), returning a
+    single 4-byte codepoint would silently exceed the cap. Now: if
+    even one codepoint can't fit, return ``""``. Callers that need a
+    "preserve at least one codepoint" semantics should set a cap of
+    ≥ 4 bytes and check for empty output.
+
+    Args:
+        s: The string to truncate. Empty strings pass through.
+        max_bytes: The byte cap. Must be >= 1.
+
+    Returns:
+        ``s`` unchanged if it already fits; otherwise the longest
+        prefix of ``s`` whose UTF-8 encoding is at most ``max_bytes``
+        bytes. Returns ``""`` when not even one codepoint fits.
+    """
+    if not s:
+        return ""
+    encoded = s.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return s
+    # O(log n) outer pass: drop large chunks while we're far over.
+    truncated = s
+    while len(truncated.encode("utf-8")) > max_bytes and len(truncated) > 1:
+        over = len(truncated.encode("utf-8")) - max_bytes
+        # Conservative codepoint estimate (4 bytes/char max in UTF-8).
+        drop = max(1, over // 4)
+        truncated = truncated[:-drop] if drop < len(truncated) else truncated[:1]
+    # Final tightening — last 1-3 chars may still push over. Step by 1.
+    while len(truncated.encode("utf-8")) > max_bytes and len(truncated) > 1:
+        truncated = truncated[:-1]
+    # Strict-cap enforcement: if the remaining single codepoint is
+    # still over budget, return empty rather than violate the cap.
+    if len(truncated.encode("utf-8")) > max_bytes:
+        return ""
+    return truncated
+
 
 # ------------------------------------------------------------------ #
 # Module-level singletons

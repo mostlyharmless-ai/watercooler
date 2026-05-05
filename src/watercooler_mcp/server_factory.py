@@ -145,7 +145,10 @@ def _apply_hosted_auth_transforms(mcp: FastMCP, authorizer) -> None:
 
             # Check authorization (uses preloaded caps from credentials
             # response to avoid a second control-plane round-trip).
-            denial = authorizer.ensure(
+            # Use the async variant so any cache-miss fallback fetch
+            # runs in a worker thread instead of blocking the event
+            # loop on a 10s urlopen timeout.  See issue #521.
+            denial = await authorizer.ensure_async(
                 cap, user_id, preloaded_capabilities=preloaded_caps
             )
             logger.debug(
@@ -406,10 +409,12 @@ def build_mcp_server(runtime: ToolRuntime) -> FastMCP:
         from .tools.thread_query import register_thread_query_tools
         from .tools.thread_write import register_thread_write_tools
         from .tools.decisions import register_decisions_tools
+        from .tools.annotations_xref import register_annotations_xref_tools
 
         register_thread_query_tools(mcp)
         register_thread_write_tools(mcp)
         register_decisions_tools(mcp)
+        register_annotations_xref_tools(mcp)
 
     # Sync tools (local surfaces only — reindex must not leak to hosted)
     if surface in ("local_full", "local_hybrid"):

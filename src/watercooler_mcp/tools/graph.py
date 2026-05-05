@@ -312,6 +312,48 @@ async def route_search(
                 + result_json
             )
 
+    # Detect entry-shape filters (entry_type, role, agent) that the Graphiti
+    # backend cannot apply. Graphiti's search returns fact/entity/episode shapes
+    # without entry_type/role/agent fields, so post-filtering is impossible.
+    # Issue #393: previously these filters were silently dropped, so callers
+    # received unfiltered results and could mistake "0 of type X" for
+    # "no entries of type X exist". Surface a structured error envelope
+    # instead of returning misleading results.
+    _entry_type_active = bool((kwargs.get("entry_type") or "").strip())
+    _role_active = bool((kwargs.get("role") or "").strip())
+    _agent_active = bool((kwargs.get("agent") or "").strip())
+    _entry_filters_active = (
+        _entry_type_active or _role_active or _agent_active
+    )
+
+    def _entry_filter_unsupported_error() -> str:
+        """Return structured error when entry filters meet the graphiti backend."""
+        unsupported = []
+        if _entry_type_active:
+            unsupported.append("entry_type")
+        if _role_active:
+            unsupported.append("role")
+        if _agent_active:
+            unsupported.append("agent")
+        return json.dumps(
+            {
+                "error": "entry_filters_not_supported_on_graphiti",
+                "message": (
+                    "The graphiti backend cannot filter by "
+                    f"{', '.join(unsupported)}. Graphiti results are facts/"
+                    "entities/episodes which do not carry these fields."
+                ),
+                "hint": (
+                    "Re-run with backend='baseline' to apply these filters, "
+                    "or omit them to use the graphiti backend."
+                ),
+                "unsupported_filters": unsupported,
+                "results": [],
+                "count": 0,
+            },
+            indent=2,
+        )
+
     # Facts mode — Graphiti temporal fact edges; hard-fails if Graphiti unavailable.
     # Broad except: intentional — MCP callers must always receive structured JSON,
     # not the bare error string returned by the outer handler. Any exception
@@ -331,6 +373,10 @@ async def route_search(
                     "count": 0,
                 }
             )
+        # #393: facts mode result shape lacks entry_type/role/agent — the filter
+        # can't be honoured here, so refuse rather than return unfiltered facts.
+        if _entry_filters_active:
+            return _entry_filter_unsupported_error()
         try:
             return _warn_annotation_filters(await _search_graphiti_impl(
                 ctx=ctx,
@@ -402,6 +448,10 @@ async def route_search(
             fallback_used = True
             fallback_reason = f"{original_mode} requires memory backend"
         else:
+            # #393: entities/episodes results don't carry entry_type/role/
+            # agent fields — refuse rather than return unfiltered results.
+            if _entry_filters_active:
+                return _entry_filter_unsupported_error()
             # Route to Graphiti entity/episode search
             try:
                 if mode == "entities":
@@ -431,6 +481,13 @@ async def route_search(
 
     # Entries mode - route based on backend
     if backend == "graphiti":
+        # #393: graphiti entries mode returns facts shape (no entry_type/role/
+        # agent fields). Silently dropping these filters made callers think
+        # there were "0 entries of type X". Refuse with a structured error
+        # that points at backend='baseline' instead of returning misleading
+        # unfiltered results.
+        if _entry_filters_active:
+            return _entry_filter_unsupported_error()
         try:
             return _warn_annotation_filters(await _search_graphiti_impl(
                 ctx=ctx,
