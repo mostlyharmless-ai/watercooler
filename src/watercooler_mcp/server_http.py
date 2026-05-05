@@ -1370,9 +1370,42 @@ def create_http_app():
     cors_origins_config, MAX_REQUEST_SIZE, REQUEST_TIMEOUT = _get_http_config()
 
     # Initialize rate limiter
+    #
+    # Closes audit M2 from the 2026-05-03 audit
+    # (security-audit-2026-05-03 thread, top finding entry
+    # 01KQPGXZZR9SM4N7069F41N319). Operator decision (per
+    # security-audit-followon-2026-05-04 plan v1, Phase 5):
+    # single-replica pin over Upstash REST. The per-process in-memory
+    # ``_RateLimiter`` is correct ONLY when this service runs as a
+    # single replica + single Uvicorn worker. Scale-out (manual or
+    # auto) silently invalidates the per-user RPM ceiling because
+    # each replica/worker holds its own _windows dict.
+    #
+    # The Railway service config must therefore stay pinned at
+    # numReplicas=1 (see docs/RAILWAY_OPERATIONS.md "Rate-limiter
+    # single-replica constraint" section). The startup-time INFO
+    # log below makes the assumption observable in deploy logs so
+    # an operator scaling the service can spot the constraint
+    # without reading the source.
     global _rate_limiter
     rate_limit_rpm = int(os.getenv("WATERCOOLER_RATE_LIMIT_RPM", "0"))
     _rate_limiter = _RateLimiter(rpm=rate_limit_rpm)
+    if rate_limit_rpm > 0:
+        logger.info(
+            "RATE_LIMITER: in-memory _RateLimiter initialised at %d RPM/user. "
+            "This is single-replica-only (per-process state). If Railway is "
+            "scaled to more than 1 replica or more than 1 Uvicorn worker, the "
+            "effective per-user cap becomes (RPM × replicas × workers). See "
+            "docs/RAILWAY_OPERATIONS.md > 'Rate-limiter single-replica "
+            "constraint' for the runbook constraint.",
+            rate_limit_rpm,
+        )
+    else:
+        logger.info(
+            "RATE_LIMITER: WATERCOOLER_RATE_LIMIT_RPM is unset or 0 — "
+            "rate limiting is DISABLED. The single-replica constraint "
+            "(see docs/RAILWAY_OPERATIONS.md) is moot in this state."
+        )
 
     # Move 2.5 (HMAC v3): build the per-key registry and run the
     # multi-tenant fail-fast invariant check at startup.

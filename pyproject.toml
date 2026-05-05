@@ -1,11 +1,11 @@
-# Cache bust: 2026-04-13-01
+# Cache bust: 2026-05-05-01
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "watercooler"
-version = "0.4.3"
+version = "0.4.4"
 description = "File-based collaboration protocol for agentic coding projects"
 readme = "README.md"
 requires-python = ">=3.10"
