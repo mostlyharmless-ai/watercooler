@@ -23,14 +23,16 @@ discover.
 
 ## Getting the skills
 
-The open-source Watercooler repository ships five skills under a top-level
+The open-source Watercooler repository ships seven skills under a top-level
 `skills/` directory:
 
 - `find-related/`
 - `recall/`
 - `search-threads/`
 - `threads/`
+- `update-agent-context/`
 - `watercooler-health/`
+- `watercooler-onboarding/`
 
 Each is a self-contained folder with a `SKILL.md` file and any
 supporting scripts or reference material it needs.
@@ -58,7 +60,9 @@ find-related/
 recall/
 search-threads/
 threads/
+update-agent-context/
 watercooler-health/
+watercooler-onboarding/
 ```
 
 Each folder should contain its own `SKILL.md` file. After adding them, restart
@@ -78,7 +82,9 @@ find-related/
 recall/
 search-threads/
 threads/
+update-agent-context/
 watercooler-health/
+watercooler-onboarding/
 ```
 
 Each folder should contain its own `SKILL.md` file. After adding them, restart
@@ -99,7 +105,9 @@ Suggested commands:
 .cursor/commands/recall.md
 .cursor/commands/search-threads.md
 .cursor/commands/threads.md
+.cursor/commands/update-agent-context.md
 .cursor/commands/watercooler-health.md
+.cursor/commands/watercooler-onboarding.md
 ```
 
 Each command file should describe the workflow you want Cursor to run. After
@@ -123,21 +131,113 @@ Examples:
 /search-threads type:Decision auth
 /find-related branch parity
 /watercooler-health
+/watercooler-onboarding
+/update-agent-context --phase2
 ```
 
 ## Available skills
 
 | Skill | When to use it | Example |
 |---|---|---|
+| `watercooler-onboarding` | First-run setup: seed a repo with structured `onboarding-*` threads (overview, architecture, risk register, etc.) | `/watercooler-onboarding` |
+| `update-agent-context` | Refresh `CLAUDE.md` and `AGENTS.md` from the repo + onboarding seeds + recent Decisions | `/update-agent-context --phase2` |
 | `threads` | You want an overview of current threads, or you want to inspect one thread | `/threads open` |
 | `search-threads` | You know roughly what you want and need to search by topic, role, type, date, or agent | `/search-threads type:Decision auth` |
 | `find-related` | You found one useful thread or entry and want connected discussions | `/find-related branch parity` |
 | `recall` | You want a direct answer to "what was decided?" or "why did we do this?" | `/recall Why did we choose markdown for threads?` |
 | `watercooler-health` | Something feels broken and you want a broad system check | `/watercooler-health` |
 
+## Bootstrapping a repo: setup and ongoing maintenance
+
+The two skills `/watercooler-onboarding` and `/update-agent-context` work
+together to seed and maintain the agent-context layer of a repo. They are
+independent — you can use either alone — but they compose well.
+
+### What CLAUDE.md and AGENTS.md are
+
+`CLAUDE.md` and `AGENTS.md` are top-level Markdown files that AI coding tools
+read on startup to learn the working conventions of a repo. `CLAUDE.md` is the
+Claude-specific source of truth in projects that have one; `AGENTS.md` is
+derived from it with Claude-specific sections stripped, so other agents
+(Codex, Cursor, etc.) can read the same project conventions through their own
+front door.
+
+These files are an ecosystem convention, not Watercooler-specific — many repos
+use them independently. Watercooler's role is to keep their *content* grounded
+in the project's actual decisions and seed context.
+
+**Two phases at a glance.** `/update-agent-context` has two modes that do
+very different things:
+
+- **`--phase1`** (full rewrite) — replaces `CLAUDE.md` from scratch using a
+  canonical structure, then re-derives `AGENTS.md`. Use on first setup, or
+  after a major tooling/role refactor.
+- **`--phase2`** (incremental patch) — touches only the
+  `## Project Conventions` block of `CLAUDE.md`, folding in new
+  `Decision`-typed entries since the last refresh. Use periodically.
+
+The bootstrap flow below uses Phase 1 (via the chain); the maintenance flow
+uses Phase 2.
+
+### Bootstrap flow (run once on a new repo)
+
+```text
+/watercooler-onboarding
+```
+
+This inspects the repo (README, CI, package manifests, git history, existing
+threads) and writes a small set of provenance-backed `onboarding-*` seed
+threads — overview, product charter, architecture, working map, risk register,
+test surface, docs/contracts, team map, and an entry path for new
+contributors. The seeds are tagged `onboarding` so other skills can find them.
+
+To also refresh `CLAUDE.md` and `AGENTS.md` in the same run:
+
+```text
+/watercooler-onboarding --update-agent-context
+```
+
+This chains into `/update-agent-context --phase1` after the seeds are written
+and verified, so the new agent-context files reflect the freshly-seeded
+threads.
+
+**Backups are taken first.** Existing `CLAUDE.md` and `AGENTS.md` are copied
+to `<file>.pre-onboarding.<UTC-timestamp>.bak` before the rewrite. If the
+result isn't what you wanted, restore with:
+
+```bash
+mv CLAUDE.md.pre-onboarding.<TS>.bak CLAUDE.md
+mv AGENTS.md.pre-onboarding.<TS>.bak AGENTS.md
+```
+
+The chain is opt-in. Without the flag, `/watercooler-onboarding` finishes
+after writing the seeds and prints a recommendation to run
+`/update-agent-context --phase1` separately.
+
+### Maintenance flow (run periodically)
+
+```text
+/update-agent-context --phase2
+```
+
+Run this monthly, or after a batch of `Decision` entries lands in threads.
+Phase 2 patches the `## Project Conventions` block of `CLAUDE.md` with new
+evidence-backed conventions, then re-derives `AGENTS.md`. It does not touch
+the rest of the file.
+
+If `/update-agent-context --phase2` reports no candidates, that's expected on
+a young repo — Phase 2 needs Decision entries to fold in. Run
+`/watercooler-onboarding` first (Phase 2 also reads onboarding seeds) or wait
+until Decisions accumulate.
+
 ## Which skill should I start with?
 
-Use this rule of thumb:
+**For setup:** if Watercooler is new to your repo, run `/watercooler-onboarding`
+(optionally with `--update-agent-context`) before everything else. See
+[Bootstrapping a repo](#bootstrapping-a-repo-setup-and-ongoing-maintenance)
+above.
+
+**For everyday use:**
 
 1. Start with `threads` if you need orientation
 2. Use `search-threads` if you already know the topic
@@ -149,7 +249,13 @@ Use this rule of thumb:
 
 One practical way to use the skills:
 
+0. **First time only:** run `/watercooler-onboarding` to seed the repo with
+   structured `onboarding-*` threads. Add `--update-agent-context` if you also
+   want `CLAUDE.md` / `AGENTS.md` populated immediately.
 1. Run `/threads` to see what is active
 2. Run `/search-threads` or `/recall` to get the context you need
 3. Run `/find-related` if you discover a thread worth digging into
 4. Run `/watercooler-health` if results look wrong or tools stop behaving
+
+Run `/update-agent-context --phase2` periodically (monthly, or after a batch of
+`Decision` entries lands) to keep `CLAUDE.md` / `AGENTS.md` current.

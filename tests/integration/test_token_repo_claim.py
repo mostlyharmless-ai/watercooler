@@ -550,3 +550,75 @@ class TestWarnCacheConcurrency:
         assert "key-0" in _repo_claim_warn_cache
         assert "key-1" not in _repo_claim_warn_cache
         assert "new-key" in _repo_claim_warn_cache
+
+
+class TestRepoClaimMismatchObservabilityAndUx:
+    """Pins observability + UX additions to the
+    ``check_repo_claim`` rejection paths so future Adi-style 403s
+    don't repeat as opaque "you can't act on something we won't
+    name, and we won't tell you what you can act on" failures.
+
+    Background: thread ``bug-dashboard-webhook-burst-2026-05-05``
+    entry ``01KQXRF4H7ZH1EX439XJMSXF38`` traced an Adi-side 403 on
+    the bearer-token / agent-API-key path (his ``X-Repo`` wasn't
+    in his ``ConnectedRepo`` set). The log emit dropped ``x_repo``
+    so we couldn't determine which repo he tried; the response
+    body dropped the authorised list so his agent CLI couldn't
+    suggest what was actually authorised. Both gaps closed here.
+    """
+
+    def test_mismatch_response_body_includes_x_repo_and_authorised_list(
+        self, _warn_mode: None
+    ) -> None:
+        info = _make_token_info(repos=["org/auth-allowed", "org/other-allowed"])
+        err = check_repo_claim(info, "org/forbidden")
+        assert err is not None
+        assert "repo_claim_mismatch" in err
+        # The X-Repo the user tried is named in the rejection so an
+        # agent CLI can echo it back to the operator.
+        assert "org/forbidden" in err
+        # The authorised list is included so the operator sees what
+        # they CAN act on and either changes directories or connects
+        # the missing repo on the dashboard.
+        assert "org/auth-allowed" in err
+        assert "org/other-allowed" in err
+
+    def test_mismatch_log_action_includes_x_repo_and_authorised_repos(
+        self,
+        _warn_mode: None,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        info = _make_token_info(repos=["org/auth-allowed"])
+        # `log_action` writes through the watercooler_mcp logger; the
+        # caplog fixture captures structured fields when the action
+        # serialiser logs them.
+        with caplog.at_level(logging.INFO, logger="watercooler_mcp"):
+            check_repo_claim(info, "org/forbidden")
+        # Find the structured log line for this rejection.
+        records = [
+            r for r in caplog.records
+            if "security.consolidation.m2.repo_claim_mismatch" in r.getMessage()
+        ]
+        assert records, "expected a repo_claim_mismatch log_action emit"
+        # The serialised action line carries x_repo (canonicalised)
+        # and the authorised repos list as a list of strings. We
+        # check the rendered message for both fields.
+        msg = records[0].getMessage()
+        assert "org/forbidden" in msg, (
+            f"expected canonicalised x_repo in log emit, got {msg!r}"
+        )
+        assert "org/auth-allowed" in msg, (
+            f"expected authorised_repos in log emit, got {msg!r}"
+        )
+
+    def test_x_repo_required_response_body_includes_authorised_list(
+        self, _warn_mode: None
+    ) -> None:
+        info = _make_token_info(repos=["org/a", "org/b"])
+        err = check_repo_claim(info, None)
+        assert err is not None
+        assert "repo_claim_x_repo_required" in err
+        # When the claim is non-empty but X-Repo is absent, the
+        # response now lists what the caller could have specified.
+        assert "org/a" in err
+        assert "org/b" in err

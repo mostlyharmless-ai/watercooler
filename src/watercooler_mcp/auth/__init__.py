@@ -433,6 +433,7 @@ def check_repo_claim(
                     outcome="observed",
                     user_id=token_info.user_id,
                     mode=mode,
+                    x_repo=x_repo or "",
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -461,6 +462,7 @@ def check_repo_claim(
                 outcome="rejected",
                 user_id=token_info.user_id,
                 mode=mode,
+                x_repo=x_repo or "",
             )
         except Exception:  # noqa: BLE001
             pass
@@ -493,14 +495,18 @@ def check_repo_claim(
                 outcome="rejected",
                 user_id=token_info.user_id,
                 mode=mode,
+                x_repo="",
+                authorised_repos=sorted(token_info.repos),
             )
         except Exception:  # noqa: BLE001
             pass
+        authorised = ", ".join(sorted(token_info.repos))
         return (
             "repo_claim_x_repo_required: token's ``repos`` claim names "
             "specific repos but the request supplied no X-Repo header. "
-            "Hosted requests must include X-Repo so the auth boundary "
-            "can verify membership against the claim."
+            f"Authorised: [{authorised}]. Hosted requests must include "
+            "X-Repo so the auth boundary can verify membership against "
+            "the claim."
         )
     # Use the strict claim-canonical (no ``-threads`` strip) so the
     # X-Repo and the claim entries are compared on the same surface.
@@ -518,14 +524,32 @@ def check_repo_claim(
             outcome="rejected",
             user_id=token_info.user_id,
             mode=mode,
+            # Including the canonicalised X-Repo (and the claim list)
+            # in the structured log lets a future operator answer
+            # "which repo did the user try?" from logs alone, without
+            # asking the user. Without this field, an Adi-style 403
+            # leaves no diagnostic trail (see thread
+            # ``bug-dashboard-webhook-burst-2026-05-05`` entry
+            # ``01KQXRF4H7ZH1EX439XJMSXF38``).
+            x_repo=canon_request,
+            authorised_repos=sorted(token_info.repos),
         )
     except Exception:  # noqa: BLE001
         pass
+    # Including the authorised repo list in the response body lets
+    # an agent CLI surface the actionable next step ("connect
+    # org/missing-repo via the dashboard, or change directories to
+    # one of: ...") rather than the user staring at an opaque
+    # rejection. The list is the user's own ConnectedRepo set, not
+    # sensitive: if the OAuth scope grants the user the token, they
+    # already know which repos they own; we just confirm what's
+    # authorised in this token specifically.
+    authorised = ", ".join(sorted(token_info.repos))
     return (
-        "repo_claim_mismatch: X-Repo is not in the token's authorised "
-        "``repos`` claim. The token-issuing service determines which "
-        "repos this token may act on; X-Repo can only narrow within "
-        "that set."
+        f"repo_claim_mismatch: X-Repo {canon_request!r} is not in the "
+        f"token's authorised ``repos`` claim. Authorised: [{authorised}]. "
+        "The token-issuing service determines which repos this token "
+        "may act on; X-Repo can only narrow within that set."
     )
 
 

@@ -207,6 +207,34 @@ See [TOOLS-REFERENCE.md](./TOOLS-REFERENCE.md) for the full tool list and
 
 ---
 
+## Step 4.5: Seed your project context (recommended)
+
+Ad-hoc threads are useful, but a new repo benefits from a small set of
+structured seed threads that future agents can query. Ask your agent:
+
+> "Please run `/watercooler-onboarding`."
+
+The skill inspects the repo (README, CI, package manifests, git history) and
+writes a set of `onboarding-*` seed threads — overview, architecture, risk
+register, test surface, docs/contracts, team map, and more — each backed by
+file:line citations.
+
+To also create or refresh `CLAUDE.md` and `AGENTS.md` in the same run, ask
+the agent to add the chain flag:
+
+> "Please run `/watercooler-onboarding --update-agent-context`."
+
+**Heads up:** the chain rewrites `CLAUDE.md` and `AGENTS.md` in the repo
+root. Before doing so it copies any existing files to
+`<file>.pre-onboarding.<UTC-timestamp>.bak` (also in the repo root), so the
+operation is reversible — see
+[TROUBLESHOOTING.md → undo agent-context rewrite](./TROUBLESHOOTING.md#undo-agent-context-rewrite). See
+[SKILLS.md → Bootstrapping a repo](./SKILLS.md#bootstrapping-a-repo-setup-and-ongoing-maintenance)
+for the full lifecycle, including periodic maintenance with
+`/update-agent-context --phase2`.
+
+---
+
 ## Step 5: Connect the dashboard (optional)
 
 The Watercooler Dashboard is a browser UI for reading, triaging, and updating

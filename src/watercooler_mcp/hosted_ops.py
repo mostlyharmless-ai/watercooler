@@ -728,30 +728,51 @@ def _read_per_thread_graph(
         log_error(f"Failed to parse meta.json for {topic}: {e}")
 
     # Read entries.jsonl
+    #
+    # Malformed JSONL lines are dropped with a log_warning rather than
+    # silently swallowed. The prior ``delete_entry_hosted`` path
+    # explicitly preserved unparseable lines on rewrite; after the
+    # 2026-05-06 atomic-write migration (PR #781) all hosted
+    # writers re-render ``entries.jsonl`` from the parsed list, so
+    # malformed lines would silently disappear on the next write.
+    # In practice no malformed lines should exist (the writer is
+    # the only producer and emits a single dict per line); the
+    # warning surfaces upstream-corruption events that previously
+    # had no signal.
     try:
         entries_file = client.get_file(entries_path)
         entries_sha = entries_file.sha
-        for line in entries_file.content.split("\n"):
-            line = line.strip()
-            if line:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
+        for line_no, raw in enumerate(entries_file.content.split("\n"), start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                log_warning(
+                    f"_read_per_thread_graph: dropping malformed entries.jsonl "
+                    f"line {line_no} for topic {topic!r}: {e} (line preview: "
+                    f"{line[:80]!r})"
+                )
     except GitHubNotFoundError:
         log_debug(f"Per-thread entries.jsonl not found for {topic}, will create")
 
-    # Read edges.jsonl
+    # Read edges.jsonl (same malformed-line policy as entries above).
     try:
         edges_file = client.get_file(edges_path)
         edges_sha = edges_file.sha
-        for line in edges_file.content.split("\n"):
-            line = line.strip()
-            if line:
-                try:
-                    edges.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
+        for line_no, raw in enumerate(edges_file.content.split("\n"), start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                edges.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                log_warning(
+                    f"_read_per_thread_graph: dropping malformed edges.jsonl "
+                    f"line {line_no} for topic {topic!r}: {e} (line preview: "
+                    f"{line[:80]!r})"
+                )
     except GitHubNotFoundError:
         log_debug(f"Per-thread edges.jsonl not found for {topic}, will create")
 
@@ -790,51 +811,63 @@ def _write_per_thread_graph(
     """
     meta_path, entries_path, edges_path = _get_per_thread_paths(topic)
 
+    # Sort entries by index
+    sorted_entries = sorted(entries, key=lambda e: e.get("index", 0))
+    # Sort edges by source_id, target_id
+    sorted_edges = sorted(
+        edges, key=lambda e: (e.get("source_id", ""), e.get("target_id", ""))
+    )
+
+    # Render file contents
+    meta_content = json.dumps(meta, indent=2) + "\n"
+    entries_content = (
+        "\n".join(json.dumps(e, separators=(",", ":")) for e in sorted_entries)
+        + "\n"
+        if sorted_entries
+        else ""
+    )
+    edges_content = (
+        "\n".join(json.dumps(e, separators=(",", ":")) for e in sorted_edges) + "\n"
+        if sorted_edges
+        else ""
+    )
+
+    # Atomic commit of all 3 graph files. Previously this was 3 sequential
+    # ``put_file`` calls — each producing its own commit, push event, and
+    # webhook delivery. With the multi-file ``commit_files`` (Git Trees
+    # API) the same 3 files land in ONE commit and produce ONE webhook
+    # delivery, eliminating the 3× burst that overwhelmed downstream
+    # webhook receivers (Vercel's edge dropped most of the burst).
+    #
+    # Concurrency: the caller-supplied ``meta_sha`` / ``entries_sha`` /
+    # ``edges_sha`` are forwarded to ``commit_files`` as
+    # ``expected_blob_shas`` so the per-file conflict check spans the
+    # caller's full read→write window — same coverage as the prior
+    # ``put_file(sha=X)`` 422 → ``GitHubConflictError`` path. A drift
+    # on any of these between the caller's read and our write raises
+    # ``GitHubConflictError`` and the caller's retry loop refreshes
+    # from a clean read. (The narrower ref-tip-only check that
+    # ``commit_files`` does on its own would miss writes that landed
+    # between the caller's read and ``commit_files``'s internal ref
+    # read — a lost-write race we explicitly do not want.)
+    expected_blob_shas: dict[str, Optional[str]] = {
+        meta_path: meta_sha,
+        entries_path: entries_sha,
+        edges_path: edges_sha,
+    }
     try:
-        # Write meta.json (single JSON object, pretty-printed for readability)
-        meta_content = json.dumps(meta, indent=2) + "\n"
-        new_meta_sha = client.put_file(
-            path=meta_path,
-            content=meta_content,
+        _commit_sha, blob_shas = client.commit_files(
+            files=[
+                (meta_path, meta_content),
+                (entries_path, entries_content),
+                (edges_path, edges_content),
+            ],
             message=commit_message,
-            sha=meta_sha,
+            expected_blob_shas=expected_blob_shas,
         )
-
-        # Sort entries by index
-        sorted_entries = sorted(entries, key=lambda e: e.get("index", 0))
-
-        # Write entries.jsonl
-        entries_content = (
-            "\n".join(json.dumps(e, separators=(",", ":")) for e in sorted_entries)
-            + "\n"
-            if sorted_entries
-            else ""
-        )
-        new_entries_sha = client.put_file(
-            path=entries_path,
-            content=entries_content,
-            message=commit_message,
-            sha=entries_sha,
-        )
-
-        # Sort edges by source_id, target_id
-        sorted_edges = sorted(
-            edges, key=lambda e: (e.get("source_id", ""), e.get("target_id", ""))
-        )
-
-        # Write edges.jsonl
-        edges_content = (
-            "\n".join(json.dumps(e, separators=(",", ":")) for e in sorted_edges) + "\n"
-            if sorted_edges
-            else ""
-        )
-        new_edges_sha = client.put_file(
-            path=edges_path,
-            content=edges_content,
-            message=commit_message,
-            sha=edges_sha,
-        )
-
+        new_meta_sha = blob_shas.get(meta_path, "")
+        new_entries_sha = blob_shas.get(entries_path, "")
+        new_edges_sha = blob_shas.get(edges_path, "")
         return new_meta_sha, new_entries_sha, new_edges_sha
 
     except GitHubConflictError:
@@ -852,86 +885,22 @@ def _write_per_thread_graph(
         return None, None, None
 
 
-def _write_md_projection(
-    client: GitHubClient,
-    topic: str,
-    meta: dict,
-    entries: list[dict],
-    commit_message: str,
-) -> str | None:
-    """Write .md projection file from graph data via GitHub API.
-
-    The .md file is a write-only projection for human review and git diffs.
-    The graph (JSON) remains the source of truth.
-
-    Args:
-        client: GitHub API client
-        topic: Thread topic identifier
-        meta: Thread metadata dict
-        entries: List of entry node dicts
-        commit_message: Commit message for the write
-
-    Returns:
-        New file SHA on success, None on failure.
-    """
-    md_path = f"threads/{topic}.md"
-    md_content = _reconstruct_markdown_from_graph(meta, entries)
-
-    # Read existing .md SHA (if file already exists, we need it for update)
-    md_sha: str | None = None
-    try:
-        existing = client.get_file(md_path)
-        md_sha = existing.sha
-    except GitHubNotFoundError:
-        pass  # New file, no SHA needed
-
-    try:
-        new_sha = client.put_file(
-            path=md_path,
-            content=md_content,
-            message=commit_message,
-            sha=md_sha,
-        )
-        log_debug(f"Wrote .md projection for {topic} (sha={new_sha[:8] if new_sha else '?'})")
-        return new_sha
-    except GitHubConflictError:
-        # .md is a projection — conflict is non-fatal, will be correct on next write
-        log_warning(f"Conflict writing .md projection for {topic}, skipping (non-fatal)")
-        return None
-    except GitHubAPIError as e:
-        log_warning(f"Failed to write .md projection for {topic}: {e}")
-        return None
-
-
-def _enrich_entry_hosted(
-    client: GitHubClient,
-    topic: str,
-    entry_id: str,
+def _generate_entry_enrichment(
     body: str,
     title: str,
     entry_type: str,
-    entries: list[dict],
-    entries_sha: str | None,
-    commit_message: str,
-) -> bool:
-    """Enrich a new entry with summary and embedding, writing back via GitHub API.
+) -> tuple[str | None, list[float] | None]:
+    """Generate summary + embedding for a new entry, in memory.
 
-    Best-effort: failures are logged but do not propagate. The graph data
-    written by the caller is already committed; this adds optional enrichment.
+    Best-effort and pure: makes no GitHub writes. Each generator is
+    wrapped in try/except so a failing summarizer doesn't block the
+    embedder (and vice versa). Either or both may return ``None``.
 
-    Args:
-        client: GitHub API client
-        topic: Thread topic identifier
-        entry_id: Entry ID to enrich
-        body: Entry body text
-        title: Entry title
-        entry_type: Entry type (Note, Plan, etc.)
-        entries: Full entries list (already includes the new entry)
-        entries_sha: Current entries.jsonl SHA after the graph write
-        commit_message: Base commit message
-
-    Returns:
-        True if any enrichment was generated, False otherwise.
+    Returns ``(summary, embedding)``. Caller decides what to do with
+    them — typically, merge into the matching entry node before the
+    GitHub write so enrichment lands in the same commit as the graph
+    write rather than producing a follow-up commit (and a follow-up
+    webhook delivery).
     """
     from watercooler.baseline_graph.summarizer import (
         create_summarizer_config,
@@ -944,86 +913,220 @@ def _enrich_entry_hosted(
         is_embedding_available,
     )
 
-    summary_generated = False
-    embedding_generated = False
-    new_summary = ""
-    new_embedding = None
+    summary: str | None = None
+    embedding: list[float] | None = None
 
-    # Generate summary
     try:
-        summarizer_config = create_summarizer_config()
-        if is_llm_service_available(summarizer_config):
-            new_summary = summarize_entry(
-                body,
-                entry_title=title,
-                entry_type=entry_type,
-                config=summarizer_config,
+        cfg = create_summarizer_config()
+        if is_llm_service_available(cfg):
+            generated = summarize_entry(
+                body, entry_title=title, entry_type=entry_type, config=cfg
             )
-            if new_summary:
-                summary_generated = True
-                log_debug(f"enrich_entry_hosted: generated summary for {entry_id}")
-        else:
-            log_debug(f"enrich_entry_hosted: LLM service unavailable, skipping summary")
+            if generated:
+                summary = generated
     except Exception as e:
-        log_warning(f"enrich_entry_hosted: summary generation failed for {entry_id}: {e}")
+        log_warning(f"_generate_entry_enrichment: summary generation failed: {e}")
 
-    # Generate embedding
     try:
-        embed_config = EmbeddingConfig.from_env()
-        if is_embedding_available(embed_config):
-            embed_text = new_summary if new_summary else body[:embed_config.max_text_chars]
-            new_embedding = generate_embedding(embed_text, config=embed_config)
-            if new_embedding:
-                embedding_generated = True
-                log_debug(f"enrich_entry_hosted: generated embedding for {entry_id}")
-        else:
-            log_debug(f"enrich_entry_hosted: embedding service unavailable, skipping")
+        embed_cfg = EmbeddingConfig.from_env()
+        if is_embedding_available(embed_cfg):
+            embed_text = summary if summary else body[: embed_cfg.max_text_chars]
+            generated = generate_embedding(embed_text, config=embed_cfg)
+            if generated:
+                embedding = generated
     except Exception as e:
-        log_warning(f"enrich_entry_hosted: embedding generation failed for {entry_id}: {e}")
+        log_warning(f"_generate_entry_enrichment: embedding generation failed: {e}")
 
-    if not summary_generated and not embedding_generated:
-        return False
+    return summary, embedding
 
-    # Update the entry in the entries list and write back
-    updated = False
-    for entry in entries:
-        if entry.get("entry_id") == entry_id:
-            if new_summary:
-                entry["summary"] = new_summary
-            if new_embedding:
-                entry["embedding"] = new_embedding
-            updated = True
-            break
 
-    if not updated:
-        log_warning(f"enrich_entry_hosted: entry {entry_id} not found in entries list")
-        return False
+def _write_per_thread_atomic(
+    client: GitHubClient,
+    topic: str,
+    meta: dict,
+    entries: list[dict],
+    edges: list[dict],
+    commit_message: str,
+    project_md: bool = True,
+    enrich_entry_id: str | None = None,
+    enrich_body: str | None = None,
+    enrich_title: str | None = None,
+    enrich_entry_type: str | None = None,
+    meta_sha: str | None = None,
+    entries_sha: str | None = None,
+    edges_sha: str | None = None,
+) -> tuple[str | None, dict]:
+    """Write per-thread graph + .md projection + entry enrichment in
+    ONE atomic git commit.
 
-    # Write updated entries.jsonl back to GitHub
-    _, entries_path, _ = _get_per_thread_paths(topic)
+    Replaces the prior 3-step sequence (``_write_per_thread_graph`` →
+    ``_write_md_projection`` → ``_enrich_entry_hosted``), which produced
+    5 separate commits and 5 webhook deliveries per ``say``. By
+    bundling all writes into a single ``commit_files`` call, one
+    ``say`` produces one commit, one push event, one webhook delivery.
+
+    Enrichment (summary + embedding) is generated in-memory BEFORE
+    the commit so the enriched entry lands in the same commit as the
+    graph and md projection. The enrichment generators are best-effort
+    — failures are logged and the entry simply lacks summary/embedding
+    until the next write touches it.
+
+    Args:
+        client: GitHub API client.
+        topic: Thread topic.
+        meta: Thread metadata dict.
+        entries: List of entry node dicts. Mutated in place to add
+            enrichment fields when ``enrich_entry_id`` is set.
+        edges: List of edge dicts.
+        commit_message: Commit message.
+        project_md: If True (default), include the ``.md`` projection
+            in the same commit. Set False for callers that don't want
+            the markdown re-rendered (e.g. status-only changes that
+            don't affect any entry's content).
+        enrich_entry_id: If set, generate summary + embedding for the
+            matching entry and merge them into ``entries`` before the
+            write. Requires ``enrich_body`` / ``enrich_title`` /
+            ``enrich_entry_type`` to be non-None.
+        enrich_body / enrich_title / enrich_entry_type: Inputs to the
+            enrichment generators. Ignored if ``enrich_entry_id`` is
+            None.
+        meta_sha / entries_sha / edges_sha: Caller-observed blob SHAs
+            for the existing per-thread graph files (or ``None`` if
+            the caller expects the file to not exist yet, e.g. new
+            thread). Forwarded to ``commit_files`` as
+            ``expected_blob_shas`` so the per-file conflict check
+            spans the caller's full read→write window. A drift on
+            any of these between the caller's read and our write
+            raises ``GitHubConflictError`` so the retry loop kicks
+            in. Without these, two concurrent ``say_hosted`` calls
+            could both succeed with the second silently overwriting
+            the first's entry — see PR #775 review.
+
+    Returns:
+        ``(commit_sha, info)`` where ``info`` has keys
+        ``md_projected`` (bool) and ``enriched`` (bool indicating
+        whether at least one of summary or embedding was generated).
+        ``commit_sha`` is None on GitHubAPIError; raises
+        ``GitHubConflictError`` for branch-level concurrency conflicts
+        so callers can retry from a fresh read (matches
+        ``_write_per_thread_graph``'s contract).
+    """
+    info = {"md_projected": False, "enriched": False}
+
+    # 1. Generate enrichment in-memory and merge into entries.
+    #    ``_generate_entry_enrichment`` already wraps each individual
+    #    generator (summary, embedding) in try/except and returns
+    #    ``None`` for failures, so this call rarely raises in practice.
+    #    We still wrap defensively: an unexpected failure in the
+    #    enrichment layer should not block the graph write itself —
+    #    the user-visible "say succeeded" outcome takes priority over
+    #    "say succeeded with enrichment". The entry simply lacks
+    #    summary/embedding until a later write touches it.
+    if (
+        enrich_entry_id
+        and enrich_body is not None
+        and enrich_title is not None
+        and enrich_entry_type is not None
+    ):
+        try:
+            summary, embedding = _generate_entry_enrichment(
+                body=enrich_body, title=enrich_title, entry_type=enrich_entry_type
+            )
+        except Exception as e:
+            log_warning(
+                f"_write_per_thread_atomic: enrichment generation raised "
+                f"unexpectedly for {enrich_entry_id}, continuing without "
+                f"enrichment: {e}"
+            )
+            summary, embedding = None, None
+        if summary or embedding:
+            for entry in entries:
+                if entry.get("entry_id") == enrich_entry_id:
+                    if summary:
+                        entry["summary"] = summary
+                    if embedding:
+                        entry["embedding"] = embedding
+                    info["enriched"] = True
+                    break
+            else:
+                log_warning(
+                    f"_write_per_thread_atomic: enrich_entry_id {enrich_entry_id} "
+                    f"not found in entries list; skipping enrichment merge"
+                )
+
+    # 2. Render file contents from the (possibly enriched) graph.
+    meta_path, entries_path, edges_path = _get_per_thread_paths(topic)
     sorted_entries = sorted(entries, key=lambda e: e.get("index", 0))
+    sorted_edges = sorted(
+        edges, key=lambda e: (e.get("source_id", ""), e.get("target_id", ""))
+    )
+    meta_content = json.dumps(meta, indent=2) + "\n"
     entries_content = (
         "\n".join(json.dumps(e, separators=(",", ":")) for e in sorted_entries)
         + "\n"
         if sorted_entries
         else ""
     )
+    edges_content = (
+        "\n".join(json.dumps(e, separators=(",", ":")) for e in sorted_edges) + "\n"
+        if sorted_edges
+        else ""
+    )
 
+    files: list[tuple[str, str]] = [
+        (meta_path, meta_content),
+        (entries_path, entries_content),
+        (edges_path, edges_content),
+    ]
+    if project_md:
+        # The .md is a write-only projection of the graph for human
+        # diffs. ``_reconstruct_markdown_from_graph`` is pure and
+        # failure-resistant in normal operation, but a malformed entry
+        # could in principle crash it. Wrap defensively so a renderer
+        # crash doesn't take down the whole commit (graph + edges
+        # would be lost). On failure we drop just the .md from the
+        # commit; the next write naturally re-projects from the
+        # current graph state.
+        try:
+            md_path = f"threads/{topic}.md"
+            md_content = _reconstruct_markdown_from_graph(meta, sorted_entries)
+            files.append((md_path, md_content))
+            info["md_projected"] = True
+        except Exception as e:
+            log_warning(
+                f"_write_per_thread_atomic: .md rendering failed for "
+                f"{topic}, skipping md from commit: {e}"
+            )
+
+    # 3. One atomic commit. ``commit_files`` validates the
+    #    caller-supplied per-file SHAs (``meta_sha`` / ``entries_sha``
+    #    / ``edges_sha``) against the parent commit's tree before
+    #    creating any blobs, so the conflict-detection window matches
+    #    the caller's full read→write transaction (matching the prior
+    #    ``put_file(sha=X)`` 422 contract). The .md projection is a
+    #    derived file that's always re-rendered from current state,
+    #    so we deliberately don't conflict-check it — last-write-wins
+    #    is the right semantics for a derived file.
+    expected_blob_shas: dict[str, Optional[str]] = {
+        meta_path: meta_sha,
+        entries_path: entries_sha,
+        edges_path: edges_sha,
+    }
     try:
-        client.put_file(
-            path=entries_path,
-            content=entries_content,
-            message=f"{commit_message}\n\nEnrichment: summary={'yes' if summary_generated else 'no'}, embedding={'yes' if embedding_generated else 'no'}",
-            sha=entries_sha,
+        commit_sha, _blob_shas = client.commit_files(
+            files=files,
+            message=commit_message,
+            expected_blob_shas=expected_blob_shas,
         )
-        log_debug(
-            f"enrich_entry_hosted: wrote enrichment for {entry_id} "
-            f"(summary={summary_generated}, embedding={embedding_generated})"
+        return commit_sha, info
+    except GitHubConflictError:
+        raise
+    except GitHubAPIError as e:
+        log_error(
+            f"_write_per_thread_atomic failed for {topic}: {e} "
+            f"(repo={client.repo}, branch={client.branch})"
         )
-        return True
-    except (GitHubConflictError, GitHubAPIError) as e:
-        log_warning(f"enrich_entry_hosted: failed to write enrichment for {entry_id}: {e}")
-        return False
+        return None, info
 
 
 def _build_per_thread_graph_data(
@@ -1619,51 +1722,44 @@ def say_hosted(
                 code_branch=effective_code_branch,
             )
 
-            # Write to per-thread format
+            # Write to per-thread format. Bundles graph (meta + entries
+            # + edges) + .md projection + entry enrichment (summary +
+            # embedding) into ONE atomic git commit via the Trees API,
+            # which fans out to ONE webhook delivery downstream rather
+            # than the prior 5 (3 graph put_files + 1 md put_file + 1
+            # enrichment put_file). The 5-event burst was overwhelming
+            # the dashboard's webhook receiver — most events were dropped
+            # at the edge, leaving ConnectedRepo.graphNodes stale and
+            # the dashboard list out of sync with the orphan branch.
             commit_message = f"[watercooler] {topic}: {title}\n\nEntry-ID: {entry_id}"
-            new_meta_sha, new_entries_sha, new_edges_sha = _write_per_thread_graph(
+            new_commit_sha, write_info = _write_per_thread_atomic(
                 client,
                 topic=topic,
                 meta=new_meta,
                 entries=new_entries,
                 edges=new_edges,
+                commit_message=commit_message,
+                project_md=True,
+                enrich_entry_id=entry_id,
+                enrich_body=body,
+                enrich_title=title,
+                enrich_entry_type=entry_type,
+                # Pass through the caller's read-time SHAs so the
+                # commit_files conflict check spans the full caller
+                # transaction (closes the lost-write window flagged
+                # in PR #775 review).
                 meta_sha=meta_sha,
                 entries_sha=entries_sha,
                 edges_sha=edges_sha,
-                commit_message=commit_message,
             )
 
-            if new_meta_sha:
+            if new_commit_sha:
                 log_debug(
-                    f"say_hosted: wrote entry to per-thread format {topic} (meta_sha={new_meta_sha[:8]})"
+                    f"say_hosted: atomic write to per-thread format {topic} "
+                    f"(commit={new_commit_sha[:8]}, "
+                    f"md={write_info['md_projected']}, "
+                    f"enriched={write_info['enriched']})"
                 )
-
-                # Project .md from graph data (write-only projection for human review)
-                md_projected = False
-                try:
-                    md_sha = _write_md_projection(
-                        client, topic, new_meta, new_entries, commit_message,
-                    )
-                    md_projected = md_sha is not None
-                except Exception as e:
-                    log_warning(f"say_hosted: .md projection failed for {topic}: {e}")
-
-                # Enrich new entry (summary + embedding) — best-effort
-                enriched = False
-                try:
-                    enriched = _enrich_entry_hosted(
-                        client,
-                        topic=topic,
-                        entry_id=entry_id,
-                        body=body,
-                        title=title,
-                        entry_type=entry_type,
-                        entries=new_entries,
-                        entries_sha=new_entries_sha,
-                        commit_message=commit_message,
-                    )
-                except Exception as e:
-                    log_warning(f"say_hosted: enrichment failed for {topic}/{entry_id}: {e}")
 
                 # Sync entry to Slack (non-blocking, non-fatal)
                 slack_synced = False
@@ -1692,16 +1788,16 @@ def say_hosted(
                         "timestamp": timestamp,
                         "status": status,
                         "ball": new_ball,
-                        "sha": new_meta_sha,
+                        "sha": new_commit_sha,
                         "graph_updated": True,
-                        "md_projected": md_projected,
-                        "enriched": enriched,
+                        "md_projected": write_info["md_projected"],
+                        "enriched": write_info["enriched"],
                         "slack_synced": slack_synced,
                         "format": "per-thread",
                     },
                 )
             else:
-                log_error(f"say_hosted: _write_per_thread_graph failed for {topic}")
+                log_error(f"say_hosted: _write_per_thread_atomic failed for {topic}")
                 return (f"Failed to write entry to per-thread format for {topic}", {})
 
         except GitHubConflictError:
@@ -1770,31 +1866,25 @@ def set_status_hosted(
             # Update status in meta
             new_meta = {**meta, "status": status}
 
-            # Write to per-thread format
+            # Atomic write — graph (meta+entries+edges) + .md projection
+            # in ONE git commit, ONE webhook event. Status changes don't
+            # produce a new entry so no enrichment is needed.
             commit_message = f"[watercooler] {topic}: status {old_status} → {status}"
-            new_meta_sha, _, _ = _write_per_thread_graph(
+            new_commit_sha, _info = _write_per_thread_atomic(
                 client,
                 topic=topic,
                 meta=new_meta,
                 entries=existing_entries,
                 edges=existing_edges,
+                commit_message=commit_message,
+                project_md=True,
                 meta_sha=meta_sha,
                 entries_sha=entries_sha,
                 edges_sha=edges_sha,
-                commit_message=commit_message,
             )
 
-            if new_meta_sha:
+            if new_commit_sha:
                 log_debug(f"set_status_hosted: updated {topic} status to {status}")
-
-                # Project .md from graph data (non-fatal)
-                try:
-                    _write_md_projection(
-                        client, topic, new_meta, existing_entries, commit_message,
-                    )
-                except Exception as e:
-                    log_warning(f"set_status_hosted: .md projection failed for {topic}: {e}")
-
                 return (
                     None,
                     {
@@ -1802,7 +1892,7 @@ def set_status_hosted(
                         "old_status": old_status,
                         "new_status": status,
                         "ball": ball,
-                        "sha": new_meta_sha,
+                        "sha": new_commit_sha,
                         "format": "per-thread",
                     },
                 )
@@ -1903,47 +1993,29 @@ def ack_hosted(
                 code_branch=effective_code_branch,
             )
 
-            # Write to per-thread format
+            # Atomic write — graph + .md projection + entry enrichment
+            # in ONE git commit. Same pattern as ``say_hosted``: 5
+            # webhook events → 1.
             commit_message = f"[watercooler] {topic}: {title} (ack)\n\nEntry-ID: {entry_id}"
-            new_meta_sha, new_entries_sha, _ = _write_per_thread_graph(
+            new_commit_sha, _info = _write_per_thread_atomic(
                 client,
                 topic=topic,
                 meta=new_meta,
                 entries=new_entries,
                 edges=new_edges,
+                commit_message=commit_message,
+                project_md=True,
+                enrich_entry_id=entry_id,
+                enrich_body=body,
+                enrich_title=title,
+                enrich_entry_type="Note",
                 meta_sha=meta_sha,
                 entries_sha=entries_sha,
                 edges_sha=edges_sha,
-                commit_message=commit_message,
             )
 
-            if new_meta_sha:
+            if new_commit_sha:
                 log_debug(f"ack_hosted: acknowledged {topic}")
-
-                # Project .md from graph data (non-fatal)
-                try:
-                    _write_md_projection(
-                        client, topic, new_meta, new_entries, commit_message,
-                    )
-                except Exception as e:
-                    log_warning(f"ack_hosted: .md projection failed for {topic}: {e}")
-
-                # Enrich new entry (summary + embedding) — best-effort
-                try:
-                    _enrich_entry_hosted(
-                        client,
-                        topic=topic,
-                        entry_id=entry_id,
-                        body=body,
-                        title=title,
-                        entry_type="Note",
-                        entries=new_entries,
-                        entries_sha=new_entries_sha,
-                        commit_message=commit_message,
-                    )
-                except Exception as e:
-                    log_warning(f"ack_hosted: enrichment failed for {topic}/{entry_id}: {e}")
-
                 return (
                     None,
                     {
@@ -1952,7 +2024,7 @@ def ack_hosted(
                         "timestamp": timestamp,
                         "status": status,
                         "ball": ball,  # Ball unchanged
-                        "sha": new_meta_sha,
+                        "sha": new_commit_sha,
                         "format": "per-thread",
                     },
                 )
@@ -2060,50 +2132,35 @@ def handoff_hosted(
                 new_entries = existing_entries
                 new_edges = existing_edges
 
-            # Write to per-thread format
+            # Atomic write — graph + .md projection + (optional) entry
+            # enrichment in ONE git commit. Handoffs may or may not
+            # carry a note: with note → new entry → enrichment runs;
+            # without note → meta-only update → no enrichment.
             commit_message = f"[watercooler] {topic}: handoff to {new_ball}"
             if note:
                 commit_message += f"\n\nEntry-ID: {entry_id}"
-            new_meta_sha, new_entries_sha, _ = _write_per_thread_graph(
+            new_commit_sha, _info = _write_per_thread_atomic(
                 client,
                 topic=topic,
                 meta=new_meta,
                 entries=new_entries,
                 edges=new_edges,
+                commit_message=commit_message,
+                project_md=True,
+                # Enrichment only fires when a handoff note created an
+                # entry; ``_write_per_thread_atomic`` skips enrichment
+                # when ``enrich_entry_id`` is None.
+                enrich_entry_id=entry_id if note else None,
+                enrich_body=note if note else None,
+                enrich_title=f"Handoff to {new_ball}" if note else None,
+                enrich_entry_type="Note" if note else None,
                 meta_sha=meta_sha,
                 entries_sha=entries_sha,
                 edges_sha=edges_sha,
-                commit_message=commit_message,
             )
 
-            if new_meta_sha:
+            if new_commit_sha:
                 log_debug(f"handoff_hosted: handed off {topic} to {new_ball}")
-
-                # Project .md from graph data (non-fatal)
-                try:
-                    _write_md_projection(
-                        client, topic, new_meta, new_entries, commit_message,
-                    )
-                except Exception as e:
-                    log_warning(f"handoff_hosted: .md projection failed for {topic}: {e}")
-
-                # Enrich handoff entry if one was created (best-effort)
-                if note:
-                    try:
-                        _enrich_entry_hosted(
-                            client,
-                            topic=topic,
-                            entry_id=entry_id,
-                            body=note,
-                            title=f"Handoff to {new_ball}",
-                            entry_type="Note",
-                            entries=new_entries,
-                            entries_sha=new_entries_sha,
-                            commit_message=commit_message,
-                        )
-                    except Exception as e:
-                        log_warning(f"handoff_hosted: enrichment failed for {topic}/{entry_id}: {e}")
-
                 return (
                     None,
                     {
@@ -2114,7 +2171,7 @@ def handoff_hosted(
                         "timestamp": timestamp,
                         "status": status,
                         "ball": new_ball,
-                        "sha": new_meta_sha,
+                        "sha": new_commit_sha,
                         "format": "per-thread",
                     },
                 )
@@ -2687,83 +2744,69 @@ def delete_entry_hosted(
     if error or not client:
         return (error or "Failed to create GitHub client", {})
 
-    entries_path = f"{GRAPH_THREADS_DIR}/{topic}/entries.jsonl"
-    meta_path = f"{GRAPH_THREADS_DIR}/{topic}/meta.json"
-
     for attempt in range(DEFAULT_MAX_RETRIES):
         try:
-            # Read entries
-            try:
-                file_content = client.get_file(entries_path)
-            except GitHubNotFoundError:
+            # Read full per-thread state (meta + entries + edges + their
+            # SHAs) so we can do the entry-delete + meta entry_count
+            # update + .md re-projection in ONE atomic commit. The
+            # prior implementation issued 3 separate ``put_file`` calls
+            # (entries, meta, md) and a nested meta retry — same
+            # 3-event-burst-vs-Vercel-edge mismatch the say path used
+            # to suffer.
+            (
+                existing_meta,
+                existing_entries,
+                existing_edges,
+                meta_sha,
+                entries_sha,
+                edges_sha,
+            ) = _read_per_thread_graph(client, topic)
+
+            if entries_sha is None:
                 return (f"Error: Thread '{topic}' has no entries file.", {})
 
-            lines = file_content.content.splitlines()
-            kept = []
-            valid_entry_count = 0
-            removed = False
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    if entry.get("entry_id") == entry_id:
-                        removed = True
-                        continue
-                    kept.append(line)
-                    valid_entry_count += 1
-                except json.JSONDecodeError:
-                    kept.append(line)  # preserve malformed lines but don't count
+            # Filter out the deleted entry; preserve everything else.
+            kept_entries = [e for e in existing_entries if e.get("entry_id") != entry_id]
+            removed = len(kept_entries) < len(existing_entries)
 
             if not removed:
                 return (f"Error: Entry '{entry_id}' not found in thread '{topic}'.", {})
 
-            # Write updated entries
-            new_content = "\n".join(kept) + "\n" if kept else ""
-            client.put_file(
-                path=entries_path,
-                content=new_content,
-                message=f"delete entry {entry_id[:12]} from {topic}",
-                sha=file_content.sha,
+            # Update meta.entry_count if a meta file exists (it's
+            # optional — pre-meta threads still get the entries write).
+            if existing_meta is not None:
+                new_meta = {**existing_meta, "entry_count": len(kept_entries)}
+            else:
+                # Synthesise a minimal meta so the atomic write has a
+                # non-None target. Older threads without a meta file
+                # are rare; this gives them one going forward.
+                new_meta = {
+                    "id": f"thread:{topic}",
+                    "type": "thread",
+                    "topic": topic,
+                    "title": topic,
+                    "status": "OPEN",
+                    "entry_count": len(kept_entries),
+                }
+
+            commit_message = f"delete entry {entry_id[:12]} from {topic}"
+            new_commit_sha, _info = _write_per_thread_atomic(
+                client,
+                topic=topic,
+                meta=new_meta,
+                entries=kept_entries,
+                edges=existing_edges,
+                commit_message=commit_message,
+                project_md=True,
+                meta_sha=meta_sha,
+                entries_sha=entries_sha,
+                edges_sha=edges_sha,
             )
 
-            # Update meta.json entry_count — retry on conflict since entries already updated
-            meta_updated = False
-            for meta_attempt in range(DEFAULT_MAX_RETRIES):
-                try:
-                    meta_file = client.get_file(meta_path)
-                    meta = json.loads(meta_file.content)
-                    meta["entry_count"] = valid_entry_count
-                    client.put_file(
-                        path=meta_path,
-                        content=json.dumps(meta, indent=2) + "\n",
-                        message=f"update meta after deleting {entry_id[:12]}",
-                        sha=meta_file.sha,
-                    )
-                    meta_updated = True
-                    break
-                except GitHubConflictError:
-                    if meta_attempt < DEFAULT_MAX_RETRIES - 1:
-                        continue
-                    log_warning(f"Meta update conflict after entry delete {entry_id[:12]}")
-                except GitHubNotFoundError:
-                    meta_updated = True  # no meta file is fine
-                    break
+            if new_commit_sha is None:
+                return (f"Failed to write delete commit for {topic}", {})
 
-            # Project .md (non-fatal) — re-read graph state for consistent projection
-            try:
-                meta_r, entries_r, _, _, _, _ = _read_per_thread_graph(client, topic)
-                if meta_r is not None:
-                    _write_md_projection(
-                        client, topic, meta_r, entries_r,
-                        f"delete entry {entry_id[:12]} from {topic}",
-                    )
-            except Exception as e:
-                log_warning(f"delete_entry_hosted: .md projection failed for {topic}: {e}")
-
-            status = "deleted" if meta_updated else "deleted_meta_stale"
-            return (None, {"status": status, "topic": topic, "entry_id": entry_id})
+            return (None, {"status": "deleted", "topic": topic, "entry_id": entry_id})
 
         except GitHubConflictError:
             if attempt < DEFAULT_MAX_RETRIES - 1:
@@ -2882,45 +2925,52 @@ def archive_thread_hosted(
     if error or not client:
         return (error or "Failed to create GitHub client", {})
 
-    meta_path = f"{GRAPH_THREADS_DIR}/{topic}/meta.json"
-
     action = "unarchived" if unarchive else "archived"
 
     for attempt in range(DEFAULT_MAX_RETRIES):
         try:
-            try:
-                meta_file = client.get_file(meta_path)
-            except GitHubNotFoundError:
+            # Read full per-thread state so meta-mutate + .md re-project
+            # land in ONE atomic commit. The prior implementation did
+            # a meta-only put_file followed by a separate
+            # _write_md_projection — 2 commits, 2 webhook events.
+            (
+                existing_meta,
+                existing_entries,
+                existing_edges,
+                meta_sha,
+                entries_sha,
+                edges_sha,
+            ) = _read_per_thread_graph(client, topic)
+
+            if existing_meta is None:
                 return (f"Error: Thread '{topic}' not found.", {})
 
-            meta = json.loads(meta_file.content)
-
+            new_meta = dict(existing_meta)
             if unarchive:
-                meta.pop("archived", None)
-                meta.pop("archive_reason", None)
-                meta["status"] = "OPEN"
+                new_meta.pop("archived", None)
+                new_meta.pop("archive_reason", None)
+                new_meta["status"] = "OPEN"
             else:
-                meta["archived"] = True
-                meta["status"] = "CLOSED"
+                new_meta["archived"] = True
+                new_meta["status"] = "CLOSED"
                 if reason:
-                    meta["archive_reason"] = reason
+                    new_meta["archive_reason"] = reason
 
-            client.put_file(
-                path=meta_path,
-                content=json.dumps(meta, indent=2) + "\n",
-                message=f"{action} thread {topic}",
-                sha=meta_file.sha,
+            commit_message = f"{action} thread {topic}"
+            new_commit_sha, _info = _write_per_thread_atomic(
+                client,
+                topic=topic,
+                meta=new_meta,
+                entries=existing_entries,
+                edges=existing_edges,
+                commit_message=commit_message,
+                project_md=True,
+                meta_sha=meta_sha,
+                entries_sha=entries_sha,
+                edges_sha=edges_sha,
             )
-
-            # Project .md (non-fatal) — re-read entries for consistent projection
-            try:
-                _, entries_r, _, _, _, _ = _read_per_thread_graph(client, topic)
-                _write_md_projection(
-                    client, topic, meta, entries_r,
-                    f"{action} thread {topic}",
-                )
-            except Exception as e:
-                log_warning(f"archive_thread_hosted: .md projection failed for {topic}: {e}")
+            if new_commit_sha is None:
+                return (f"Failed to write {action} commit for {topic}", {})
 
             result = {"status": action, "topic": topic}
             if reason and not unarchive:

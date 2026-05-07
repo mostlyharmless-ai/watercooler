@@ -467,3 +467,76 @@ simultaneously from different machines. The retry logic handles most conflicts
 automatically — this warning only appears when retries are exhausted.
 
 ---
+
+### CLAUDE.md or AGENTS.md was rewritten and I want to undo it {#undo-agent-context-rewrite}
+
+**Symptom:** You ran `/watercooler-onboarding --update-agent-context` (or
+`/update-agent-context --phase1` directly) and the resulting `CLAUDE.md` or
+`AGENTS.md` isn't what you wanted.
+
+**Cause:** Phase 1 of `/update-agent-context` is a full structural rewrite. It
+intentionally replaces the file rather than patching individual sections.
+
+**Fix:** When invoked through `/watercooler-onboarding --update-agent-context`,
+the chain takes timestamped backups before any rewrite. The backups land
+**alongside** `CLAUDE.md` / `AGENTS.md` in the repo root (not under
+`~/.watercooler/`). List them with:
+
+```bash
+ls CLAUDE.md.pre-onboarding.*.bak AGENTS.md.pre-onboarding.*.bak
+```
+
+Each filename matches the pattern `<file>.pre-onboarding.<UTC-timestamp>.bak`.
+Restore with:
+
+```bash
+mv CLAUDE.md.pre-onboarding.<TS>.bak CLAUDE.md
+mv AGENTS.md.pre-onboarding.<TS>.bak AGENTS.md
+```
+
+(Replace `<TS>` with the timestamp on the actual backup file.) The backup
+files are untracked, so you can either keep them as a safety net or delete
+them once the rewrite is accepted.
+
+If you ran `/update-agent-context --phase1` directly (not through the chain),
+no automatic backup is taken. Recover from `git`:
+
+```bash
+git diff CLAUDE.md AGENTS.md      # see what changed
+git checkout CLAUDE.md AGENTS.md  # discard the rewrite
+```
+
+That assumes the previous version was committed. If `CLAUDE.md` was
+uncommitted local work, the rewrite is unrecoverable from git — which is
+exactly why the `/watercooler-onboarding` chain wraps the call with backups.
+
+---
+
+### `/update-agent-context --phase2` reports no candidates {#agent-context-phase2-no-candidates}
+
+**Symptom:** You ran `/update-agent-context --phase2` and the candidate list
+is empty (or nearly so).
+
+**Cause:** Phase 2 patches the `## Project Conventions` block from `Decision`
+entries written since the last update. On a young repo, or one that has not
+yet captured durable conventions as `Decision`-typed entries, there is
+nothing to extract.
+
+**Fix:**
+
+1. Run `/watercooler-onboarding` first if you haven't. Phase 2 also reads the
+   `onboarding-*` seed threads (architecture, risk register, docs/contracts,
+   team map, entry path) for rule-shaped content, which gives Phase 2 a
+   second evidence source to work from.
+
+2. If Watercooler has been in use for a while but Phase 2 still finds
+   nothing, agents may have been writing observations as `Note` rather than
+   `Decision` entries. Decisions are the higher-trust source for durable
+   conventions; ask agents to use `entry_type="Decision"` when they record
+   binding choices, and re-run Phase 2 after a batch lands.
+
+3. As a one-time setup, run `/update-agent-context --phase1` to establish the
+   `## Project Conventions` block structure. Phase 2 patches that block; if
+   it doesn't exist yet, Phase 1 creates the scaffold.
+
+---
