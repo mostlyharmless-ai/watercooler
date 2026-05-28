@@ -500,6 +500,7 @@ def _handoff_impl(
     code_path: str = "",
     agent_func: str = "",
     role: str | None = None,
+    title: str | None = None,
 ) -> str:
     """Hand off the ball to another agent.
 
@@ -519,6 +520,9 @@ def _handoff_impl(
             - role: The agent role (e.g., 'implementer', 'reviewer', 'planner')
             Full examples: 'Cursor:Composer 1:implementer', 'Claude Code:sonnet-4:reviewer', 'Codex:gpt-4:planner'
             This information is recorded in commit footers for full traceability.
+        title: Optional entry title override. Defaults to ``f"Handoff to {target_agent}"``
+            when omitted — used by ``watercooler_write`` to forward a wrapper-derived
+            title through to the handoff entry.
 
     Returns:
         Confirmation with new ball owner
@@ -562,6 +566,7 @@ def _handoff_impl(
             note=note,
             code_branch=context.code_branch,
             role=role or "pm",
+            title=title,
         )
 
         if write_error:
@@ -606,7 +611,7 @@ def _handoff_impl(
                     threads_dir=threads_dir,
                     agent=agent,
                     role=role or "pm",
-                    title=f"Handoff to {target_agent}",
+                    title=title or f"Handoff to {target_agent}",
                     entry_type="Note",
                     body=note,
                     ball=target_agent,
@@ -886,6 +891,105 @@ def _set_status_impl(
 
 _VALID_AUTHORITY_MODES = frozenset({"ordinary", "decision", "closure"})
 
+# Maximum length for an entry title before ellipsization.
+_TITLE_MAX = 60
+
+# Generic section markers that should never become an entry title on their own
+# — agents writing scribe/planner/pm bodies routinely open with `## TL;DR`
+# or `## Summary`, and the old derivation took those literally. Compared
+# case-insensitively after stripping markdown heading chars and trailing
+# punctuation.
+_GENERIC_HEADING_BLOCKLIST = frozenset(
+    {
+        "tl;dr", "tldr",
+        "summary",
+        "context",
+        "overview",
+        "background",
+        "note",
+        "update",
+        "status",
+        "introduction",
+    }
+)
+
+
+def _derive_title(body: str, explicit_title: str | None) -> tuple[str, str | None]:
+    """Resolve an entry title and an optional advisory warning.
+
+    Explicit titles win outright (truncated, no warning). Otherwise scans
+    `body` lines, skipping `Spec:` / empty lines, stripping leading markdown
+    heading chars, and skipping leading generic-section headings (TL;DR,
+    Summary, Context, ...). Returns a `(title, warning)` tuple — the
+    warning is non-None when the auto-derived title still looks low-signal
+    (still generic after the blocklist skip, very short, or heading-only).
+
+    Defense-in-depth: scrubs CR/LF from explicit titles before truncating.
+    The title is later projected as a markdown header line (``Title: ...``)
+    and embedded in local commit messages (``f"{agent}: {title} ({topic})"``);
+    an embedded newline could forge extra header lines or commit subjects.
+    Same scrub pattern as ``_write_impl`` already applies to ``next_actor``
+    and ``authorization_text``. Auto-derived candidates are already safe
+    because ``body.splitlines()`` strips line separators upstream.
+    """
+    if explicit_title and explicit_title.strip():
+        scrubbed = explicit_title.replace("\r", " ").replace("\n", " ").strip()
+        if scrubbed:
+            return (_truncate_title(scrubbed), None)
+
+    # Candidates are (raw_line, heading_stripped_text) pairs in source order.
+    candidates: list[tuple[str, str]] = []
+    for ln in body.splitlines():
+        s = ln.strip()
+        if not s or s.startswith("Spec:"):
+            continue
+        stripped = s.lstrip("#").strip()
+        candidates.append((s, stripped))
+
+    if not candidates:
+        return (
+            _truncate_title(body.strip()) or "(untitled)",
+            "⚠️ title: body produced no usable title. Pass title='<explicit>' to override.",
+        )
+
+    # Default to the first candidate (preserves old behavior as fallback).
+    chosen_raw, chosen_stripped = candidates[0]
+    # Walk candidates in order; the first non-blocklist candidate wins.
+    for raw, stripped in candidates:
+        norm = stripped.lower().rstrip(":.")
+        if norm in _GENERIC_HEADING_BLOCKLIST:
+            continue
+        chosen_raw, chosen_stripped = raw, stripped
+        break
+
+    chosen_text = chosen_stripped or chosen_raw
+    title = _truncate_title(chosen_text)
+
+    warning: str | None = None
+    norm = chosen_stripped.lower().rstrip(":.")
+    if norm in _GENERIC_HEADING_BLOCKLIST:
+        warning = (
+            f"⚠️ title: auto-derived '{title}' is a generic section marker. "
+            f"Pass title='<explicit>' to override."
+        )
+    elif not chosen_stripped:
+        warning = (
+            "⚠️ title: auto-derived from a heading-only line with no text. "
+            "Pass title='<explicit>' to override."
+        )
+    elif len(chosen_stripped) < 10:
+        warning = (
+            f"⚠️ title: auto-derived '{title}' is very short "
+            f"({len(chosen_stripped)} chars). Pass title='<explicit>' to override."
+        )
+
+    return (title, warning)
+
+
+def _truncate_title(s: str) -> str:
+    """Ellipsize past `_TITLE_MAX` with a single-char ellipsis."""
+    return (s[: _TITLE_MAX - 1] + "…") if len(s) > _TITLE_MAX else s
+
 
 def _write_impl(
     topic: str,
@@ -898,11 +1002,12 @@ def _write_impl(
     authorization_text: str | None = None,
     downgrade_to_note: bool = False,
     code_path: str = "",
+    title: str | None = None,
 ) -> str:
     """Unified write path — the preferred tool for ordinary agent writes.
 
     Wraps say/ack/handoff internally.  Direct tools remain available for
-    explicit coordination control or when title/spec/entry_type override matters.
+    explicit spec override or coordination moves the wrapper doesn't cover.
 
     Args:
         topic: Thread topic identifier
@@ -925,9 +1030,16 @@ def _write_impl(
             resolved from the code_path context; per-call branch override is
             not supported here — use the direct say/ack/handoff tools if you
             need to bypass context resolution.
+        title: Explicit entry title override. When omitted (default), the
+            title is auto-derived from the first non-Spec, non-blocklist
+            heading in ``body``. Pass an explicit value when the auto-derived
+            title would be a generic section marker (``## TL;DR``, ``## Summary``,
+            etc.) — the wrapper emits an advisory warning in the response when
+            it detects this case so agents can correct at write time.
 
     Returns:
-        Confirmation string with Ball: / Next: advisory suffix.
+        Confirmation string with Ball: / Next: advisory suffix, plus an optional
+        ``⚠️ title: ...`` warning when the auto-derived title looks generic.
     """
     if authority_mode not in _VALID_AUTHORITY_MODES:
         return (
@@ -1014,25 +1126,20 @@ def _write_impl(
     if authorization_text:
         body = body + f"\n\n[watercooler_write: authorized — {authorization_text}]"
 
-    # Title is the first non-empty, non-Spec line; ellipsized past TITLE_MAX.
-    TITLE_MAX = 60
-    lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("Spec:")]
-    raw = lines[0] if lines else body.strip()
-    title = (raw[: TITLE_MAX - 3] + "…") if len(raw) > TITLE_MAX else raw
+    resolved_title, title_warning = _derive_title(body, title)
 
     if next_actor == "self":
-        return _ack_impl(
+        result = _ack_impl(
             topic=topic,
             ctx=ctx,
-            title=title,
+            title=resolved_title,
             body=body,
             code_path=code_path,
             agent_func=agent_func,
             role=role,
         )
-
-    if next_actor not in ("auto", "self"):
-        return _handoff_impl(
+    elif next_actor not in ("auto", "self"):
+        result = _handoff_impl(
             topic=topic,
             ctx=ctx,
             note=body,
@@ -1040,19 +1147,24 @@ def _write_impl(
             code_path=code_path,
             agent_func=agent_func,
             role=role,
+            title=resolved_title,
+        )
+    else:
+        result = _say_impl(
+            topic=topic,
+            title=resolved_title,
+            body=body,
+            ctx=ctx,
+            role=role,
+            entry_type=entry_type,
+            create_if_missing=False,
+            code_path=code_path,
+            agent_func=agent_func,
         )
 
-    return _say_impl(
-        topic=topic,
-        title=title,
-        body=body,
-        ctx=ctx,
-        role=role,
-        entry_type=entry_type,
-        create_if_missing=False,
-        code_path=code_path,
-        agent_func=agent_func,
-    )
+    if title_warning:
+        result = f"{result}\n{title_warning}"
+    return result
 
 
 def register_thread_write_tools(mcp):

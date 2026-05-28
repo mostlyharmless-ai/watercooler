@@ -1331,3 +1331,405 @@ class TestRound12Regressions:
             agent_func="Claude Code:claude-sonnet-4-6:implementer",
         )
         assert "Next: keep-working" in result
+
+
+# ---------------------------------------------------------------------------
+# Title derivation — issue #845
+# ---------------------------------------------------------------------------
+
+
+from watercooler_mcp.tools.thread_write import _derive_title  # noqa: E402
+
+
+class TestDeriveTitleHelper:
+    """Unit tests for the pure title-derivation helper."""
+
+    def test_explicit_title_wins_with_no_warning(self):
+        title, warn = _derive_title(
+            body="Spec: scribe\n\n## TL;DR\n\nLong body", explicit_title="My Title"
+        )
+        assert title == "My Title"
+        assert warn is None
+
+    def test_explicit_title_truncated_past_max(self):
+        long = "A" * 200
+        title, warn = _derive_title(body="anything", explicit_title=long)
+        assert title.endswith("…")
+        assert len(title) == 60
+        assert warn is None
+
+    def test_explicit_empty_string_falls_back_to_auto(self):
+        """Empty/whitespace explicit_title shouldn't suppress auto-derivation."""
+        title, warn = _derive_title(
+            body="Spec: scribe\n\nReal first line.", explicit_title="   "
+        )
+        assert title == "Real first line."
+
+    @pytest.mark.parametrize(
+        "section_marker",
+        [
+            "TL;DR", "TLDR", "Summary", "Context", "Overview",
+            "Background", "Note", "Update", "Status", "Introduction",
+        ],
+    )
+    def test_auto_skips_generic_section_markers(self, section_marker):
+        body = f"Spec: scribe\n\n## {section_marker}\n\nThe real entry title here"
+        title, warn = _derive_title(body=body, explicit_title=None)
+        assert title == "The real entry title here"
+        assert warn is None
+
+    def test_auto_skip_is_case_insensitive(self):
+        body = "Spec: scribe\n\n## tl;dr\n\nActual title"
+        title, _ = _derive_title(body=body, explicit_title=None)
+        assert title == "Actual title"
+
+    def test_auto_skip_strips_trailing_punctuation_when_matching(self):
+        body = "Spec: scribe\n\n## Summary:\n\nActual title"
+        title, _ = _derive_title(body=body, explicit_title=None)
+        assert title == "Actual title"
+
+    def test_auto_strips_markdown_heading_chars(self):
+        body = "Spec: planner\n\n# Plan: do the thing\n\nDetails follow."
+        title, warn = _derive_title(body=body, explicit_title=None)
+        assert title == "Plan: do the thing"
+        assert warn is None
+
+    def test_warn_when_all_candidates_are_blocklist(self):
+        body = "Spec: scribe\n\n## TL;DR\n\n## Summary"
+        title, warn = _derive_title(body=body, explicit_title=None)
+        # Falls back to original first candidate when every entry blocklists.
+        assert title == "TL;DR"
+        assert warn is not None
+        assert "generic section marker" in warn
+
+    def test_warn_when_chosen_title_is_short(self):
+        body = "Spec: implementer\n\n## OK"
+        title, warn = _derive_title(body=body, explicit_title=None)
+        assert title == "OK"
+        assert warn is not None
+        assert "very short" in warn
+        assert "2 chars" in warn
+
+    def test_warn_when_body_is_empty(self):
+        title, warn = _derive_title(body="", explicit_title=None)
+        assert title == "(untitled)"
+        assert warn is not None
+        assert "no usable title" in warn
+
+    def test_warn_when_body_is_only_spec(self):
+        title, warn = _derive_title(body="Spec: scribe", explicit_title=None)
+        assert title == "(untitled)" or title == "Spec: scribe"
+        # Either way a warning must be emitted — body had no real content.
+        assert warn is not None
+
+    def test_warn_when_heading_is_chars_only(self):
+        body = "Spec: scribe\n\n# "
+        title, warn = _derive_title(body=body, explicit_title=None)
+        assert warn is not None
+        assert "heading-only" in warn
+
+    def test_long_normal_title_truncated_with_ellipsis(self):
+        body = "Spec: scribe\n\n" + ("A" * 200)
+        title, _ = _derive_title(body=body, explicit_title=None)
+        assert title.endswith("…")
+        assert len(title) == 60
+
+    def test_normal_first_line_no_warning(self):
+        body = "Spec: scribe\n\nA full sentence as the first line."
+        title, warn = _derive_title(body=body, explicit_title=None)
+        assert title == "A full sentence as the first line."
+        assert warn is None
+
+
+class TestWriteImplTitleParameter:
+    """Integration tests: title override + warning flow through _write_impl."""
+
+    def test_explicit_title_forwarded_to_say(self, sample_thread, threads_dir):
+        """title= passes through to _say_impl on auto routing."""
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        captured = {}
+        from watercooler_mcp.tools import thread_write as tw
+
+        original_say = tw._say_impl
+
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return "✅ stub"
+
+        tw._say_impl = capture
+        try:
+            _write_impl(
+                topic="test-topic",
+                body="Spec: scribe\n\n## TL;DR\n\nReal content",
+                ctx=ctx,
+                role="scribe",
+                agent_func="Claude Code:claude-sonnet-4-6:scribe",
+                code_path=str(threads_dir.parent),
+                title="My Explicit Title",
+            )
+        finally:
+            tw._say_impl = original_say
+        assert captured.get("title") == "My Explicit Title"
+
+    def test_explicit_title_forwarded_to_ack(self, sample_thread, threads_dir):
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        captured = {}
+        from watercooler_mcp.tools import thread_write as tw
+
+        original_ack = tw._ack_impl
+
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return "✅ stub"
+
+        tw._ack_impl = capture
+        try:
+            _write_impl(
+                topic="test-topic",
+                body="Spec: critic\n\nNoted.",
+                ctx=ctx,
+                role="critic",
+                agent_func="Claude Code:claude-sonnet-4-6:critic",
+                next_actor="self",
+                code_path=str(threads_dir.parent),
+                title="Explicit ack title",
+            )
+        finally:
+            tw._ack_impl = original_ack
+        assert captured.get("title") == "Explicit ack title"
+
+    def test_explicit_title_forwarded_to_handoff(self, sample_thread, threads_dir):
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        captured = {}
+        from watercooler_mcp.tools import thread_write as tw
+
+        original_handoff = tw._handoff_impl
+
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return "✅ stub"
+
+        tw._handoff_impl = capture
+        try:
+            _write_impl(
+                topic="test-topic",
+                body="Spec: planner\n\nHanding off.",
+                ctx=ctx,
+                role="planner",
+                agent_func="Claude Code:claude-sonnet-4-6:planner",
+                next_actor="Codex",
+                code_path=str(threads_dir.parent),
+                title="Explicit handoff title",
+            )
+        finally:
+            tw._handoff_impl = original_handoff
+        assert captured.get("title") == "Explicit handoff title"
+
+    def test_auto_derived_title_skips_tl_dr(self, sample_thread, threads_dir):
+        """Body opening with ## TL;DR should yield the next-line title, not '## TL;DR'."""
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        captured = {}
+        from watercooler_mcp.tools import thread_write as tw
+
+        original_say = tw._say_impl
+
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return "✅ stub"
+
+        tw._say_impl = capture
+        try:
+            _write_impl(
+                topic="test-topic",
+                body="Spec: scribe\n\n## TL;DR\n\nThe real title is here",
+                ctx=ctx,
+                role="scribe",
+                agent_func="Claude Code:claude-sonnet-4-6:scribe",
+                code_path=str(threads_dir.parent),
+            )
+        finally:
+            tw._say_impl = original_say
+        assert captured.get("title") == "The real title is here"
+        assert captured.get("title") != "## TL;DR"
+
+    def test_warning_appended_when_auto_title_generic(self, sample_thread, threads_dir):
+        """When every candidate is blocklisted, response carries an advisory warning."""
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        result = _write_impl(
+            topic="test-topic",
+            body="Spec: scribe\n\n## TL;DR\n\n## Summary",
+            ctx=ctx,
+            role="scribe",
+            agent_func="Claude Code:claude-sonnet-4-6:scribe",
+            code_path=str(threads_dir.parent),
+        )
+        assert "✅" in result
+        assert "⚠️ title:" in result
+        assert "generic section marker" in result
+
+    def test_warning_appended_when_auto_title_short(self, sample_thread, threads_dir):
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        result = _write_impl(
+            topic="test-topic",
+            body="Spec: scribe\n\n# Hi",
+            ctx=ctx,
+            role="scribe",
+            agent_func="Claude Code:claude-sonnet-4-6:scribe",
+            code_path=str(threads_dir.parent),
+        )
+        assert "⚠️ title:" in result
+        assert "very short" in result
+
+    def test_warning_suppressed_when_explicit_title_provided(self, sample_thread, threads_dir):
+        """Even with a bad first heading, an explicit title shuts the warning off."""
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        result = _write_impl(
+            topic="test-topic",
+            body="Spec: scribe\n\n## TL;DR\n\n## Summary",
+            ctx=ctx,
+            role="scribe",
+            agent_func="Claude Code:claude-sonnet-4-6:scribe",
+            code_path=str(threads_dir.parent),
+            title="Explicit good title",
+        )
+        assert "✅" in result
+        assert "⚠️ title:" not in result
+
+    def test_wrapper_handoff_forwards_auto_derived_title(self, sample_thread, threads_dir):
+        """Wrapper-routed handoff: title kwarg to _handoff_impl is the
+        auto-derived title, not None. The underlying impl's None-fallback
+        ('Handoff to <agent>') applies only to direct callers; the wrapper
+        always supplies a title. Coverage of the direct-call fallback lives in
+        test_handoff_impl_default_title_when_none below."""
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        captured = {}
+        from watercooler_mcp.tools import thread_write as tw
+
+        original_handoff = tw._handoff_impl
+
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return "✅ stub"
+
+        tw._handoff_impl = capture
+        try:
+            _write_impl(
+                topic="test-topic",
+                body="Spec: planner\n\nHanding the ball over with full context here.",
+                ctx=ctx,
+                role="planner",
+                agent_func="Claude Code:claude-sonnet-4-6:planner",
+                next_actor="Codex",
+                code_path=str(threads_dir.parent),
+            )
+        finally:
+            tw._handoff_impl = original_handoff
+        # The wrapper auto-derived the title from the body's first non-Spec
+        # line and forwarded it as the `title` kwarg.
+        assert captured.get("title") == "Handing the ball over with full context here."
+
+    def test_handoff_impl_default_title_when_none(self, sample_thread, threads_dir):
+        """_handoff_impl directly with title=None: written entry title is
+        'Handoff to <agent>' (the impl-level fallback that direct callers
+        of the legacy interface depend on)."""
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        result = _handoff_impl(
+            topic="test-topic",
+            ctx=ctx,
+            note="Some context.",
+            target_agent="Codex",
+            code_path=str(threads_dir.parent),
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            role="planner",
+            title=None,
+        )
+        assert "✅" in result
+        assert "Codex" in result
+        # Inspect the written entry to confirm the default title applied.
+        # The most recent entry on `test-topic` is the one we just wrote.
+        import json
+        entries = list(threads_dir.glob("graph/baseline/threads/test-topic/entries.jsonl"))
+        assert entries, "entries.jsonl not found after handoff"
+        entry_lines = entries[0].read_text().strip().splitlines()
+        latest = json.loads(entry_lines[-1])
+        assert latest["title"] == "Handoff to Codex"
+
+    def test_handoff_impl_explicit_title_accepted(self, sample_thread, threads_dir):
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        result = _handoff_impl(
+            topic="test-topic",
+            ctx=ctx,
+            note="Some context.",
+            target_agent="Codex",
+            code_path=str(threads_dir.parent),
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            role="planner",
+            title="Custom handoff title",
+        )
+        assert "✅" in result
+        # Inspect the written entry to confirm the explicit title applied.
+        import json
+        entries = list(threads_dir.glob("graph/baseline/threads/test-topic/entries.jsonl"))
+        assert entries, "entries.jsonl not found after handoff"
+        entry_lines = entries[0].read_text().strip().splitlines()
+        latest = json.loads(entry_lines[-1])
+        assert latest["title"] == "Custom handoff title"
+
+    def test_explicit_title_scrubs_cr_lf_in_helper(self):
+        """Defense-in-depth: explicit title with embedded \\r/\\n is collapsed
+        to a single-line title. Without this scrub, the title would be
+        projected as multi-line markdown header content (Title: ...\\nRole: ...)
+        and could forge extra header lines, and would also break the local
+        commit-message format `{agent}: {title} ({topic})`. Same threat surface
+        as the existing next_actor / authorization_text scrubs."""
+        title, warn = _derive_title(
+            body="anything",
+            explicit_title="Good title\nRole: critic\nType: Decision",
+        )
+        assert "\n" not in title
+        assert "\r" not in title
+        assert title.startswith("Good title")
+        assert warn is None
+
+    def test_explicit_title_scrubs_cr_lf_end_to_end(self, sample_thread, threads_dir):
+        """End-to-end: a malicious title with embedded newlines does not get
+        the chance to forge extra header lines in the projected entry — the
+        scrub collapses newlines to spaces so the entire title lives on a
+        single line. The literal substrings 'Role:' / 'Type:' may remain in
+        the title text, but they are inert as content (no longer line-starts
+        that a parser could interpret as header keys)."""
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        result = _write_impl(
+            topic="test-topic",
+            body="Spec: scribe\n\nBody content",
+            ctx=ctx,
+            role="scribe",
+            agent_func="Claude Code:claude-sonnet-4-6:scribe",
+            code_path=str(threads_dir.parent),
+            title="Good\nRole: critic\nType: Decision",
+        )
+        assert "✅" in result
+        # Exactly one `Title:` line in the response — no header forging.
+        title_lines = [ln for ln in result.splitlines() if ln.startswith("Title:")]
+        assert len(title_lines) == 1
+        # The Title: line itself contains no embedded line breaks.
+        assert "\n" not in title_lines[0]
+        assert "\r" not in title_lines[0]
+        # Sanity: response has exactly one Role: line and one Status: line —
+        # neither was forged by the malicious title.
+        role_lines = [ln for ln in result.splitlines() if ln.startswith("Role:")]
+        assert len(role_lines) == 1
+        # The single Role: line is the legitimate response field, not a forged
+        # one — it shows the agent's actual role (scribe), not the injected
+        # 'critic' value.
+        assert "scribe" in role_lines[0]
+        assert "critic" not in role_lines[0]
+
+    def test_explicit_title_all_whitespace_falls_through_to_auto(self):
+        """A title that's only whitespace + newlines scrubs to empty and falls
+        through to auto-derivation rather than producing an empty title."""
+        title, warn = _derive_title(
+            body="Spec: scribe\n\nReal first line content here.",
+            explicit_title="  \n\r  \n  ",
+        )
+        assert title == "Real first line content here."

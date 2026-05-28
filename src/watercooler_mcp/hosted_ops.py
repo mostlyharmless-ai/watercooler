@@ -2062,6 +2062,7 @@ def handoff_hosted(
     entry_id: Optional[str] = None,
     code_branch: Optional[str] = None,
     role: str = "pm",
+    title: Optional[str] = None,
 ) -> tuple[str | None, dict]:
     """Hand off the ball to another agent (per-thread format only).
 
@@ -2070,6 +2071,8 @@ def handoff_hosted(
         agent: Current agent name
         target_agent: Agent to hand off to (optional)
         note: Handoff note
+        title: Optional explicit entry title; defaults to
+            ``f"Handoff to {new_ball}"`` when omitted.
 
     Returns:
         Tuple of (error_message, result_dict).
@@ -2123,7 +2126,7 @@ def handoff_hosted(
                     agent=agent,
                     role=role,
                     entry_type="Note",
-                    entry_title=f"Handoff to {new_ball}",
+                    entry_title=title or f"Handoff to {new_ball}",
                     body=note,
                     timestamp=timestamp,
                     code_branch=effective_code_branch,
@@ -2154,7 +2157,7 @@ def handoff_hosted(
                 # when ``enrich_entry_id`` is None.
                 enrich_entry_id=entry_id if note else None,
                 enrich_body=note if note else None,
-                enrich_title=f"Handoff to {new_ball}" if note else None,
+                enrich_title=(title or f"Handoff to {new_ball}") if note else None,
                 enrich_entry_type="Note" if note else None,
                 meta_sha=meta_sha,
                 entries_sha=entries_sha,
