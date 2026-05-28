@@ -99,24 +99,30 @@ def test_read_thread_creates_directory_if_missing(temp_project_dir, monkeypatch)
     assert exc_info.value.topic == "test-topic"
 
 
-def test_reindex_creates_directory_if_missing(temp_project_dir, mock_context, monkeypatch):
-    """Test that reindex() creates the .watercooler directory if it doesn't exist."""
-    from watercooler_mcp.server import reindex
+# watercooler_reindex was retired in PR4b (superseded by the graph-first
+# watercooler_list_threads); its directory-creation behaviour is covered by
+# test_say_creates_directory_via_init_thread below.
 
-    # Set the watercooler directory to a non-existent path
-    watercooler_dir = temp_project_dir / ".watercooler"
-    assert not watercooler_dir.exists()
 
-    # Mock get_threads_dir to return our test directory
-    monkeypatch.setenv("WATERCOOLER_DIR", str(watercooler_dir))
+def test_health_identity_does_not_create_threads_dir(temp_project_dir, mock_context):
+    """PR4b review — health(detail="identity") / the whoami alias must stay a
+    pure identity probe: it reports threads-dir state without creating it."""
+    from unittest.mock import patch
 
-    # Call reindex - access the underlying function
-    result = reindex(mock_context)
+    from watercooler_mcp.tools import diagnostic
 
-    # Verify directory was created
-    assert watercooler_dir.exists()
-    assert watercooler_dir.is_dir()
-    assert "Threads directory created" in result
+    missing = temp_project_dir / "nested" / ".watercooler"
+    fake_ctx = type("Ctx", (), {"threads_dir": missing})()
+    with patch.object(
+        diagnostic, "resolve_thread_context", return_value=fake_ctx
+    ):
+        result = diagnostic._health_identity_impl(
+            mock_context, code_path=str(temp_project_dir)
+        )
+
+    # The directory must NOT have been created by an identity check.
+    assert not missing.exists()
+    assert "absent" in result
 
 
 def test_say_creates_directory_via_init_thread(temp_project_dir, mock_context, monkeypatch):

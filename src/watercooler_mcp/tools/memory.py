@@ -1,21 +1,21 @@
 """Memory tools for watercooler MCP server (Graphiti backend).
 
 Tools:
-- watercooler_get_entity_edge: Get entity/edge details
+- watercooler_graph_trace: Entity-edge detail, or entry↔episode provenance
 - watercooler_diagnose_memory: Diagnose memory backend
 - watercooler_graphiti_add_episode: Add episode to Graphiti
-- watercooler_leanrag_run_pipeline: Run LeanRAG clustering pipeline
 - watercooler_clear_graph_group: Clear episodes for a group
 - watercooler_smart_query: Multi-tier intelligent query with auto-escalation
 - watercooler_memory_task_status: Check queue health, poll task status, recover
-- watercooler_bulk_index: Queue bulk thread indexing into memory backend
-- watercooler_get_entry_provenance: Bidirectional entry↔episode provenance lookup
+- watercooler_bulk_index: Memory-ingest lifecycle — preflight, bulk index,
+  or run the LeanRAG pipeline (preflight_only=/run_pipeline= selectors)
 
 Removed (use replacements):
 - watercooler_query_memory → watercooler_smart_query
 - watercooler_search_nodes → watercooler_search(mode="entities")
 - watercooler_search_memory_facts → watercooler_smart_query
 - watercooler_get_episodes → watercooler_search(mode="episodes")
+- watercooler_leanrag_run_pipeline → watercooler_bulk_index(run_pipeline=True)
 """
 
 import asyncio
@@ -39,12 +39,11 @@ logger = logging.getLogger(__name__)
 
 
 # Module-level references to registered tools (populated by register_memory_tools)
-get_entity_edge = None
+graph_trace = None
 diagnose_memory = None
 
 # Write tools (Milestone 5.1, 5.2)
 graphiti_add_episode = None
-leanrag_run_pipeline = None
 
 # Cleanup tools
 clear_graph_group = None
@@ -55,9 +54,6 @@ smart_query = None
 # Memory task queue tools
 memory_task_status = None
 bulk_index = None
-
-# Provenance tools
-get_entry_provenance = None
 
 
 def _ensure_t2_suffix(group_id: str) -> str:
@@ -2467,11 +2463,30 @@ async def _bulk_index_impl(
     backend: str = "graphiti",
     threads: str = "",
     max_entries: int = 0,
+    preflight_only: bool = False,
+    run_pipeline: bool = False,
+    group_id: str = "",
+    dry_run: bool = False,
+    incremental: bool = True,
+    start_date: str = "",
+    end_date: str = "",
 ) -> ToolResult:
-    """Queue bulk indexing of threads into memory backend (paid tier onboarding).
+    """Memory-ingest lifecycle: preflight, bulk index, or run the LeanRAG pipeline.
 
-    Discovers threads, builds a manifest of entries, and enqueues them
-    as individual tasks for persistent background processing with retry.
+    Default behaviour discovers threads, builds a manifest of entries, and
+    enqueues them as individual tasks for persistent background processing
+    with retry (paid tier onboarding). Two mode selectors fold in the former
+    standalone tools:
+
+    - ``preflight_only=True`` — check migration prerequisites for ``backend``
+      and return without queuing anything (capability ``memory_migration``,
+      authority L1). Folded-in ``watercooler_migration_preflight``.
+    - ``run_pipeline=True`` — run the LeanRAG clustering pipeline over already
+      indexed Graphiti episodes (capability ``memory_admin_cluster``). Folded-in
+      ``watercooler_leanrag_run_pipeline``. ``group_id``/``start_date``/
+      ``end_date``/``dry_run``/``incremental`` apply to this mode.
+
+    ``preflight_only`` and ``run_pipeline`` are mutually exclusive.
 
     Args:
         ctx: MCP context
@@ -2479,6 +2494,13 @@ async def _bulk_index_impl(
         backend: Target backend ("graphiti" or "leanrag").
         threads: Comma-separated thread topics to index (empty = all).
         max_entries: Max entries to queue (0 = unlimited, for testing).
+        preflight_only: Run a migration-prerequisite check instead of queuing.
+        run_pipeline: Run the LeanRAG clustering pipeline instead of queuing.
+        group_id: Graph group scope (run_pipeline mode; empty = derive).
+        dry_run: Preview without executing (run_pipeline mode).
+        incremental: Only process new episodes (run_pipeline mode).
+        start_date: ISO start bound (run_pipeline mode).
+        end_date: ISO end bound (run_pipeline mode).
 
     Returns:
         JSON with indexing summary containing:
@@ -2494,6 +2516,49 @@ async def _bulk_index_impl(
         - errors: per-topic errors (capped at 10)
         - queue: queue status summary
     """
+    # Mode dispatch (B1/B2 collapse) — preflight and pipeline are distinct
+    # operations folded under bulk_index; each resolves its own capability
+    # per-(tool, args) via capabilities._ARG_RESOLVERS.
+    if preflight_only and run_pipeline:
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({
+                "error": "preflight_only and run_pipeline are mutually exclusive",
+            }),
+        )])
+    if preflight_only:
+        from .. import validation
+        from .migration import _migration_preflight_impl
+
+        error, context = validation._require_context(code_path)
+        if error:
+            return ToolResult([TextContent(type="text", text=error)])
+        if context is None or not context.threads_dir:
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": "Unable to resolve threads directory",
+                }),
+            )])
+        preflight_json = await _migration_preflight_impl(
+            threads_dir=context.threads_dir,
+            backend=backend,
+            ctx=ctx,
+            code_path=code_path,
+        )
+        return ToolResult([TextContent(type="text", text=preflight_json)])
+    if run_pipeline:
+        return await _leanrag_run_pipeline_impl(
+            group_id=group_id,
+            ctx=ctx,
+            code_path=code_path,
+            start_date=start_date,
+            end_date=end_date,
+            dry_run=dry_run,
+            incremental=incremental,
+        )
+
     try:
         from ..memory_queue import get_queue, MemoryTask, enqueue_memory_task, VALID_BACKENDS
 
@@ -2844,21 +2909,137 @@ async def _get_entry_provenance_impl(
         )])
 
 
+async def _graph_trace_impl(
+    ctx: Context,
+    uuid: str = "",
+    entry_id: str = "",
+    episode_uuid: str = "",
+    group_id: str | None = None,
+    code_path: str = "",
+) -> ToolResult:
+    """Trace a relationship in the knowledge graph, dispatched by identifier.
+
+    - ``uuid``: return a specific entity edge (Graphiti relationship).
+    - ``entry_id`` or ``episode_uuid``: bidirectional T1-entry ↔ T2-episode
+      provenance — trace a T2 result back to its T1 source, or find the
+      episodes for a T1 entry.
+
+    Provide exactly one of ``uuid``, ``entry_id``, or ``episode_uuid``.
+
+    Args:
+        uuid: Graphiti entity-edge UUID (entity-edge lookup).
+        entry_id: Watercooler entry ULID (provenance lookup).
+        episode_uuid: Graphiti episode UUID (provenance lookup).
+        group_id: Optional graph group scope (entity-edge lookup).
+        code_path: Path to the project directory.
+
+    Returns:
+        JSON with the entity-edge detail or the provenance mapping.
+    """
+    # Exactly one selector — a mixed call (e.g. uuid + entry_id) is
+    # ambiguous: it would silently take one path and ignore the other.
+    # Before this collapse the split tools made such a call impossible.
+    # Strip first so a whitespace-only value is not counted as supplied.
+    uuid = uuid.strip()
+    entry_id = entry_id.strip()
+    episode_uuid = episode_uuid.strip()
+    provided = [
+        name
+        for name, value in (
+            ("uuid", uuid),
+            ("entry_id", entry_id),
+            ("episode_uuid", episode_uuid),
+        )
+        if value
+    ]
+    if len(provided) != 1:
+        error = (
+            "provide exactly one of: uuid, entry_id, episode_uuid"
+            if not provided
+            else f"provide exactly one selector, got: {', '.join(provided)}"
+        )
+        return ToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {"error": error, "operation": "graph_trace"}
+                    ),
+                )
+            ]
+        )
+
+    if uuid:
+        return await _get_entity_edge_impl(uuid, ctx, code_path, group_id)
+    return await _get_entry_provenance_impl(
+        ctx, entry_id, episode_uuid, code_path
+    )
+
+
 # ---------------------------------------------------------------------------
 # TOOL_BUILDERS: map of public tool name → (impl_func, global_name)
 # ---------------------------------------------------------------------------
 
 TOOL_BUILDERS: dict[str, tuple] = {
-    "watercooler_get_entity_edge": (_get_entity_edge_impl, "get_entity_edge"),
+    "watercooler_graph_trace": (_graph_trace_impl, "graph_trace"),
     "watercooler_diagnose_memory": (_diagnose_memory_impl, "diagnose_memory"),
     "watercooler_graphiti_add_episode": (_graphiti_add_episode_impl, "graphiti_add_episode"),
-    "watercooler_leanrag_run_pipeline": (_leanrag_run_pipeline_impl, "leanrag_run_pipeline"),
     "watercooler_clear_graph_group": (_clear_graph_group_impl, "clear_graph_group"),
     "watercooler_smart_query": (_smart_query_impl, "smart_query"),
     "watercooler_memory_task_status": (_memory_task_status_impl, "memory_task_status"),
     "watercooler_bulk_index": (_bulk_index_impl, "bulk_index"),
-    "watercooler_get_entry_provenance": (_get_entry_provenance_impl, "get_entry_provenance"),
 }
+
+
+def _build_hybrid_bulk_index_wrapper(runtime):
+    """Build a hybrid wrapper for ``watercooler_bulk_index``.
+
+    bulk_index is a *mixed* tool: its default ingest mode resolves to the
+    ``memory_ingest`` capability (remote in hybrid), while ``preflight_only=``
+    and ``run_pipeline=`` resolve to ``memory_migration`` /
+    ``memory_admin_cluster`` — both disabled by default in hybrid. A bare
+    proxy-mount would expose the disabled modes, so the tool is registered
+    locally with this wrapper, which resolves the capability per ``(tool,
+    args)`` and routes local / remote / disabled at call time. This preserves
+    the contract the retired standalone tools (watercooler_migration_preflight,
+    watercooler_leanrag_run_pipeline) had.
+    """
+    import functools
+    from ..capabilities import tool_capability
+
+    @functools.wraps(_bulk_index_impl)
+    async def _hybrid_bulk_index(ctx, **kwargs):
+        capability = tool_capability("watercooler_bulk_index", kwargs)
+        target = runtime.capability_profile.resolve_execution_target(
+            capability,
+            local_available=True,
+            remote_available=runtime.premium_client is not None,
+        )
+        if target == "disabled":
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps(
+                    {"error": "capability_disabled", "capability": capability},
+                    indent=2,
+                ),
+            )])
+        if target == "remote":
+            if runtime.premium_client is None:
+                return ToolResult([TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "remote_unavailable",
+                        "capability": capability,
+                        "message": "Remote premium client is not configured.",
+                    }),
+                )])
+            remote_text = await runtime.premium_client.call_tool_text(
+                "watercooler_bulk_index", kwargs
+            )
+            return ToolResult([TextContent(type="text", text=remote_text)])
+        return await _bulk_index_impl(ctx, **kwargs)
+
+    return _hybrid_bulk_index
 
 
 def register_memory_tools(mcp, *, selected=None, runtime=None):
@@ -2868,7 +3049,9 @@ def register_memory_tools(mcp, *, selected=None, runtime=None):
         mcp: The FastMCP server instance
         selected: Optional collection of tool names to register.
             ``None`` means register all tools in this module.
-        runtime: Optional ToolRuntime for profile-based tier capping.
+        runtime: Optional ToolRuntime. When the surface is ``local_hybrid``,
+            the mixed tool watercooler_bulk_index gets a hybrid wrapper that
+            routes local/remote/disabled per call.
 
     Note:
         The following tools have been removed (use replacements):
@@ -2877,11 +3060,10 @@ def register_memory_tools(mcp, *, selected=None, runtime=None):
         - watercooler_search_memory_facts → watercooler_smart_query
         - watercooler_get_episodes → watercooler_search(mode="episodes")
     """
-    global get_entity_edge, diagnose_memory
-    global graphiti_add_episode, leanrag_run_pipeline, clear_graph_group
+    global graph_trace, diagnose_memory
+    global graphiti_add_episode, clear_graph_group
     global smart_query
     global memory_task_status, bulk_index
-    global get_entry_provenance
     global _runtime
 
     _runtime = runtime
@@ -2890,5 +3072,12 @@ def register_memory_tools(mcp, *, selected=None, runtime=None):
     for tool_name, (impl_func, global_name) in TOOL_BUILDERS.items():
         if selected is not None and tool_name not in selected:
             continue
-        registered = mcp.tool(name=tool_name)(impl_func)
+        actual_impl = impl_func
+        if (
+            runtime is not None
+            and getattr(runtime, "surface", None) == "local_hybrid"
+            and tool_name == "watercooler_bulk_index"
+        ):
+            actual_impl = _build_hybrid_bulk_index_wrapper(runtime)
+        registered = mcp.tool(name=tool_name)(actual_impl)
         _globals[global_name] = registered

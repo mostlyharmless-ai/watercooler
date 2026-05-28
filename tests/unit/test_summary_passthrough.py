@@ -5,7 +5,7 @@ Validates that:
 - _entry_full_payload includes summary alongside body
 - _load_entries returns 3-tuple with summaries dict
 - _list_threads returns 7-tuple with thread summary
-- summary_only mode in read_thread and get_thread_entry_range
+- summary_only mode in read_thread and get_thread_entry (range form)
 """
 
 from __future__ import annotations
@@ -277,10 +277,10 @@ class TestEntryRangeSummaryOnly:
     """Tests for get_thread_entry_range with summary_only=True."""
 
     def test_summary_only_json(self, patched_context):
-        result = server.get_thread_entry_range(
+        result = server.get_thread_entry(
             topic="summary-test",
-            start_index=0,
-            end_index=1,
+            index=0,
+            to_index=1,
             code_path=".",
             format="json",
             summary_only=True,
@@ -294,10 +294,10 @@ class TestEntryRangeSummaryOnly:
             assert "body" not in entry
 
     def test_summary_only_markdown(self, patched_context):
-        result = server.get_thread_entry_range(
+        result = server.get_thread_entry(
             topic="summary-test",
-            start_index=0,
-            end_index=1,
+            index=0,
+            to_index=1,
             code_path=".",
             format="markdown",
             summary_only=True,

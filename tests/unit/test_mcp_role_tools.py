@@ -1,12 +1,14 @@
-"""Tests for src/watercooler_mcp/tools/roles.py."""
+"""Tests for src/watercooler_mcp/tools/roles.py.
+
+PR3b: watercooler_role_details was folded into watercooler_roles(role=...);
+``_roles_impl`` with a ``role`` argument now serves the single-role spec.
+"""
 
 from __future__ import annotations
 
 import json
 
-import pytest
-
-from watercooler_mcp.tools.roles import _role_details_impl, _roles_impl
+from watercooler_mcp.tools.roles import _roles_impl
 
 CANONICAL_ROLES = {"planner", "critic", "implementer", "tester", "pm", "scribe"}
 
@@ -18,7 +20,7 @@ def test_roles_returns_all_six():
 
 
 def test_roles_compact_no_instructions():
-    """Compact response does not include instructions, entry_style, or collaborate_with."""
+    """Catalog response omits instructions, entry_style, collaborate_with."""
     result = json.loads(_roles_impl())
     for role_data in result.values():
         assert "instructions" not in role_data
@@ -26,9 +28,9 @@ def test_roles_compact_no_instructions():
         assert "collaborate_with" not in role_data
 
 
-def test_role_details_full_spec():
-    """role_details for 'critic' includes full behavioral spec."""
-    result = json.loads(_role_details_impl(role="critic"))
+def test_roles_with_role_returns_full_spec():
+    """_roles_impl(role='critic') returns the full behavioral spec."""
+    result = json.loads(_roles_impl(role="critic"))
     assert "error" not in result
     assert result["name"] == "critic"
     assert "instructions" in result
@@ -37,16 +39,16 @@ def test_role_details_full_spec():
     assert "collaborate_with" in result
 
 
-def test_role_details_unknown_role():
-    """Unknown role returns error with valid_roles list."""
-    result = json.loads(_role_details_impl(role="reviewer"))
+def test_roles_with_unknown_role():
+    """An unknown role returns an error with a valid_roles list."""
+    result = json.loads(_roles_impl(role="reviewer"))
     assert result["error"] == "unknown_role"
     assert "valid_roles" in result
     assert set(result["valid_roles"]) >= CANONICAL_ROLES
 
 
 def test_roles_project_override(tmp_path):
-    """Project roles.toml override is reflected in _roles_impl response."""
+    """Project roles.toml override is reflected in the catalog response."""
     wc_dir = tmp_path / ".watercooler"
     wc_dir.mkdir()
     (wc_dir / "roles.toml").write_text(

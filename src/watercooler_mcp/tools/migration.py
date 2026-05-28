@@ -82,9 +82,10 @@ DEFAULT_CHUNK_MAX_TOKENS = 768
 DEFAULT_CHUNK_OVERLAP = 64
 
 
-# Module-level references to registered tools
-migrate_to_memory_backend = None
-migration_preflight = None
+# This module registers no MCP tools after the PR4a consolidation. The
+# preflight implementation (_migration_preflight_impl) is imported by
+# watercooler_bulk_index(preflight_only=True); _migrate_to_memory_backend_impl
+# is retained but no longer MCP-exposed.
 
 
 # --- Checkpoint v2 Data Structures ---
@@ -954,121 +955,31 @@ async def _migrate_to_memory_backend_impl(
 
 
 # ---------------------------------------------------------------------------
-# Validation-aware wrappers (defined once, referenced by TOOL_BUILDERS)
-# ---------------------------------------------------------------------------
-
-async def _preflight_wrapper(
-    ctx: Context,
-    code_path: str = "",
-    backend: str = "graphiti",
-) -> str:
-    """Check migration prerequisites.
-
-    Args:
-        code_path: Path to code repository
-        backend: Target backend ("graphiti" or "leanrag")
-
-    Returns:
-        JSON with preflight check results
-    """
-    from .. import validation
-    error, context = validation._require_context(code_path)
-    if error:
-        return error
-    if context is None or not context.threads_dir:
-        return json.dumps({
-            "success": False,
-            "error": "Unable to resolve threads directory",
-        })
-
-    return await _migration_preflight_impl(
-        threads_dir=context.threads_dir,
-        backend=backend,
-        ctx=ctx,
-        code_path=code_path,
-    )
-
-
-async def _migrate_wrapper(
-    ctx: Context,
-    code_path: str = "",
-    backend: str = "graphiti",
-    dry_run: bool = True,
-    topics: str = "",
-    skip_closed: bool = False,
-    resume: bool = True,
-    force_new_migration: bool = False,
-    chunk_max_tokens: int = DEFAULT_CHUNK_MAX_TOKENS,
-    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-    rechunk: bool = False,
-) -> str:
-    """Migrate thread entries to memory backend with chunking support.
-
-    Entries are chunked for aligned boundaries with MemoryGraph and LeanRAG.
-    Episodes within an entry are linked for proper temporal ordering.
-
-    Args:
-        code_path: Path to code repository
-        backend: Target backend ("graphiti" or "leanrag")
-        dry_run: If True, show what would be migrated without executing
-        topics: Comma-separated list of topics to migrate (empty = all)
-        skip_closed: Skip closed threads
-        resume: Resume from checkpoint if available
-        force_new_migration: If True, ignore checkpoint backend mismatch
-        chunk_max_tokens: Maximum tokens per chunk (default: 768)
-        chunk_overlap: Overlap tokens between chunks (default: 64)
-        rechunk: If True, re-migrate entries previously migrated as single episodes
-
-    Returns:
-        JSON with migration results
-    """
-    from .. import validation
-    error, context = validation._require_context(code_path)
-    if error:
-        return error
-    if context is None or not context.threads_dir:
-        return json.dumps({
-            "success": False,
-            "error": "Unable to resolve threads directory",
-        })
-
-    return await _migrate_to_memory_backend_impl(
-        threads_dir=context.threads_dir,
-        backend=backend,
-        ctx=ctx,
-        code_path=code_path,
-        dry_run=dry_run,
-        topics=topics,
-        skip_closed=skip_closed,
-        resume=resume,
-        force_new_migration=force_new_migration,
-        chunk_max_tokens=chunk_max_tokens,
-        chunk_overlap=chunk_overlap,
-        rechunk=rechunk,
-    )
-
-
-# ---------------------------------------------------------------------------
 # TOOL_BUILDERS: map of public tool name → (impl_func, global_name)
+#
+# Empty as of PR4a. watercooler_migration_preflight folded into
+# watercooler_bulk_index(preflight_only=True); watercooler_migrate_to_memory_backend
+# retired in favour of the idempotent watercooler_bulk_index. The preflight
+# implementation (_migration_preflight_impl) is still imported and called by
+# bulk_index. _migrate_to_memory_backend_impl is retained below but is no longer
+# MCP-exposed — bulk_index is the canonical, superseding ingest path.
 # ---------------------------------------------------------------------------
 
-TOOL_BUILDERS: dict[str, tuple] = {
-    "watercooler_migration_preflight": (_preflight_wrapper, "migration_preflight"),
-    "watercooler_migrate_to_memory_backend": (_migrate_wrapper, "migrate_to_memory_backend"),
-}
+TOOL_BUILDERS: dict[str, tuple] = {}
 
 
 def register_migration_tools(mcp, *, selected=None, runtime=None):
     """Register migration tools with the MCP server.
 
+    No tools remain in this module after the PR4a consolidation; the function
+    is retained as a stable, empty registration so server_factory's sequence
+    is unchanged.
+
     Args:
         mcp: The FastMCP server instance
         selected: Optional collection of tool names to register.
-            ``None`` means register all tools in this module.
         runtime: Optional ToolRuntime (reserved for future use).
     """
-    global migrate_to_memory_backend, migration_preflight
-
     _globals = globals()
     for tool_name, (impl_func, global_name) in TOOL_BUILDERS.items():
         if selected is not None and tool_name not in selected:

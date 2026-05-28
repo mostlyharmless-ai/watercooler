@@ -33,12 +33,12 @@ Every write call (`say`, `ack`, `handoff`, `set_status`) requires:
    - Canonical roles: `planner`, `critic`, `implementer`, `tester`, `pm`, `scribe`;
      projects may define additional roles in `.watercooler/roles.toml`
    - Use `watercooler_roles(code_path)` to see the active role set for a project
-   - Use `watercooler_role_details(code_path, role)` for full behavioral guidance
+   - Use `watercooler_roles(code_path, role)` for one role's full behavioral guidance
 3. **`Spec: <role>`** — include as the first line of your entry body
 
 Read tools (`list_threads`, `read_thread`, etc.) require `code_path` but not `agent_func`.
-`watercooler_whoami`, `watercooler_reindex`, `watercooler_daemon_status`,
-`watercooler_daemon_findings`, and `watercooler_memory_task_status` accept neither.
+`watercooler_daemon_status`, `watercooler_daemon_findings`, and
+`watercooler_memory_task_status` accept neither.
 Diagnostic tools (`health`, `diagnose_memory`) accept `code_path` as an optional parameter for context-aware checks.
 
 To verify your resolved identity, call `watercooler_whoami()` — no parameters required.
@@ -93,7 +93,7 @@ watercooler_list_thread_entries(topic="feature-auth", code_path=".", limit=10)
 watercooler_get_thread_entry(topic="feature-auth", code_path=".", index=3)
 
 # Or fetch a contiguous range in one call
-watercooler_get_thread_entry_range(topic="feature-auth", start_index=0, end_index=9, code_path=".")
+watercooler_get_thread_entry(topic="feature-auth", index=0, to_index=9, code_path=".")
 ```
 
 ## Memory and search
@@ -115,14 +115,14 @@ without any memory backend.
 Advanced memory lookups:
 ```python
 # Semantic neighbor lookup (T1 embeddings required)
-watercooler_find_similar(entry_id="<ulid>", code_path=".")
+watercooler_search(seed_entry_id="<ulid>", code_path=".")
 
 # Cross-repo keyword search (federation config required)
-watercooler_federated_search(query="...", code_path=".")
+watercooler_search(federated=True, query="...", code_path=".")
 
 # Bidirectional T1↔T2 provenance lookup (entry → episodes OR episode → entry)
-watercooler_get_entry_provenance(entry_id="<ulid>", code_path=".")       # entry → episodes
-watercooler_get_entry_provenance(episode_uuid="<uuid>", code_path=".")   # episode → entry
+watercooler_graph_trace(entry_id="<ulid>", code_path=".")       # entry → episodes
+watercooler_graph_trace(episode_uuid="<uuid>", code_path=".")   # episode → entry
 ```
 
 ## Thread closure

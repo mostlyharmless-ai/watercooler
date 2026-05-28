@@ -89,7 +89,6 @@ list_threads = None
 read_thread = None
 list_thread_entries = None
 get_thread_entry = None
-get_thread_entry_range = None
 
 
 def _filter_threads_by_annotations(
@@ -768,6 +767,23 @@ def _read_thread_impl(
         raise HostedModeError(f"Unexpected error reading thread '{topic}': {e}", operation="read_thread")
 
 
+def _filter_entries(entries: list, keyword: str) -> list:
+    """Keep entries whose title or body contains *keyword* (case-insensitive).
+
+    A blank/empty keyword returns *entries* unchanged. Backs the in-thread
+    keyword filter on watercooler_list_thread_entries (#325).
+    """
+    kw = (keyword or "").strip().lower()
+    if not kw:
+        return entries
+    return [
+        e
+        for e in entries
+        if kw in (getattr(e, "title", "") or "").lower()
+        or kw in (getattr(e, "body", "") or "").lower()
+    ]
+
+
 def _list_thread_entries_impl(
     topic: str,
     offset: int = 0,
@@ -775,6 +791,7 @@ def _list_thread_entries_impl(
     format: str = "json",
     code_path: str = "",
     code_branch: str | None = None,
+    filter: str = "",
 ) -> ToolResult:
     """Return thread entry headers (metadata only) with optional pagination.
 
@@ -786,6 +803,9 @@ def _list_thread_entries_impl(
         code_path: Path to code repository
         code_branch: Filter entries by code branch. Auto-populated from current
             branch in orphan mode. Pass "*" to see all branches.
+        filter: Optional keyword — case-insensitive substring matched against
+            each entry's title and body. Only matching entries are returned
+            (in-thread keyword search); pagination applies to the matches.
     """
 
     fmt_error, resolved_format = _resolve_format(format, default="json")
@@ -820,6 +840,7 @@ def _list_thread_entries_impl(
                 raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
             raise HostedModeError(load_error, operation="list_entries")
 
+        entries = _filter_entries(entries, filter)
         total = len(entries)
         start = min(offset, total)
         end = total if limit is None else min(start + limit, total)
@@ -832,9 +853,13 @@ def _list_thread_entries_impl(
             "limit": limit,
             "entries": [_entry_header_payload(entry) for entry in slice_entries],
         }
+        if filter:
+            payload["filter"] = filter
 
         if resolved_format == "markdown":
             lines = [f"Entries for '{topic}' ({total} total)"]
+            if filter:
+                lines[0] += f" [filter: {filter}]"
             if slice_entries:
                 for entry in slice_entries:
                     timestamp = entry.timestamp or "unknown"
@@ -866,14 +891,10 @@ def _list_thread_entries_impl(
             raise ThreadNotFoundError(topic=topic)
         raise ContextError(load_error, code_path=code_path)
 
-    total = len(entries)
-    start = min(offset, total)
-    end = total if limit is None else min(start + limit, total)
-    slice_entries = entries[start:end]
-
-    # Branch-discovery hint — fires only when the topic exists but
-    # filtered entries list is empty AND an explicit branch filter is
-    # active. Matches `_read_thread_impl` semantics.
+    # Branch-discovery hint — fires only when the topic exists but the
+    # branch-filtered entries list is empty AND an explicit branch filter is
+    # active. Computed before the keyword filter, so a no-match keyword does
+    # not trigger it. Matches `_read_thread_impl` semantics.
     branch_hint = ""
     branches_with_entries_list: list[str] = []
     if not entries and code_branch and code_branch != "*":
@@ -884,6 +905,14 @@ def _list_thread_entries_impl(
                 b for b in _all_branches if b != code_branch
             )
     hint_banner = f"{branch_hint}\n\n" if branch_hint else ""
+
+    # In-thread keyword filter (#325) — narrows to matching entries.
+    entries = _filter_entries(entries, filter)
+
+    total = len(entries)
+    start = min(offset, total)
+    end = total if limit is None else min(start + limit, total)
+    slice_entries = entries[start:end]
 
     payload = {
         "topic": topic,
@@ -899,11 +928,15 @@ def _list_thread_entries_impl(
             for entry in slice_entries
         ],
     }
+    if filter:
+        payload["filter"] = filter
 
     if resolved_format == "markdown":
         lines = [f"Entries for '{topic}' ({total} total)"]
         if code_branch and code_branch != "*":
             lines[0] += f" [branch: {code_branch}]"
+        if filter:
+            lines[0] += f" [filter: {filter}]"
         if slice_entries:
             for entry in slice_entries:
                 timestamp = entry.timestamp or "unknown"
@@ -932,10 +965,37 @@ def _get_thread_entry_impl(
     topic: str,
     index: int | None = None,
     entry_id: str | None = None,
+    to_index: int | None = None,
     format: str = "json",
+    summary_only: bool = False,
     code_path: str = "",
+    code_branch: str | None = None,
 ) -> ToolResult:
-    """Return a single thread entry (header + body)."""
+    """Return a thread entry, or a contiguous range of entries.
+
+    With ``to_index`` unset this returns a single entry selected by ``index``
+    or ``entry_id``. With ``to_index`` set it returns the inclusive range
+    ``index .. to_index`` (``index`` defaults to 0), honouring ``summary_only``
+    and ``code_branch`` filtering. ``summary_only`` and ``code_branch`` apply
+    only to the range form.
+    """
+
+    if to_index is not None:
+        if entry_id is not None:
+            raise ValidationError(
+                "entry_id cannot be combined with to_index; use index as the "
+                "range start",
+                field="entry_id",
+            )
+        return _get_thread_entry_range_impl(
+            topic=topic,
+            start_index=index if index is not None else 0,
+            end_index=to_index,
+            format=format,
+            summary_only=summary_only,
+            code_path=code_path,
+            code_branch=code_branch,
+        )
 
     fmt_error, resolved_format = _resolve_format(format, default="json")
     if fmt_error:
@@ -1255,11 +1315,10 @@ def register_thread_query_tools(mcp):
     Args:
         mcp: The FastMCP server instance
     """
-    global list_threads, read_thread, list_thread_entries, get_thread_entry, get_thread_entry_range
+    global list_threads, read_thread, list_thread_entries, get_thread_entry
 
     # Register tools and store references for testing
     list_threads = mcp.tool(name="watercooler_list_threads")(_list_threads_impl)
     read_thread = mcp.tool(name="watercooler_read_thread")(_read_thread_impl)
     list_thread_entries = mcp.tool(name="watercooler_list_thread_entries")(_list_thread_entries_impl)
     get_thread_entry = mcp.tool(name="watercooler_get_thread_entry")(_get_thread_entry_impl)
-    get_thread_entry_range = mcp.tool(name="watercooler_get_thread_entry_range")(_get_thread_entry_range_impl)

@@ -759,10 +759,25 @@ class DecisionExtractorConfig(BaseModel):
         description="Max entry body chars sent to LLM",
     )
     min_confidence: int = Field(
-        default=3,
+        default=4,
         ge=1,
         le=5,
-        description="Minimum LLM confidence score to emit Decision entry (3=floor)",
+        description=(
+            "Minimum LLM confidence score to emit a direct Decision entry. "
+            "Raising to 4 (default) routes confidence-3 extractions through the "
+            "candidate-Note fallback path. Set to 3 to preserve pre-Phase-1b "
+            "direct-emission behavior."
+        ),
+    )
+    candidate_note_rate_cap_per_thread_per_week: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description=(
+            "Max candidate Notes emitted per thread per rolling 7-day window. "
+            "Additional extractions above the cap route to a private Finding "
+            "with category extraction_rejected_rate_cap."
+        ),
     )
     max_tick_duration: float = Field(
         default=300.0,
@@ -1308,12 +1323,66 @@ class T2IndexerConfig(BaseModel):
     )
 
 
+class ExternalDaemonsConfig(BaseModel):
+    """External daemon loader configuration (J.1 — in-process loader).
+
+    Lets third-party packages register a :class:`BaseDaemon` subclass with
+    the local DaemonManager without modifying the watercooler-cloud
+    source tree. Each entry in ``modules`` is an importable
+    ``"module.path:ClassName"`` spec. The loader imports the module,
+    instantiates the class with no arguments, and registers it. Failures
+    are captured per-entry via
+    :meth:`DaemonManager.record_registration_failure` so they surface in
+    :func:`watercooler_daemon_status` alongside built-in registration
+    errors.
+
+    Contract (deliberately narrow):
+
+    * The class must be importable in the running MCP server process
+      (same Python environment as watercooler-cloud — no out-of-process
+      loading, no auto-install, no manifest resolution).
+    * The class must have a no-argument constructor. Daemons that need
+      configuration must read it themselves inside ``__init__``,
+      mirroring the built-in pattern.
+    * Lifecycle (threading, ticking, sleep/wake, checkpoint
+      persistence, shutdown) is owned by the existing local
+      :class:`DaemonManager` — no sidecar / RPC / container isolation.
+    * Hosted-mode short-circuit applies: external daemons do not
+      register when ``init_daemons`` defers to the
+      :class:`HostedDaemonCoordinator` or to another process that
+      holds the daemon PID lock.
+
+    Container-friendly / sidecar / RPC / manifest-based registration is
+    out of scope for J.1 and tracked as J.2. See ``docs/DAEMONS.md``
+    section "External daemons" for the user-facing version of this
+    contract.
+    """
+
+    modules: List[str] = Field(
+        default_factory=list,
+        description=(
+            "List of ``\"module.path:ClassName\"`` specs for external "
+            "BaseDaemon subclasses to register at startup. Each class "
+            "must be importable in-process and have a no-argument "
+            "constructor; see ``ExternalDaemonsConfig`` docstring and "
+            "``docs/DAEMONS.md`` for the full contract."
+        ),
+    )
+
+
 class DaemonsConfig(BaseModel):
     """Daemon management configuration."""
 
     enabled: bool = Field(
         default=False,
         description="Enable daemon management system globally (opt-in per project)",
+    )
+    external: ExternalDaemonsConfig = Field(
+        default_factory=ExternalDaemonsConfig,
+        description=(
+            "External daemon loader — config-driven registration of "
+            "third-party BaseDaemon subclasses ([mcp.daemons.external])"
+        ),
     )
     llm: Optional[DaemonLLMConfig] = Field(
         default=None,

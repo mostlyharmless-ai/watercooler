@@ -1,5 +1,6 @@
 """Tests for sync_repair.py — derived-only dirt classification and auto-clean."""
 
+import subprocess
 import pytest
 from pathlib import Path
 
@@ -7,6 +8,8 @@ from watercooler.sync_repair import (
     DERIVED_FILE_PATTERNS,
     DiagnosticReport,
     _parse_porcelain_filename,
+    diagnose,
+    repair,
 )
 
 
@@ -91,3 +94,121 @@ class TestParsePorcelainFilename:
     def test_filename_starting_with_M(self):
         """Regression: old lstrip approach would eat leading M from filename."""
         assert _parse_porcelain_filename("?? META.json") == "META.json"
+
+
+# ============================================================================
+# repair() local-only commit handling — preserve-first behavior
+#
+# Regression coverage for bug-watercooler-sync-repair-resets-unpushed / #799:
+# the default repair path must NEVER discard committed-but-unpushed work.
+# ============================================================================
+
+
+def _git(cwd: Path, *args: str) -> str:
+    """Run a git command in ``cwd``, returning stdout."""
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout
+
+
+@pytest.fixture
+def synced_pair(tmp_path):
+    """A threads worktree tracking a local bare 'remote', both in parity.
+
+    Returns (worktree_dir, remote_dir).
+    """
+    remote = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(remote)],
+        capture_output=True, check=True,
+    )
+    wt = tmp_path / "threads"
+    subprocess.run(
+        ["git", "init", "-b", "main", str(wt)], capture_output=True, check=True,
+    )
+    _git(wt, "config", "user.email", "test@example.com")
+    _git(wt, "config", "user.name", "Test")
+    _git(wt, "remote", "add", "origin", str(remote))
+    (wt / "seed.txt").write_text("seed\n")
+    _git(wt, "add", "seed.txt")
+    _git(wt, "commit", "-m", "seed")
+    _git(wt, "push", "-u", "origin", "main")
+    return wt, remote
+
+
+def _make_local_only_commit(wt: Path, filename: str, message: str) -> None:
+    """Create a committed-but-unpushed commit in the worktree."""
+    (wt / filename).write_text("local-only content\n")
+    _git(wt, "add", filename)
+    _git(wt, "commit", "-m", message)
+
+
+class TestRepairPreservesLocalCommits:
+    """repair() must recover local-only commits, not destroy them."""
+
+    def test_ahead_only_recovered_by_push(self, synced_pair):
+        """Default repair pushes local-only commits — no data loss."""
+        wt, remote = synced_pair
+        _make_local_only_commit(wt, "entry.txt", "local-only entry")
+        assert diagnose(wt).ahead == 1
+
+        actions = repair(wt)
+
+        assert diagnose(wt).ahead == 0, "commit should now be on the remote"
+        assert any("Recover" in a and "pushed" in a for a in actions), actions
+        remote_log = subprocess.run(
+            ["git", "-C", str(remote), "log", "--format=%s"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        assert "local-only entry" in remote_log
+
+    def test_default_never_resets_when_push_fails(self, synced_pair, tmp_path):
+        """If the push side is broken, commits stay intact — no reset."""
+        wt, _ = synced_pair
+        _make_local_only_commit(wt, "stranded.txt", "stranded entry")
+        # Break the remote so push cannot succeed.
+        _git(wt, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
+
+        actions = repair(wt)
+
+        assert diagnose(wt).ahead == 1, "local-only commit must be preserved"
+        assert any("FAILED" in a for a in actions), actions
+        head_subject = _git(wt, "log", "-1", "--format=%s").strip()
+        assert head_subject == "stranded entry"
+
+    def test_discard_opt_in_resets(self, synced_pair):
+        """discard_local_commits=True is the explicit destructive path."""
+        wt, _ = synced_pair
+        _make_local_only_commit(wt, "doomed.txt", "doomed entry")
+
+        actions = repair(wt, discard_local_commits=True)
+
+        assert diagnose(wt).ahead == 0
+        assert any("Discard" in a for a in actions), actions
+        # Discarded commits are captured in the recovery log first.
+        recovery_log = wt / ".watercooler" / "recovery.jsonl"
+        assert recovery_log.exists()
+        assert "doomed entry" in recovery_log.read_text(encoding="utf-8")
+
+    def test_dry_run_changes_nothing(self, synced_pair):
+        """dry_run reports the recover action without touching HEAD."""
+        wt, _ = synced_pair
+        _make_local_only_commit(wt, "entry.txt", "untouched entry")
+
+        actions = repair(wt, dry_run=True)
+
+        assert diagnose(wt).ahead == 1
+        assert any("[DRY RUN]" in a and "Recover" in a for a in actions), actions
+
+    def test_skips_when_worktree_dirty(self, synced_pair):
+        """A dirty worktree blocks the local-commit path entirely."""
+        wt, _ = synced_pair
+        _make_local_only_commit(wt, "entry.txt", "committed entry")
+        (wt / "uncommitted.txt").write_text("work in progress\n")
+
+        actions = repair(wt)
+
+        assert diagnose(wt).ahead == 1
+        assert any("SKIPPED" in a for a in actions), actions

@@ -883,3 +883,48 @@ def load_findings(
         # File-append order is chronological; reverse for newest-first.
         all_findings.reverse()
     return all_findings if limit is None else all_findings[:limit]
+
+
+def count_findings(
+    daemon_name: str,
+    *,
+    namespace: str = "",
+    _allow_unscoped: bool = False,
+) -> int:
+    """Count persisted findings on disk for *daemon_name* / *namespace*.
+
+    Cheaper than ``load_findings`` because it skips JSON parsing — just
+    counts non-blank lines.  Used by ``BaseDaemon.status_summary`` to
+    surface ``persisted_findings_count`` so consumers see the on-disk
+    total instead of just the in-memory session counter
+    (``total_findings``) which resets on process restart.
+
+    Closes #682 Gap 1.  Returns 0 when the findings file doesn't exist
+    yet (cold-start) or can't be read (defensive).  Reads without
+    holding ``_findings_lock`` for the same atomicity reasons
+    ``load_findings`` documents.
+    """
+    try:
+        path = (
+            _daemon_dir(
+                daemon_name,
+                namespace=namespace,
+                _allow_unscoped=_allow_unscoped,
+            )
+            / "findings.jsonl"
+        )
+    except Exception:  # noqa: BLE001 — never raise from a status query
+        return 0
+    if not path.exists():
+        return 0
+    try:
+        with open(path) as f:
+            return sum(1 for line in f if line.strip())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "DAEMON[%s]: count_findings: failed to read %s: %s",
+            daemon_name,
+            path,
+            exc,
+        )
+        return 0

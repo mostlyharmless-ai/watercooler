@@ -173,23 +173,18 @@ list_threads = _thread_query_tools.list_threads
 read_thread = _thread_query_tools.read_thread
 list_thread_entries = _thread_query_tools.list_thread_entries
 get_thread_entry = _thread_query_tools.get_thread_entry
-get_thread_entry_range = _thread_query_tools.get_thread_entry_range
 say = _thread_write_tools.say
 ack = _thread_write_tools.ack
 handoff = _thread_write_tools.handoff
 set_status = _thread_write_tools.set_status
-reindex = _sync_tools.reindex
-baseline_graph_stats = _graph_tools.baseline_graph_stats
+baseline_graph_tool = _graph_tools.baseline_graph_tool
 search_graph_tool = _graph_tools.search_graph_tool
-find_similar_entries_tool = _graph_tools.find_similar_entries_tool
-baseline_sync_status_tool = _graph_tools.baseline_sync_status_tool
 access_stats_tool = _graph_tools.access_stats_tool
 # New graph tooling suite
 graph_enrich_tool = _graph_tools.graph_enrich_tool
-graph_recover_tool = _graph_tools.graph_recover_tool
 graph_project_tool = _graph_tools.graph_project_tool
 # Memory tools (some tools removed - see replacement mappings in tools/memory.py)
-get_entity_edge = _memory_tools.get_entity_edge
+graph_trace = _memory_tools.graph_trace
 diagnose_memory = _memory_tools.diagnose_memory
 # Daemon tools
 daemon_status_tool = _daemon_tools.daemon_status

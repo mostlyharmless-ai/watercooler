@@ -23,7 +23,7 @@ docs/MCP-CLIENTS.md for the full discussion.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 # ---------------------------------------------------------------------------
 # Route and capability type aliases
@@ -103,11 +103,15 @@ HYBRID_DEFAULT_ROUTES: dict[str, RouteChoice] = {
 # Tool-name sets used by surface builders
 # ---------------------------------------------------------------------------
 
-# Mixed tools: registered locally but wrapper decides local vs remote per-call.
+# Mixed tools: registered locally but a hybrid wrapper decides local vs remote
+# vs disabled per call. watercooler_bulk_index is mixed because its modes span
+# capabilities — default ingest (memory_ingest, remote) vs preflight_only= /
+# run_pipeline= (memory_migration / memory_admin_cluster, disabled by default);
+# a bare-name mount would expose the disabled modes (PR4a review).
 MIXED_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "watercooler_search",
-        "watercooler_find_similar",
+        "watercooler_bulk_index",
     }
 )
 
@@ -116,71 +120,59 @@ HYBRID_REMOTE_MOUNT_TOOLS: frozenset[str] = frozenset(
     {
         "watercooler_smart_query",
         "watercooler_diagnose_memory",
-        "watercooler_get_entity_edge",
-        "watercooler_get_entry_provenance",
+        "watercooler_graph_trace",
         "watercooler_memory_task_status",
-        "watercooler_bulk_index",
         "watercooler_graphiti_add_episode",
         # Daemon tools: routed to Railway in hybrid mode
         "watercooler_daemon_status",
         "watercooler_daemon_findings",
         "watercooler_pulse_snapshot",
-        "watercooler_acknowledge_finding",
     }
 )
 
 # Daemon tools: observe and control daemons (routed to Railway in hybrid mode).
+# acknowledge_finding folded into daemon_findings(action="acknowledge") in PR5
+# D1 — the daemon_control capability is now a daemon_findings mode.
 DAEMON_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "watercooler_daemon_status",
         "watercooler_daemon_findings",
         "watercooler_pulse_snapshot",
-        "watercooler_acknowledge_finding",
     }
 )
 
-# Disabled in hybrid by default (memory_admin_graph + memory_admin_cluster + memory_migration).
+# Disabled in hybrid by default (memory_admin_graph). The memory_admin_cluster
+# and memory_migration capabilities are now reached as bulk_index modes
+# (run_pipeline= / preflight_only=) and route per-(tool, args), not per name.
 HYBRID_DISABLED_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "watercooler_clear_graph_group",
-        "watercooler_leanrag_run_pipeline",
-        "watercooler_migration_preflight",
-        "watercooler_migrate_to_memory_backend",
     }
 )
 
-# All remote-capable memory and migration tools (superset of hybrid remote-mount
-# + disabled). Hosted surfaces may expose all of these.
+# All remote-capable memory tools (superset of hybrid remote-mount + disabled).
+# Hosted surfaces may expose all of these.
 REMOTE_CAPABLE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "watercooler_smart_query",
         "watercooler_diagnose_memory",
-        "watercooler_get_entity_edge",
-        "watercooler_get_entry_provenance",
+        "watercooler_graph_trace",
         "watercooler_memory_task_status",
         "watercooler_bulk_index",
         "watercooler_graphiti_add_episode",
         "watercooler_clear_graph_group",
-        "watercooler_leanrag_run_pipeline",
-        "watercooler_migration_preflight",
-        "watercooler_migrate_to_memory_backend",
     }
 )
 
 # All graph tool names (registered by tools/graph.py).
 GRAPH_TOOL_NAMES: frozenset[str] = frozenset(
     {
-        "watercooler_baseline_graph_stats",
+        "watercooler_baseline_graph",
         "watercooler_search",
-        "watercooler_find_similar",
-        "watercooler_baseline_sync_status",
         "watercooler_access_stats",
         "watercooler_graph_enrich",
-        "watercooler_graph_recover",
         "watercooler_graph_project",
-        "watercooler_annotate",
-        "watercooler_remove_annotation",
-        "watercooler_get_annotations",
+        "watercooler_annotations",
         "watercooler_delete_entry",
         "watercooler_delete_thread",
         "watercooler_archive_thread",
@@ -193,85 +185,126 @@ GRAPH_TOOL_NAMES: frozenset[str] = frozenset(
 PREMIUM_GRAPH_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "watercooler_search",
-        "watercooler_find_similar",
     }
 )
 
 # ---------------------------------------------------------------------------
-# Tool → capability mapping
+# Tool × capability × authority matrix
 # ---------------------------------------------------------------------------
+#
+# TOOL_MATRIX is the single source of truth for the tool-surface
+# consolidation (thread mcp-tool-surface-consolidation-2026-05): every
+# registered watercooler MCP tool has exactly one entry. _TOOL_CAPABILITY_MAP
+# is *derived* from it — do not edit that map directly. See
+# dev_docs/reference/tool-capability-matrix.md for the schema and rationale.
 
+AuthorityLevel = Literal["L1", "L2", "L3"]
+# L1  autonomous  — retrieval / analysis / observation / ordinary Note writes;
+#                   an agent may invoke without human authorization.
+# L2  preparation — mutates durable state but asserts no human judgment
+#                   (indexing, graph maintenance, annotation writes).
+# L3  authority   — asserts human-domain authority (Decision/Closure writes,
+#                   status mutation, archive, delete, daemon control);
+#                   requires explicit human authorization.
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    """One row of TOOL_MATRIX: a tool's capability and authority level.
+
+    For a tool whose capability and/or authority depends on call arguments
+    (e.g. ``watercooler_search`` by ``mode``, ``watercooler_write`` by
+    ``authority_mode``), ``arg_sensitive`` is True and the ``capability`` /
+    ``authority`` fields record the *default* (no-argument) resolution; the
+    live value comes from the resolver registered in ``_ARG_RESOLVERS`` /
+    ``_AUTHORITY_ARG_RESOLVERS``.
+    """
+
+    capability: CapabilityId
+    authority: AuthorityLevel
+    arg_sensitive: bool = False
+    note: str = ""
+
+
+TOOL_MATRIX: dict[str, ToolSpec] = {
+    # ── Thread core ──────────────────────────────────────────────────────
+    "watercooler_list_threads": ToolSpec("threads_core", "L1"),
+    "watercooler_read_thread": ToolSpec("threads_core", "L1"),
+    "watercooler_list_thread_entries": ToolSpec("threads_core", "L1"),
+    "watercooler_get_thread_entry": ToolSpec("threads_core", "L1"),
+    "watercooler_say": ToolSpec("threads_core", "L1"),
+    "watercooler_ack": ToolSpec("threads_core", "L1"),
+    "watercooler_handoff": ToolSpec("threads_core", "L1"),
+    "watercooler_set_status": ToolSpec(
+        "threads_core", "L3", note="status mutation is authority-gated"
+    ),
+    "watercooler_write": ToolSpec(
+        "threads_core", "L1", arg_sensitive=True,
+        note="authority_mode=ordinary → L1; decision/closure → L3",
+    ),
+    # ── Thread state admin ───────────────────────────────────────────────
+    "watercooler_delete_entry": ToolSpec("thread_state_admin", "L3"),
+    "watercooler_delete_thread": ToolSpec("thread_state_admin", "L3"),
+    "watercooler_archive_thread": ToolSpec("thread_state_admin", "L3"),
+    # ── Annotation ───────────────────────────────────────────────────────
+    "watercooler_annotations": ToolSpec(
+        "annotation_admin", "L2", arg_sensitive=True,
+        note="action=get → L1; action=add/remove → L2",
+    ),
+    "watercooler_follow_xref": ToolSpec("annotation_admin", "L1"),
+    # ── Baseline search ──────────────────────────────────────────────────
+    # watercooler_search capability resolves per-(tool, args): by mode/semantic,
+    # or the seed_entry_id= (semantic_similarity) / namespaces= (federation_search)
+    # mode selectors (PR6). Every mode is an L1 read.
+    "watercooler_search": ToolSpec(
+        "baseline_search", "L1", arg_sensitive=True,
+        note="capability resolves by mode/semantic/seed_entry_id/namespaces; "
+        "all modes are L1 reads",
+    ),
+    "watercooler_baseline_graph": ToolSpec("baseline_search", "L1"),
+    "watercooler_access_stats": ToolSpec("baseline_search", "L1"),
+    "watercooler_list_decisions": ToolSpec("baseline_search", "L1"),
+    # ── Semantic similarity ──────────────────────────────────────────────
+    # PR3b: hosted T1 embedding upsert/list/delete, action-selected.
+    "watercooler_semantic": ToolSpec(
+        "semantic_similarity", "L2", arg_sensitive=True,
+        note="action=list → L1; action=upsert/delete → L2",
+    ),
+    # ── Baseline maintenance (local-only, not hosted-safe) ───────────────
+    "watercooler_graph_enrich": ToolSpec("baseline_maintenance", "L2"),
+    "watercooler_graph_project": ToolSpec("baseline_maintenance", "L2"),
+    "watercooler_sync_repair": ToolSpec("baseline_maintenance", "L2"),
+    # ── Memory query ─────────────────────────────────────────────────────
+    "watercooler_smart_query": ToolSpec("memory_query", "L1"),
+    "watercooler_graph_trace": ToolSpec("memory_query", "L1"),
+    # ── Memory observe ───────────────────────────────────────────────────
+    "watercooler_diagnose_memory": ToolSpec("memory_observe", "L1"),
+    "watercooler_memory_task_status": ToolSpec("memory_observe", "L1"),
+    # ── Memory ingest ────────────────────────────────────────────────────
+    # bulk_index default = memory_ingest/L2; preflight_only= and run_pipeline=
+    # modes resolve via _ARG_RESOLVERS / _AUTHORITY_ARG_RESOLVERS (PR4a B1/B2).
+    "watercooler_bulk_index": ToolSpec(
+        "memory_ingest", "L2", arg_sensitive=True
+    ),
+    "watercooler_graphiti_add_episode": ToolSpec("memory_ingest", "L2"),
+    # ── Memory admin ─────────────────────────────────────────────────────
+    "watercooler_clear_graph_group": ToolSpec("memory_admin_graph", "L2"),
+    # ── Daemon ───────────────────────────────────────────────────────────
+    "watercooler_daemon_status": ToolSpec("daemon_observe", "L1"),
+    # daemon_findings default = daemon_observe/L1 (list); action="acknowledge"
+    # resolves to daemon_control/L3 via the _ARG_RESOLVERS entries (PR5 D1).
+    "watercooler_daemon_findings": ToolSpec(
+        "daemon_observe", "L1", arg_sensitive=True
+    ),
+    "watercooler_pulse_snapshot": ToolSpec("daemon_observe", "L1"),
+    # ── Roles / diagnostics ──────────────────────────────────────────────
+    "watercooler_roles": ToolSpec("diagnostics", "L1"),
+    "watercooler_health": ToolSpec("diagnostics", "L1"),
+}
+
+# Derived from TOOL_MATRIX — the authoritative source. Do not edit directly.
 _TOOL_CAPABILITY_MAP: dict[str, CapabilityId] = {
-    # Thread core
-    "watercooler_list_threads": "threads_core",
-    "watercooler_read_thread": "threads_core",
-    "watercooler_list_thread_entries": "threads_core",
-    "watercooler_get_thread_entry": "threads_core",
-    "watercooler_get_thread_entry_range": "threads_core",
-    "watercooler_say": "threads_core",
-    "watercooler_ack": "threads_core",
-    "watercooler_handoff": "threads_core",
-    "watercooler_set_status": "threads_core",
-    # Thread state admin
-    "watercooler_delete_entry": "thread_state_admin",
-    "watercooler_delete_thread": "thread_state_admin",
-    "watercooler_archive_thread": "thread_state_admin",
-    # Annotation admin
-    "watercooler_annotate": "annotation_admin",
-    "watercooler_remove_annotation": "annotation_admin",
-    "watercooler_get_annotations": "annotation_admin",
-    "watercooler_follow_xref": "annotation_admin",
-    # Baseline search — note: watercooler_search is mode-dependent (see resolve_search_capability)
-    "watercooler_baseline_graph_stats": "baseline_search",
-    "watercooler_baseline_sync_status": "baseline_search",
-    "watercooler_access_stats": "baseline_search",
-    "watercooler_list_decisions": "baseline_search",
-    # Semantic similarity
-    "watercooler_find_similar": "semantic_similarity",
-    # Plan v20 Phase 8: hosted-side T1 embedding upsert/delete. Registered
-    # only on hosted_full / hosted_premium surfaces; hybrid clients reach
-    # them via premium_client. Semantic-similarity capability keeps the
-    # hosted auth middleware gate honest.
-    "watercooler_semantic_upsert_embedding": "semantic_similarity",
-    "watercooler_semantic_delete_embedding": "semantic_similarity",
-    "watercooler_semantic_list_embeddings": "semantic_similarity",
-    # Baseline maintenance (local-only, not hosted-safe)
-    "watercooler_graph_enrich": "baseline_maintenance",
-    "watercooler_graph_recover": "baseline_maintenance",
-    "watercooler_graph_project": "baseline_maintenance",
-    "watercooler_sync_repair": "baseline_maintenance",
-    "watercooler_reindex": "baseline_maintenance",
-    # Memory query
-    "watercooler_smart_query": "memory_query",
-    "watercooler_get_entity_edge": "memory_query",
-    "watercooler_get_entry_provenance": "memory_query",
-    # Memory observe
-    "watercooler_diagnose_memory": "memory_observe",
-    "watercooler_memory_task_status": "memory_observe",
-    # Memory ingest
-    "watercooler_bulk_index": "memory_ingest",
-    "watercooler_graphiti_add_episode": "memory_ingest",
-    # Graph memory admin
-    "watercooler_clear_graph_group": "memory_admin_graph",
-    # Cluster admin
-    "watercooler_leanrag_run_pipeline": "memory_admin_cluster",
-    # Memory migration
-    "watercooler_migration_preflight": "memory_migration",
-    "watercooler_migrate_to_memory_backend": "memory_migration",
-    # Daemon
-    "watercooler_daemon_status": "daemon_observe",
-    "watercooler_daemon_findings": "daemon_observe",
-    "watercooler_pulse_snapshot": "daemon_observe",
-    "watercooler_acknowledge_finding": "daemon_control",
-    "watercooler_decision_extractor_reset": "daemon_control",
-    # Federation
-    "watercooler_federated_search": "federation_search",
-    # Roles
-    "watercooler_roles": "diagnostics",
-    "watercooler_role_details": "diagnostics",
-    # Diagnostics
-    "watercooler_health": "diagnostics",
-    "watercooler_whoami": "diagnostics",
+    name: spec.capability for name, spec in TOOL_MATRIX.items()
 }
 
 
@@ -310,24 +343,119 @@ def resolve_find_similar_capability() -> CapabilityId:
     return "semantic_similarity"
 
 
+# ---------------------------------------------------------------------------
+# Argument-sensitive resolution
+# ---------------------------------------------------------------------------
+#
+# Most tools have a static (tool → capability) and (tool → authority) mapping
+# in TOOL_MATRIX. A few resolve per call argument. Each such tool registers a
+# resolver here; later consolidation PRs add resolvers as they collapse tools
+# behind an ``action=`` / ``mode=`` selector. This is the generalization of
+# the former hard-coded ``watercooler_search`` special case — the safety
+# substrate that lets a collapsed tool span an authority/capability boundary
+# while still resolving per ``(tool, arguments)``.
+
+_ARG_RESOLVERS: dict[str, Callable[[dict[str, Any]], CapabilityId]] = {
+    # watercooler_search (PR6 D4/D5): seed_entry_id= is seeded similarity
+    # (semantic_similarity, folded-in find_similar); federated=/namespaces= is
+    # federated search (federation_search, folded-in federated_search);
+    # otherwise the capability resolves by mode/semantic.
+    "watercooler_search": lambda args: (
+        "federation_search"
+        if (args.get("federated") or args.get("namespaces"))
+        else "semantic_similarity"
+        if args.get("seed_entry_id")
+        else resolve_search_capability(
+            args.get("mode", "entries"),
+            query=args.get("query", ""),
+            semantic=args.get("semantic", False),
+        )
+    ),
+    # watercooler_bulk_index (PR4a B1/B2): preflight_only= is a migration
+    # prerequisite check; run_pipeline= runs the LeanRAG clustering pipeline;
+    # the default queues ingest tasks. Each mode keeps the capability the
+    # former standalone tool resolved to.
+    "watercooler_bulk_index": lambda args: (
+        "memory_migration"
+        if args.get("preflight_only")
+        else "memory_admin_cluster"
+        if args.get("run_pipeline")
+        else "memory_ingest"
+    ),
+    # watercooler_daemon_findings (PR5 D1): action="acknowledge" is the
+    # folded-in acknowledge_finding (daemon_control); listing is daemon_observe.
+    "watercooler_daemon_findings": lambda args: (
+        "daemon_control"
+        if str(args.get("action", "")).strip().lower() == "acknowledge"
+        else "daemon_observe"
+    ),
+}
+
+_AUTHORITY_ARG_RESOLVERS: dict[str, Callable[[dict[str, Any]], AuthorityLevel]] = {
+    # watercooler_write: ordinary Note → L1; decision/closure → L3.
+    "watercooler_write": lambda args: (
+        "L3"
+        if str(args.get("authority_mode", "ordinary")) in ("decision", "closure")
+        else "L1"
+    ),
+    # watercooler_semantic: action=list is an L1 read; upsert/delete are L2.
+    "watercooler_semantic": lambda args: (
+        "L1" if str(args.get("action", "")).strip().lower() == "list" else "L2"
+    ),
+    # watercooler_annotations: action=get is an L1 read; add/remove are L2.
+    "watercooler_annotations": lambda args: (
+        "L1" if str(args.get("action", "")).strip().lower() == "get" else "L2"
+    ),
+    # watercooler_bulk_index: preflight_only= is a read-only prerequisite
+    # check (L1, folded-in migration_preflight); queuing ingest and running
+    # the LeanRAG pipeline are both L2.
+    "watercooler_bulk_index": lambda args: (
+        "L1" if args.get("preflight_only") else "L2"
+    ),
+    # watercooler_daemon_findings: listing is an L1 read; action="acknowledge"
+    # (folded-in acknowledge_finding) is an L3 authority-gated write.
+    "watercooler_daemon_findings": lambda args: (
+        "L3"
+        if str(args.get("action", "")).strip().lower() == "acknowledge"
+        else "L1"
+    ),
+}
+
+
 def tool_capability(
     tool_name: str, arguments: dict[str, Any] | None = None
 ) -> CapabilityId:
     """Return the capability required to execute *tool_name*.
 
-    For ``watercooler_search`` the resolved capability depends on the
-    ``mode`` argument; all other tools have a static mapping.
+    Tools whose capability depends on call arguments (e.g. ``watercooler_search``
+    by ``mode``) resolve through ``_ARG_RESOLVERS``; all others use the static
+    TOOL_MATRIX projection.
     """
-    if tool_name == "watercooler_search":
-        args = arguments or {}
-        mode = args.get("mode", "entries")
-        query = args.get("query", "")
-        semantic = args.get("semantic", False)
-        return resolve_search_capability(mode, query=query, semantic=semantic)
+    resolver = _ARG_RESOLVERS.get(tool_name)
+    if resolver is not None:
+        return resolver(arguments or {})
     cap = _TOOL_CAPABILITY_MAP.get(tool_name)
     if cap is None:
         raise ValueError(f"Unknown tool: {tool_name}")
     return cap
+
+
+def tool_authority(
+    tool_name: str, arguments: dict[str, Any] | None = None
+) -> AuthorityLevel:
+    """Return the agent-authority-ladder level a call to *tool_name* implies.
+
+    Tools whose authority depends on call arguments (e.g. ``watercooler_write``
+    by ``authority_mode``) resolve through ``_AUTHORITY_ARG_RESOLVERS``; all
+    others use the static TOOL_MATRIX authority field.
+    """
+    resolver = _AUTHORITY_ARG_RESOLVERS.get(tool_name)
+    if resolver is not None:
+        return resolver(arguments or {})
+    spec = TOOL_MATRIX.get(tool_name)
+    if spec is None:
+        raise ValueError(f"Unknown tool: {tool_name}")
+    return spec.authority
 
 
 # ---------------------------------------------------------------------------

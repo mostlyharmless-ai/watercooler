@@ -22,7 +22,6 @@ from watercooler.baseline_graph.sync import (
     reconcile_graph,
     record_graph_sync_error,
     should_update_thread_summary,
-    sync_entry_to_graph,
     sync_thread_to_graph,
 )
 from watercooler.baseline_graph import storage
@@ -233,78 +232,6 @@ def test_graph_sync_state_round_trip(threads_dir: Path, graph_dir: Path):
 # ============================================================================
 
 
-def test_sync_entry_to_graph_creates_nodes(threads_dir: Path, sample_thread: Path):
-    """Test sync_entry_to_graph creates per-thread graph files."""
-    success = sync_entry_to_graph(threads_dir, "test-topic")
-
-    assert success
-
-    # Check per-thread format files
-    thread_dir = threads_dir / "graph" / "baseline" / "threads" / "test-topic"
-    meta_file = thread_dir / "meta.json"
-    entries_file = thread_dir / "entries.jsonl"
-
-    assert meta_file.exists()
-    assert entries_file.exists()
-
-    # Check thread meta
-    meta = json.loads(meta_file.read_text(encoding="utf-8"))
-    assert meta.get("type") == "thread"
-    assert meta.get("topic") == "test-topic"
-
-    # Check entry nodes
-    entries = []
-    for line in entries_file.read_text(encoding="utf-8").strip().split("\n"):
-        entries.append(json.loads(line))
-    assert len(entries) >= 1
-
-
-def test_sync_entry_to_graph_creates_edges(threads_dir: Path, sample_thread: Path):
-    """Test sync_entry_to_graph creates edges."""
-    sync_entry_to_graph(threads_dir, "test-topic")
-
-    # Check per-thread edges file
-    edges_file = threads_dir / "graph" / "baseline" / "threads" / "test-topic" / "edges.jsonl"
-    assert edges_file.exists()
-
-    edges = []
-    for line in edges_file.read_text(encoding="utf-8").strip().split("\n"):
-        edges.append(json.loads(line))
-
-    # Should have at least one "contains" edge
-    contains_edges = [e for e in edges if e.get("type") == "contains"]
-    assert len(contains_edges) >= 1
-
-
-def test_sync_entry_to_graph_updates_state(threads_dir: Path, sample_thread: Path):
-    """Test sync_entry_to_graph updates sync state."""
-    sync_entry_to_graph(threads_dir, "test-topic")
-
-    state = get_graph_sync_state(threads_dir, "test-topic")
-    assert state is not None
-    assert state.status == "ok"
-    assert state.last_synced_entry_id is not None
-
-
-def test_sync_entry_to_graph_nonexistent_thread(threads_dir: Path):
-    """Test sync_entry_to_graph returns False for nonexistent thread."""
-    success = sync_entry_to_graph(threads_dir, "nonexistent")
-    assert not success
-
-
-def test_sync_entry_with_specific_entry_id(threads_dir: Path, sample_thread: Path):
-    """Test sync_entry_to_graph with specific entry ID."""
-    # First sync to create initial state
-    sync_thread_to_graph(threads_dir, "test-topic")
-
-    # Sync specific entry
-    success = sync_entry_to_graph(
-        threads_dir, "test-topic", entry_id="01TEST00000000000000000001"
-    )
-
-    assert success
-
-
 # ============================================================================
 # Thread Sync Tests
 # ============================================================================
@@ -454,25 +381,6 @@ def test_concurrent_sync_operations(threads_dir: Path, sample_thread: Path):
     # Verify meta.json is valid
     meta_file = threads_dir / "graph" / "baseline" / "threads" / "test-topic" / "meta.json"
     json.loads(meta_file.read_text(encoding="utf-8"))  # Should not raise
-
-
-def test_sync_failure_does_not_block(threads_dir: Path, sample_thread: Path):
-    """Test that sync failure is recorded but doesn't raise."""
-    # Graph dir already exists from sample_thread fixture
-
-    # Mock parse_thread_file to raise
-    with patch(
-        "watercooler.baseline_graph.sync.parse_thread_file",
-        side_effect=Exception("Parse failed"),
-    ):
-        success = sync_entry_to_graph(threads_dir, "test-topic")
-
-    # Should return False, not raise
-    assert not success
-
-    # Error should be recorded
-    state = get_graph_sync_state(threads_dir, "test-topic")
-    assert state.status == "error"
 
 
 # ============================================================================
@@ -744,54 +652,6 @@ def test_generate_embedding_no_server():
 # ============================================================================
 
 
-def test_sync_entry_with_embeddings_flag(threads_dir: Path, sample_thread: Path, monkeypatch):
-    """Test sync_entry_to_graph respects generate_embeddings flag."""
-    # Track if embedding was attempted
-    embedding_called = []
-
-    def mock_generate_embedding(text, config=None):
-        embedding_called.append(text)
-        return [0.1, 0.2, 0.3]  # Mock embedding vector
-
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync.generate_embedding",
-        mock_generate_embedding,
-    )
-    # Mock service availability check
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync.is_embedding_available",
-        lambda config=None: True,
-    )
-
-    # Sync with embeddings enabled
-    success = sync_entry_to_graph(
-        threads_dir, "test-topic", generate_embeddings=True
-    )
-
-    assert success
-    assert len(embedding_called) > 0  # Embedding was generated
-
-
-def test_sync_entry_without_embeddings_flag(threads_dir: Path, sample_thread: Path, monkeypatch):
-    """Test sync_entry_to_graph skips embeddings when disabled."""
-    embedding_called = []
-
-    def mock_generate_embedding(text, config=None):
-        embedding_called.append(text)
-        return [0.1, 0.2, 0.3]
-
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync.generate_embedding",
-        mock_generate_embedding,
-    )
-
-    # Sync with embeddings disabled (default)
-    success = sync_entry_to_graph(threads_dir, "test-topic", generate_embeddings=False)
-
-    assert success
-    assert len(embedding_called) == 0  # Embedding was not generated
-
-
 def test_reconcile_graph_with_embeddings(threads_dir: Path, sample_thread: Path, monkeypatch):
     """Test reconcile_graph passes generate_embeddings to sync."""
     embedding_called = []
@@ -955,97 +815,6 @@ def test_try_auto_start_service_no_server_manager(monkeypatch):
     assert isinstance(result, bool)
 
 
-def test_sync_skips_llm_when_unavailable(threads_dir: Path, sample_thread: Path, monkeypatch):
-    """Test sync_entry_to_graph skips LLM summary when service unavailable."""
-    llm_called = []
-
-    def mock_summarize_entry(*args, **kwargs):
-        llm_called.append(True)
-        return "mock summary"
-
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync.summarize_entry",
-        mock_summarize_entry,
-    )
-    # LLM service is unavailable
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync.is_llm_service_available",
-        lambda config=None: False,
-    )
-    # Don't try auto-start
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync._try_auto_start_service",
-        lambda *args: False,
-    )
-
-    # Sync with summaries enabled but service unavailable
-    success = sync_entry_to_graph(
-        threads_dir, "test-topic", generate_summaries=True
-    )
-
-    assert success
-    assert len(llm_called) == 0  # LLM was NOT called because service unavailable
-
-
-def test_sync_calls_llm_when_available(threads_dir: Path, sample_thread: Path, monkeypatch):
-    """Test sync_entry_to_graph calls LLM when service is available."""
-    llm_called = []
-
-    def mock_summarize_entry(*args, **kwargs):
-        llm_called.append(True)
-        return "mock summary"
-
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync.summarize_entry",
-        mock_summarize_entry,
-    )
-    # LLM service is available
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync.is_llm_service_available",
-        lambda config=None: True,
-    )
-
-    # Sync with summaries enabled
-    success = sync_entry_to_graph(
-        threads_dir, "test-topic", generate_summaries=True
-    )
-
-    assert success
-    assert len(llm_called) > 0  # LLM was called
-
-
-def test_sync_skips_embedding_when_unavailable(threads_dir: Path, sample_thread: Path, monkeypatch):
-    """Test sync_entry_to_graph skips embedding when service unavailable."""
-    embed_called = []
-
-    def mock_generate_embedding(*args, **kwargs):
-        embed_called.append(True)
-        return [0.1, 0.2, 0.3]
-
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync.generate_embedding",
-        mock_generate_embedding,
-    )
-    # Embedding service is unavailable
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync.is_embedding_available",
-        lambda config=None: False,
-    )
-    # Don't try auto-start
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync._try_auto_start_service",
-        lambda *args: False,
-    )
-
-    # Sync with embeddings enabled but service unavailable
-    success = sync_entry_to_graph(
-        threads_dir, "test-topic", generate_embeddings=True
-    )
-
-    assert success
-    assert len(embed_called) == 0  # Embedding was NOT called
-
-
 # ============================================================================
 # Memory Backend Sync Hook Tests (Milestone 5.3)
 # ============================================================================
@@ -1195,49 +964,6 @@ def test_sync_to_memory_backend_non_blocking(threads_dir: Path, sample_thread: P
         # Restore original callback
         from watercooler_mcp.memory_sync import _graphiti_sync_callback
         register_memory_sync_callback("graphiti", _graphiti_sync_callback)
-
-
-def test_sync_entry_calls_memory_hook_when_enabled(threads_dir: Path, sample_thread: Path, monkeypatch):
-    """Test sync_entry_to_graph calls memory backend hook when enabled."""
-    from watercooler.baseline_graph.sync import sync_entry_to_graph
-
-    monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
-
-    memory_calls = []
-
-    def mock_sync_to_memory(*args, **kwargs):
-        memory_calls.append(kwargs)
-        return True
-
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync.sync_to_memory_backend",
-        mock_sync_to_memory,
-    )
-
-    success = sync_entry_to_graph(threads_dir, "test-topic")
-
-    assert success
-    assert len(memory_calls) == 1
-    assert memory_calls[0]["topic"] == "test-topic"
-
-
-def test_sync_entry_succeeds_when_memory_hook_fails(threads_dir: Path, sample_thread: Path, monkeypatch):
-    """Test sync_entry_to_graph succeeds even if memory hook fails."""
-    from watercooler.baseline_graph.sync import sync_entry_to_graph
-
-    monkeypatch.setenv("WATERCOOLER_MEMORY_BACKEND", "graphiti")
-
-    def mock_sync_to_memory_fails(*args, **kwargs):
-        return False  # Memory sync failed
-
-    monkeypatch.setattr(
-        "watercooler.baseline_graph.sync.sync_to_memory_backend",
-        mock_sync_to_memory_fails,
-    )
-
-    # Baseline sync should still succeed
-    success = sync_entry_to_graph(threads_dir, "test-topic")
-    assert success  # Baseline sync succeeded despite memory hook failure
 
 
 # ============================================================================
@@ -1737,3 +1463,99 @@ def test_is_llm_service_available_local_no_key_sentinel():
     )
     # Should return False (no server) but not crash due to auth header
     assert not is_llm_service_available(config)
+
+
+# ============================================================================
+# Baseline integrity checks (T1-only — issue #330)
+# ============================================================================
+
+
+def _write_graph_thread(
+    threads_dir: Path,
+    topic: str,
+    *,
+    entry_count: int,
+    meta_entry_count=None,
+    corrupt_entries: int = 0,
+    corrupt_edges: int = 0,
+) -> None:
+    """Write a per-thread baseline graph directory directly (no sync path)."""
+    from watercooler.baseline_graph import storage
+
+    graph_dir = storage.get_graph_dir(threads_dir)
+    tdir = storage.get_thread_graph_dir(graph_dir, topic)
+    tdir.mkdir(parents=True, exist_ok=True)
+
+    entry_lines = [
+        json.dumps({"id": f"entry:{topic}-{i}", "type": "entry", "index": i})
+        for i in range(entry_count)
+    ]
+    entry_lines += ["{ not valid json"] * corrupt_entries
+    (tdir / "entries.jsonl").write_text(
+        "\n".join(entry_lines) + ("\n" if entry_lines else ""), encoding="utf-8"
+    )
+
+    edge_lines = ["{ not valid json"] * corrupt_edges
+    (tdir / "edges.jsonl").write_text(
+        "\n".join(edge_lines) + ("\n" if edge_lines else ""), encoding="utf-8"
+    )
+
+    meta = {"type": "thread", "topic": topic}
+    if meta_entry_count is not None:
+        meta["entry_count"] = meta_entry_count
+    (tdir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+class TestBaselineIntegrity:
+    """check_baseline_integrity — T1-only on-disk graph integrity."""
+
+    def test_clean_graph_has_no_issues(self, threads_dir: Path):
+        from watercooler.baseline_graph.sync import check_baseline_integrity
+
+        _write_graph_thread(threads_dir, "topic-a", entry_count=3, meta_entry_count=3)
+        report = check_baseline_integrity(threads_dir)
+        assert report.checked_threads == 1
+        assert report.ok
+        assert report.issues == []
+
+    def test_entry_count_mismatch_detected(self, threads_dir: Path):
+        from watercooler.baseline_graph.sync import check_baseline_integrity
+
+        # meta claims 5, entries.jsonl has 3
+        _write_graph_thread(threads_dir, "topic-a", entry_count=3, meta_entry_count=5)
+        report = check_baseline_integrity(threads_dir)
+        assert not report.ok
+        kinds = {i.kind for i in report.issues}
+        assert "entry_count_mismatch" in kinds
+
+    def test_no_entry_count_field_is_not_flagged(self, threads_dir: Path):
+        from watercooler.baseline_graph.sync import check_baseline_integrity
+
+        # meta with no entry_count — should not raise a mismatch
+        _write_graph_thread(threads_dir, "topic-a", entry_count=3, meta_entry_count=None)
+        report = check_baseline_integrity(threads_dir)
+        assert report.ok
+
+    def test_jsonl_corruption_detected(self, threads_dir: Path):
+        from watercooler.baseline_graph.sync import check_baseline_integrity
+
+        _write_graph_thread(
+            threads_dir, "topic-a", entry_count=2, meta_entry_count=2,
+            corrupt_entries=1,
+        )
+        report = check_baseline_integrity(threads_dir)
+        assert not report.ok
+        assert any(i.kind == "jsonl_corruption" for i in report.issues)
+
+    def test_markdown_without_graph_detected(self, threads_dir: Path):
+        from watercooler.baseline_graph.sync import check_baseline_integrity
+        from watercooler import fs as _fs
+
+        _write_graph_thread(threads_dir, "topic-a", entry_count=1, meta_entry_count=1)
+        # A markdown projection on disk with no graph dir of its own.
+        _fs.ensure_directory_structure(threads_dir)
+        (threads_dir / "threads" / "orphan-md.md").write_text("# orphan", encoding="utf-8")
+
+        report = check_baseline_integrity(threads_dir)
+        issues = {(i.topic, i.kind) for i in report.issues}
+        assert ("orphan-md", "markdown_not_in_graph") in issues

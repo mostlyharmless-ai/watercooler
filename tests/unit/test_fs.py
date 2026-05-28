@@ -13,7 +13,7 @@ from watercooler.fs import (
     THREAD_CATEGORIES,
     has_structured_layout,
     ensure_directory_structure,
-    discover_thread_files,
+    list_markdown_thread_topics,
     find_thread_path,
 )
 
@@ -144,17 +144,16 @@ class TestThreadPathStructured:
         assert tp == threads_dir / "topic.md"
 
 
-class TestDiscoverThreadFilesStructured:
-    def test_finds_files_in_categories(self, tmp_path: Path):
+class TestListMarkdownThreadTopics:
+    def test_finds_topics_in_categories(self, tmp_path: Path):
         threads_dir = tmp_path / "threads"
         ensure_directory_structure(threads_dir)
         (threads_dir / "threads" / "a.md").write_text("# a")
         (threads_dir / "closed" / "b.md").write_text("# b")
 
-        found = discover_thread_files(threads_dir)
-        names = [p.name for p in found]
-        assert "a.md" in names
-        assert "b.md" in names
+        topics = list_markdown_thread_topics(threads_dir)
+        assert "a" in topics
+        assert "b" in topics
 
     def test_ignores_non_category_dirs(self, tmp_path: Path):
         threads_dir = tmp_path / "threads"
@@ -163,20 +162,9 @@ class TestDiscoverThreadFilesStructured:
         # Put a file in compound/ (not a thread category)
         (threads_dir / "compound" / "reports" / "report.md").write_text("# report")
 
-        found = discover_thread_files(threads_dir)
-        names = [p.name for p in found]
-        assert "a.md" in names
-        assert "report.md" not in names
-
-    def test_category_filter(self, tmp_path: Path):
-        threads_dir = tmp_path / "threads"
-        ensure_directory_structure(threads_dir)
-        (threads_dir / "threads" / "a.md").write_text("# a")
-        (threads_dir / "closed" / "b.md").write_text("# b")
-
-        found = discover_thread_files(threads_dir, category="closed")
-        names = [p.name for p in found]
-        assert names == ["b.md"]
+        topics = list_markdown_thread_topics(threads_dir)
+        assert "a" in topics
+        assert "report" not in topics
 
     def test_flat_layout_backward_compat(self, tmp_path: Path):
         threads_dir = tmp_path / "threads"
@@ -186,10 +174,9 @@ class TestDiscoverThreadFilesStructured:
         sub.mkdir()
         (sub / "b.md").write_text("# b")
 
-        found = discover_thread_files(threads_dir)
-        names = [p.name for p in found]
-        assert "a.md" in names
-        assert "b.md" in names
+        topics = list_markdown_thread_topics(threads_dir)
+        assert "a" in topics
+        assert "b" in topics
 
     def test_flat_layout_skips_graph_dir(self, tmp_path: Path):
         threads_dir = tmp_path / "threads"
@@ -199,10 +186,18 @@ class TestDiscoverThreadFilesStructured:
         graph.mkdir()
         (graph / "meta.md").write_text("# not a thread")
 
-        found = discover_thread_files(threads_dir)
-        names = [p.name for p in found]
-        assert "a.md" in names
-        assert "meta.md" not in names
+        topics = list_markdown_thread_topics(threads_dir)
+        assert "a" in topics
+        assert "meta" not in topics
+
+    def test_deduplicates_and_sorts(self, tmp_path: Path):
+        threads_dir = tmp_path / "threads"
+        ensure_directory_structure(threads_dir)
+        (threads_dir / "threads" / "z.md").write_text("# z")
+        (threads_dir / "threads" / "a.md").write_text("# a")
+
+        topics = list_markdown_thread_topics(threads_dir)
+        assert topics == sorted(topics)
 
 
 class TestFindThreadPathStructured:

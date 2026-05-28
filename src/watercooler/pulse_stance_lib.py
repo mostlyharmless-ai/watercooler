@@ -31,11 +31,9 @@ _READ_ONLY_TOOLS: frozenset[str] = frozenset(
         "watercooler_smart_query",
         "watercooler_read_thread",
         "watercooler_get_thread_entry",
-        "watercooler_get_thread_entry_range",
         "watercooler_list_thread_entries",
         "watercooler_daemon_findings",
         "watercooler_search",
-        "watercooler_find_similar",
         "watercooler_list_decisions",
     }
 )

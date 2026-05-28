@@ -69,7 +69,7 @@ class ThreadEntry:
         body: Entry body content (markdown)
         agent: Agent name (extracted from "Entry: Agent ..." line)
         timestamp: ISO 8601 timestamp (YYYY-MM-DDTHH:MM:SSZ)
-        role: Agent role — see project's .watercooler/roles.toml or call watercooler_role_details for the active catalog
+        role: Agent role — see project's .watercooler/roles.toml or call watercooler_roles for the active catalog
         entry_type: Entry type (Note, Plan, Decision, PR, Closure)
         title: Entry title
         entry_id: ULID identifier from <!-- Entry-ID: ... --> comment (26 chars, base32)

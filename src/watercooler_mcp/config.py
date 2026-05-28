@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover - Python <3.8 fallback
 
 from watercooler.agents import _canonical_agent, _load_agents_registry
 
-from .observability import log_debug
+from .observability import log_debug, log_warning
 
 # Import shared git discovery and path helpers from path_resolver (consolidates logic)
 from watercooler.path_resolver import (
@@ -23,7 +23,6 @@ from watercooler.path_resolver import (
     _resolve_path,
     _extract_repo_path,
 )
-
 
 __all__ = [
     "ThreadContext",
@@ -96,7 +95,11 @@ def _run_git(args: list[str], cwd: Path) -> Optional[str]:
         )
         log_debug(f"CONFIG_GIT_END: git {cmd} (returned {len(result.stdout)} chars)")
         return result.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+    ) as e:
         log_debug(f"CONFIG_GIT_FAIL: git {cmd} (error: {type(e).__name__})")
         return None
 
@@ -112,16 +115,16 @@ def _discover_git(code_root: Optional[Path]) -> _GitDetails:
     # Use shared git discovery from path_resolver
     git_info = _discover_git_shared(code_root)
 
-    log_debug(f"CONFIG: Git discovery complete (root={git_info.root}, branch={git_info.branch})")
+    log_debug(
+        f"CONFIG: Git discovery complete (root={git_info.root}, branch={git_info.branch})"
+    )
 
     return _GitDetails(
         root=git_info.root,
         branch=git_info.branch,
         commit=git_info.commit,
-        remote=git_info.remote
+        remote=git_info.remote,
     )
-
-
 
 
 def _worktree_path_for(code_root: Path) -> Path:
@@ -135,42 +138,92 @@ def _orphan_branch_exists(code_root: Path) -> bool:
     return bool(result and ORPHAN_BRANCH_NAME in result)
 
 
-def _create_orphan_branch(code_root: Path) -> bool:
-    """Create the orphan branch with an empty initial commit.
+def _select_push_remote(code_root: Path) -> Optional[str]:
+    """Pick the remote to publish the orphan branch to.
 
-    Creates the branch without switching the code working tree.
+    Prefers ``origin``. With no ``origin`` a lone remote is unambiguous and
+    is used; multiple non-``origin`` remotes are ambiguous, so None is
+    returned (the caller proceeds local-only rather than guessing). None is
+    also returned when the repo has no remotes at all.
+    """
+    remotes_out = _run_git(["remote"], code_root)
+    remotes = [r.strip() for r in (remotes_out or "").splitlines() if r.strip()]
+    if not remotes:
+        return None
+    if "origin" in remotes:
+        return "origin"
+    if len(remotes) == 1:
+        return remotes[0]
+    log_warning(
+        f"CONFIG: no 'origin' remote and {len(remotes)} remotes configured "
+        f"({', '.join(remotes)}) — cannot pick a push target unambiguously; "
+        f"orphan branch will be created local-only"
+    )
+    return None
+
+
+def _create_orphan_branch(code_root: Path) -> bool:
+    """Create the orphan branch and bind its worktree.
+
+    Returns True only when the worktree is a valid git worktree on the
+    orphan branch. On a worktree/branch/commit failure the half-created
+    scaffold is rolled back and False is returned — callers never observe
+    a scaffold-only directory. A failed *push* is non-fatal (the worktree
+    is valid locally and entries sync on a later push).
     """
     log_debug(f"CONFIG: Creating orphan branch '{ORPHAN_BRANCH_NAME}' in {code_root}")
-
-    # Use git worktree to create the orphan branch without touching the main tree.
-    # Step 1: Create a temporary orphan branch via low-level commands
     wt_path = _worktree_path_for(code_root)
-    wt_path.mkdir(parents=True, exist_ok=True)
 
-    # Create orphan branch and worktree in one step
-    result = _run_git(
+    def _rollback(reason: str) -> bool:
+        log_warning(
+            f"CONFIG: orphan-branch bootstrap failed — {reason}; "
+            f"rolling back {wt_path}"
+        )
+        _run_git(["worktree", "remove", "--force", str(wt_path)], code_root)
+        _run_git(["worktree", "prune"], code_root)
+        shutil.rmtree(wt_path, ignore_errors=True)
+        return False
+
+    # `git worktree add` refuses a non-empty path. A stale scaffold from a
+    # prior failed bootstrap (a directory tree with no .git) is the common
+    # trigger for that refusal — clear it so `worktree add` starts clean.
+    if wt_path.exists() and not (wt_path / ".git").exists():
+        log_debug(f"CONFIG: clearing stale scaffold at {wt_path} before worktree add")
+        shutil.rmtree(wt_path, ignore_errors=True)
+
+    # Create the orphan branch + worktree. Prefer `worktree add --orphan`
+    # (git >= 2.42); fall back to a detached worktree + `checkout --orphan`.
+    created = _run_git(
         ["worktree", "add", "--orphan", "-b", ORPHAN_BRANCH_NAME, str(wt_path)],
         code_root,
     )
-    if result is None:
-        # Fallback for older git: create orphan branch manually
-        log_debug("CONFIG: git worktree add --orphan failed, trying manual approach")
-
-        # Create a detached worktree first
-        _run_git(["worktree", "add", "--detach", str(wt_path)], code_root)
-
-        # Create orphan branch in the worktree
-        _run_git(["checkout", "--orphan", ORPHAN_BRANCH_NAME], wt_path)
+    if created is None:
+        log_debug(
+            "CONFIG: `worktree add --orphan` unavailable — using detached fallback"
+        )
+        shutil.rmtree(wt_path, ignore_errors=True)  # ensure a clean path
+        if _run_git(["worktree", "add", "--detach", str(wt_path)], code_root) is None:
+            return _rollback("could not create the worktree")
+        if _run_git(["checkout", "--orphan", ORPHAN_BRANCH_NAME], wt_path) is None:
+            return _rollback("could not create the orphan branch")
         _run_git(["rm", "-rf", "."], wt_path)
 
-    # Create initial empty commit in the worktree
-    _run_git(["commit", "--allow-empty", "-m", "Initialize watercooler threads"], wt_path)
+    # The worktree must actually be bound before we continue.
+    if not (wt_path / ".git").exists():
+        return _rollback("worktree directory was not bound to git")
 
-    # Create structured directory layout for new repos.
-    # Add .gitkeep files so empty directories are tracked by git.
+    if (
+        _run_git(
+            ["commit", "--allow-empty", "-m", "Initialize watercooler threads"], wt_path
+        )
+        is None
+    ):
+        return _rollback("initial commit failed")
+
+    # Structured directory layout for new repos, with .gitkeep placeholders.
     from watercooler.fs import ensure_directory_structure
-    created = ensure_directory_structure(wt_path)
-    for d in created:
+
+    for d in ensure_directory_structure(wt_path):
         gitkeep = d / ".gitkeep"
         if not gitkeep.exists():
             gitkeep.touch()
@@ -178,10 +231,125 @@ def _create_orphan_branch(code_root: Path) -> bool:
     _run_git(["commit", "-m", "Add structured directory layout"], wt_path)
     log_debug(f"CONFIG: Created structured directory layout in {wt_path}")
 
-    # Push to origin if remote exists
-    _run_git(["push", "-u", "origin", ORPHAN_BRANCH_NAME], wt_path)
+    # Publish the orphan branch. Resolve the remote explicitly — repos
+    # forked/migrated between hosts commonly have origin + upstream, and a
+    # bare push is ambiguous. A failed push is non-fatal: the worktree is
+    # valid locally and entries sync on a later push.
+    remote = _select_push_remote(code_root)
+    if remote is None:
+        log_warning(
+            f"CONFIG: orphan branch '{ORPHAN_BRANCH_NAME}' created local-only "
+            f"in {wt_path} — no usable push remote"
+        )
+    elif _run_git(["push", "-u", remote, ORPHAN_BRANCH_NAME], wt_path) is None:
+        log_warning(
+            f"CONFIG: orphan branch '{ORPHAN_BRANCH_NAME}' created but the push "
+            f"to '{remote}' failed — check auth/network/permissions for that "
+            f"remote; entries will sync on a later push"
+        )
+    else:
+        log_debug(f"CONFIG: orphan branch '{ORPHAN_BRANCH_NAME}' pushed to '{remote}'")
 
     log_debug(f"CONFIG: Orphan branch '{ORPHAN_BRANCH_NAME}' created")
+    return True
+
+
+def _find_existing_worktree_on_branch(
+    code_root: Path,
+    branch: str,
+) -> Optional[Path]:
+    """Return the path of an existing worktree on ``branch`` for ``code_root``,
+    or None.
+
+    Parses ``git worktree list --porcelain`` to find checkouts of ``branch``.
+    Returns the first matching worktree path that is NOT ``code_root`` itself.
+
+    Used by :func:`_ensure_worktree` to detect a legacy ``_local`` worktree
+    that needs to be migrated to the canonical location.
+    """
+    out = _run_git(["worktree", "list", "--porcelain"], code_root)
+    if not out:
+        return None
+    current_path: Optional[Path] = None
+    for raw in out.splitlines():
+        line = raw.strip()
+        if line.startswith("worktree "):
+            current_path = Path(line[len("worktree ") :])
+        elif line.startswith("branch ") and current_path is not None:
+            # `branch` value is in the form `refs/heads/<name>`
+            branch_name = line[len("branch ") :]
+            if branch_name == f"refs/heads/{branch}":
+                # Don't return the main worktree (code_root itself)
+                try:
+                    if current_path.resolve() != code_root.resolve():
+                        return current_path
+                except OSError:
+                    pass
+    return None
+
+
+def _migrate_legacy_local_worktree(
+    code_root: Path,
+    existing: Path,
+    canonical: Path,
+) -> bool:
+    """Migrate an existing legacy worktree at ``existing`` to ``canonical``.
+
+    Uses ``git worktree move`` so git's registry stays consistent. Returns
+    True on success, False on any failure (logged); on False the caller
+    should NOT assume the worktree is at the canonical path.
+
+    Pre-conditions verified by the caller (only call when the branch is
+    confirmed to be ``ORPHAN_BRANCH_NAME`` and ``existing`` is a real
+    git worktree). Per bug report
+    ``bug-threads-resolver-cwd-fallback-cross-repo-contamination`` /
+    GH issue #837.
+    """
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    # `git worktree move` refuses to write into an existing path (whether
+    # empty or not — it wants to create the dir itself). Handle each
+    # subcase deliberately:
+    #
+    #   - canonical is a real git worktree (has .git): something else
+    #     created it; refuse to overwrite (this is an unexpected state
+    #     that the operator should investigate, not auto-clean).
+    #   - canonical is a stale scaffold (exists but no .git): a prior
+    #     failed bootstrap left files behind. Clear it — matches the
+    #     same recovery pattern in `_create_orphan_branch` (lines
+    #     188-190). This is the case the PR #838 reviewer flagged as
+    #     blocking legacy users from migrating.
+    #   - canonical is an empty dir: rmdir.
+    if canonical.exists():
+        if (canonical / ".git").exists():
+            log_warning(
+                f"CONFIG: cannot migrate {existing} -> {canonical}: "
+                f"canonical target is already a git worktree. Investigate "
+                f"(unexpected state — _ensure_worktree should have taken "
+                f"the fast path before calling migrate)."
+            )
+            return False
+        # Stale scaffold or non-empty non-git dir — same recovery
+        # pattern as _create_orphan_branch.
+        log_debug(
+            f"CONFIG: clearing stale scaffold at {canonical} before " f"worktree move"
+        )
+        shutil.rmtree(canonical, ignore_errors=True)
+        # rmtree on a real path leaves the parent intact; canonical is
+        # now gone.
+    result = _run_git(
+        ["worktree", "move", str(existing), str(canonical)],
+        code_root,
+    )
+    if result is None:
+        log_warning(
+            f"CONFIG: `git worktree move {existing} {canonical}` failed; "
+            f"the orphan-branch worktree remains at the legacy location"
+        )
+        return False
+    log_debug(
+        f"CONFIG: migrated legacy worktree {existing} -> {canonical} "
+        f"(canonical orphan-branch location)"
+    )
     return True
 
 
@@ -190,6 +358,13 @@ def _ensure_worktree(code_root: Path) -> Optional[Path]:
 
     Returns:
         Path to the worktree directory, or None if creation failed.
+
+    Handles the legacy ``<code_root>/_local`` collision case (bug
+    ``bug-threads-resolver-cwd-fallback-cross-repo-contamination``,
+    GH #837): if the orphan branch is already checked out at
+    ``<code_root>/_local`` (pre-canonical-path setup), migrate it to
+    the canonical location via ``git worktree move`` rather than
+    silently failing.
     """
     wt_path = _worktree_path_for(code_root)
 
@@ -200,17 +375,62 @@ def _ensure_worktree(code_root: Path) -> Optional[Path]:
         if branch == ORPHAN_BRANCH_NAME:
             return wt_path
         # Worktree exists but wrong branch — remove and recreate
-        log_debug(f"CONFIG: Worktree at {wt_path} on wrong branch '{branch}', recreating")
+        log_debug(
+            f"CONFIG: Worktree at {wt_path} on wrong branch '{branch}', recreating"
+        )
         _run_git(["worktree", "remove", "--force", str(wt_path)], code_root)
 
-    # Prune stale worktree registrations before attempting add.
+    # Prune stale worktree registrations before any further git ops.
     # Git refuses to create a worktree at a path that is "missing but
     # already registered" (e.g. directory was deleted externally).
     prune_result = _run_git(["worktree", "prune"], code_root)
     if prune_result is None:
         log_debug("CONFIG: git worktree prune failed (permissions or old git version)")
 
-    # Check if orphan branch exists
+    # ALWAYS check for an existing worktree on the orphan branch BEFORE
+    # gating on _orphan_branch_exists. Two reasons (per PR #838 review):
+    #
+    # 1. On git >= 2.42, `worktree add --orphan` creates an UNBORN branch
+    #    (no initial commit). `git branch --list` returns empty for unborn
+    #    branches, so _orphan_branch_exists() falsely reports "no branch"
+    #    — but `worktree list --porcelain` DOES report the worktree on
+    #    `refs/heads/watercooler/threads`. Probing worktrees first detects
+    #    the unborn-branch case correctly.
+    # 2. Architecturally: an existing worktree on the branch is the
+    #    higher-priority signal. If one exists, we must decide migrate /
+    #    refuse / use-as-is BEFORE attempting create-or-add.
+    existing = _find_existing_worktree_on_branch(code_root, ORPHAN_BRANCH_NAME)
+    if existing is not None:
+        legacy_local = (code_root / "_local").resolve()
+        try:
+            existing_resolved = existing.resolve()
+        except OSError:
+            existing_resolved = existing
+        if existing_resolved == legacy_local:
+            # Known migration case: move to canonical and continue.
+            if _migrate_legacy_local_worktree(code_root, existing, wt_path):
+                if wt_path.exists() and (wt_path / ".git").exists():
+                    return wt_path
+            # Migration failed — fall through to the same return-None
+            # path so the resolver's structural guard handles it (NEVER
+            # fall back to Path.cwd()).
+            return None
+        else:
+            # Unexpected location — operator-attention case. Don't
+            # silently fall back; the resolver's Bug-C structural guard
+            # produces a warning-loud in-repo fallback when this returns
+            # None.
+            log_warning(
+                f"CONFIG: orphan branch '{ORPHAN_BRANCH_NAME}' already "
+                f"checked out at {existing} (expected canonical "
+                f"{wt_path} or legacy {legacy_local}). Refusing to "
+                f"silently fall back; manually `git worktree move` "
+                f"or `git worktree remove` the unexpected checkout."
+            )
+            return None
+
+    # No existing worktree on the branch. Check if the branch itself
+    # exists (as a born ref). If not, bootstrap it.
     if not _orphan_branch_exists(code_root):
         try:
             _create_orphan_branch(code_root)
@@ -218,7 +438,8 @@ def _ensure_worktree(code_root: Path) -> Optional[Path]:
             log_debug(f"CONFIG: Failed to create orphan branch: {e}")
             return None
     else:
-        # Branch exists but no worktree — create worktree
+        # Branch exists as a born ref but no worktree on it — add one
+        # at the canonical path.
         wt_path.mkdir(parents=True, exist_ok=True)
         result = _run_git(
             ["worktree", "add", str(wt_path), ORPHAN_BRANCH_NAME],
@@ -232,6 +453,43 @@ def _ensure_worktree(code_root: Path) -> Optional[Path]:
         return wt_path
 
     return None
+
+
+def _enforce_threads_dir_safety(threads_dir: Path, effective_root: Path) -> Path:
+    """Defense-in-depth: refuse a ``threads_dir`` outside the allowed set.
+
+    The allowed set for an ``effective_root``:
+
+      - The canonical orphan worktree at ``WORKTREE_BASE / effective_root.name``
+      - The in-repo legacy fallback at ``effective_root / "_local"``
+
+    Anything else means a resolution regression silently landed in an
+    unrelated location (e.g. a different repo's tree, ``Path.cwd()`` from
+    elsewhere). Override to the in-repo legacy fallback and log loudly so
+    operators see the regression. Per GH #837.
+
+    Idempotent — safe to call on a known-good ``threads_dir``.
+    """
+    canonical = _worktree_path_for(effective_root)
+    legacy_local = _resolve_path(effective_root / "_local")
+    try:
+        allowed_canonical = threads_dir.resolve() == canonical.resolve()
+    except OSError:
+        allowed_canonical = False
+    try:
+        allowed_legacy = threads_dir.resolve() == legacy_local.resolve()
+    except OSError:
+        allowed_legacy = False
+    if allowed_canonical or allowed_legacy:
+        return threads_dir
+    log_warning(
+        f"CONFIG: threads_dir resolved to {threads_dir} which is "
+        f"NEITHER the canonical worktree ({canonical}) nor the "
+        f"in-repo legacy fallback ({legacy_local}) for effective_root "
+        f"{effective_root}. This indicates a cross-repo resolution "
+        f"regression; overriding to {legacy_local} as a safe default."
+    )
+    return legacy_local
 
 
 def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
@@ -289,20 +547,48 @@ def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
                 explicit_dir=False,
             )
         else:
-            log_debug("CONFIG: Worktree creation failed, falling back to _local")
-            from .helpers import _add_startup_warning
-            _add_startup_warning(
-                "Worktree creation failed — threads will be stored in a local "
-                "_local/ directory instead of the orphan branch. New writes will "
-                "NOT be synced to the remote. Check git permissions and retry."
+            # Worktree creation failed — fall back to <effective_root>/_local.
+            # Bug B fix (GH #837): previously this used Path.cwd() which is
+            # the MCP server's CWD, not the queried repo, causing writes to
+            # land in a DIFFERENT repository's _local. Always use
+            # effective_root so writes stay inside the repo they were meant
+            # for.
+            fallback_local = _resolve_path(effective_root / "_local")
+            log_warning(
+                f"CONFIG: Orphan worktree creation failed for "
+                f"{effective_root}; threads will be stored at {fallback_local}. "
+                f"New writes will NOT be synced to the remote until the "
+                f"orphan branch is configured. Check git permissions and retry."
             )
+            from .helpers import _add_startup_warning
+
+            _add_startup_warning(
+                f"Worktree creation failed for {effective_root} — threads "
+                f"will be stored at {fallback_local} (local-only). New writes "
+                f"will NOT be synced to the remote."
+            )
+            threads_dir = fallback_local
 
     # =========================================================================
-    # Fallback: no git context (or worktree failed)
+    # Fallback: no git context (or worktree failed AND effective_root is None)
     # =========================================================================
     if threads_dir is None:
+        # effective_root is None here (no git context at all) — fall back
+        # to MCP-server CWD's _local as a last-resort. This path should
+        # rarely fire in practice; the typical "no git context" case is a
+        # tool invoked from outside any repo with no code_path set.
         base = Path.cwd()
         threads_dir = _resolve_path(base / "_local")
+        log_warning(
+            f"CONFIG: no git context AND no effective_root — falling back to "
+            f"Path.cwd() / _local = {threads_dir}. This is unusual; expected "
+            f"callers to pass code_path or be inside a git repo."
+        )
+
+    # Bug C — structural guard: never leak writes across repos.
+    # See _enforce_threads_dir_safety. Per GH #837 defense-in-depth.
+    if effective_root is not None:
+        threads_dir = _enforce_threads_dir_safety(threads_dir, effective_root)
 
     return ThreadContext(
         code_root=effective_root,
@@ -321,7 +607,6 @@ def get_threads_dir() -> Path:
 
 def get_threads_dir_for(code_root: Optional[Path]) -> Path:
     return resolve_thread_context(code_root).threads_dir
-
 
 
 def get_code_context(code_root: Optional[Path]) -> Dict[str, str]:
@@ -398,15 +683,29 @@ def get_watercooler_config(project_path: Optional[Path] = None) -> "WatercoolerC
     if _loaded_config is None:
         try:
             from watercooler.config_loader import load_config
+
             _loaded_config = load_config(project_path)
         except ImportError:
             # Config system not available, use defaults
             from watercooler.config_schema import WatercoolerConfig
+
             _loaded_config = WatercoolerConfig()
         except Exception as e:
-            # Config loading failed, use defaults
-            log_debug(f"Config loading failed, using defaults: {e}")
+            # Promoted from log_debug per bug-falkordb-startup-gate-hybrid-2026-05-12
+            # entry 01KRDMK58S59A2WRPHCBY46XPS: a silent fallback to schema
+            # defaults can flip transport from hybrid to stdio in transient
+            # subprocesses, bypassing the FalkorDB hybrid skip in
+            # startup.ensure_falkordb_running. Make this visible at the
+            # operator's default log level so config-resolution failures
+            # are diagnosable.
+            log_warning(
+                f"CONFIG: load_config failed; falling back to schema defaults "
+                f"(transport=stdio, capability_routes={{}}). This may cause "
+                f"unwanted local-FalkorDB auto-start if operator intent was "
+                f"hybrid/proxy. Underlying error: {type(e).__name__}: {e}"
+            )
             from watercooler.config_schema import WatercoolerConfig
+
             _loaded_config = WatercoolerConfig()
 
     return _loaded_config
@@ -502,9 +801,15 @@ def get_logging_config() -> Dict[str, Any]:
     return {
         "level": os.getenv("WATERCOOLER_LOG_LEVEL", logging.level),
         "dir": os.getenv("WATERCOOLER_LOG_DIR", logging.dir) or None,
-        "max_bytes": int(os.getenv("WATERCOOLER_LOG_MAX_BYTES", str(logging.max_bytes))),
-        "backup_count": int(os.getenv("WATERCOOLER_LOG_BACKUP_COUNT", str(logging.backup_count))),
-        "disable_file": os.getenv("WATERCOOLER_LOG_DISABLE_FILE", "").lower() in ("1", "true", "yes") or logging.disable_file,
+        "max_bytes": int(
+            os.getenv("WATERCOOLER_LOG_MAX_BYTES", str(logging.max_bytes))
+        ),
+        "backup_count": int(
+            os.getenv("WATERCOOLER_LOG_BACKUP_COUNT", str(logging.backup_count))
+        ),
+        "disable_file": os.getenv("WATERCOOLER_LOG_DISABLE_FILE", "").lower()
+        in ("1", "true", "yes")
+        or logging.disable_file,
     }
 
 
@@ -561,16 +866,30 @@ def get_slack_config() -> Dict[str, Any]:
         "webhook_url": os.getenv("WATERCOOLER_SLACK_WEBHOOK", slack.webhook_url),
         "bot_token": os.getenv("WATERCOOLER_SLACK_BOT_TOKEN", slack.bot_token),
         "app_token": os.getenv("WATERCOOLER_SLACK_APP_TOKEN", slack.app_token),
-        "default_channel": os.getenv("WATERCOOLER_SLACK_CHANNEL", slack.default_channel),
+        "default_channel": os.getenv(
+            "WATERCOOLER_SLACK_CHANNEL", slack.default_channel
+        ),
         # Phase 2+ config
-        "channel_prefix": os.getenv("WATERCOOLER_SLACK_CHANNEL_PREFIX", slack.channel_prefix),
-        "auto_create_channels": _get_bool("WATERCOOLER_SLACK_AUTO_CREATE_CHANNELS", slack.auto_create_channels),
+        "channel_prefix": os.getenv(
+            "WATERCOOLER_SLACK_CHANNEL_PREFIX", slack.channel_prefix
+        ),
+        "auto_create_channels": _get_bool(
+            "WATERCOOLER_SLACK_AUTO_CREATE_CHANNELS", slack.auto_create_channels
+        ),
         # Notification toggles
         "notify_on_say": _get_bool("WATERCOOLER_SLACK_NOTIFY_SAY", slack.notify_on_say),
-        "notify_on_ball_flip": _get_bool("WATERCOOLER_SLACK_NOTIFY_BALL_FLIP", slack.notify_on_ball_flip),
-        "notify_on_status_change": _get_bool("WATERCOOLER_SLACK_NOTIFY_STATUS", slack.notify_on_status_change),
-        "notify_on_handoff": _get_bool("WATERCOOLER_SLACK_NOTIFY_HANDOFF", slack.notify_on_handoff),
-        "min_notification_interval": _get_float("WATERCOOLER_SLACK_MIN_INTERVAL", slack.min_notification_interval),
+        "notify_on_ball_flip": _get_bool(
+            "WATERCOOLER_SLACK_NOTIFY_BALL_FLIP", slack.notify_on_ball_flip
+        ),
+        "notify_on_status_change": _get_bool(
+            "WATERCOOLER_SLACK_NOTIFY_STATUS", slack.notify_on_status_change
+        ),
+        "notify_on_handoff": _get_bool(
+            "WATERCOOLER_SLACK_NOTIFY_HANDOFF", slack.notify_on_handoff
+        ),
+        "min_notification_interval": _get_float(
+            "WATERCOOLER_SLACK_MIN_INTERVAL", slack.min_notification_interval
+        ),
     }
 
 

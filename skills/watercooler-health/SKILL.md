@@ -4,7 +4,7 @@ description: Check watercooler system health — MCP server, baseline graph (T1)
 allowed-tools:
   - ToolSearch
   - mcp__watercooler__watercooler_health
-  - mcp__watercooler__watercooler_baseline_sync_status
+  - mcp__watercooler__watercooler_baseline_graph
 ---
 
 # Watercooler Health Check
@@ -16,14 +16,19 @@ Run a full health check across all watercooler subsystems.
 1. **Load diagnostic tools** in parallel:
    ```
    ToolSearch: select:mcp__watercooler__watercooler_health
-   ToolSearch: select:mcp__watercooler__watercooler_baseline_sync_status
+   ToolSearch: select:mcp__watercooler__watercooler_baseline_graph
    ```
 
 2. **Run checks** in parallel:
    ```
    mcp__watercooler__watercooler_health(code_path="<repo root>")
-   mcp__watercooler__watercooler_baseline_sync_status(code_path="<repo root>")
+   mcp__watercooler__watercooler_health(code_path="<repo root>", detail="identity")
+   mcp__watercooler__watercooler_baseline_graph(scope="sync", code_path="<repo root>")
    ```
+
+   The `detail="identity"` call returns the resolved agent identity and a
+   write-readiness assessment (threads-dir writability + `agent_func`
+   guidance) — this is the folded-in former `whoami` check.
 
 3. **Report status** — organize output into these sections:
 
@@ -34,6 +39,8 @@ Run a full health check across all watercooler subsystems.
    - Agent identity and threads directory
    - Code branch and auto-branch mode
    - Python / fastmcp versions
+   - Write-readiness (from `watercooler_health(detail="identity")`): resolved
+     identity and whether the threads dir is writable
 
    **Graph Services** (from `watercooler_health`):
    - Summaries enabled, LLM service URL and availability
@@ -62,14 +69,14 @@ Run a full health check across all watercooler subsystems.
 
    ---
 
-   **T1 — Baseline Graph** (from `baseline_sync_status`):
+   **T1 — Baseline Graph** (from `baseline_graph`, `scope="sync"`):
    - Total / synced / stale / error threads
    - Recommendations (if any)
 
 4. **Suggest fixes** for common issues:
 
    *T1 issues:*
-   - Stale threads: run `watercooler_baseline_sync_status` and reconcile stale entries
+   - Stale threads: run `watercooler_baseline_graph` (`scope="sync"`) and reconcile stale entries
 
    *Git / GitHub issues:*
    - SSH without agent: `eval "$(ssh-agent -s)" && ssh-add`

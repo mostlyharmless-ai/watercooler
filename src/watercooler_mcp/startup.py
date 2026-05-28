@@ -2430,6 +2430,56 @@ def ensure_falkordb_running() -> None:
             )
             return
 
+        # Explicit-routes skip. Catches operators who have configured
+        # transport=stdio but explicitly routed all FalkorDB-using
+        # capabilities to "remote" (uncommon but valid — e.g.
+        # stdio-only client wanting to use the hosted backend without
+        # the hybrid transport label).
+        #
+        # NOTE: This check does NOT catch the silent-fallback case
+        # documented in bug-falkordb-startup-gate-hybrid-2026-05-12
+        # entry 01KRDMK58S59A2WRPHCBY46XPS — when load_config raises
+        # and falls back to WatercoolerConfig(), capability_routes is
+        # empty {}, and the all-remote check returns False. The
+        # operative fix for that incident is the log_warning
+        # promotion in src/watercooler_mcp/config.py (the silent
+        # fallback is now observable in logs).
+        #
+        # Capability list mirrors the "remote" entries in
+        # HYBRID_DEFAULT_ROUTES in src/watercooler_mcp/capabilities.py
+        # that drive FalkorDB-backed code paths. Keep this list in
+        # sync with that source if new FalkorDB-using capabilities
+        # are added.
+        try:
+            from .config import get_watercooler_config
+            routes = get_watercooler_config().mcp.capability_routes or {}
+        except Exception as routes_exc:
+            log_warning(
+                f"STARTUP: failed to resolve capability_routes; "
+                f"explicit-routes FalkorDB skip check disabled: "
+                f"{type(routes_exc).__name__}: {routes_exc}"
+            )
+            routes = {}
+
+        falkordb_caps = (
+            "memory_ingest",
+            "memory_query",
+            "memory_observe",
+            "daemon_observe",
+            "semantic_similarity",
+        )
+        if routes and all(routes.get(c) == "remote" for c in falkordb_caps):
+            _update_service_status(
+                "falkordb", ServiceState.DISABLED,
+                message="All FalkorDB-using routes are remote",
+            )
+            log_debug(
+                "All FalkorDB-using capability routes ("
+                + ", ".join(falkordb_caps)
+                + ") are 'remote', skipping local FalkorDB auto-start"
+            )
+            return
+
         # T1-aware gate: FalkorDB is needed if EITHER T1 baseline semantic
         # (gated by mcp.graph.generate_embeddings) OR T2 graphiti
         # (gated by memory.backend == "graphiti") is enabled. The previous

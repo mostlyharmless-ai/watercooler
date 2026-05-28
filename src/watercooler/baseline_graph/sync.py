@@ -12,9 +12,6 @@ Key functions:
 - record_graph_sync_error(): Track sync failures for later reconciliation
 - get_graph_sync_state(): Check current sync state
 
-DEPRECATED (MD-first era):
-- sync_entry_to_graph(): Reads from markdown - use enrich_graph_entry() instead
-
 Feature Configuration:
     The following features are configurable and may be disabled by default:
 
@@ -81,9 +78,6 @@ from watercooler.memory_config import AUTH_SKIP_SENTINELS
 from watercooler.path_resolver import derive_group_id
 
 logger = logging.getLogger(__name__)
-
-# Module-level flag to show deprecation warning only once per session
-_sync_entry_deprecation_warned = False
 
 
 # ============================================================================
@@ -695,8 +689,8 @@ def upsert_embedding(
     # PR #654 in-PR review round 5 (MEDIUM §3): the prior form returned
     # unconditionally when the hybrid callback was registered, regardless
     # of whether the remote upsert actually succeeded. A failed hybrid
-    # submit left the caller (sync_entry_to_graph / sync_thread_to_graph
-    # / enrich_graph_entry) with no signal; the entry would land in the
+    # submit left the caller (sync_thread_to_graph / enrich_graph_entry)
+    # with no signal; the entry would land in the
     # baseline graph with no T1 embedding, invisible until a semantic
     # query missed it. Log at WARNING on hybrid submit failure so the
     # loss is auditable in operator logs — the caller still owns whether
@@ -1535,285 +1529,6 @@ def enrich_graph_entry(
         return EnrichmentResult.error(str(e))
 
 
-def sync_entry_to_graph(
-    threads_dir: Path,
-    topic: str,
-    entry_id: Optional[str] = None,
-    generate_summaries: bool = False,
-    generate_embeddings: bool = False,
-) -> bool:
-    """DEPRECATED: Use enrich_graph_entry() instead.
-
-    This function is from the MD-first era and reads from markdown files.
-    In graph-first architecture, use enrich_graph_entry() which reads from
-    the graph (source of truth) and only adds enrichment data.
-
-    This function is preserved for backward compatibility with legacy repos
-    that may not have graph data yet. It will be removed in a future version.
-
-    Original docstring:
-    Sync a single entry to the graph after an MCP write.
-
-    This function:
-    1. Parses the thread file (DEPRECATED - reads from MD not graph)
-    2. Generates entry summary (if enabled)
-    3. Generates entry embedding (if enabled)
-    4. Optionally updates thread summary (if arc changed)
-    5. Upserts the entry node (and thread node)
-    6. Updates edges (contains, followed_by)
-    7. Updates sync state
-
-    Args:
-        threads_dir: Threads directory
-        topic: Thread topic
-        entry_id: Specific entry ID to sync (or None for latest)
-        generate_summaries: Whether to generate LLM summaries
-        generate_embeddings: Whether to generate embedding vectors
-
-    Returns:
-        True if sync succeeded, False otherwise
-    """
-    global _sync_entry_deprecation_warned
-    if not _sync_entry_deprecation_warned:
-        warnings.warn(
-            "sync_entry_to_graph() is deprecated. Use enrich_graph_entry() instead. "
-            "This function reads from markdown; in graph-first architecture, "
-            "enrich_graph_entry() reads from the graph (source of truth).",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        _sync_entry_deprecation_warned = True
-    thread_path = _fs.find_thread_path(topic, threads_dir)
-    if not thread_path:
-        logger.warning(f"Thread file not found for sync: {topic}")
-        return False
-
-    try:
-        # Get previous thread state for arc change detection
-        prev_entry_count, prev_thread_summary = get_previous_thread_state(threads_dir, topic)
-
-        # Parse thread (without generating summaries during parse - we do it here)
-        parsed = parse_thread_file(
-            thread_path,
-            config=None,
-            generate_summaries=False,  # Generate summaries in sync, not parse
-        )
-        if not parsed:
-            logger.warning(f"Failed to parse thread for sync: {topic}")
-            return False
-
-        # Find the entry to sync
-        if entry_id:
-            entry = next((e for e in parsed.entries if e.entry_id == entry_id), None)
-            if not entry:
-                # Entry ID not found, sync full thread
-                logger.debug(f"Entry {entry_id} not found, syncing full thread")
-                return sync_thread_to_graph(
-                    threads_dir, topic, generate_summaries, generate_embeddings
-                )
-        else:
-            # Sync latest entry
-            entry = parsed.entries[-1] if parsed.entries else None
-
-        if not entry:
-            logger.warning(f"No entries found in thread: {topic}")
-            return False
-
-        # Generate entry summary if enabled
-        summarizer_config = None
-        llm_available = False
-        if generate_summaries and not entry.summary:
-            summarizer_config = create_summarizer_config()
-            llm_available = is_llm_service_available(summarizer_config)
-
-            # Try auto-start if unavailable and enabled
-            if not llm_available and _try_auto_start_service("llm", summarizer_config.api_base):
-                llm_available = is_llm_service_available(summarizer_config)
-
-            if llm_available:
-                entry.summary = summarize_entry(
-                    entry.body,
-                    entry_title=entry.title,
-                    entry_type=entry.entry_type,
-                    config=summarizer_config,
-                )
-                if entry.summary:
-                    logger.debug(f"Generated summary for entry {entry.entry_id}")
-            else:
-                logger.warning(
-                    f"LLM service unavailable at {summarizer_config.api_base}. "
-                    "Skipping summary generation. To enable summaries: "
-                    "1) Start llama-server on port 8000 "
-                    "2) Or set WATERCOOLER_AUTO_START_SERVICES=true"
-                )
-
-        # Generate entry embedding if enabled
-        entry_embedding = None
-        if generate_embeddings:
-            embed_config = EmbeddingConfig.from_env()
-            embed_available = is_embedding_available(embed_config)
-
-            # Try auto-start if unavailable and enabled
-            if not embed_available and _try_auto_start_service("embedding", embed_config.api_base):
-                embed_available = is_embedding_available(embed_config)
-
-            if embed_available:
-                # Use summary for embedding if available, otherwise truncated body
-                embed_text = entry.summary if entry.summary else entry.body[:500]
-                entry_embedding = generate_embedding(embed_text)
-                if entry_embedding:
-                    logger.debug(f"Generated embedding for entry {entry.entry_id}")
-            else:
-                logger.warning(
-                    f"Embedding service unavailable at {embed_config.api_base}. "
-                    "Skipping embedding generation. To enable embeddings: "
-                    "1) Start llama.cpp server with embedding model "
-                    "2) Or set WATERCOOLER_AUTO_START_SERVICES=true"
-                )
-
-        # Check if thread summary needs update (arc change detection)
-        update_thread_summary = False
-        if generate_summaries:
-            # Ensure we have config and availability check
-            if summarizer_config is None:
-                summarizer_config = create_summarizer_config()
-                llm_available = is_llm_service_available(summarizer_config)
-
-            update_thread_summary = should_update_thread_summary(
-                parsed, entry, prev_entry_count
-            )
-            if update_thread_summary and llm_available:
-                # Convert entries to dict format for summarize_thread
-                entries_for_summary = [
-                    {
-                        "title": e.title,
-                        "body": e.body,
-                        "entry_type": e.entry_type,
-                        "agent": e.agent,
-                    }
-                    for e in parsed.entries
-                ]
-                parsed.summary = summarize_thread(
-                    entries_for_summary,
-                    thread_title=parsed.title,
-                    config=summarizer_config,
-                )
-                if parsed.summary:
-                    logger.info(f"Updated thread summary for {topic} (arc change)")
-            elif prev_thread_summary:
-                # Preserve existing thread summary
-                parsed.summary = prev_thread_summary
-
-        # Get graph directory and load existing per-thread data
-        graph_dir = storage.ensure_graph_dir(threads_dir)
-
-        # Load existing data (or empty dicts if new thread)
-        meta = storage.load_thread_meta(graph_dir, topic) or {}
-        entries = storage.load_thread_entries_dict(graph_dir, topic)
-        edges = storage.load_thread_edges(graph_dir, topic)
-
-        thread_id = f"thread:{topic}"
-        entry_node_id = f"entry:{entry.entry_id}"
-
-        # Build entry node with embedding if available
-        entry_node = entry_to_node(entry, topic)
-        if entry_embedding:
-            entry_node["embedding"] = entry_embedding
-
-        # Update entries dict
-        entries[entry_node_id] = entry_node
-
-        # Build/update thread meta
-        thread_node = thread_to_node(parsed)
-        meta.update(thread_node)
-
-        # Add contains edge
-        contains_edge_id = thread_id + entry_node_id
-        edges[contains_edge_id] = {
-            "source": thread_id,
-            "target": entry_node_id,
-            "type": "contains",
-        }
-
-        # Find previous entry for followed_by edge
-        # Note: entry.index is the position in the thread (0-based)
-        # We look for the entry at index-1 to create a followed_by edge
-        if entry.index > 0:
-            prev_entry: Optional[ParsedEntry] = None
-            prev_idx = entry.index - 1
-            # First try direct list access if entries are in order
-            if prev_idx < len(parsed.entries):
-                candidate = parsed.entries[prev_idx]
-                if candidate.index == prev_idx:
-                    prev_entry = candidate
-            # Fallback: search by index attribute (handles sparse/reordered lists)
-            if prev_entry is None:
-                for e in parsed.entries:
-                    if e.index == prev_idx:
-                        prev_entry = e
-                        break
-            if prev_entry and prev_entry.entry_id:
-                prev_entry_node_id = f"entry:{prev_entry.entry_id}"
-                followed_by_edge_id = prev_entry_node_id + entry_node_id
-                edges[followed_by_edge_id] = {
-                    "source": prev_entry_node_id,
-                    "target": entry_node_id,
-                    "type": "followed_by",
-                }
-
-        # Write all per-thread files atomically
-        storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
-
-        # Store embedding in FalkorDB (with fallback to search-index.jsonl).
-        # Phase 8 / Codex re-review: thread entry metadata through so hosted
-        # semantic search can filter on role/entry_type/agent/timestamp.
-        if entry_embedding:
-            upsert_embedding(
-                threads_dir,
-                graph_dir,
-                entry.entry_id,
-                topic,
-                entry_embedding,
-                role=entry.role or "",
-                entry_type=entry.entry_type or "",
-                agent=entry.agent or "",
-                timestamp=entry.timestamp or "",
-            )
-
-        # Update sync state
-        state = GraphSyncState(
-            status="ok",
-            last_synced_entry_id=entry.entry_id,
-            last_sync_at=_now_iso(),
-            error_message=None,
-            entries_synced=(get_graph_sync_state(threads_dir, topic) or GraphSyncState()).entries_synced + 1,
-        )
-        _update_graph_sync_state(threads_dir, topic, state)
-
-        logger.debug(f"Graph sync complete for {topic}/{entry.entry_id}")
-
-        # Call memory backend hook (non-blocking - errors logged, never raise)
-        # WARNING: This is the deprecated sync path. New code should use
-        # enrich_graph_entry() via middleware.operation_with_graph_sync() which
-        # handles memory sync independently. If both paths fire for the same
-        # entry, it will be double-indexed.
-        sync_to_memory_backend(
-            threads_dir=threads_dir,
-            topic=topic,
-            entry_id=entry.entry_id,
-            entry_body=entry.body,
-            entry_title=entry.title,
-            timestamp=entry.timestamp,
-        )
-
-        return True
-
-    except Exception as e:
-        logger.error(f"Graph sync failed for {topic}: {e}")
-        record_graph_sync_error(threads_dir, topic, entry_id, e)
-        return False
-
-
 def sync_thread_to_graph(
     threads_dir: Path,
     topic: str,
@@ -2052,6 +1767,114 @@ def check_graph_health(
         and report.pending_threads == 0
         and len(report.stale_threads) == 0
     )
+
+    return report
+
+
+@dataclass
+class IntegrityIssue:
+    """A single baseline-graph integrity problem.
+
+    kind is one of: ``entry_count_mismatch``, ``jsonl_corruption``,
+    ``markdown_not_in_graph``.
+    """
+
+    topic: str
+    kind: str
+    detail: str
+
+
+@dataclass
+class BaselineIntegrityReport:
+    """On-disk integrity report produced by ``check_baseline_integrity``."""
+
+    checked_threads: int = 0
+    issues: List["IntegrityIssue"] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.issues
+
+
+def _count_jsonl_lines(path: Path) -> tuple[int, int]:
+    """Return ``(valid, corrupt)`` counts of non-blank lines in a JSONL file.
+
+    A missing or unreadable file counts as ``(0, 0)``.
+    """
+    if not path.exists():
+        return 0, 0
+    valid = 0
+    corrupt = 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    json.loads(line)
+                    valid += 1
+                except (json.JSONDecodeError, ValueError):
+                    corrupt += 1
+    except OSError:
+        return 0, 0
+    return valid, corrupt
+
+
+def check_baseline_integrity(threads_dir: Path) -> BaselineIntegrityReport:
+    """Check baseline-graph on-disk integrity for all threads — T1-only.
+
+    Requires no Graphiti / T2 backend: it inspects only the local baseline
+    graph files, so T1-only users can verify their graph is consistent.
+    Complements ``check_graph_health`` (which reports sync-state status).
+
+    Detects, per thread:
+    - ``entry_count_mismatch``: meta.json ``entry_count`` disagrees with the
+      actual number of valid rows in entries.jsonl
+    - ``jsonl_corruption``: unparseable lines in entries.jsonl / edges.jsonl
+    - ``markdown_not_in_graph``: a thread .md projection exists on disk for a
+      topic that has no baseline graph directory
+    """
+    report = BaselineIntegrityReport()
+    graph_dir = storage.get_graph_dir(threads_dir)
+    graph_topics = storage.list_thread_topics(graph_dir)
+    report.checked_threads = len(graph_topics)
+
+    for topic in graph_topics:
+        topic_dir = storage.get_thread_graph_dir(graph_dir, topic)
+
+        entry_valid, entry_corrupt = _count_jsonl_lines(topic_dir / "entries.jsonl")
+        _, edge_corrupt = _count_jsonl_lines(topic_dir / "edges.jsonl")
+
+        if entry_corrupt:
+            report.issues.append(IntegrityIssue(
+                topic, "jsonl_corruption",
+                f"{entry_corrupt} unparseable line(s) in entries.jsonl",
+            ))
+        if edge_corrupt:
+            report.issues.append(IntegrityIssue(
+                topic, "jsonl_corruption",
+                f"{edge_corrupt} unparseable line(s) in edges.jsonl",
+            ))
+
+        meta = storage.load_thread_meta(graph_dir, topic)
+        if meta is not None:
+            declared = meta.get("entry_count")
+            if isinstance(declared, int) and declared != entry_valid:
+                report.issues.append(IntegrityIssue(
+                    topic, "entry_count_mismatch",
+                    f"meta.json entry_count={declared} but entries.jsonl "
+                    f"has {entry_valid} valid entr"
+                    f"{'y' if entry_valid == 1 else 'ies'}",
+                ))
+
+    # A thread .md projection on disk with no corresponding graph data.
+    md_topics = set(_fs.list_markdown_thread_topics(threads_dir))
+    for topic in sorted(md_topics - set(graph_topics)):
+        report.issues.append(IntegrityIssue(
+            topic, "markdown_not_in_graph",
+            "thread .md exists on disk but the topic has no baseline graph data",
+        ))
 
     return report
 
@@ -2606,9 +2429,9 @@ def resolve_recovery_targets(
     elif mode == "selective":
         # Check graph first, then fall back to .md discovery for threads
         # that exist on disk but haven't been synced to the graph yet.
-        from watercooler.fs import discover_thread_files
+        from watercooler.fs import list_markdown_thread_topics
 
-        md_topics = {f.stem for f in discover_thread_files(threads_dir)}
+        md_topics = set(list_markdown_thread_topics(threads_dir))
         known_topics = set(graph_topics) | md_topics
         target_topics = [t for t in topics if t in known_topics]
         if not target_topics:
@@ -2620,9 +2443,8 @@ def resolve_recovery_targets(
         if graph_topics:
             target_topics = graph_topics
         else:
-            from watercooler.fs import discover_thread_files
-            md_files = discover_thread_files(threads_dir)
-            target_topics = [f.stem for f in md_files]
+            from watercooler.fs import list_markdown_thread_topics
+            target_topics = list_markdown_thread_topics(threads_dir)
             if not target_topics:
                 errors.append("No threads found in graph or on disk")
                 return [], errors

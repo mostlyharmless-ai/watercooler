@@ -12,10 +12,7 @@ from watercooler_mcp.capabilities import (
     CapabilityProfile,
 )
 from watercooler_mcp.tool_runtime import ToolRuntime
-from watercooler_mcp.tools.graph import (
-    _build_hybrid_search_wrapper,
-    _build_hybrid_find_similar_wrapper,
-)
+from watercooler_mcp.tools.graph import _build_hybrid_search_wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -106,55 +103,94 @@ class TestHybridSearchWrapper:
 
 
 # ---------------------------------------------------------------------------
-# Find similar wrapper
+# Search wrapper — seeded similarity & federated modes (PR6 D4/D5)
 # ---------------------------------------------------------------------------
 
 
-class TestHybridFindSimilarWrapper:
-    @pytest.mark.anyio
-    async def test_local_route_calls_impl(self):
-        """When the operator overrides semantic_similarity to "local", the
-        wrapper calls the local impl rather than routing remote.
+class TestHybridSearchSeedAndFederated:
+    """find_similar / federated_search folded into watercooler_search; the
+    search hybrid wrapper resolves the seed_entry_id= and federated= modes
+    per-(tool, args)."""
 
-        Plan v20 Phase 8 flipped the hybrid default for semantic_similarity
-        from "local" to "remote" so the hosted T1 HNSW index is authoritative;
-        this test now exercises the explicit-local-override path instead of
-        relying on the default.
-        """
+    @pytest.mark.anyio
+    async def test_seed_entry_id_routes_remote(self):
+        """search(seed_entry_id=) → semantic_similarity → remote (Plan v20
+        default) when a premium client exists."""
+        mock_client = MagicMock()
+        mock_client.call_tool_text = AsyncMock(return_value='{"remote": true}')
+        rt = _make_runtime(premium_client=mock_client)
+        wrapper = _build_hybrid_search_wrapper(rt)
+
+        result = await wrapper(_mock_ctx(), seed_entry_id="01ABC")
+        mock_client.call_tool_text.assert_called_once_with(
+            "watercooler_search", {"seed_entry_id": "01ABC"}
+        )
+        assert '"remote"' in result
+
+    @pytest.mark.anyio
+    async def test_seed_entry_id_local_override(self):
+        """With semantic_similarity overridden to local, the seed call runs
+        the local impl."""
         routes = dict(HYBRID_DEFAULT_ROUTES)
         routes["semantic_similarity"] = "local"
         rt = _make_runtime(routes=routes)
-        wrapper = _build_hybrid_find_similar_wrapper(rt)
+        wrapper = _build_hybrid_search_wrapper(rt)
 
         with patch(
-            "watercooler_mcp.tools.graph._find_similar_entries_impl",
+            "watercooler_mcp.tools.graph._search_graph_impl",
+            new_callable=AsyncMock,
             return_value='{"results": []}',
         ) as mock_impl:
-            result = await wrapper(_mock_ctx(), entry_id="01ABC", code_path=".")
+            result = await wrapper(
+                _mock_ctx(), seed_entry_id="01ABC", code_path="."
+            )
             mock_impl.assert_called_once()
             assert '"results"' in result
 
     @pytest.mark.anyio
-    async def test_remote_route_calls_premium(self):
-        """Default hybrid route for semantic_similarity is remote → premium."""
-        mock_client = MagicMock()
-        mock_client.call_tool_text = AsyncMock(return_value='{"remote": true}')
-
-        # No route override needed — "remote" is the Plan v20 default.
-        rt = _make_runtime(premium_client=mock_client)
-        wrapper = _build_hybrid_find_similar_wrapper(rt)
-
-        result = await wrapper(_mock_ctx(), entry_id="01ABC")
-        mock_client.call_tool_text.assert_called_once()
-
-    @pytest.mark.anyio
-    async def test_disabled_returns_error(self):
+    async def test_seed_entry_id_disabled(self):
         routes = dict(HYBRID_DEFAULT_ROUTES)
         routes["semantic_similarity"] = "disabled"
         rt = _make_runtime(routes=routes)
-        wrapper = _build_hybrid_find_similar_wrapper(rt)
+        wrapper = _build_hybrid_search_wrapper(rt)
 
-        result = await wrapper(_mock_ctx(), entry_id="01ABC")
+        result = await wrapper(_mock_ctx(), seed_entry_id="01ABC")
         data = json.loads(result)
         assert data["error"] == "capability_disabled"
         assert data["capability"] == "semantic_similarity"
+
+    @pytest.mark.anyio
+    async def test_federated_routes_local(self):
+        """search(federated=True) → federation_search → local (default route)."""
+        rt = _make_runtime()
+        wrapper = _build_hybrid_search_wrapper(rt)
+
+        with patch(
+            "watercooler_mcp.tools.graph._search_graph_impl",
+            new_callable=AsyncMock,
+            return_value='{"results": []}',
+        ) as mock_impl:
+            result = await wrapper(_mock_ctx(), federated=True, query="x")
+            mock_impl.assert_called_once()
+            assert '"results"' in result
+
+
+class TestSearchSeedDispatch:
+    """search(seed_entry_id=) dispatches to the find_similar impl, preserving
+    use_embeddings — the retired tool's heuristic-fallback mode (PR6 review)."""
+
+    @pytest.mark.anyio
+    async def test_seed_dispatch_forwards_use_embeddings(self):
+        from watercooler_mcp.tools import graph as graph_mod
+
+        with patch.object(
+            graph_mod,
+            "_find_similar_entries_impl",
+            return_value='{"results": []}',
+        ) as mock_impl:
+            await graph_mod._search_graph_impl(
+                _mock_ctx(), seed_entry_id="01ABC", use_embeddings=False
+            )
+        mock_impl.assert_called_once()
+        assert mock_impl.call_args.kwargs["entry_id"] == "01ABC"
+        assert mock_impl.call_args.kwargs["use_embeddings"] is False

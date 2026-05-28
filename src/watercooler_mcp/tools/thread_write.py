@@ -74,6 +74,35 @@ handoff = None
 set_status = None
 
 
+_TERMINAL_STATUSES = frozenset({"CLOSED", "RESOLVED", "DONE", "MERGED"})
+
+
+def _next_signal(
+    entry_type: str = "Note",
+    ball: str = "",
+    target_agent: str | None = None,
+    status: str | None = None,
+    keep_ball: bool = False,
+) -> str:
+    """Return the Ball:/Next: advisory line appended to every write-tool response.
+
+    Next: meanings:
+    - stop         — entry_type is Closure, or status transitioned to terminal
+    - handoff      — ball explicitly passed to a named agent
+    - keep-working — ball stayed with the caller (ack path); caller should continue
+    - continue     — ball flipped to counterpart; counterpart should act next
+    """
+    if entry_type == "Closure":
+        return f"Ball: {ball}. Next: stop. Phase complete."
+    if status and status.strip().upper() in _TERMINAL_STATUSES:
+        return f"Ball: {ball or 'counterpart'}. Next: stop. Status is terminal ({status.strip().upper()})."
+    if target_agent:
+        return f"Ball: {target_agent}. Next: handoff. Ball passed to {target_agent}."
+    if keep_ball:
+        return f"Ball: {ball or 'you'}. Next: keep-working. Ball stayed with you."
+    return f"Ball: {ball or 'counterpart'}. Next: continue."
+
+
 def _touch_annotation(threads_dir, topic, entry_id=None):
     """Update last_touched on annotation state for thread and entry.
 
@@ -134,7 +163,7 @@ def _say_impl(
             Thread entries should explicitly reference any files changed, using file paths
             (e.g., `src/watercooler_mcp/server.py`, `docs/README.md`) to maintain clear
             traceability of what was modified.
-        role: Your role — call watercooler_role_details for the active catalog (default: implementer)
+        role: Your role — call watercooler_roles for the active catalog (default: implementer)
         entry_type: Entry type - Note, Plan, Decision, PR, or Closure (default: Note)
         create_if_missing: Whether to create the thread if it doesn't exist (default: False, but threads are auto-created by commands.say)
         code_path: Path to the code repository directory containing the files most immediately
@@ -216,6 +245,7 @@ def _say_impl(
         ]
         if slack_synced:
             lines.append("Slack: synced")
+        lines.append(_next_signal(entry_type, ball))
 
         return _format_warnings_for_response("\n".join(lines))
 
@@ -304,7 +334,8 @@ def _say_impl(
         f"Ball flipped to: {ball}\n"
         f"Status: {status}\n"
         f"Entry-ID: {entry_id}"
-        f"{push_warning}"
+        f"{push_warning}\n"
+        f"{_next_signal(entry_type, ball)}"
     )
 
 
@@ -315,6 +346,7 @@ def _ack_impl(
     body: str = "",
     code_path: str = "",
     agent_func: str = "",
+    role: str | None = None,
 ) -> str:
     """Acknowledge a thread without flipping the ball.
 
@@ -369,6 +401,7 @@ def _ack_impl(
             title=title or "Ack",
             body=body or "Acknowledged",
             code_branch=context.code_branch,
+            role=role or "pm",
         )
 
         if write_error:
@@ -381,11 +414,23 @@ def _ack_impl(
         ball = result.get("ball", "Agent")
 
         ack_title = title or "Ack"
+        # keep_ball is only truthful when the caller actually owns the ball.
+        # ack preserves the existing owner — if that owner is someone else,
+        # the signal must say so (Next: continue with the real owner) rather
+        # than falsely claiming the caller can keep working.
+        # Case+whitespace-insensitive comparison — matches the convention in
+        # hosted_ops.py:1691-1693 since ball values can drift in case/spacing
+        # across human edits, defaulted values ("Agent"), and platform names.
+        caller_holds_ball = (
+            bool(ball)
+            and ball.strip().lower() == (agent or "").strip().lower()
+        )
         return (
             f"✅ Acknowledged '{topic}'\n"
             f"Title: {ack_title}\n"
             f"Ball remains with: {ball}\n"
-            f"Status: {status}"
+            f"Status: {status}\n"
+            f"{_next_signal(ball=ball, keep_ball=caller_holds_ball)}"
         )
 
     # =====================================================================
@@ -409,6 +454,7 @@ def _ack_impl(
             topic,
             threads_dir=threads_dir,
             agent=agent,
+            role=role,
             title=title or None,
             body=body or None,
             entry_id=entry_id,
@@ -432,12 +478,17 @@ def _ack_impl(
     _, status, ball, _ = _get_thread_meta(threads_dir, topic)
 
     ack_title = title or "Ack"
+    caller_holds_ball = (
+        bool(ball)
+        and ball.strip().lower() == (agent or "").strip().lower()
+    )
     return (
         f"✅ Acknowledged '{topic}'\n"
         f"Title: {ack_title}\n"
         f"Ball remains with: {ball}\n"
         f"Status: {status}"
-        f"{push_warning}"
+        f"{push_warning}\n"
+        f"{_next_signal(ball=ball, keep_ball=caller_holds_ball)}"
     )
 
 
@@ -448,6 +499,7 @@ def _handoff_impl(
     target_agent: str | None = None,
     code_path: str = "",
     agent_func: str = "",
+    role: str | None = None,
 ) -> str:
     """Hand off the ball to another agent.
 
@@ -488,6 +540,13 @@ def _handoff_impl(
         raise IdentityError("identity invalid: agent_func must be '<platform>:<model>:<role>' (e.g., 'Cursor:Composer 1:implementer')")
     agent = agent_base or get_agent_name(ctx.client_id)
 
+    # Defense-in-depth: scrub CR/LF and surrounding whitespace from target_agent
+    # for direct callers that bypass _write_impl's normalization. An embedded
+    # newline could otherwise forge commit-message footers downstream.
+    if isinstance(target_agent, str):
+        normalized = target_agent.replace("\r", " ").replace("\n", " ").strip()
+        target_agent = normalized or None
+
     # =====================================================================
     # Hosted Mode Path (GitHub API)
     # =====================================================================
@@ -502,6 +561,7 @@ def _handoff_impl(
             target_agent=target_agent,
             note=note,
             code_branch=context.code_branch,
+            role=role or "pm",
         )
 
         if write_error:
@@ -517,7 +577,8 @@ def _handoff_impl(
             f"✅ Ball handed off to: {new_ball}\n"
             f"Thread: {topic}\n"
             f"Status: {status}\n"
-            + (f"Note: {note}" if note else "")
+            + (f"Note: {note}\n" if note else "")
+            + _next_signal(ball=new_ball, target_agent=target_agent or new_ball)
         )
 
     # =====================================================================
@@ -544,7 +605,7 @@ def _handoff_impl(
                     topic,
                     threads_dir=threads_dir,
                     agent=agent,
-                    role="pm",
+                    role=role or "pm",
                     title=f"Handoff to {target_agent}",
                     entry_type="Note",
                     body=note,
@@ -593,8 +654,9 @@ def _handoff_impl(
         return (
             f"✅ Ball handed off to: {target_agent}\n"
             f"Thread: {topic}\n"
-            + (f"Note: {note}" if note else "")
+            + (f"Note: {note}\n" if note else "")
             + push_warning
+            + f"\n{_next_signal(ball=target_agent, target_agent=target_agent)}"
         )
     else:
         # Define operation
@@ -603,6 +665,7 @@ def _handoff_impl(
                 topic,
                 threads_dir=threads_dir,
                 agent=agent,
+                role=role or "pm",
                 note=note or None,
                 entry_id=entry_id,
                 code_branch=context.code_branch,
@@ -653,8 +716,11 @@ def _handoff_impl(
             f"✅ Ball handed off to: {ball}\n"
             f"Thread: {topic}\n"
             f"Status: {status}\n"
-            + (f"Note: {note}" if note else "")
+            + (f"Note: {note}\n" if note else "")
             + push_warning
+            # Implicit handoff (target_agent=None) still changed the ball, so
+            # always emit Next: handoff using the resolved ball as the target.
+            + f"\n{_next_signal(ball=ball, target_agent=target_agent or ball)}"
         )
 
 
@@ -715,9 +781,11 @@ def _set_status_impl(
                 raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
             raise HostedModeError(write_error, operation="set_status")
 
+        hosted_ball = result.get("ball", "") if isinstance(result, dict) else ""
         return (
             f"✅ Status updated for '{topic}'\n"
-            f"New status: {status}"
+            f"New status: {status}\n"
+            f"{_next_signal(ball=hosted_ball, status=status)}"
         )
 
     # =====================================================================
@@ -796,10 +864,194 @@ def _set_status_impl(
         except Exception as e:
             logging.getLogger(__name__).warning(f"Slack status sync failed for {topic}: {e}")
 
+    # Resolve current ball owner so the response advisory names the real actor.
+    # Status updates don't move the ball, but the Ball: <owner> signal must
+    # still be truthful for downstream agents following the stop-naturally
+    # contract.
+    current_ball = ""
+    try:
+        _, _, current_ball, _ = _get_thread_meta(threads_dir, topic)
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "set_status: _get_thread_meta failed for topic=%s: %s", topic, exc
+        )
+
     return (
         f"✅ Status updated for '{topic}'\n"
         f"New status: {status}"
-        f"{push_warning}"
+        f"{push_warning}\n"
+        f"{_next_signal(ball=current_ball or '', status=status)}"
+    )
+
+
+_VALID_AUTHORITY_MODES = frozenset({"ordinary", "decision", "closure"})
+
+
+def _write_impl(
+    topic: str,
+    body: str,
+    ctx: Context,
+    role: str,
+    agent_func: str,
+    next_actor: str = "auto",
+    authority_mode: str = "ordinary",
+    authorization_text: str | None = None,
+    downgrade_to_note: bool = False,
+    code_path: str = "",
+) -> str:
+    """Unified write path — the preferred tool for ordinary agent writes.
+
+    Wraps say/ack/handoff internally.  Direct tools remain available for
+    explicit coordination control or when title/spec/entry_type override matters.
+
+    Args:
+        topic: Thread topic identifier
+        body: Entry body (markdown).  Must start with a ``Spec: <spec>`` line;
+            if absent one is prepended from ``role``.
+        role: Your canonical role: planner | critic | implementer | tester | pm | scribe
+        agent_func: Agent identity ``<platform>:<model>:<role>``
+        next_actor: ``auto`` (flip ball, same as say) | ``self`` (keep ball, same
+            as ack) | ``<agent name>`` (explicit handoff)
+        authority_mode: ``ordinary`` (Note) | ``decision`` (Decision entry) |
+            ``closure`` (Closure entry).  ``decision`` and ``closure`` require
+            ``authorization_text``; without it the call writes nothing and returns
+            an error unless ``downgrade_to_note=True``.
+        authorization_text: Explicit authorization statement required for
+            ``authority_mode="decision"`` or ``"closure"``.
+        downgrade_to_note: When True and ``authority_mode`` is decision/closure
+            but ``authorization_text`` is absent, write a Note with a loud
+            warning instead of returning an error.
+        code_path: Path to the repository root (required). The git branch is
+            resolved from the code_path context; per-call branch override is
+            not supported here — use the direct say/ack/handoff tools if you
+            need to bypass context resolution.
+
+    Returns:
+        Confirmation string with Ball: / Next: advisory suffix.
+    """
+    if authority_mode not in _VALID_AUTHORITY_MODES:
+        return (
+            f"❌ watercooler_write: invalid authority_mode={authority_mode!r}. "
+            f"Use 'ordinary', 'decision', or 'closure'."
+        )
+
+    # Delegate role validation to the project catalog (consults
+    # .watercooler/roles.toml with bundled defaults as fallback).
+    try:
+        validate_role(role, code_path=code_path or None)
+    except ValueError as exc:
+        return f"❌ watercooler_write: {exc}"
+
+    # Contract: "auto" | "self" | <explicit agent name>. Whitespace-only or
+    # empty values must not route as an implicit handoff (target_agent="" is
+    # falsy and would flip the ball to the default counterpart). Embedded CR/LF
+    # in an explicit agent name would forge commit-message footers downstream,
+    # same threat as authorization_text — scrub before the emptiness check.
+    if isinstance(next_actor, str):
+        next_actor = next_actor.replace("\r", " ").replace("\n", " ").strip()
+    if not next_actor:
+        return (
+            f"❌ watercooler_write: next_actor must be 'auto', 'self', or an "
+            f"explicit agent name. Got empty/whitespace value."
+        )
+
+    # Sanitize authorization_text up front: whitespace-only or newline-only is
+    # truthy but carries no human-readable authorization. CR/LF scrub also
+    # blocks commit-footer forgery via embedded newlines.
+    if authorization_text:
+        authorization_text = authorization_text.replace("\r", " ").replace("\n", " ").strip()
+    needs_auth = authority_mode in ("decision", "closure")
+    downgraded_from: str | None = None
+    if needs_auth and not authorization_text:
+        if not downgrade_to_note:
+            return (
+                f"❌ watercooler_write: authority_mode={authority_mode!r} requires "
+                f"authorization_text. Pass authorization_text=<explicit statement> "
+                f"or set downgrade_to_note=True to write a Note instead."
+            )
+        downgraded_from = authority_mode
+        authority_mode = "ordinary"
+
+    # entry_type only flows through _say_impl; ack/handoff drop it. Allowing
+    # Decision/Closure on next_actor in ("self", <agent>) would silently write
+    # a Note and pretend authority was exercised.
+    if authority_mode != "ordinary" and next_actor != "auto":
+        return (
+            f"❌ watercooler_write: authority_mode={authority_mode!r} requires "
+            f"next_actor='auto' (Decision/Closure entries must flip the ball via say). "
+            f"Got next_actor={next_actor!r}."
+        )
+
+    entry_type_map = {"ordinary": "Note", "decision": "Decision", "closure": "Closure"}
+    entry_type = entry_type_map[authority_mode]
+
+    # Per CLAUDE.md, the first body line must be `Spec: <spec>`. The spec value
+    # is free-form documentation (canonical role, sub-spec like
+    # `planner-architecture`, or cross-cutting label like `security-audit`,
+    # `docs`, `ops`, `general-purpose`, `active-disagreement`). The structural
+    # role lives in graph metadata via the `role` field; the Spec line is for
+    # human readers and does not need to match. Preserve a caller-supplied
+    # Spec line verbatim; prepend `Spec: <role>` only when absent.
+    stripped = body.lstrip()
+    if stripped.startswith("Spec:"):
+        body = stripped
+    else:
+        body = f"Spec: {role}\n\n{stripped}"
+
+    # Banner injected after the Spec line so the first byte of the body
+    # remains `Spec:` — protocol invariant.
+    if downgraded_from is not None:
+        spec_line, _, rest = body.partition("\n")
+        # partition() leaves a trailing \r when the body used CRLF endings;
+        # strip it so the Spec line doesn't carry stray control bytes.
+        spec_line = spec_line.rstrip("\r")
+        banner = (
+            f"[watercooler_write: downgraded from {downgraded_from} "
+            f"— no authorization_text]"
+        )
+        body = f"{spec_line}\n\n{banner}\n\n{rest.lstrip()}" if rest else f"{spec_line}\n\n{banner}"
+
+    if authorization_text:
+        body = body + f"\n\n[watercooler_write: authorized — {authorization_text}]"
+
+    # Title is the first non-empty, non-Spec line; ellipsized past TITLE_MAX.
+    TITLE_MAX = 60
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("Spec:")]
+    raw = lines[0] if lines else body.strip()
+    title = (raw[: TITLE_MAX - 3] + "…") if len(raw) > TITLE_MAX else raw
+
+    if next_actor == "self":
+        return _ack_impl(
+            topic=topic,
+            ctx=ctx,
+            title=title,
+            body=body,
+            code_path=code_path,
+            agent_func=agent_func,
+            role=role,
+        )
+
+    if next_actor not in ("auto", "self"):
+        return _handoff_impl(
+            topic=topic,
+            ctx=ctx,
+            note=body,
+            target_agent=next_actor,
+            code_path=code_path,
+            agent_func=agent_func,
+            role=role,
+        )
+
+    return _say_impl(
+        topic=topic,
+        title=title,
+        body=body,
+        ctx=ctx,
+        role=role,
+        entry_type=entry_type,
+        create_if_missing=False,
+        code_path=code_path,
+        agent_func=agent_func,
     )
 
 
@@ -816,3 +1068,4 @@ def register_thread_write_tools(mcp):
     ack = mcp.tool(name="watercooler_ack")(_ack_impl)
     handoff = mcp.tool(name="watercooler_handoff")(_handoff_impl)
     set_status = mcp.tool(name="watercooler_set_status")(_set_status_impl)
+    mcp.tool(name="watercooler_write")(_write_impl)

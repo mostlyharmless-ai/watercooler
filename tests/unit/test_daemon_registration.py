@@ -1184,3 +1184,192 @@ class TestDaemonExecutionPolicy:
         assert daemon_execution_policy(
             "thread_auditor", sub, "stdio", False
         ) == "local"
+
+
+class TestLocalRegistrationErrors:
+    """``init_daemons`` captures structured per-daemon registration failures.
+
+    Mirrors the hosted-side ``_record_failure`` pattern shipped in PR #755,
+    extended to local mode so secondary MCP-server processes can see why a
+    daemon didn't register without paging through process logs.  Closes the
+    site-side analogue of Jay's 2026-05-04 silent-registration incident
+    (entry ``01KQSQJ68NQBXP1A1GM41WJW1G`` on
+    ``hosted-premium-daemons-zero-registration-2026-05-04``) for local mode.
+    """
+
+    def test_successful_registration_records_no_errors(self) -> None:
+        """Healthy registrations leave ``registration_errors`` empty."""
+        mock_cfg = _make_config(enable={"thread_auditor", "sync_guard"})
+
+        with patch("watercooler.config_facade.config.full", return_value=mock_cfg):
+            mgr = init_daemons(start=False)
+
+        assert mgr.registration_errors == []
+
+    def test_construction_failure_recorded_structurally(self) -> None:
+        """When a daemon constructor raises, the failure is captured."""
+        mock_cfg = _make_config(enable={"thread_auditor"})
+
+        def _boom(*_a, **_kw):  # noqa: ANN001 — constructor stub
+            raise RuntimeError("synthetic construction failure")
+
+        with (
+            patch("watercooler.config_facade.config.full", return_value=mock_cfg),
+            patch(
+                "watercooler_mcp.daemons.auditor.ThreadAuditorDaemon",
+                side_effect=_boom,
+            ),
+        ):
+            mgr = init_daemons(start=False)
+
+        # The failed daemon is not in the registry...
+        assert "thread_auditor" not in mgr.daemon_names
+        # ...but the failure is recorded structurally.
+        assert any(
+            err["daemon"] == "thread_auditor"
+            and "synthetic construction failure" in err["error"]
+            for err in mgr.registration_errors
+        )
+
+    def test_one_daemon_failure_does_not_block_others(self) -> None:
+        """A failing daemon's error is captured; sibling daemons still register."""
+        mock_cfg = _make_config(
+            enable={"thread_auditor", "sync_guard", "decision_detector"}
+        )
+
+        def _boom(*_a, **_kw):  # noqa: ANN001
+            raise RuntimeError("auditor down")
+
+        with (
+            patch("watercooler.config_facade.config.full", return_value=mock_cfg),
+            patch(
+                "watercooler_mcp.daemons.auditor.ThreadAuditorDaemon",
+                side_effect=_boom,
+            ),
+        ):
+            mgr = init_daemons(start=False)
+
+        assert "thread_auditor" not in mgr.daemon_names
+        assert "sync_guard" in mgr.daemon_names
+        assert "decision_detector" in mgr.daemon_names
+        assert any(e["daemon"] == "thread_auditor" for e in mgr.registration_errors)
+
+    def test_config_load_failure_recorded_under_synthetic_key(self) -> None:
+        """A config-load exception records under the ``_config`` synthetic name."""
+        with patch(
+            "watercooler.config_facade.config.full",
+            side_effect=ValueError("malformed config"),
+        ):
+            mgr = init_daemons(start=False)
+
+        assert mgr.daemon_names == []
+        assert any(
+            err["daemon"] == "_config" and "malformed config" in err["error"]
+            for err in mgr.registration_errors
+        )
+
+    def test_error_payload_shape_matches_hosted_side(self) -> None:
+        """Each entry is ``{"daemon": str, "error": str}`` like the hosted side."""
+        mock_cfg = _make_config(enable={"thread_auditor"})
+
+        with (
+            patch("watercooler.config_facade.config.full", return_value=mock_cfg),
+            patch(
+                "watercooler_mcp.daemons.auditor.ThreadAuditorDaemon",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            mgr = init_daemons(start=False)
+
+        assert len(mgr.registration_errors) == 1
+        entry = mgr.registration_errors[0]
+        assert set(entry.keys()) == {"daemon", "error"}
+        assert isinstance(entry["daemon"], str)
+        assert isinstance(entry["error"], str)
+        # Error class name is included so consumers can distinguish failure modes.
+        assert "RuntimeError" in entry["error"]
+
+
+class TestDaemonStatusToolSurfacesRegistrationErrors:
+    """``watercooler_daemon_status`` (local mode) surfaces registration_errors.
+
+    This is the user-facing endpoint that closes the local-side analogue
+    of Jay's 2026-05-04 silent-registration incident — without it, the
+    new `DaemonManager.registration_errors` field is invisible to MCP
+    clients.
+    """
+
+    def test_all_daemons_view_includes_registration_errors(self) -> None:
+        """When errors are recorded, the all-daemons response surfaces them."""
+        import json
+        from unittest.mock import MagicMock
+
+        from watercooler_mcp.daemons.manager import DaemonManager
+        from watercooler_mcp.tools.daemon import _daemon_status_impl
+
+        mgr = DaemonManager()
+        mgr.record_registration_failure(
+            "thread_auditor", RuntimeError("synthetic boom")
+        )
+
+        with patch(
+            "watercooler_mcp.daemons.get_daemon_runtime", return_value=mgr
+        ):
+            result = _daemon_status_impl(ctx=MagicMock())
+
+        payload = json.loads(result)
+        assert "registration_errors" in payload
+        assert payload["registration_errors"] == [
+            {"daemon": "thread_auditor", "error": "RuntimeError: synthetic boom"}
+        ]
+
+    def test_no_errors_omits_registration_errors_key(self) -> None:
+        """Healthy state — no ``registration_errors`` key in response."""
+        import json
+        from unittest.mock import MagicMock
+
+        from watercooler_mcp.daemons.manager import DaemonManager
+        from watercooler_mcp.tools.daemon import _daemon_status_impl
+
+        mgr = DaemonManager()  # empty errors
+
+        with patch(
+            "watercooler_mcp.daemons.get_daemon_runtime", return_value=mgr
+        ):
+            result = _daemon_status_impl(ctx=MagicMock())
+
+        payload = json.loads(result)
+        assert "registration_errors" not in payload
+
+    def test_per_daemon_view_does_not_include_registration_errors(self) -> None:
+        """``daemon=<name>`` returns per-daemon scope; not the fleet-wide errors.
+
+        Per-daemon queries answer "what's happening with this one daemon?"
+        Errors recorded against other daemons are visible via the
+        all-daemons view, not the per-daemon view.
+        """
+        import json
+        from unittest.mock import MagicMock
+
+        from watercooler_mcp.daemons.base import BaseDaemon
+        from watercooler_mcp.daemons.manager import DaemonManager
+        from watercooler_mcp.tools.daemon import _daemon_status_impl
+
+        # Need a real registered daemon for the per-daemon path.
+        mock_daemon = MagicMock(spec=BaseDaemon)
+        mock_daemon.name = "thread_auditor"
+        mock_daemon.status_summary.return_value = {"running": False}
+
+        mgr = DaemonManager()
+        mgr._daemons["thread_auditor"] = mock_daemon
+        mgr.record_registration_failure(
+            "decision_extractor", RuntimeError("other failure")
+        )
+
+        with patch(
+            "watercooler_mcp.daemons.get_daemon_runtime", return_value=mgr
+        ):
+            result = _daemon_status_impl(ctx=MagicMock(), daemon="thread_auditor")
+
+        payload = json.loads(result)
+        assert "registration_errors" not in payload

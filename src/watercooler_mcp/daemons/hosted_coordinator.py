@@ -844,10 +844,29 @@ class HostedDaemonCoordinator:
         daemon_name: str,
         finding_id: str,
     ) -> bool:
-        """Acknowledge a finding within a scope's namespace."""
+        """Acknowledge a finding within a scope's namespace.
+
+        Refreshes ``entry.last_touched`` for the target scope before
+        delegating to the disk write so the idle reaper does not reap
+        an active scope while the user is acknowledging findings.
+        Closes #607.
+
+        ``touch_scope`` is a no-op when *scope_id* doesn't resolve to a
+        live scope (defensive: callers may pass an empty or stale id);
+        the underlying ``_ack_finding`` write still proceeds in that
+        case so the on-disk state is still updated.
+        """
         from .state import acknowledge_finding as _ack_finding
 
         namespace = scope_id or ""
+
+        # Keep-alive refresh first so a slow disk write doesn't expose
+        # a reaper race window. ``touch_scope`` takes ``self._lock``
+        # internally — same pattern every other scope-mutating method
+        # in this class uses.
+        if scope_id:
+            self.touch_scope(scope_id)
+
         return _ack_finding(daemon_name, finding_id, namespace=namespace)
 
     # ------------------------------------------------------------------

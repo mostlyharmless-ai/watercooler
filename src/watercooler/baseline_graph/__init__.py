@@ -50,7 +50,6 @@ from .reader import (
 from .sync import (
     EnrichmentResult,
     enrich_graph_entry,
-    sync_entry_to_graph,  # Deprecated, use enrich_graph_entry
     sync_thread_to_graph,
     record_graph_sync_error,
     check_graph_health,
@@ -145,7 +144,6 @@ __all__ = [
     # Sync / Enrichment
     "EnrichmentResult",
     "enrich_graph_entry",
-    "sync_entry_to_graph",  # Deprecated
     "sync_thread_to_graph",
     "record_graph_sync_error",
     "check_graph_health",

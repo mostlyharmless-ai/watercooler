@@ -3,8 +3,11 @@
 Capabilities:
 - Diagnose: report branch state, ahead/behind, stuck rebase, dirty files,
   stale locks, recovery log, global artifact status
-- Fix: abort stuck rebase/merge, break stale locks, cherry-pick or discard
-  local-only commits, regenerate derived files
+- Fix: abort stuck rebase/merge, break stale locks, recover local-only
+  commits by pushing/rebasing them onto the remote (preserve-first — the
+  default path never discards committed work), regenerate derived files
+- Discard: opt-in (``discard_local_commits``) destructive reset that drops
+  local-only commits after logging them to the recovery log
 - Migrate: one-time cleanup of globally-committed derived files
 """
 
@@ -26,8 +29,10 @@ from watercooler.baseline_graph.storage import (
 from watercooler.sync_common import (
     WORKTREE_LOCK_DIR,
     WORKTREE_LOCK_TTL_SECONDS,
+    acquire_worktree_lock,
     is_safe_to_auto_recover,
     load_recovery_log,
+    log_local_only_commits,
 )
 
 # Derived file patterns that can be safely discarded from a dirty worktree.
@@ -83,6 +88,8 @@ class DiagnosticReport:
     has_global_manifest: bool = False
     has_global_search_index: bool = False
     has_global_sync_state: bool = False
+    remotes: List[str] = field(default_factory=list)
+    published_remotes: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -100,6 +107,8 @@ class DiagnosticReport:
             "has_global_manifest": self.has_global_manifest,
             "has_global_search_index": self.has_global_search_index,
             "has_global_sync_state": self.has_global_sync_state,
+            "remotes": self.remotes,
+            "published_remotes": self.published_remotes,
             "errors": self.errors,
         }
 
@@ -150,6 +159,7 @@ class DiagnosticReport:
             or bool(self.stale_locks)
             or self.ahead > 0
             or bool(self.dirty_files)
+            or self.parity_state == "no_upstream"
         )
 
 
@@ -257,7 +267,150 @@ def diagnose(threads_dir: Path) -> DiagnosticReport:
     report.has_global_search_index = (graph_dir / "search-index.jsonl").exists()
     report.has_global_sync_state = (graph_dir / "sync_state.json").exists()
 
+    # Remote context — which remotes exist, and which already carry the
+    # thread branch. Uses local refs only (no ls-remote) so diagnose()
+    # stays network-free; the published-remotes view may be as stale as
+    # the last fetch, which is acceptable for a diagnostic.
+    try:
+        result = subprocess.run(
+            ["git", "-C", td, "remote"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            report.remotes = [
+                r.strip() for r in result.stdout.splitlines() if r.strip()
+            ]
+    except Exception:
+        pass
+    if report.branch:
+        suffix = "/" + report.branch
+        try:
+            result = subprocess.run(
+                ["git", "-C", td, "branch", "-r", "--list", f"*{suffix}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                pub = set()
+                for line in result.stdout.splitlines():
+                    ref = line.strip()
+                    if ref and " -> " not in ref and ref.endswith(suffix):
+                        pub.add(ref[: -len(suffix)])
+                report.published_remotes = sorted(pub)
+        except Exception:
+            pass
+
     return report
+
+
+def _recover_local_only(threads_dir: Path, report: DiagnosticReport) -> List[str]:
+    """Preserve local-only commits by pushing them to the remote.
+
+    Mirrors the write path (``middleware.run_with_sync``): reuse
+    ``sync.primitives.push_with_retry``, which rebases onto the remote on a
+    non-fast-forward rejection and retries. That recovers both ``ahead_only``
+    (clean push) and ``diverged`` (rebase-then-push) without ever discarding
+    committed work. On failure the commits stay intact in the local worktree.
+    """
+    n = report.ahead
+    try:
+        from git import Repo
+
+        from watercooler_mcp.sync.primitives import push_with_retry
+    except ImportError as e:  # pragma: no cover - defensive
+        return [f"FAILED: Recover {n} local-only commit(s): {e}"]
+
+    err = ""
+    try:
+        repo = Repo(threads_dir)
+        pushed = push_with_retry(repo, branch=report.branch)
+    except Exception as e:
+        pushed = False
+        err = str(e)[:200]
+
+    if pushed:
+        return [f"Recover {n} local-only commit(s): pushed to {report.tracking}"]
+    detail = f": {err}" if err else ""
+    return [
+        f"FAILED: Recover {n} local-only commit(s){detail}. Commits are intact "
+        f"locally — fix the push side (auth/network) and re-run, or pass "
+        f"discard_local_commits=True to drop them."
+    ]
+
+
+def _discard_local_only(threads_dir: Path, report: DiagnosticReport) -> List[str]:
+    """Destructively reset to the tracking ref, discarding local-only commits.
+
+    Opt-in only (``discard_local_commits=True``). Every discarded commit is
+    written to ``.watercooler/recovery.jsonl`` first; the reset is aborted if
+    that recovery log cannot be completed.
+    """
+    td = str(threads_dir)
+    action = f"Discard {report.ahead} local-only commit(s) (reset to {report.tracking})"
+    if not log_local_only_commits(threads_dir, report.tracking):
+        return [f"FAILED: {action}: recovery log incomplete, aborting reset"]
+    result = subprocess.run(
+        ["git", "-C", td, "reset", "--hard", report.tracking],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode == 0:
+        return [f"{action} — discarded commits logged to .watercooler/recovery.jsonl"]
+    return [f"FAILED: {action}: {result.stderr.strip()[:200]}"]
+
+
+def _publish_orphan_branch(
+    threads_dir: Path, report: DiagnosticReport, remote: str
+) -> List[str]:
+    """Publish the thread branch to a named remote and set its upstream.
+
+    The opt-in repair for an orphan branch that has no usable remote
+    (issue #689): pushes the current branch to ``remote`` with ``-u`` so
+    subsequent pushes have a tracking target.
+    """
+    td = str(threads_dir)
+    branch = report.branch
+    if not branch:
+        return [f"FAILED: publish to '{remote}': current branch is unknown"]
+    if remote not in report.remotes:
+        avail = ", ".join(report.remotes) or "(none configured)"
+        return [
+            f"FAILED: publish '{branch}' to '{remote}': no such remote "
+            f"(configured: {avail})"
+        ]
+    result = subprocess.run(
+        ["git", "-C", td, "push", "-u", remote, branch],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode == 0:
+        return [f"Published '{branch}' to '{remote}' and set upstream tracking"]
+    return [
+        f"FAILED: publish '{branch}' to '{remote}': "
+        f"{result.stderr.strip()[:200]}"
+    ]
+
+
+def suggest_publish_remote(
+    remotes: List[str], published_remotes: List[str]
+) -> Optional[str]:
+    """Pick the best remote to (re)publish the thread branch to.
+
+    Prefers the sole remote that already carries the branch — republishing
+    there repairs tracking instead of forking thread history onto a second
+    remote. When the branch is already on *several* remotes the target is
+    genuinely ambiguous and None is returned. Only when the branch is on no
+    remote does it fall back to ``origin``, then a lone remote; None when
+    that too is ambiguous (operator must choose).
+    """
+    if len(published_remotes) == 1:
+        return published_remotes[0]
+    if published_remotes:
+        # Already on multiple remotes — ambiguous; do not nudge the
+        # operator to fork yet another copy onto origin.
+        return None
+    if "origin" in remotes:
+        return "origin"
+    if len(remotes) == 1:
+        return remotes[0]
+    return None
 
 
 def repair(
@@ -265,6 +418,8 @@ def repair(
     dry_run: bool = False,
     regenerate_cache: bool = False,
     migrate: bool = False,
+    discard_local_commits: bool = False,
+    publish_remote: str = "",
 ) -> List[str]:
     """Fix common sync issues.
 
@@ -273,6 +428,12 @@ def repair(
         dry_run: If True, only report what would be done
         regenerate_cache: If True, rebuild manifest + search-index from per-thread data
         migrate: If True, perform one-time cleanup of globally-committed derived files
+        discard_local_commits: If True, local-only commits are destructively
+            reset away (after recovery-log capture) instead of recovered by
+            push/rebase. Default False — the safe, preserve-first path.
+        publish_remote: If set, publish the thread branch to this remote and
+            set upstream tracking — the opt-in repair for an orphan branch
+            with no usable remote (issue #689).
 
     Returns:
         List of actions taken (or would-be-taken if dry_run)
@@ -285,9 +446,21 @@ def repair(
 
     report = diagnose(threads_dir)
 
+    # Publish the thread branch to a named remote — the opt-in repair for
+    # an orphan branch with no usable upstream (issue #689). Explicit: the
+    # caller chooses the remote.
+    if publish_remote:
+        if dry_run:
+            actions.append(
+                f"[DRY RUN] Publish '{report.branch}' to remote '{publish_remote}'"
+            )
+        else:
+            actions.extend(
+                _publish_orphan_branch(threads_dir, report, publish_remote)
+            )
+
     # Fix stuck rebase/merge (requires worktree lock — mutating git state)
     if (report.stuck_rebase or report.stuck_merge) and not dry_run:
-        from watercooler.sync_common import acquire_worktree_lock
         try:
             abort_wt_lock = acquire_worktree_lock(threads_dir)
         except TimeoutError:
@@ -368,47 +541,44 @@ def repair(
             # Re-diagnose after cleaning to get updated state
             report = diagnose(threads_dir)
 
-    # Fetch before reset so the tracking ref is current
+    # Fetch so the tracking ref is current before recovering local commits
     if report.ahead > 0 and report.tracking and not dry_run:
         subprocess.run(
             ["git", "-C", td, "fetch", "origin"],
             capture_output=True, text=True, timeout=30,
         )
 
-    # Handle local-only commits
+    # Handle local-only commits — preserve-first, mirroring the write path.
+    # Default: push them to the remote (push_with_retry rebases onto remote
+    # when diverged). Destructive reset is opt-in only via discard_local_commits.
     if report.ahead > 0 and report.tracking:
-        # Log local-only commits to recovery before discarding
-        action = f"Discard {report.ahead} local-only commit(s) (reset to {report.tracking})"
+        n = report.ahead
+        verb = (
+            f"Discard {n} local-only commit(s) (reset --hard to {report.tracking})"
+            if discard_local_commits
+            else f"Recover {n} local-only commit(s) by pushing to {report.tracking}"
+        )
         if dry_run:
-            actions.append(f"[DRY RUN] {action}")
+            actions.append(f"[DRY RUN] {verb}")
         elif report.dirty_files:
-            # Match cli.py and middleware.py: skip reset when worktree has
-            # uncommitted changes to avoid destroying concurrent writes.
+            # Match cli.py and middleware.py: don't touch HEAD or push when the
+            # worktree has uncommitted changes — resolve those first.
             actions.append(
-                f"SKIPPED: {action}: worktree has {len(report.dirty_files)} "
-                f"uncommitted file(s) — reset would destroy them"
+                f"SKIPPED: {verb}: worktree has {len(report.dirty_files)} "
+                f"uncommitted file(s) — resolve those first"
             )
         else:
-            from watercooler.sync_common import acquire_worktree_lock, log_local_only_commits
             try:
                 wt_lock = acquire_worktree_lock(threads_dir)
             except TimeoutError:
-                actions.append(f"FAILED: {action}: worktree lock timeout")
+                actions.append(f"FAILED: {verb}: worktree lock timeout")
                 return actions
 
             try:
-                recovery_ok = log_local_only_commits(threads_dir, report.tracking)
-                if recovery_ok:
-                    result = subprocess.run(
-                        ["git", "-C", td, "reset", "--hard", report.tracking],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    if result.returncode == 0:
-                        actions.append(action)
-                    else:
-                        actions.append(f"FAILED: {action}: {result.stderr.strip()[:200]}")
+                if discard_local_commits:
+                    actions.extend(_discard_local_only(threads_dir, report))
                 else:
-                    actions.append(f"FAILED: {action}: recovery log incomplete, aborting reset")
+                    actions.extend(_recover_local_only(threads_dir, report))
             finally:
                 wt_lock.release()
 
@@ -483,7 +653,6 @@ def repair(
 
         # Execute migration under worktree lock (git rm, add, commit, push)
         if not dry_run:
-            from watercooler.sync_common import acquire_worktree_lock
             try:
                 wt_lock = acquire_worktree_lock(threads_dir)
             except TimeoutError:
@@ -596,6 +765,38 @@ def format_report(report: DiagnosticReport) -> str:
     lines.append(f"Branch: {report.branch or '(unknown)'}")
     lines.append(f"Tracking: {report.tracking or '(none)'}")
     lines.append(f"Ahead: {report.ahead}  Behind: {report.behind}")
+    if report.ahead > 0:
+        lines.append(
+            f"  -> {report.ahead} local-only commit(s): `watercooler sync-repair` "
+            f"recovers these by push/rebase (preserved by default; reset away "
+            f"only with discard_local_commits)"
+        )
+
+    if report.parity_state == "no_upstream":
+        lines.append("")
+        lines.append("!! NO REMOTE UPSTREAM for the thread branch")
+        if report.remotes:
+            lines.append(f"  Configured remotes: {', '.join(report.remotes)}")
+        else:
+            lines.append("  No git remotes are configured.")
+        if report.published_remotes:
+            lines.append(
+                f"  '{report.branch}' exists on: "
+                f"{', '.join(report.published_remotes)}"
+            )
+        else:
+            lines.append(f"  '{report.branch}' is not published to any remote.")
+        _target = suggest_publish_remote(report.remotes, report.published_remotes)
+        if _target:
+            lines.append(
+                f"  -> Publish it: "
+                f"watercooler_sync_repair(publish_remote='{_target}')"
+            )
+        elif report.remotes:
+            lines.append(
+                "  -> Choose a remote, then: "
+                "watercooler_sync_repair(publish_remote='<remote>')"
+            )
 
     if report.stuck_rebase:
         lines.append("!! STUCK REBASE detected")

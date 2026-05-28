@@ -25,10 +25,30 @@ class DaemonManager:
         manager.start_all()
         # ... server runs ...
         manager.stop_all()
+
+    ``registration_errors`` accumulates structured per-daemon failures
+    captured by ``init_daemons`` when a daemon fails to construct or
+    register. Each entry is ``{"daemon": str, "error": str}``. Surfaced
+    via ``watercooler_daemon_status`` so MCP clients can see why a
+    daemon didn't register without paging through process logs — mirrors
+    the hosted-side pattern shipped in PR #755.
+
+    ``repo_key`` records which repo this manager's daemons watch.  In
+    local mode it's the SHA-1-derived key from ``derive_repo_key()``
+    over the CWD's resolved code root; empty string when CWD doesn't
+    resolve to a watercooler repo (legacy single-fleet fallback).  In
+    hosted mode the per-scope manager constructed by
+    ``HostedDaemonCoordinator`` does not set this field — its scope
+    identity lives on ``_ScopeEntry.key`` instead.  Used by
+    ``watercooler_daemon_status`` to distinguish sibling fleets across
+    concurrent MCP servers on one machine.  Per cloud Design (local)
+    entry ``01KR5RCWK0F0EM1YVKWRJPD239``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, repo_key: str = "") -> None:
         self._daemons: Dict[str, BaseDaemon] = {}
+        self.registration_errors: List[Dict[str, str]] = []
+        self.repo_key: str = repo_key
 
     def register(self, daemon: BaseDaemon) -> None:
         """Register a daemon. Raises if name is already taken."""
@@ -39,6 +59,23 @@ class DaemonManager:
             )
         self._daemons[daemon.name] = daemon
         logger.info("DAEMON_MANAGER: registered '%s'", daemon.name)
+
+    def record_registration_failure(
+        self, daemon_name: str, exc: BaseException
+    ) -> None:
+        """Record a structured per-daemon registration failure.
+
+        Captures the exception class and message so ``watercooler_daemon_status``
+        can surface it. Logs at warning level so operators still see it in
+        process logs. Idempotent — duplicate `daemon_name` entries are
+        appended (matching the hosted-side pattern), since a real
+        registration loop only attempts each daemon once per init.
+        """
+        msg = f"{type(exc).__name__}: {exc}"
+        self.registration_errors.append({"daemon": daemon_name, "error": msg})
+        logger.warning(
+            "DAEMON_MANAGER: failed to register '%s': %s", daemon_name, msg
+        )
 
     def start_all(self) -> None:
         """Start all enabled daemons."""

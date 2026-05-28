@@ -462,3 +462,92 @@ class TestReadOnlyMode:
         state = get_annotation_state(thread_dir, "entry-1", read_only=True)
         assert state.tags == ["hot"]
         assert not cache.exists()
+
+
+# ============================================================================
+# URI-shaped targets (workstream B: target_type="uri")
+# ============================================================================
+
+
+class TestUriTargetType:
+    """target_type="uri" lets callers annotate opaque content-addressed
+    identifiers (e.g. ``codex://sha256:<hex>``) that are not entry/thread
+    nodes in this graph. Downstream code treats ``target_id`` as an
+    opaque string key regardless of ``target_type``."""
+
+    URI = "codex://sha256:" + "a" * 64
+
+    def test_valid_target_types_includes_uri(self):
+        assert "uri" in VALID_TARGET_TYPES
+        # Backward compat — the original two values still valid
+        assert "entry" in VALID_TARGET_TYPES
+        assert "thread" in VALID_TARGET_TYPES
+
+    def test_append_annotation_with_uri_target(self, thread_dir):
+        event = _make_event(
+            target_id=self.URI,
+            target_type="uri",
+            kind="tag",
+            value="watched",
+        )
+        append_annotation(thread_dir, event)
+
+        events = load_annotation_events(thread_dir)
+        assert len(events) == 1
+        assert events[0].target_id == self.URI
+        assert events[0].target_type == "uri"
+
+    def test_state_materialization_keyed_by_uri(self, thread_dir):
+        append_annotation(
+            thread_dir,
+            _make_event(target_id=self.URI, target_type="uri", kind="tag", value="watched"),
+        )
+        append_annotation(
+            thread_dir,
+            _make_event(
+                event_id="evt-002",
+                target_id=self.URI,
+                target_type="uri",
+                kind="reaction",
+                value="thumbsup",
+                actor="bob",
+            ),
+        )
+
+        state = get_annotation_state(thread_dir, self.URI)
+        assert state.tags == ["watched"]
+        assert state.reactions == {"thumbsup": ["bob"]}
+
+    def test_uri_and_entry_targets_are_independent(self, thread_dir):
+        """A URI target and an entry target in the same thread keep
+        separate per-target state."""
+        append_annotation(
+            thread_dir,
+            _make_event(target_id=self.URI, target_type="uri", kind="tag", value="watched"),
+        )
+        append_annotation(
+            thread_dir,
+            _make_event(
+                event_id="evt-002",
+                target_id="entry-1",
+                target_type="entry",
+                kind="tag",
+                value="entry-tag",
+            ),
+        )
+
+        uri_state = get_annotation_state(thread_dir, self.URI)
+        entry_state = get_annotation_state(thread_dir, "entry-1")
+        assert uri_state.tags == ["watched"]
+        assert entry_state.tags == ["entry-tag"]
+
+    def test_uri_target_roundtrips_through_jsonl(self, thread_dir):
+        """The JSONL on-disk format preserves target_type='uri'."""
+        append_annotation(
+            thread_dir,
+            _make_event(target_id=self.URI, target_type="uri", kind="pin", value=""),
+        )
+        ann_file = thread_dir / "annotations.jsonl"
+        line = ann_file.read_text(encoding="utf-8").strip()
+        assert '"target_type":"uri"' in line
+        assert f'"target_id":"{self.URI}"' in line

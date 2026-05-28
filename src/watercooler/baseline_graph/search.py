@@ -29,10 +29,15 @@ from watercooler.path_resolver import derive_group_id
 logger = logging.getLogger(__name__)
 
 
-# Max raw keyword score: base 1.0 + title 0.5 + body 0.3 + 4 fields * 0.1 = 2.2.
-# Bumped above true max so no natural result hits the min() cap and compresses ranking signal.
-# Used to normalize keyword scores to [0, 1] when merging with cosine similarity.
-KEYWORD_SCORE_MAX = 2.3
+# Keyword relevance score = base 1.0 + title 0.5 + body 0.3 + matched-field
+# count * 0.1 + token-match ratio * TOKEN_MATCH_WEIGHT. The token-match term
+# dominates the field boosts (PR2: an entry matching every query token must
+# outrank one matching only some), so OR-default recall keeps AND-quality
+# ordering at the top. KEYWORD_SCORE_MAX is set above the true max so no
+# natural result hits the min() cap when normalizing to [0, 1] for merging
+# with cosine-similarity scores.
+TOKEN_MATCH_WEIGHT = 8.0
+KEYWORD_SCORE_MAX = 11.0
 
 
 # ============================================================================
@@ -61,7 +66,8 @@ class SearchQuery:
         pinned: Filter by pinned status. True=has pinned entries, False=has no
             pinned entries (includes unannotated items which are implicitly not pinned)
         limit: Maximum results to return
-        query_operator: How to combine query tokens ("AND" or "OR")
+        query_operator: How to combine query tokens ("AND" or "OR"; default
+            "OR" — broad recall, results ranked by token-match count)
         combine: How to combine filters ("AND" or "OR")
         include_threads: Include thread nodes in results
         include_entries: Include entry nodes in results
@@ -81,7 +87,7 @@ class SearchQuery:
     flag: Optional[str] = None
     pinned: Optional[bool] = None
     limit: int = 10
-    query_operator: Literal["AND", "OR"] = "AND"
+    query_operator: Literal["AND", "OR"] = "OR"
     combine: Literal["AND", "OR"] = "AND"
     include_threads: bool = True
     include_entries: bool = True
@@ -90,7 +96,7 @@ class SearchQuery:
         self.query_operator = self.query_operator.upper()  # type: ignore[assignment]
         self.combine = self.combine.upper()  # type: ignore[assignment]
         if self.query_operator not in ("AND", "OR"):
-            self.query_operator = "AND"  # type: ignore[assignment]
+            self.query_operator = "OR"  # type: ignore[assignment]
         if self.combine not in ("AND", "OR"):
             self.combine = "AND"  # type: ignore[assignment]
 
@@ -465,31 +471,33 @@ def _parse_timestamp(ts: str) -> Optional[datetime]:
 def _matches_keyword(
     node: dict[str, Any],
     query: str,
-    query_operator: Literal["AND", "OR"] = "AND",
-) -> tuple[bool, List[str]]:
+    query_operator: Literal["AND", "OR"] = "OR",
+) -> tuple[bool, List[str], float]:
     """Check if node matches a tokenized keyword query.
 
-    Multi-word queries are split on whitespace. ``query_operator="AND"``
-    requires every token to appear in at least one searchable field.
-    ``query_operator="OR"`` requires at least one token to appear.
-    Tokens may match across different fields (e.g. token A in title,
-    token B in body).
+    Multi-word queries are split on whitespace. ``query_operator="OR"``
+    (the default) matches when at least one token appears in a searchable
+    field; ``query_operator="AND"`` requires every token. Tokens may match
+    across different fields (e.g. token A in title, token B in body).
 
     Returns:
-        Tuple of (matches, list of field names that contained tokens)
+        Tuple of (matches, matched field names, token-match ratio). The ratio
+        is matched-token-count / total-token-count in [0.0, 1.0] (1.0 for an
+        empty query) — callers rank OR results by it so an entry matching
+        every query token outranks one matching only some.
     """
     if not query or not query.strip():
-        return True, []
+        return True, [], 1.0
 
     tokens = query.lower().split()
     operator = query_operator.upper()
     if operator not in ("AND", "OR"):
-        operator = "AND"
+        operator = "OR"
 
     searchable_fields = ["title", "body", "summary", "topic"]
 
     matched_fields: set[str] = set()
-    any_token_matched = False
+    matched_token_count = 0
 
     for token in tokens:
         found_in_any_field = False
@@ -499,14 +507,18 @@ def _matches_keyword(
                 found_in_any_field = True
                 matched_fields.add(field_name)
         if found_in_any_field:
-            any_token_matched = True
+            matched_token_count += 1
         elif operator == "AND":
-            return False, []
+            return False, [], 0.0
+
+    ratio = matched_token_count / len(tokens) if tokens else 1.0
 
     if operator == "OR":
-        return any_token_matched, list(matched_fields) if any_token_matched else []
+        matched = matched_token_count > 0
+        return matched, (list(matched_fields) if matched else []), ratio
 
-    return True, list(matched_fields)
+    # AND: reaching here means every token matched.
+    return True, list(matched_fields), ratio
 
 
 def _matches_time_range(
@@ -845,6 +857,10 @@ def search_graph(
         filter_results = []
         matched_fields: List[str] = []
         semantic_score: Optional[float] = None
+        # Defaults to 0.0 so the token-match bonus is added only when a
+        # keyword query actually participated — a filter-only search
+        # (e.g. role=critic, no query) must not receive the token bonus.
+        token_ratio: float = 0.0
 
         # Semantic search with embeddings
         if search_query.semantic and query_embedding and search_query.query:
@@ -866,7 +882,7 @@ def search_graph(
                 filter_results.append(False)
         # Keyword match (fallback or primary)
         elif search_query.query:
-            keyword_match, keyword_fields = _matches_keyword(
+            keyword_match, keyword_fields, token_ratio = _matches_keyword(
                 node,
                 search_query.query,
                 search_query.query_operator,
@@ -910,7 +926,7 @@ def search_graph(
             # Use cosine similarity as the score for semantic search
             score = semantic_score
         else:
-            # Simple relevance scoring for keyword search
+            # Relevance scoring for keyword search.
             score = 1.0
             if matched_fields:
                 # Boost for title matches
@@ -920,6 +936,11 @@ def search_graph(
                 if "body" in matched_fields:
                     score += 0.3
                 score += len(matched_fields) * 0.1
+            # Token-match-count ranking (PR2): reward matching more of the
+            # query's tokens. The weight dominates the field boosts so that,
+            # under the OR default, an entry matching every token always
+            # outranks one matching only some.
+            score += token_ratio * TOKEN_MATCH_WEIGHT
 
         result = SearchResult(
             node_type=node_type,
@@ -988,7 +1009,7 @@ def search_entries(
     entry_type: Optional[str] = None,
     agent: Optional[str] = None,
     limit: int = 10,
-    query_operator: str = "AND",
+    query_operator: str = "OR",
 ) -> List[GraphEntry]:
     """Search entries with common filters.
 
@@ -1002,9 +1023,9 @@ def search_entries(
         entry_type: Filter by entry type
         agent: Filter by agent
         limit: Maximum results
-        query_operator: Token matching logic - "AND" (all tokens must match) or
-            "OR" (any token matches). Use "OR" for broad recall over a keyword
-            union (e.g. "decided committed resolved"). Default: "AND".
+        query_operator: Token matching logic - "OR" (default — any token
+            matches, results ranked by how many tokens matched) or "AND"
+            (every token must match). Default: "OR".
 
     Returns:
         List of matching GraphEntry objects

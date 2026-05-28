@@ -48,7 +48,7 @@ VALID_KINDS = frozenset(
     }
 )
 
-VALID_TARGET_TYPES = frozenset({"entry", "thread"})
+VALID_TARGET_TYPES = frozenset({"entry", "thread", "uri"})
 
 
 @dataclass
@@ -57,8 +57,13 @@ class AnnotationEvent:
 
     Attributes:
         id: ULID for the event
-        target_id: Entry ID or thread topic
-        target_type: "entry" or "thread"
+        target_id: Entry ID, thread topic, or opaque URI (see ``target_type``)
+        target_type: "entry", "thread", or "uri". ``"uri"`` allows callers
+            to annotate content-addressed or namespace-scoped identifiers
+            (e.g. ``codex://sha256:<hex>``) that are not tracked as
+            entry/thread nodes in this graph. Downstream code treats
+            ``target_id`` as an opaque string key regardless of
+            ``target_type``; only validation gates branch on the value.
         kind: The annotation operation
         value: Emoji name, tag name, agent name, or target entry_id (for xrefs)
         actor: Who made the annotation

@@ -3,7 +3,6 @@ name: find-related
 description: Find discussions and entries related to a specific topic or entry. Use to discover connected context across threads.
 allowed-tools:
   - ToolSearch
-  - mcp__watercooler__watercooler_find_similar
   - mcp__watercooler__watercooler_search
 ---
 
@@ -17,14 +16,14 @@ Find content related to: $ARGUMENTS
    - **Entry ID**: ULID format (e.g., `01HQXYZ123ABC456DEF789GHJ`) — exactly 26 characters matching `^[0-9A-HJKMNP-TV-Z]{26}$` (Crockford base32)
    - **Description**: Any other text
 
-2. **For Entry ID** — use similarity search:
+2. **For Entry ID** — use seeded similarity search:
 
    ```
-   ToolSearch: select:mcp__watercooler__watercooler_find_similar
+   ToolSearch: select:mcp__watercooler__watercooler_search
    ```
    Then call:
    ```
-   mcp__watercooler__watercooler_find_similar(entry_id="<ulid>")
+   mcp__watercooler__watercooler_search(seed_entry_id="<ulid>")
    ```
 
 3. **For Description** — use semantic search:

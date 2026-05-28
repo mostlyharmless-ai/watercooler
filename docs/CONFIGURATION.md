@@ -636,8 +636,8 @@ and dependency risks. Cite exact file paths and line numbers.
 ### Verifying custom roles
 
 ```python
-watercooler_roles(code_path=".")
-watercooler_role_details(code_path=".", role="security-audit")
+watercooler_roles(code_path=".")                          # catalog
+watercooler_roles(code_path=".", role="security-audit")   # one role's full spec
 ```
 
 Or via CLI:

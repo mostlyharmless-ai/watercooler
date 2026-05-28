@@ -1,7 +1,11 @@
 """Sync tools for watercooler MCP server.
 
-Tools:
-- watercooler_reindex: Generate thread index
+This module registers no MCP tools after the PR4b consolidation —
+watercooler_reindex (a pre-graph-first markdown thread index) was retired in
+favour of the graph-first watercooler_list_threads, which already offers
+format="json"/"markdown". _reindex_impl / _reindex_hosted_impl are retained
+but no longer MCP-exposed. The CLI `wc reindex` (graph initialisation) is a
+separate command and is unaffected.
 """
 
 from fastmcp import Context
@@ -9,10 +13,6 @@ from fastmcp import Context
 from watercooler import commands
 
 from ..config import get_agent_name, get_threads_dir
-
-
-# Module-level references to registered tools (populated by register_sync_tools)
-reindex = None
 
 
 def _reindex_hosted_impl(ctx: Context) -> str:
@@ -181,10 +181,10 @@ def _reindex_impl(ctx: Context) -> str:
 def register_sync_tools(mcp):
     """Register sync tools with the MCP server.
 
+    No tools remain in this module after the PR4b consolidation; retained as a
+    stable no-op so server_factory's registration sequence is unchanged.
+
     Args:
         mcp: The FastMCP server instance
     """
-    global reindex
-
-    # Register tools and store references for testing
-    reindex = mcp.tool(name="watercooler_reindex")(_reindex_impl)
+    return None

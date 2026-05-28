@@ -7,8 +7,8 @@ Each entry links to a longer treatment where one exists.
 
 A structured, non-entry marker attached to an entry or thread — a
 reaction, tag, flag, cross-reference (`xref`), or pin. Managed by the
-`watercooler_annotate` / `watercooler_remove_annotation` /
-`watercooler_get_annotations` tools. Annotations change thread state
+`watercooler_annotations` tool (`action="add"|"get"|"remove"`).
+Annotations change thread state
 but do not add entries. See
 [TOOLS-REFERENCE — Annotation tools](./TOOLS-REFERENCE.md#annotation-tools).
 
@@ -82,7 +82,7 @@ namespace; the one passed as `code_path` is the primary. See
 A structured observation emitted by a daemon — category, severity, and
 a payload describing what the daemon noticed. Findings accumulate in
 per-daemon logs and can be acknowledged with
-`watercooler_acknowledge_finding`.
+`watercooler_daemon_findings(action="acknowledge")`.
 
 ## Namespace
 

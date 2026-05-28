@@ -21,15 +21,16 @@ from watercooler_mcp.daemons.decision_extractor import (
     CAT_PUSH_FAILED,
     CAT_RATE_LIMITED,
     CAT_REJECTED,
+    CAT_REJECTED_HARD_GATE,
     CAT_SUCCESS,
     ExtractDecisionsDaemon,
 )
 from watercooler_mcp.daemons.state import Finding
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _write_graph_thread(
     threads_dir: Path,
@@ -80,6 +81,7 @@ def _make_detector_finding(
     **overrides: Any,
 ) -> Finding:
     from ulid import ULID
+
     return Finding(
         finding_id=overrides.pop("finding_id", str(ULID())),
         daemon_name="decision_detector",
@@ -100,45 +102,68 @@ def _make_detector_finding(
 
 def _llm_response_pass(quotes: list[str] | None = None) -> str:
     """Valid LLM response that passes all gates."""
-    return json.dumps({
-        "gates": {
-            f"g{i}_{name}": {"passed": True, "reason": "ok"}
-            for i, name in enumerate(
-                ["commitment", "not_superseded", "quotable", "rationale",
-                 "scope", "temporal", "authority", "self_contained"],
-                start=1,
-            )
-        },
-        "confidence": 4,
-        "decision_statement": "Use PostgreSQL for session storage",
-        "rationale": "Better performance",
-        "scope": "Storage subsystem",
-        "alternatives_considered": None,
-        "verbatim_quotes": quotes or ["We decided to use PostgreSQL"],
-        "warning": None,
-    })
+    return json.dumps(
+        {
+            "gates": {
+                f"g{i}_{name}": {"passed": True, "reason": "ok"}
+                for i, name in enumerate(
+                    [
+                        "commitment",
+                        "not_superseded",
+                        "quotable",
+                        "rationale",
+                        "scope",
+                        "temporal",
+                        "authority",
+                        "self_contained",
+                    ],
+                    start=1,
+                )
+            },
+            "confidence": 4,
+            "decision_statement": "Use PostgreSQL for session storage",
+            "rationale": "Better performance",
+            "scope": "Storage subsystem",
+            "alternatives_considered": None,
+            "verbatim_quotes": quotes or ["We decided to use PostgreSQL"],
+            "warning": None,
+        }
+    )
 
 
 def _llm_response_reject() -> str:
     """LLM response with low confidence."""
     gates = {
-        f"g{i}_{name}": {"passed": i != 1, "reason": "ok" if i != 1 else "No commitment"}
+        f"g{i}_{name}": {
+            "passed": i != 1,
+            "reason": "ok" if i != 1 else "No commitment",
+        }
         for i, name in enumerate(
-            ["commitment", "not_superseded", "quotable", "rationale",
-             "scope", "temporal", "authority", "self_contained"],
+            [
+                "commitment",
+                "not_superseded",
+                "quotable",
+                "rationale",
+                "scope",
+                "temporal",
+                "authority",
+                "self_contained",
+            ],
             start=1,
         )
     }
-    return json.dumps({
-        "gates": gates,
-        "confidence": 1,
-        "decision_statement": None,
-        "rationale": None,
-        "scope": None,
-        "alternatives_considered": None,
-        "verbatim_quotes": [],
-        "warning": "Not a decision",
-    })
+    return json.dumps(
+        {
+            "gates": gates,
+            "confidence": 1,
+            "decision_statement": None,
+            "rationale": None,
+            "scope": None,
+            "alternatives_considered": None,
+            "verbatim_quotes": [],
+            "warning": "Not a decision",
+        }
+    )
 
 
 def _make_daemon(
@@ -149,6 +174,7 @@ def _make_daemon(
 ) -> ExtractDecisionsDaemon:
     cfg = DecisionExtractorConfig(**config_overrides)
     from watercooler_mcp.daemons.llm_client import DaemonLLMClient
+
     return ExtractDecisionsDaemon(
         config=cfg,
         threads_dir=threads_dir or tmp_path / "threads",
@@ -192,7 +218,9 @@ class TestExtractDecisionsDaemon:
         )
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
-        daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient())
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient()
+        )
         daemon._resolved_code_root = tmp_path
 
         with patch(
@@ -210,21 +238,24 @@ class TestExtractDecisionsDaemon:
         entry = _make_entry()
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use PostgreSQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use PostgreSQL"])
+        )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=llm)
         daemon._resolved_code_root = tmp_path
 
         detector_finding = _make_detector_finding(score=5)
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[detector_finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
-            return_value=DaemonWriteResult(
-                entry_id="01WRITTEN", written=True, pushed=True
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[detector_finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                return_value=DaemonWriteResult(
+                    entry_id="01WRITTEN", written=True, pushed=True
+                ),
             ),
         ):
             findings = daemon.tick()
@@ -239,7 +270,9 @@ class TestExtractDecisionsDaemon:
         )
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
-        daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient())
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient()
+        )
         daemon._resolved_code_root = None  # No code_root
 
         findings = daemon.tick()
@@ -264,7 +297,8 @@ class TestExtractDecisionsDaemon:
             findings = daemon.tick()
 
         assert len(findings) == 1
-        assert findings[0].category == CAT_REJECTED
+        # g1_commitment failure is a hard-fail gate → CAT_REJECTED_HARD_GATE
+        assert findings[0].category == CAT_REJECTED_HARD_GATE
 
     def test_tick_rejects_low_confidence(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -275,23 +309,33 @@ class TestExtractDecisionsDaemon:
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
         # Low confidence but all gates pass
-        response = json.dumps({
-            "gates": {
-                f"g{i}_{name}": {"passed": True, "reason": "ok"}
-                for i, name in enumerate(
-                    ["commitment", "not_superseded", "quotable", "rationale",
-                     "scope", "temporal", "authority", "self_contained"],
-                    start=1,
-                )
-            },
-            "confidence": 2,
-            "decision_statement": "Maybe X",
-            "rationale": "Unclear",
-            "scope": "Unknown",
-            "alternatives_considered": None,
-            "verbatim_quotes": ["We decided to use PostgreSQL"],
-            "warning": None,
-        })
+        response = json.dumps(
+            {
+                "gates": {
+                    f"g{i}_{name}": {"passed": True, "reason": "ok"}
+                    for i, name in enumerate(
+                        [
+                            "commitment",
+                            "not_superseded",
+                            "quotable",
+                            "rationale",
+                            "scope",
+                            "temporal",
+                            "authority",
+                            "self_contained",
+                        ],
+                        start=1,
+                    )
+                },
+                "confidence": 2,
+                "decision_statement": "Maybe X",
+                "rationale": "Unclear",
+                "scope": "Unknown",
+                "alternatives_considered": None,
+                "verbatim_quotes": ["We decided to use PostgreSQL"],
+                "warning": None,
+            }
+        )
         llm = MockLLMClient(response=response)
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=llm)
         daemon._resolved_code_root = tmp_path
@@ -315,9 +359,9 @@ class TestExtractDecisionsDaemon:
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
         # Quote doesn't match source
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use MySQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use MySQL"])
+        )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=llm)
         daemon._resolved_code_root = tmp_path
 
@@ -338,7 +382,8 @@ class TestExtractDecisionsDaemon:
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir,
+            tmp_path,
+            threads_dir=threads_dir,
             llm_client=MockLLMClient(available=False),
         )
         findings = daemon.tick()
@@ -395,19 +440,22 @@ class TestExtractDecisionsDaemon:
         entry = _make_entry()
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use PostgreSQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use PostgreSQL"])
+        )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=llm)
         daemon._resolved_code_root = tmp_path
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[_make_detector_finding()],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
-            return_value=DaemonWriteResult(
-                entry_id="01X", written=False, pushed=False, error="Lock failed"
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[_make_detector_finding()],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                return_value=DaemonWriteResult(
+                    entry_id="01X", written=False, pushed=False, error="Lock failed"
+                ),
             ),
         ):
             findings = daemon.tick()
@@ -416,7 +464,9 @@ class TestExtractDecisionsDaemon:
         assert len(findings) == 1
         assert findings[0].category == CAT_FAILED
 
-    def test_tick_handles_push_failure_without_retry_duplication(self, tmp_path, monkeypatch):
+    def test_tick_handles_push_failure_without_retry_duplication(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.setattr(
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
         )
@@ -424,21 +474,24 @@ class TestExtractDecisionsDaemon:
         entry = _make_entry()
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use PostgreSQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use PostgreSQL"])
+        )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=llm)
         daemon._resolved_code_root = tmp_path
 
         detector_finding = _make_detector_finding()
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[detector_finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
-            return_value=DaemonWriteResult(
-                entry_id="01X", written=True, pushed=False, error="Push timeout"
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[detector_finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                return_value=DaemonWriteResult(
+                    entry_id="01X", written=True, pushed=False, error="Push timeout"
+                ),
             ),
         ):
             findings = daemon.tick()
@@ -456,21 +509,24 @@ class TestExtractDecisionsDaemon:
         entry = _make_entry()
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use PostgreSQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use PostgreSQL"])
+        )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=llm)
         daemon._resolved_code_root = tmp_path
 
         detector_finding = _make_detector_finding(finding_id="F001")
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[detector_finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
-            return_value=DaemonWriteResult(
-                entry_id="01W", written=True, pushed=True
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[detector_finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                return_value=DaemonWriteResult(
+                    entry_id="01W", written=True, pushed=True
+                ),
             ),
         ):
             findings1 = daemon.tick()
@@ -493,7 +549,9 @@ class TestExtractDecisionsDaemon:
         )
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
-        daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient())
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient()
+        )
         daemon._resolved_code_root = tmp_path
 
         # Pre-populate cursor with stale IDs
@@ -525,7 +583,9 @@ class TestExtractDecisionsDaemon:
         )
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
-        daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient())
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient()
+        )
 
         ctx = MagicMock()
         ctx.code_root = tmp_path
@@ -539,13 +599,17 @@ class TestExtractDecisionsDaemon:
         assert resolved_threads_dir == threads_dir
         assert resolved_code_root == tmp_path
 
-    def test_cursor_gc_uses_all_findings_not_only_unacknowledged(self, tmp_path, monkeypatch):
+    def test_cursor_gc_uses_all_findings_not_only_unacknowledged(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.setattr(
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
         )
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
-        daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient())
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient()
+        )
         daemon._resolved_code_root = tmp_path
         daemon._set_processed_ids(["F001"])
         daemon._set_processed_source_keys(["test-topic:01ENTRY"])
@@ -577,7 +641,9 @@ class TestExtractDecisionsDaemon:
         )
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
-        daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient())
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient()
+        )
         daemon._resolved_code_root = tmp_path
 
         with patch(
@@ -598,14 +664,15 @@ class TestExtractDecisionsDaemon:
 
         llm = MockLLMClient(response=_llm_response_reject())
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir, llm_client=llm,
+            tmp_path,
+            threads_dir=threads_dir,
+            llm_client=llm,
             max_candidates_per_tick=1,
         )
         daemon._resolved_code_root = tmp_path
 
         findings_list = [
-            _make_detector_finding(finding_id=f"F{i:03d}", score=5)
-            for i in range(5)
+            _make_detector_finding(finding_id=f"F{i:03d}", score=5) for i in range(5)
         ]
 
         with patch(
@@ -624,13 +691,16 @@ class TestExtractDecisionsDaemon:
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient(),
+            tmp_path,
+            threads_dir=threads_dir,
+            llm_client=MockLLMClient(),
             max_extractions_per_day=2,
         )
         daemon._resolved_code_root = tmp_path
 
         # Pre-fill daily count to cap
         from datetime import datetime, timezone
+
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         daemon._checkpoint.extras["daily_count"] = {"date": today, "count": 2}
 
@@ -650,7 +720,9 @@ class TestExtractDecisionsDaemon:
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient(),
+            tmp_path,
+            threads_dir=threads_dir,
+            llm_client=MockLLMClient(),
             max_extractions_per_day=5,
         )
         daemon._resolved_code_root = tmp_path
@@ -659,6 +731,7 @@ class TestExtractDecisionsDaemon:
         daemon._checkpoint.extras["daily_count"] = {"date": "1999-01-01", "count": 100}
 
         from datetime import datetime, timezone
+
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         assert daemon._get_daily_count(today) == 0
 
@@ -674,12 +747,15 @@ class TestExtractDecisionsDaemon:
         class SlowLLM:
             def is_available(self):
                 return True
+
             def complete(self, prompt, system="", **kwargs):
                 time.sleep(0.1)
                 return _llm_response_reject()
 
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir, llm_client=SlowLLM(),
+            tmp_path,
+            threads_dir=threads_dir,
+            llm_client=SlowLLM(),
             max_candidates_per_tick=10,
         )
         # Override max_tick_duration below validator minimum for testing
@@ -689,8 +765,7 @@ class TestExtractDecisionsDaemon:
         daemon._resolved_code_root = tmp_path
 
         findings_list = [
-            _make_detector_finding(finding_id=f"F{i:03d}", score=5)
-            for i in range(10)
+            _make_detector_finding(finding_id=f"F{i:03d}", score=5) for i in range(10)
         ]
 
         with patch(
@@ -741,6 +816,7 @@ class TestExtractDecisionsDaemon:
         class TrackingLLM:
             def is_available(self):
                 return True
+
             def complete(self, prompt, system="", **kwargs):
                 # Track which entry was processed
                 if "HIGH" in prompt:
@@ -750,7 +826,9 @@ class TestExtractDecisionsDaemon:
                 return _llm_response_reject()
 
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir, llm_client=TrackingLLM(),
+            tmp_path,
+            threads_dir=threads_dir,
+            llm_client=TrackingLLM(),
             max_candidates_per_tick=2,
             min_extraction_score=4,
         )
@@ -781,6 +859,7 @@ class TestExtractDecisionsDaemon:
         class FailOnceLLM:
             def is_available(self):
                 return True
+
             def complete(self, prompt, system="", **kwargs):
                 call_count[0] += 1
                 if call_count[0] == 1:
@@ -788,7 +867,9 @@ class TestExtractDecisionsDaemon:
                 return _llm_response_reject()
 
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir, llm_client=FailOnceLLM(),
+            tmp_path,
+            threads_dir=threads_dir,
+            llm_client=FailOnceLLM(),
             max_candidates_per_tick=2,
         )
         daemon._resolved_code_root = tmp_path
@@ -827,7 +908,9 @@ class TestExtractDecisionsDaemon:
 
         llm = MockLLMClient(response=_llm_response_reject())
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir, llm_client=llm,
+            tmp_path,
+            threads_dir=threads_dir,
+            llm_client=llm,
             max_candidates_per_tick=2,
         )
         daemon._resolved_code_root = tmp_path
@@ -836,12 +919,15 @@ class TestExtractDecisionsDaemon:
         f1 = _make_detector_finding(finding_id="F1")
         f2 = _make_detector_finding(finding_id="F2")
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[f1, f2],
-        ), patch.object(
-            daemon, "_load_thread_context", wraps=daemon._load_thread_context
-        ) as mock_load:
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[f1, f2],
+            ),
+            patch.object(
+                daemon, "_load_thread_context", wraps=daemon._load_thread_context
+            ) as mock_load,
+        ):
             daemon.tick()
 
         # _load_thread_context should be called twice but cache should prevent
@@ -857,7 +943,7 @@ class TestExtractDecisionsDaemon:
         assert cfg.max_candidates_per_tick == 3
         assert cfg.max_extractions_per_day == 20
         assert cfg.max_body_chars == 4000
-        assert cfg.min_confidence == 3
+        assert cfg.min_confidence == 4
         assert cfg.max_tick_duration == 300.0
         assert cfg.llm is None
 
@@ -895,9 +981,9 @@ class TestExtractDecisionsDaemon:
         entry = _make_entry()
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use PostgreSQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use PostgreSQL"])
+        )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=llm)
         daemon._resolved_code_root = tmp_path
 
@@ -907,12 +993,15 @@ class TestExtractDecisionsDaemon:
             write_calls.append(kwargs)
             return DaemonWriteResult(entry_id="01W", written=True, pushed=True)
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[_make_detector_finding()],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
-            side_effect=lambda topic, **kw: mock_write(topic=topic, **kw),
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[_make_detector_finding()],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                side_effect=lambda topic, **kw: mock_write(topic=topic, **kw),
+            ),
         ):
             daemon.tick()
 
@@ -932,9 +1021,9 @@ class TestExtractDecisionsDaemon:
         entry = _make_entry()
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use PostgreSQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use PostgreSQL"])
+        )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=llm)
         daemon._resolved_code_root = tmp_path
 
@@ -944,12 +1033,15 @@ class TestExtractDecisionsDaemon:
             written_bodies.append(kwargs.get("body", ""))
             return DaemonWriteResult(entry_id="01W", written=True, pushed=True)
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[_make_detector_finding()],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
-            side_effect=lambda topic, **kw: mock_write(topic=topic, **kw),
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[_make_detector_finding()],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                side_effect=lambda topic, **kw: mock_write(topic=topic, **kw),
+            ),
         ):
             daemon.tick()
 
@@ -968,14 +1060,15 @@ class TestExtractDecisionsDaemon:
 
         llm = MockLLMClient(response=_llm_response_reject())
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir, llm_client=llm,
+            tmp_path,
+            threads_dir=threads_dir,
+            llm_client=llm,
             max_candidates_per_tick=5,
         )
         daemon._resolved_code_root = tmp_path
 
         findings_list = [
-            _make_detector_finding(finding_id=f"F{i:03d}", score=5)
-            for i in range(3)
+            _make_detector_finding(finding_id=f"F{i:03d}", score=5) for i in range(3)
         ]
 
         with patch(
@@ -1006,21 +1099,24 @@ class TestExtractDecisionsDaemon:
         entry = _make_entry()
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use PostgreSQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use PostgreSQL"])
+        )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=llm)
         daemon._resolved_code_root = tmp_path
 
         detector_finding = _make_detector_finding(score=5)
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[detector_finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
-            return_value=DaemonWriteResult(
-                entry_id=None, written=False, pushed=False
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[detector_finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                return_value=DaemonWriteResult(
+                    entry_id=None, written=False, pushed=False
+                ),
             ),
         ):
             daemon.tick()
@@ -1036,21 +1132,24 @@ class TestExtractDecisionsDaemon:
         entry = _make_entry()
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use PostgreSQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use PostgreSQL"])
+        )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=llm)
         daemon._resolved_code_root = tmp_path
 
         detector_finding = _make_detector_finding(score=5)
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[detector_finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
-            return_value=DaemonWriteResult(
-                entry_id="01W", written=True, pushed=False
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[detector_finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                return_value=DaemonWriteResult(
+                    entry_id="01W", written=True, pushed=False
+                ),
             ),
         ):
             daemon.tick()
@@ -1070,7 +1169,9 @@ class TestExtractDecisionsDaemon:
         )
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
-        daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient())
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient()
+        )
         daemon._resolved_code_root = tmp_path
 
         load_findings_mock = MagicMock(return_value=[])
@@ -1083,7 +1184,12 @@ class TestExtractDecisionsDaemon:
 
         load_findings_mock.assert_called_once()
         call_kwargs = load_findings_mock.call_args
-        assert call_kwargs[1].get("limit", call_kwargs[0][1] if len(call_kwargs[0]) > 1 else None) == 50_000
+        assert (
+            call_kwargs[1].get(
+                "limit", call_kwargs[0][1] if len(call_kwargs[0]) > 1 else None
+            )
+            == 50_000
+        )
 
     # ------------------------------------------------------------------
     # Fix #5: Inverted default in failed-gate reporting
@@ -1112,7 +1218,8 @@ class TestExtractDecisionsDaemon:
             findings = daemon.tick()
 
         assert len(findings) == 1
-        assert findings[0].category == CAT_REJECTED
+        # g1_commitment failure is a hard-fail gate → CAT_REJECTED_HARD_GATE
+        assert findings[0].category == CAT_REJECTED_HARD_GATE
         # The failed_gates list should include g1_commitment (which was set to failed)
         failed = findings[0].details.get("failed_gates", [])
         assert "g1_commitment" in failed
@@ -1125,7 +1232,9 @@ class TestExtractDecisionsDaemon:
         entry = _make_entry()
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
-        daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient())
+        daemon = _make_daemon(
+            tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient()
+        )
         daemon._resolved_code_root = tmp_path
         detector_finding = _make_detector_finding(score=5)
 
@@ -1140,12 +1249,15 @@ class TestExtractDecisionsDaemon:
             extraction=None,
         )
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[detector_finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.extract_decision",
-            return_value=empty_body_result,
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[detector_finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.extract_decision",
+                return_value=empty_body_result,
+            ),
         ):
             findings = daemon.tick()
 
@@ -1183,7 +1295,8 @@ class TestRetryCaps:
         threads_dir = tmp_path / "threads"
         _write_graph_thread(threads_dir, "test-topic", entries=[_make_entry()])
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir,
+            tmp_path,
+            threads_dir=threads_dir,
             llm_client=MockLLMClient(),
             **cfg_kwargs,
         )
@@ -1191,19 +1304,24 @@ class TestRetryCaps:
         return daemon
 
     def test_llm_attempts_counter_increments_on_empty_body(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         """Each empty_decision_body outcome bumps llm_extraction_attempts."""
         daemon = self._setup(tmp_path, monkeypatch)
         finding = _make_detector_finding()
         source_key = "test-topic:01ENTRY"
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.extract_decision",
-            return_value=_empty_body_result(),
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.extract_decision",
+                return_value=_empty_body_result(),
+            ),
         ):
             findings1 = daemon.tick()
             findings2 = daemon.tick()
@@ -1217,23 +1335,30 @@ class TestRetryCaps:
         assert daemon._get_llm_attempts().get(source_key) == 2
 
     def test_llm_cap_emits_cap_reached_and_advances_cursor(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         """After max_extraction_attempts empty_body failures, the next tick
         emits extraction_cap_reached (llm_failure) and advances cursor."""
         daemon = self._setup(
-            tmp_path, monkeypatch, max_extraction_attempts=3,
+            tmp_path,
+            monkeypatch,
+            max_extraction_attempts=3,
         )
         finding = _make_detector_finding()
         source_key = "test-topic:01ENTRY"
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.extract_decision",
-            return_value=_empty_body_result(),
-        ) as extract_mock:
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.extract_decision",
+                return_value=_empty_body_result(),
+            ) as extract_mock,
+        ):
             # Ticks 1-3 exhaust the budget
             for _ in range(3):
                 daemon.tick()
@@ -1255,7 +1380,9 @@ class TestRetryCaps:
     def test_llm_unavailable_counts_toward_llm_cap(self, tmp_path, monkeypatch):
         """llm_unavailable failures count toward the same LLM attempts cap."""
         daemon = self._setup(
-            tmp_path, monkeypatch, max_extraction_attempts=2,
+            tmp_path,
+            monkeypatch,
+            max_extraction_attempts=2,
         )
         finding = _make_detector_finding()
         source_key = "test-topic:01ENTRY"
@@ -1271,12 +1398,15 @@ class TestRetryCaps:
             rejection_reason="llm_unavailable",
             extraction=None,
         )
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.extract_decision",
-            return_value=llm_unavailable,
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.extract_decision",
+                return_value=llm_unavailable,
+            ),
         ):
             daemon.tick()
             daemon.tick()
@@ -1287,28 +1417,38 @@ class TestRetryCaps:
         assert daemon._get_llm_attempts().get(source_key) == 2
 
     def test_write_failure_counter_does_not_advance_cursor_before_cap(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         """Write failures increment write_failure_attempts but do NOT
         advance the cursor until the cap is reached (infra-transient)."""
         daemon = self._setup(
-            tmp_path, monkeypatch, max_write_failure_attempts=5,
+            tmp_path,
+            monkeypatch,
+            max_write_failure_attempts=5,
         )
         finding = _make_detector_finding()
         source_key = "test-topic:01ENTRY"
 
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use PostgreSQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use PostgreSQL"])
+        )
         daemon._llm_client = llm
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
-            return_value=DaemonWriteResult(
-                entry_id="01X", written=False, pushed=False, error="disk full",
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                return_value=DaemonWriteResult(
+                    entry_id="01X",
+                    written=False,
+                    pushed=False,
+                    error="disk full",
+                ),
             ),
         ):
             # Two write-failure ticks — still under cap
@@ -1321,30 +1461,40 @@ class TestRetryCaps:
         assert source_key not in daemon._get_processed_source_keys()
 
     def test_write_failure_cap_emits_cap_reached_and_advances_cursor(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         """After max_write_failure_attempts failures, the next tick emits
         extraction_cap_reached (write_failure) and advances cursor."""
         daemon = self._setup(
-            tmp_path, monkeypatch, max_write_failure_attempts=5,
+            tmp_path,
+            monkeypatch,
+            max_write_failure_attempts=5,
         )
         finding = _make_detector_finding()
         source_key = "test-topic:01ENTRY"
 
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use PostgreSQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use PostgreSQL"])
+        )
         daemon._llm_client = llm
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
-            return_value=DaemonWriteResult(
-                entry_id="01X", written=False, pushed=False, error="disk full",
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[finding],
             ),
-        ) as write_mock:
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                return_value=DaemonWriteResult(
+                    entry_id="01X",
+                    written=False,
+                    pushed=False,
+                    error="disk full",
+                ),
+            ) as write_mock,
+        ):
             for _ in range(5):
                 daemon.tick()
             assert write_mock.call_count == 5
@@ -1362,39 +1512,51 @@ class TestRetryCaps:
         assert source_key in daemon._get_processed_source_keys()
 
     def test_llm_cap_fires_before_write_cap_when_mixed(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         """Mixed failures: LLM cap is reached first with its lower budget."""
         daemon = self._setup(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             max_extraction_attempts=2,
             max_write_failure_attempts=5,
         )
         finding = _make_detector_finding()
 
         # First tick: write_failure outcome (success → write fails)
-        llm = MockLLMClient(response=_llm_response_pass(
-            quotes=["We decided to use PostgreSQL"]
-        ))
+        llm = MockLLMClient(
+            response=_llm_response_pass(quotes=["We decided to use PostgreSQL"])
+        )
         daemon._llm_client = llm
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
-            return_value=DaemonWriteResult(
-                entry_id="01X", written=False, pushed=False, error="disk full",
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                return_value=DaemonWriteResult(
+                    entry_id="01X",
+                    written=False,
+                    pushed=False,
+                    error="disk full",
+                ),
             ),
         ):
             daemon.tick()  # write_failure_attempts=1
 
         # Next: two LLM failures → hits LLM cap of 2
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.extract_decision",
-            return_value=_empty_body_result(),
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.extract_decision",
+                return_value=_empty_body_result(),
+            ),
         ):
             daemon.tick()  # llm=1
             daemon.tick()  # llm=2
@@ -1412,7 +1574,9 @@ class TestRetryCaps:
         threads_dir = tmp_path / "threads"
         threads_dir.mkdir()
         daemon = _make_daemon(
-            tmp_path, threads_dir=threads_dir, llm_client=MockLLMClient(),
+            tmp_path,
+            threads_dir=threads_dir,
+            llm_client=MockLLMClient(),
         )
         daemon._resolved_code_root = tmp_path
 
@@ -1445,19 +1609,24 @@ class TestRetryCaps:
         assert "test-topic:01ENTRY" in write_counts
 
     def test_unknown_error_type_does_not_increment_counters(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         """Exception-path CAT_FAILED (unknown error_type) should not bump
         either counter — current behavior is unchanged retry."""
         daemon = self._setup(tmp_path, monkeypatch)
         finding = _make_detector_finding()
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[finding],
-        ), patch(
-            "watercooler_mcp.daemons.decision_extractor.ExtractDecisionsDaemon._process_candidate",
-            side_effect=RuntimeError("boom"),
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[finding],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.ExtractDecisionsDaemon._process_candidate",
+                side_effect=RuntimeError("boom"),
+            ),
         ):
             findings = daemon.tick()
 
@@ -1468,7 +1637,9 @@ class TestRetryCaps:
         assert daemon._get_write_attempts() == {}
 
     def test_status_summary_exposes_attempt_counters(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         daemon = self._setup(tmp_path, monkeypatch)
         daemon._checkpoint.extras["llm_extraction_attempts"] = {"a:1": 2}

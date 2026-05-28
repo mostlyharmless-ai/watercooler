@@ -1928,6 +1928,7 @@ def ack_hosted(
     body: str = "Acknowledged",
     entry_id: Optional[str] = None,
     code_branch: Optional[str] = None,
+    role: str = "pm",
 ) -> tuple[str | None, dict]:
     """Acknowledge a thread without flipping the ball (per-thread format only).
 
@@ -1985,7 +1986,7 @@ def ack_hosted(
                 existing_edges=existing_edges,
                 entry_id=entry_id,
                 agent=agent,
-                role="pm",  # Ack entries are typically from PM role
+                role=role,
                 entry_type="Note",
                 entry_title=title,
                 body=body,
@@ -2060,6 +2061,7 @@ def handoff_hosted(
     note: str = "",
     entry_id: Optional[str] = None,
     code_branch: Optional[str] = None,
+    role: str = "pm",
 ) -> tuple[str | None, dict]:
     """Hand off the ball to another agent (per-thread format only).
 
@@ -2119,7 +2121,7 @@ def handoff_hosted(
                     existing_edges=existing_edges,
                     entry_id=entry_id,
                     agent=agent,
-                    role="pm",
+                    role=role,
                     entry_type="Note",
                     entry_title=f"Handoff to {new_ball}",
                     body=note,

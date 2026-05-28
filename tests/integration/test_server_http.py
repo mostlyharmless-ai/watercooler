@@ -158,7 +158,7 @@ class TestAuthenticationMiddleware:
             assert response.status_code == 401
 
     def test_hosted_mode_health_no_auth(self):
-        """Health endpoint doesn't require auth even in hosted mode."""
+        """Unauthenticated /health returns only the minimal liveness fields."""
         with patch.dict(os.environ, {
             "WATERCOOLER_MODE": "hosted",
             "WATERCOOLER_TOKEN_API_URL": "https://example.com",
@@ -169,6 +169,35 @@ class TestAuthenticationMiddleware:
 
             response = client.get("/health")
             assert response.status_code == 200
+            data = response.json()
+            # Only the public-safe liveness fields — no deployment internals.
+            assert set(data.keys()) == {"status", "mode"}
+            assert data["status"] == "healthy"
+            assert "hosted_profile" not in data
+            assert "cache" not in data
+            assert "token_service" not in data
+            assert "rate_limit" not in data
+
+    def test_hosted_mode_health_with_valid_auth(self):
+        """Valid Bearer token exposes the full diagnostic response."""
+        with patch.dict(os.environ, {
+            "WATERCOOLER_MODE": "hosted",
+            "WATERCOOLER_TOKEN_API_URL": "https://example.com",
+            "WATERCOOLER_TOKEN_API_KEY": "test-key",
+        }, clear=False):
+            app = create_http_app()
+            # Inject a mock resolve_api_key_fn that accepts one known key.
+            app.state.resolve_api_key_fn = lambda key: {"user": "tester"} if key == "valid-key" else None
+            client = TestClient(app)
+
+            response = client.get(
+                "/health", headers={"Authorization": "Bearer valid-key"}
+            )
+            assert response.status_code == 200
+            data = response.json()
+            # Full diagnostics must be present.
+            assert "cache" in data
+            assert data["status"] == "healthy"
 
     def test_hosted_mode_missing_token(self):
         """Hosted mode returns 403 if user has no token."""

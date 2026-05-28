@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "watercooler"
-version = "0.4.5"
+version = "0.5.0"
 description = "File-based collaboration protocol for agentic coding projects"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -101,6 +101,7 @@ watercooler = ["py.typed", "templates/*.md", "templates/*.toml", "data/*.toml"]
 [project.scripts]
 watercooler = "watercooler.cli:main"
 watercooler-mcp = "watercooler_mcp.server:main"
+watercooler-stop-hook = "watercooler.stop_hook:main"
 
 [tool.pytest.ini_options]
 norecursedirs = [

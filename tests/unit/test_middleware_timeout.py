@@ -37,10 +37,9 @@ def test_tool_timeouts_dict_is_importable():
 
 def test_known_tools_have_custom_timeouts():
     """Verify expected tools have custom timeout values."""
-    assert _TOOL_TIMEOUTS["watercooler_baseline_sync_status"] == 180.0
+    assert _TOOL_TIMEOUTS["watercooler_baseline_graph"] == 180.0
     assert _TOOL_TIMEOUTS["watercooler_graph_enrich"] == 300.0
-    assert _TOOL_TIMEOUTS["watercooler_graph_recover"] == 300.0
-    assert _TOOL_TIMEOUTS["watercooler_leanrag_run_pipeline"] == 300.0
+    assert _TOOL_TIMEOUTS["watercooler_bulk_index"] == 300.0
     assert _TOOL_TIMEOUTS["watercooler_smart_query"] == 120.0
 
 
@@ -49,6 +48,27 @@ def test_default_timeout_applies_to_unknown_tool():
     assert "watercooler_health" not in _TOOL_TIMEOUTS
     timeout = _TOOL_TIMEOUTS.get("watercooler_health", _DEFAULT_TOOL_TIMEOUT)
     assert timeout == _DEFAULT_TOOL_TIMEOUT
+
+
+def test_get_tool_timeout_canonicalizes_aliases():
+    """get_tool_timeout resolves retired alias names to their canonical tool —
+    the hosted adapter looks up the timeout on the pre-alias name, so a
+    deprecated name must get the canonical tool's timeout (PR #827 review)."""
+    from watercooler_mcp.middleware import get_tool_timeout
+
+    # Direct (canonical) names resolve as before.
+    assert get_tool_timeout("watercooler_bulk_index") == 300.0
+    assert get_tool_timeout("watercooler_smart_query") == 120.0
+    # Retired alias → canonical: leanrag_run_pipeline folded into bulk_index,
+    # so the alias must still get bulk_index's 300s, not the 50s default.
+    assert get_tool_timeout("watercooler_leanrag_run_pipeline") == 300.0
+    # An alias whose canonical has no custom timeout falls to the default.
+    assert (
+        get_tool_timeout("watercooler_federated_search")
+        == _DEFAULT_TOOL_TIMEOUT
+    )
+    # A non-aliased unknown tool still gets the default.
+    assert get_tool_timeout("watercooler_health") == _DEFAULT_TOOL_TIMEOUT
 
 
 # ---------------------------------------------------------------------------
@@ -130,13 +150,13 @@ async def test_timeout_error_message_includes_server_alive(monkeypatch):
 
     Tool = _make_tool_class(run)
     _instrument(Tool)
-    tool = Tool("watercooler_baseline_sync_status")
+    tool = Tool("watercooler_baseline_graph")
 
-    monkeypatch.setitem(_mw._TOOL_TIMEOUTS, "watercooler_baseline_sync_status", 0.05)
+    monkeypatch.setitem(_mw._TOOL_TIMEOUTS, "watercooler_baseline_graph", 0.05)
     with pytest.raises(TimeoutError) as exc_info:
         await Tool.run(tool, {})
     msg = str(exc_info.value)
-    assert "watercooler_baseline_sync_status" in msg
+    assert "watercooler_baseline_graph" in msg
     assert "server is still running" in msg
     assert "0s timeout" in msg  # Verify timeout value appears in message
 
@@ -157,7 +177,7 @@ async def test_custom_timeout_applies_to_mapped_tool():
 
     Tool = _make_tool_class(run)
     _instrument(Tool)
-    tool = Tool("watercooler_baseline_sync_status")
+    tool = Tool("watercooler_baseline_graph")
 
     with mock.patch.object(_mw.asyncio, "wait_for", side_effect=spy_wait_for):
         await Tool.run(tool, {})

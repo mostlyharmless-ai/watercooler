@@ -18,7 +18,6 @@ SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
 
 # Deprecated function names that should not appear in runtime imports
 _DEPRECATED_FUNCTIONS = {
-    "discover_thread_files",
     "parse_thread_entries",
     "parse_thread_header",
     "parse_thread_file",
@@ -52,7 +51,7 @@ def _scan_for_deprecated_imports() -> list[str]:
     names that are substrings of longer identifiers.
 
     Known gap: does not catch module-attribute usage like
-    ``_fs.discover_thread_files(...)`` where only the module is imported.
+    ``_parser.parse_thread_file(...)`` where only the module is imported.
     This is acceptable since the codebase uses explicit function imports.
     """
     violations = []
@@ -141,7 +140,7 @@ class TestGraphFirstInvariant:
     """Ensure deprecated .md-parsing functions are not used in runtime code."""
 
     def test_no_deprecated_md_imports_in_runtime(self):
-        """Runtime src/ code must not import discover_thread_files,
+        """Runtime src/ code must not import parse_thread_file,
         parse_thread_entries, or parse_thread_header.
 
         These are deprecated in favor of graph reader functions:

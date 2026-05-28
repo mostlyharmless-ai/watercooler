@@ -24,8 +24,6 @@ log = logging.getLogger(__name__)
 daemon_status = None
 daemon_findings = None
 pulse_snapshot_tool = None
-acknowledge_finding_tool = None
-decision_extractor_reset_tool = None
 
 
 def _authority_labels(runtime: Any) -> dict[str, str]:
@@ -243,6 +241,35 @@ def _daemon_status_impl(
     # 3. Build status payload (same logic as before).
     status_payload = d.status_summary() if d is not None else manager.status_all()
 
+    # 3a. Attach all-daemons-view sibling fields. Three additions land
+    #     here — they're conceptually independent so they're listed
+    #     under one ``if d is None`` guard:
+    #
+    #     - ``registration_errors``: structured per-daemon registration
+    #       failures (PR #789 / F1; mirrors hosted-side PR #755).
+    #     - ``sibling_fleets``: other live MCP-server fleets on this
+    #       machine, each watching a different repo (PR #791 / L1
+    #       per-repo PID locks; cloud Design (local) entry
+    #       ``01KR5RCWK0F0EM1YVKWRJPD239``).
+    #     - ``repo_key``: this fleet's repo identity (PR #791 / L1).
+    #
+    #     Per-daemon queries return their own scope of data and don't
+    #     get any of these fleet-wide additions.
+    if d is None:
+        if manager.registration_errors:
+            status_payload["registration_errors"] = list(
+                manager.registration_errors
+            )
+
+        from ..daemons import _list_sibling_fleets
+
+        siblings = _list_sibling_fleets()
+        if siblings:
+            status_payload["sibling_fleets"] = siblings
+        repo_key = getattr(manager, "repo_key", "")
+        if repo_key:
+            status_payload["repo_key"] = repo_key
+
     # 4. Attach service telemetry (call counts, tokens, cache stats).
     from ..daemons.telemetry import get_telemetry
 
@@ -277,13 +304,22 @@ def _daemon_findings_impl(
     unacknowledged_only: bool = False,
     enrich: bool = False,
     code_path: str = ".",
+    action: str = "list",
+    finding_id: str = "",
+    finding_ids: list[str] | None = None,
 ) -> str:
-    """Query daemon findings with optional filters.
+    """Query daemon findings, or acknowledge them.
 
-    Returns findings in reverse chronological order (newest first).
+    With ``action="list"`` (default) returns findings in reverse chronological
+    order (newest first). With ``action="acknowledge"`` marks one or more
+    findings as acknowledged (folded-in ``watercooler_acknowledge_finding``) —
+    ``daemon`` is the owning daemon and ``finding_id`` / ``finding_ids``
+    select the findings. The acknowledge action is authority-gated
+    (``daemon_control`` / L3); listing is an L1 ``daemon_observe`` read.
 
     Args:
-        daemon: Filter by daemon name (empty = all daemons).
+        daemon: Filter by daemon name (empty = all daemons). For
+            ``action="acknowledge"`` this is the daemon that owns the finding.
         severity: Filter by severity ("info", "warning", "error").
         category: Filter by category (e.g., "missing_status", "stale_thread").
         topic: Filter by thread topic.
@@ -296,7 +332,18 @@ def _daemon_findings_impl(
         code_path: Path to the code repository root (default: current
             directory).  Used to derive repo_key for S3 pulse-context
             enrichment.  Ignored when enrich=False.
+        action: ``"list"`` (default) or ``"acknowledge"``.
+        finding_id: A single finding ID to acknowledge (``action="acknowledge"``).
+        finding_ids: A list of finding IDs to acknowledge in one call (bulk).
     """
+    if str(action).strip().lower() == "acknowledge":
+        return _acknowledge_finding_impl(
+            ctx,
+            daemon_name=daemon,
+            finding_id=finding_id,
+            finding_ids=finding_ids,
+        )
+
     from ..daemons import get_daemon_runtime, ensure_hosted_scope_for_current_context
     from ..daemons.hosted_coordinator import HostedDaemonCoordinator
 
@@ -632,9 +679,10 @@ def _pulse_snapshot_impl(
 def _acknowledge_finding_impl(
     ctx: Context,
     daemon_name: str,
-    finding_id: str,
+    finding_id: str = "",
+    finding_ids: list[str] | None = None,
 ) -> str:
-    """Mark a daemon finding as acknowledged.
+    """Mark one or more daemon findings as acknowledged.
 
     Acknowledged findings are excluded from future
     ``watercooler_daemon_findings(unacknowledged_only=True)`` queries.
@@ -644,10 +692,31 @@ def _acknowledge_finding_impl(
     the acknowledgment lands in the correct namespace.
 
     Args:
-        daemon_name: The daemon that owns the finding
+        daemon_name: The daemon that owns the finding(s)
             (from ``findings[].daemon_name``, e.g. ``project_coordinator``).
-        finding_id: The finding ID to acknowledge (from ``findings[].finding_id``).
+        finding_id: A single finding ID to acknowledge.
+        finding_ids: A list of finding IDs to acknowledge in one call (bulk).
+            Combined with ``finding_id``; all must belong to ``daemon_name``.
+
+    Returns:
+        JSON with ``status`` (ok | partial | not_found | error), and the
+        ``acknowledged`` / ``not_found`` / ``errors`` lists.
     """
+    # Resolve the target id set — single + bulk, deduped, order-preserving.
+    ids: list[str] = []
+    for fid in [finding_id, *(finding_ids or [])]:
+        fid = str(fid or "").strip()
+        if fid and fid not in ids:
+            ids.append(fid)
+    if not ids:
+        return json.dumps(
+            {
+                "status": "error",
+                "message": "Provide finding_id or finding_ids",
+            },
+            indent=2,
+        )
+
     from ..daemons import get_daemon_runtime, ensure_hosted_scope_for_current_context
     from ..daemons.hosted_coordinator import HostedDaemonCoordinator
 
@@ -663,197 +732,63 @@ def _acknowledge_finding_impl(
             indent=2,
         )
 
-    try:
-        if isinstance(runtime, HostedDaemonCoordinator):
-            from ..context import get_effective_context
+    # Bind a per-id ack callable for the active runtime (hosted vs local).
+    if isinstance(runtime, HostedDaemonCoordinator):
+        from ..context import get_effective_context
 
-            eff_ctx = get_effective_context()
-            scope_id = eff_ctx.scope_id if eff_ctx else None
-            if not scope_id:
-                return json.dumps(
-                    {
-                        "status": "error",
-                        "message": "Cannot acknowledge finding: missing user identity.",
-                    },
-                    indent=2,
-                )
-            ok = runtime.acknowledge_finding(
+        eff_ctx = get_effective_context()
+        scope_id = eff_ctx.scope_id if eff_ctx else None
+        if not scope_id:
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": "Cannot acknowledge finding: missing user identity.",
+                },
+                indent=2,
+            )
+
+        def _ack_one(fid: str) -> bool:
+            return runtime.acknowledge_finding(
                 scope_id=scope_id,
                 daemon_name=daemon_name,
-                finding_id=finding_id,
+                finding_id=fid,
             )
-        else:
-            from ..daemons.state import acknowledge_finding as _ack
+    else:
+        from ..daemons.state import acknowledge_finding as _ack
 
-            ok = _ack(daemon_name, finding_id)
-    except ValueError as exc:
-        return json.dumps(
-            {"status": "error", "message": str(exc)},
-            indent=2,
-        )
+        def _ack_one(fid: str) -> bool:
+            return _ack(daemon_name, fid)
+
+    acknowledged: list[str] = []
+    not_found: list[str] = []
+    errors: list[dict] = []
+    for fid in ids:
+        try:
+            ok = _ack_one(fid)
+        except ValueError as exc:
+            errors.append({"finding_id": fid, "message": str(exc)})
+            continue
+        (acknowledged if ok else not_found).append(fid)
+
+    if errors:
+        status = "error"
+    elif acknowledged and not_found:
+        status = "partial"
+    elif not_found:
+        status = "not_found"
+    else:
+        status = "ok"
 
     return json.dumps(
         {
-            "status": "ok" if ok else "not_found",
-            "acknowledged": ok,
-            "finding_id": finding_id,
+            "status": status,
+            "daemon_name": daemon_name,
+            "acknowledged": acknowledged,
+            "not_found": not_found,
+            "errors": errors,
         },
         indent=2,
     )
-
-
-_RESET_LIVE_DAEMON_WINDOW_SECONDS = 60.0
-
-
-def _decision_extractor_reset_impl(
-    ctx: Context,
-    clear_finding_cursor: bool = True,
-    clear_source_cursor: bool = True,
-    reset_daily_count: bool = True,
-    clear_attempt_caps: bool = False,
-    force: bool = False,
-) -> str:
-    """Reset the decision_extractor cursor so stuck candidates can be retried.
-
-    The extractor persists two sets that grow over time: ``processed_finding_ids``
-    (dedup per-finding) and ``processed_source_keys`` (dedup per source entry).
-    When the quote-validation rejection rate is high, these sets accumulate
-    permanent-skip markers that prevent re-evaluation even after the source
-    entry changes. This tool empties them so the next tick scans fresh.
-
-    The existing checkpoint file is backed up alongside itself
-    (``checkpoint.json.bak-<timestamp>``) before any mutation.
-
-    WARNING — Race with running daemon:
-        ``BaseDaemon`` holds its checkpoint in memory and writes it after
-        every tick. If the extractor daemon is running in the same process
-        and ticks between this tool's ``save_checkpoint`` and its next
-        in-memory write, the reset is silently overwritten. Stop the
-        daemon (or the MCP server hosting it) before invoking this tool.
-        As a safety net, when the checkpoint was modified within the last
-        ``60`` seconds this tool refuses with ``status: active_daemon``
-        unless ``force=True`` is passed.
-
-    Args:
-        clear_finding_cursor: Empty ``processed_finding_ids`` (default True).
-        clear_source_cursor: Empty ``processed_source_keys`` (default True).
-        reset_daily_count: Reset ``daily_count`` to today at count 0
-            (default True).
-        clear_attempt_caps: Also empty ``llm_extraction_attempts`` and
-            ``write_failure_attempts`` (default False — these represent
-            genuine per-entry cost ceilings; clear only after verifying
-            the underlying failure mode is resolved).
-        force: Skip the active-daemon check. Use only after confirming the
-            daemon is stopped; any subsequent tick in the same process will
-            overwrite the reset.
-    """
-    from ..daemons.state import load_checkpoint, save_checkpoint, _daemon_dir
-    import shutil
-    import time
-    from datetime import datetime, timezone
-
-    daemon_name = "decision_extractor"
-    # Plan v5.1 Move 3: this admin/diagnostic tool legitimately
-    # operates on the un-namespaced checkpoint root (single-tenant
-    # local stdio mode, no auth-derived scope). Pass
-    # ``_allow_unscoped=True`` to opt out of the
-    # ``WATERCOOLER_FINDINGS_STRICT_NAMESPACE=1`` strict-mode check
-    # that the daemon-state module enforces. The audit anchor for
-    # this exemption is the ``_allow_unscoped=True`` literal —
-    # grep -rn '_allow_unscoped=True' src/ to enumerate all
-    # documented bypass call sites.
-    try:
-        cp_dir = _daemon_dir(daemon_name, _allow_unscoped=True)
-        cp_path = cp_dir / "checkpoint.json"
-        if not cp_path.exists():
-            return json.dumps(
-                {
-                    "status": "not_found",
-                    "message": f"No checkpoint for {daemon_name} at {cp_path}",
-                },
-                indent=2,
-            )
-
-        mtime = cp_path.stat().st_mtime
-        age_seconds = time.time() - mtime
-        if age_seconds < _RESET_LIVE_DAEMON_WINDOW_SECONDS and not force:
-            return json.dumps(
-                {
-                    "status": "active_daemon",
-                    "message": (
-                        f"Checkpoint was modified {age_seconds:.1f}s ago; the "
-                        f"extractor daemon may be running and will overwrite a "
-                        f"reset on its next tick. Stop the daemon first, or pass "
-                        f"force=True to override."
-                    ),
-                    "checkpoint_age_seconds": round(age_seconds, 1),
-                    "checkpoint_path": str(cp_path),
-                },
-                indent=2,
-            )
-
-        # Microsecond precision on the backup filename so two rapid resets
-        # (e.g. a rerun after the first returned ``active_daemon`` + force)
-        # can't collide and silently clobber the first backup. Without
-        # ``%f`` two calls within the same second produce the same path
-        # and ``shutil.copy2`` overwrites — destroying the only pre-reset
-        # snapshot. A ULID/UUID suffix would also work; microseconds keep
-        # the chronological sort intact.
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        bak_path = cp_dir / f"checkpoint.json.bak-{ts}"
-        shutil.copy2(cp_path, bak_path)
-
-        checkpoint = load_checkpoint(daemon_name, _allow_unscoped=True)
-        extras = checkpoint.extras
-        before = {
-            "processed_finding_ids": len(extras.get("processed_finding_ids", [])),
-            "processed_source_keys": len(extras.get("processed_source_keys", [])),
-            "daily_count": extras.get("daily_count"),
-            "llm_extraction_attempts": len(extras.get("llm_extraction_attempts", {})),
-            "write_failure_attempts": len(extras.get("write_failure_attempts", {})),
-        }
-
-        if clear_finding_cursor:
-            extras["processed_finding_ids"] = []
-        if clear_source_cursor:
-            extras["processed_source_keys"] = []
-        if reset_daily_count:
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            extras["daily_count"] = {"date": today, "count": 0}
-        if clear_attempt_caps:
-            extras["llm_extraction_attempts"] = {}
-            extras["write_failure_attempts"] = {}
-
-        save_checkpoint(checkpoint, _allow_unscoped=True)
-
-        return json.dumps(
-            {
-                "status": "ok",
-                "daemon": daemon_name,
-                "backup_path": str(bak_path),
-                "before": before,
-                "cleared": {
-                    "finding_cursor": clear_finding_cursor,
-                    "source_cursor": clear_source_cursor,
-                    "daily_count": reset_daily_count,
-                    "attempt_caps": clear_attempt_caps,
-                },
-                "note": (
-                    "Next extractor tick will re-evaluate all live candidates. "
-                    "Monitor via watercooler_daemon_findings(daemon='decision_extractor'). "
-                    "If the extractor daemon was running when this tool fired, "
-                    "its in-memory checkpoint will overwrite the reset on next tick "
-                    "— stop the daemon or restart the MCP server to apply cleanly."
-                ),
-            },
-            indent=2,
-        )
-    except Exception as exc:
-        log.error(f"decision_extractor_reset failed: {exc}")
-        return json.dumps(
-            {"status": "error", "message": str(exc)},
-            indent=2,
-        )
 
 
 def register_daemon_tools(mcp) -> None:
@@ -862,7 +797,7 @@ def register_daemon_tools(mcp) -> None:
     Args:
         mcp: The FastMCP server instance
     """
-    global daemon_status, daemon_findings, pulse_snapshot_tool, acknowledge_finding_tool
+    global daemon_status, daemon_findings, pulse_snapshot_tool
 
     daemon_status = mcp.tool(name="watercooler_daemon_status")(_daemon_status_impl)
     daemon_findings = mcp.tool(name="watercooler_daemon_findings")(
@@ -871,23 +806,3 @@ def register_daemon_tools(mcp) -> None:
     pulse_snapshot_tool = mcp.tool(name="watercooler_pulse_snapshot")(
         _pulse_snapshot_impl
     )
-    acknowledge_finding_tool = mcp.tool(name="watercooler_acknowledge_finding")(
-        _acknowledge_finding_impl
-    )
-
-
-def register_decision_extractor_admin_tools(mcp) -> None:
-    """Register admin tools for the local decision_extractor daemon.
-
-    The decision_extractor never registers inside a hosted scope
-    (``hosted_coordinator.py:239-240`` only runs premium daemons per
-    scope). This registration is therefore gated to local surfaces by the
-    caller — exposing the reset tool on hosted surfaces would mutate a
-    non-existent per-scope checkpoint or a shared state neither the
-    operator nor the user expects.
-    """
-    global decision_extractor_reset_tool
-
-    decision_extractor_reset_tool = mcp.tool(
-        name="watercooler_decision_extractor_reset"
-    )(_decision_extractor_reset_impl)

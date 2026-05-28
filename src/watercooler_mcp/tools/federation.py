@@ -1,7 +1,9 @@
-"""Federation tools for watercooler MCP server.
+"""Federation support for watercooler MCP server.
 
-Tools:
-- watercooler_federated_search: Cross-namespace keyword search
+This module registers no MCP tools after the PR6 consolidation —
+watercooler_federated_search was folded into watercooler_search(namespaces=).
+_federated_search_impl is retained and is called by watercooler_search's
+namespaces= mode.
 """
 
 from __future__ import annotations
@@ -420,7 +422,11 @@ async def _federated_search_inner(
 def register_federation_tools(mcp: FastMCP) -> None:
     """Register federation tools with the MCP server.
 
+    No tools remain after the PR6 consolidation — watercooler_federated_search
+    was folded into watercooler_search(namespaces=). Retained as a stable
+    no-op so server_factory's registration sequence is unchanged.
+
     Args:
         mcp: The FastMCP server instance.
     """
-    mcp.tool(name="watercooler_federated_search")(_federated_search_impl)
+    return None

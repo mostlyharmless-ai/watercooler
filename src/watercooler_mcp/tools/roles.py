@@ -1,8 +1,12 @@
-"""Role discovery tools for the watercooler MCP server.
+"""Role discovery tool for the watercooler MCP server.
 
-Tools:
-- watercooler_roles: Compact role catalog for a project
-- watercooler_role_details: Full behavioral spec for a single role
+Tool:
+- watercooler_roles: the project's role catalog, or — when ``role`` is given
+  — the full behavioral spec for that single role.
+
+PR3b consolidation: ``watercooler_role_details`` was folded into
+``watercooler_roles(role=...)``; the old name forwards via a deprecation
+alias (see ``watercooler_mcp/aliases.py``).
 """
 
 from __future__ import annotations
@@ -13,82 +17,63 @@ from dataclasses import asdict
 from watercooler.role_loader import load_roles
 
 
-# Module-level references to registered tools (populated by register_role_tools)
+# Module-level reference to the registered tool (populated by register_role_tools)
 roles = None
-role_details = None
 
 
-def _roles_impl(code_path: str = "") -> str:
-    """Return the compact role catalog for a project.
+def _roles_impl(code_path: str = "", role: str = "") -> str:
+    """Return the project's role catalog, or one role's full behavioral spec.
 
-    Returns name, description, produces, boundary, and when_to_use for all roles.
-    Full behavioral specs (instructions, entry_style, collaborate_with) are available
-    via watercooler_role_details.
+    With no ``role``, returns the compact catalog — name, description,
+    canonical_role, produces, boundary, when_to_use, handoff_to for every
+    role. With a ``role`` name, returns that role's full spec: the compact
+    fields plus instructions, entry_style, and collaborate_with.
 
     Args:
-        code_path: Path to the project repository root. Uses bundled defaults when empty.
+        code_path: Path to the project repository root. Uses bundled
+            defaults when empty.
+        role: Optional role name (e.g. "critic", "implementer"). Empty
+            returns the full catalog.
 
     Returns:
-        JSON object keyed by role name with compact metadata.
+        JSON — the catalog object, the single-role spec, or an error with a
+        ``valid_roles`` list.
     """
     try:
         loaded = load_roles(code_path or None)
     except Exception as exc:
         return json.dumps({"error": "load_failed", "detail": str(exc)})
 
+    if role:
+        normalized = role.strip().lower()
+        if normalized not in loaded:
+            return json.dumps({
+                "error": "unknown_role",
+                "role": role,
+                "valid_roles": sorted(loaded.keys()),
+            })
+        return json.dumps(asdict(loaded[normalized]), indent=2)
+
     result = {}
-    for name, role in loaded.items():
+    for name, rd in loaded.items():
         result[name] = {
-            "description": role.description,
-            "canonical_role": role.canonical_role,
-            "produces": role.produces,
-            "boundary": role.boundary,
-            "when_to_use": role.when_to_use,
-            "handoff_to": role.handoff_to,
+            "description": rd.description,
+            "canonical_role": rd.canonical_role,
+            "produces": rd.produces,
+            "boundary": rd.boundary,
+            "when_to_use": rd.when_to_use,
+            "handoff_to": rd.handoff_to,
         }
 
     return json.dumps(result, indent=2)
 
 
-def _role_details_impl(code_path: str = "", role: str = "") -> str:
-    """Return the full behavioral spec for a single role.
-
-    Includes all compact fields plus instructions, entry_style, and collaborate_with.
-
-    Args:
-        code_path: Path to the project repository root. Uses bundled defaults when empty.
-        role: Role name to retrieve (e.g. "critic", "implementer").
-
-    Returns:
-        JSON object with the full role spec, or an error with valid_roles list.
-    """
-    if not role:
-        return json.dumps({"error": "role_required"})
-
-    try:
-        loaded = load_roles(code_path or None)
-    except Exception as exc:
-        return json.dumps({"error": "load_failed", "detail": str(exc)})
-
-    normalized = role.strip().lower()
-    if normalized not in loaded:
-        return json.dumps({
-            "error": "unknown_role",
-            "role": role,
-            "valid_roles": sorted(loaded.keys()),
-        })
-
-    rd = loaded[normalized]
-    return json.dumps(asdict(rd), indent=2)
-
-
 def register_role_tools(mcp):
-    """Register role discovery tools with the MCP server.
+    """Register the role discovery tool with the MCP server.
 
     Args:
         mcp: The FastMCP server instance
     """
-    global roles, role_details
+    global roles
 
     roles = mcp.tool(name="watercooler_roles")(_roles_impl)
-    role_details = mcp.tool(name="watercooler_role_details")(_role_details_impl)

@@ -496,8 +496,9 @@ class TestT1MaterializesMetadata:
         import asyncio
 
         async def _run():
-            tool = await mcp.get_tool("watercooler_semantic_upsert_embedding")
+            tool = await mcp.get_tool("watercooler_semantic")
             return await tool.run({
+                "action": "upsert",
                 "entry_id": "E-meta-2",
                 "topic": "t",
                 "group_id": "mostlyharmless_ai_watercooler_cloud",
@@ -740,8 +741,9 @@ class TestHostedSemanticTenantIsolation:
         import asyncio
 
         async def _run():
-            tool = await mcp.get_tool("watercooler_semantic_upsert_embedding")
+            tool = await mcp.get_tool("watercooler_semantic")
             return await tool.run({
+                "action": "upsert",
                 "entry_id": "E-iso-1",
                 "topic": "t",
                 # Caller attempts to target a DIFFERENT tenant:

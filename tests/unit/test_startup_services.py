@@ -15,6 +15,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Dict, Optional
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -743,6 +744,309 @@ class TestEnsureFalkordbRunningTransportGuard:
             f"mentioning the fallback. All log_error calls: "
             f"{mock_log_error.call_args_list}"
         )
+
+
+class TestEnsureFalkordbRunningRouteGate:
+    """Defense-in-depth route check: per
+    ``bug-falkordb-startup-gate-hybrid-2026-05-12`` entry
+    ``01KRDMK58S59A2WRPHCBY46XPS``, the transport-only gate can be bypassed
+    when ``get_watercooler_config()`` silently falls back to schema
+    defaults (transport=stdio, routes={}). When an operator has explicitly
+    set all FalkorDB-using capability_routes to ``"remote"``, the gate
+    must honor that intent even if the transport label was lost.
+    """
+
+    def _patched_config(
+        self,
+        transport: str,
+        capability_routes: Optional[Dict[str, str]] = None,
+        generate_embeddings: bool = True,
+    ):
+        class _Graph:
+            def __init__(self, ge):
+                self.generate_embeddings = ge
+
+        class _Mcp:
+            def __init__(self, t, routes, ge):
+                self.transport = t
+                self.capability_routes = routes or {}
+                self.graph = _Graph(ge)
+
+        class _Config:
+            def __init__(self, t, routes, ge):
+                self.mcp = _Mcp(t, routes, ge)
+
+        return _Config(transport, capability_routes, generate_embeddings)
+
+    def test_skips_when_all_falkordb_routes_remote(self):
+        """All five FalkorDB-using routes remote ⇒ skip auto-start, even
+        with transport=stdio. List mirrors HYBRID_DEFAULT_ROUTES in
+        src/watercooler_mcp/capabilities.py."""
+        from watercooler_mcp.startup import ensure_falkordb_running
+
+        routes = {
+            "memory_ingest": "remote",
+            "memory_query": "remote",
+            "memory_observe": "remote",
+            "daemon_observe": "remote",
+            "semantic_similarity": "remote",
+        }
+        with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            return_value=self._patched_config("stdio", capability_routes=routes),
+        ), patch(
+            "watercooler_mcp.startup._update_service_status"
+        ) as mock_status:
+            ensure_falkordb_running()
+
+        mock_status.assert_called_once()
+        args = mock_status.call_args[0]
+        assert args[0] == "falkordb"
+        assert args[1] == ServiceState.DISABLED
+        msg = mock_status.call_args[1].get("message", "")
+        assert "route" in msg.lower() or "remote" in msg.lower(), (
+            f"expected route-gate message naming the remote-routes reason; "
+            f"got {msg!r}"
+        )
+
+    def test_proceeds_when_old_3cap_subset_remote(self):
+        """Regression guard for PR #795 review (Medium): setting only the
+        original three caps (memory_ingest, daemon_observe,
+        semantic_similarity) to remote while leaving memory_query and
+        memory_observe unset MUST fall through to the tier gate. A
+        stdio operator in this configuration still needs local FalkorDB
+        for watercooler_smart_query / get_entity_edge /
+        get_entry_provenance (memory_query) and
+        watercooler_diagnose_memory / memory_task_status
+        (memory_observe). Skipping auto-start here would silently break
+        those tools."""
+        from watercooler_mcp.startup import ensure_falkordb_running
+
+        # Original 3-cap subset — must not trigger the route skip.
+        routes = {
+            "memory_ingest": "remote",
+            "daemon_observe": "remote",
+            "semantic_similarity": "remote",
+        }
+        with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            return_value=self._patched_config(
+                "stdio",
+                capability_routes=routes,
+                generate_embeddings=False,
+            ),
+        ), patch(
+            "watercooler.memory_config.get_memory_backend",
+            return_value="null",
+        ), patch(
+            "watercooler_mcp.startup._update_service_status"
+        ) as mock_status:
+            ensure_falkordb_running()
+
+        # Tier gate fires (T1 off, T2 null), NOT the route gate.
+        mock_status.assert_called_once()
+        msg = mock_status.call_args[1].get("message", "")
+        assert "route" not in msg.lower(), (
+            f"route gate fired with only 3 of 5 FalkorDB-using caps "
+            f"remote; would silently break memory_query / "
+            f"memory_observe tools. message={msg!r}"
+        )
+
+    def test_proceeds_when_partial_routes_remote(self):
+        """Only one route remote ⇒ proceed (intentional: stdio operator
+        may have a single cherry-picked remote route while still needing
+        local FalkorDB for the other capabilities)."""
+        from watercooler_mcp.startup import ensure_falkordb_running
+
+        routes = {"memory_ingest": "remote"}  # only one of three
+        with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            return_value=self._patched_config(
+                "stdio",
+                capability_routes=routes,
+                generate_embeddings=False,
+            ),
+        ), patch(
+            "watercooler.memory_config.get_memory_backend",
+            return_value="null",
+        ), patch(
+            "watercooler_mcp.startup._update_service_status"
+        ) as mock_status:
+            ensure_falkordb_running()
+
+        # Falls through route gate, reaches the T1/T2 needs check, which
+        # fires DISABLED with the tier-gate message.
+        mock_status.assert_called_once()
+        msg = mock_status.call_args[1].get("message", "")
+        # Crucially, NOT the route-gate message.
+        assert "route" not in msg.lower() and "all" not in msg.lower(), (
+            f"route gate fired with only one remote route; expected to "
+            f"fall through to tier gate. message={msg!r}"
+        )
+
+    def test_proceeds_when_routes_empty(self):
+        """Empty routes ⇒ proceed (existing local-stdio default
+        behavior). Confirms the new gate doesn't false-fire on the most
+        common stdio case."""
+        from watercooler_mcp.startup import ensure_falkordb_running
+
+        with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            return_value=self._patched_config(
+                "stdio",
+                capability_routes={},
+                generate_embeddings=False,
+            ),
+        ), patch(
+            "watercooler.memory_config.get_memory_backend",
+            return_value="null",
+        ), patch(
+            "watercooler_mcp.startup._update_service_status"
+        ) as mock_status:
+            ensure_falkordb_running()
+
+        # Reaches the T1/T2 needs check (T1 off, T2 null) — tier gate
+        # fires, not the route gate.
+        mock_status.assert_called_once()
+        msg = mock_status.call_args[1].get("message", "")
+        assert "neither" in msg.lower() or (
+            "t1" in msg.lower() and "t2" in msg.lower()
+        ), f"expected tier-gate message; got {msg!r}"
+
+    def test_proceeds_when_all_routes_local(self):
+        """All three routes explicitly local ⇒ proceed. Edge case:
+        operator who has explicitly chosen local routing under stdio
+        must still get auto-start."""
+        from watercooler_mcp.startup import ensure_falkordb_running
+
+        routes = {
+            "memory_ingest": "local",
+            "daemon_observe": "local",
+            "semantic_similarity": "local",
+        }
+        with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            return_value=self._patched_config(
+                "stdio",
+                capability_routes=routes,
+                generate_embeddings=False,
+            ),
+        ), patch(
+            "watercooler.memory_config.get_memory_backend",
+            return_value="null",
+        ), patch(
+            "watercooler_mcp.startup._update_service_status"
+        ) as mock_status:
+            ensure_falkordb_running()
+
+        # Tier gate, not route gate.
+        mock_status.assert_called_once()
+        msg = mock_status.call_args[1].get("message", "")
+        assert "route" not in msg.lower(), (
+            f"route gate fired when all routes were local; "
+            f"message={msg!r}"
+        )
+
+    def test_route_gate_preempts_t1_check_when_remote(self):
+        """When all routes are remote, the route gate must fire BEFORE
+        the T1/T2 needs check — so even an operator with
+        generate_embeddings=True and backend=graphiti still skips."""
+        from watercooler_mcp.startup import ensure_falkordb_running
+
+        routes = {
+            "memory_ingest": "remote",
+            "memory_query": "remote",
+            "memory_observe": "remote",
+            "daemon_observe": "remote",
+            "semantic_similarity": "remote",
+        }
+        with patch(
+            "watercooler_mcp.config.get_watercooler_config",
+            return_value=self._patched_config(
+                "stdio",
+                capability_routes=routes,
+                generate_embeddings=True,
+            ),
+        ), patch(
+            "watercooler.memory_config.get_memory_backend",
+            return_value="graphiti",
+        ), patch(
+            "watercooler_mcp.startup._update_service_status"
+        ) as mock_status:
+            ensure_falkordb_running()
+
+        mock_status.assert_called_once()
+        assert mock_status.call_args[0][1] == ServiceState.DISABLED
+        msg = mock_status.call_args[1].get("message", "")
+        assert "route" in msg.lower() or "remote" in msg.lower(), (
+            f"expected route-gate message; got {msg!r}"
+        )
+
+
+class TestConfigLoadFallbackVisibility:
+    """Per ``bug-falkordb-startup-gate-hybrid-2026-05-12`` entry
+    ``01KRDMK58S59A2WRPHCBY46XPS``: ``get_watercooler_config()``'s silent
+    fallback to schema defaults on ``load_config`` exceptions must be
+    promoted from ``log_debug`` to ``log_warning``, so operators see
+    when config-resolution flips them to stdio/empty-routes.
+    """
+
+    def test_load_config_exception_logs_warning(self):
+        """Any non-ImportError exception during load_config must produce
+        a log_warning naming the fallback, not a silent log_debug."""
+        import watercooler_mcp.config as config_mod
+
+        # Reset module-level cache so the patched load_config is called.
+        config_mod._loaded_config = None
+        try:
+            with patch(
+                "watercooler.config_loader.load_config",
+                side_effect=RuntimeError("malformed config.toml"),
+            ), patch(
+                "watercooler_mcp.config.log_warning"
+            ) as mock_warn:
+                config_mod.get_watercooler_config()
+
+            fallback_warns = [
+                c for c in mock_warn.call_args_list
+                if any(
+                    "load_config" in str(arg)
+                    or "fallback" in str(arg).lower()
+                    or "falling back" in str(arg).lower()
+                    or "schema defaults" in str(arg).lower()
+                    for arg in c.args
+                )
+            ]
+            assert fallback_warns, (
+                f"silent fallback was not surfaced via log_warning. "
+                f"All log_warning calls: {mock_warn.call_args_list}"
+            )
+        finally:
+            config_mod._loaded_config = None
+
+    def test_load_config_import_error_stays_debug(self):
+        """The legacy ImportError branch (config system not available)
+        should stay at log_debug — that's a legitimate "no config system
+        installed" case, not a config-resolution failure."""
+        import watercooler_mcp.config as config_mod
+
+        config_mod._loaded_config = None
+        try:
+            with patch(
+                "watercooler.config_loader.load_config",
+                side_effect=ImportError("config_loader not available"),
+            ), patch(
+                "watercooler_mcp.config.log_warning"
+            ) as mock_warn:
+                config_mod.get_watercooler_config()
+
+            # ImportError path must NOT emit a warning.
+            assert not mock_warn.called, (
+                f"ImportError branch emitted log_warning when it should "
+                f"stay at log_debug. Calls: {mock_warn.call_args_list}"
+            )
+        finally:
+            config_mod._loaded_config = None
 
 
 # ============================================================================

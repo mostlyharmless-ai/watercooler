@@ -12,6 +12,9 @@ Public API
 - ``check_analysis_freshness(reports_dir, ...)`` — age of most recent analysis report
 - ``count_queue_pending()`` — pulse_queue.jsonl line count without draining
 - ``build_snapshot(threads_dir, ...)`` — full snapshot dict (orchestrates all of the above)
+- ``compute_convergence_signals(threads_dir, topics, ...)`` — per-thread convergence telemetry
+  (Phase 5a: semantic_novelty_decline, concern_cluster_recurrence, tradeoff_recurrence,
+  constraint_class_emergence)
 """
 
 from __future__ import annotations
@@ -19,6 +22,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -671,3 +676,379 @@ def compute_state_signals(snapshot: dict[str, Any]) -> dict[str, Any]:
             ],
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 5a — Convergence telemetry
+# ---------------------------------------------------------------------------
+
+# Pattern for tradeoff language detection (case-insensitive)
+_TRADEOFF_RE = re.compile(
+    r"\bvs\.?\b|\bversus\b|tradeoff between|trade-off between|either .{1,60} or\b",
+    re.IGNORECASE,
+)
+
+# Minimum entries in a thread before computing signals
+_MIN_ENTRIES_FOR_CONVERGENCE = 10
+
+# Fraction of entries treated as "recent" vs "baseline" for novelty computation
+_RECENT_FRACTION = 0.3
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two equal-length vectors. Returns 0.0 on error."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _centroid(vectors: list[list[float]]) -> list[float] | None:
+    """Compute the mean vector of a list of equal-length vectors."""
+    if not vectors:
+        return None
+    if len({len(v) for v in vectors}) > 1:
+        return None
+    dim = len(vectors[0])
+    result = [0.0] * dim
+    for v in vectors:
+        for i, x in enumerate(v):
+            result[i] += x
+    n = len(vectors)
+    return [x / n for x in result]
+
+
+def _load_topic_embeddings(
+    graph_dir: Path, topic: str
+) -> dict[str, list[float]]:
+    """Return {entry_id: embedding} from the per-topic search-index shard."""
+    result: dict[str, list[float]] = {}
+    try:
+        for rec in storage.load_search_index(graph_dir, topic=topic):
+            eid = rec.get("entry_id", "")
+            emb = rec.get("embedding")
+            if eid and emb and isinstance(emb, list):
+                result[eid] = emb
+    except Exception as exc:
+        logger.debug("pulse_snapshot_lib: failed to load embeddings for %r: %s", topic, exc)
+    return result
+
+
+def _semantic_novelty_decline(
+    entries: list[dict[str, Any]],
+    embeddings: dict[str, list[float]],
+) -> float | None:
+    """Similarity of recent embeddings to baseline centroid (higher = more similar = less novel).
+
+    Returns a value in [0, 1] or None when embeddings are insufficient.
+    """
+    n = len(entries)
+    if n < _MIN_ENTRIES_FOR_CONVERGENCE:
+        return None
+
+    split = max(1, int(n * (1 - _RECENT_FRACTION)))
+    baseline_ids = {e["entry_id"] for e in entries[:split] if "entry_id" in e}
+    recent_ids = {e["entry_id"] for e in entries[split:] if "entry_id" in e}
+
+    baseline_vecs = [embeddings[eid] for eid in baseline_ids if eid in embeddings]
+    recent_vecs = [embeddings[eid] for eid in recent_ids if eid in embeddings]
+
+    if not baseline_vecs or not recent_vecs:
+        return None
+
+    centroid = _centroid(baseline_vecs)
+    if centroid is None:
+        return None
+
+    sims = [_cosine_similarity(v, centroid) for v in recent_vecs]
+    return round(sum(sims) / len(sims), 4)
+
+
+def _concern_cluster_recurrence(
+    entries: list[dict[str, Any]],
+    embeddings: dict[str, list[float]],
+    *,
+    similarity_threshold: float = 0.85,
+) -> int:
+    """Count recurring critic-entry embedding clusters (Phase 5a rough proxy).
+
+    Groups critic-role entries by cosine similarity; returns the number of
+    groups with ≥ 2 members, indicating a concern that has re-surfaced.
+    """
+    critic_vecs: list[list[float]] = []
+    for e in entries:
+        if e.get("role") == "critic":
+            eid = e.get("entry_id", "")
+            if eid in embeddings:
+                critic_vecs.append(embeddings[eid])
+
+    if len(critic_vecs) < 2:
+        return 0
+
+    # Simple greedy clustering: assign each vec to the first cluster whose
+    # centroid is within threshold, otherwise start a new cluster.
+    clusters: list[list[list[float]]] = []
+    for vec in critic_vecs:
+        assigned = False
+        for cluster in clusters:
+            c = _centroid(cluster)
+            if c is not None and _cosine_similarity(vec, c) >= similarity_threshold:
+                cluster.append(vec)
+                assigned = True
+                break
+        if not assigned:
+            clusters.append([vec])
+
+    return sum(1 for c in clusters if len(c) >= 2)
+
+
+_STOP_WORDS = frozenset(
+    {"a", "an", "the", "and", "or", "but", "in", "of", "for", "to", "with",
+     "is", "it", "this", "that", "we", "our", "use", "can", "be", "are"}
+)
+
+
+def _clean_tokens(text: str) -> list[str]:
+    return re.sub(r"[^\w\s]", "", text.lower()).split()
+
+
+def _extract_tradeoff_operands(body: str, m: re.Match) -> str:
+    """Return a normalized key for the tension named by a tradeoff regex match.
+
+    Extraction is connector-aware so that "performance vs. maintainability" in
+    any sentence always maps to the same key:
+
+    - vs / versus: one content word immediately left, one immediately right.
+    - tradeoff between / trade-off between: first non-stop words following the
+      connector (both operands appear in ``after``).
+    - either … or: operands are the inner match text and the text after the match.
+    """
+    connector = m.group(0).lower()
+    before = re.sub(r"\s+", " ", body[: m.start()].lower()).strip()
+    after = re.sub(r"\s+", " ", body[m.end() :].lower()).strip()
+
+    if connector.startswith("either"):
+        # "either <left> or" — left operand is between "either " and the end of the match.
+        inner = re.sub(r"^either\s*", "", connector).rstrip()
+        left_tokens = [t for t in _clean_tokens(inner) if t not in _STOP_WORDS][:2]
+        right_tokens = [t for t in _clean_tokens(after) if t not in _STOP_WORDS][:2]
+    elif "between" in connector:
+        # "tradeoff between X and Y" — the two operands are the first two
+        # non-stop tokens after the connector ("and" is a stop word).
+        tokens = [t for t in _clean_tokens(after) if t not in _STOP_WORDS]
+        left_tokens = tokens[:1]
+        right_tokens = tokens[1:2]
+    else:
+        # "vs" / "versus" — operands are the single content word immediately adjacent.
+        left_tokens = [t for t in reversed(_clean_tokens(before)) if t not in _STOP_WORDS][:1]
+        right_tokens = [t for t in _clean_tokens(after) if t not in _STOP_WORDS][:1]
+
+    operands = sorted(left_tokens + right_tokens)
+    return " ".join(operands)
+
+
+def _tradeoff_recurrence(entries: list[dict[str, Any]]) -> int:
+    """Count distinct tradeoff tensions that appear in ≥ 2 separate entries.
+
+    Keys each tension by the normalized operands on each side of the connector
+    rather than surrounding prose, so "performance vs. maintainability" in two
+    different sentences maps to the same recurrence bucket.
+    """
+    phrase_entry_counts: Counter[str] = Counter()
+    for e in entries:
+        body = e.get("body", "") or ""
+        seen_in_entry: set[str] = set()
+        for m in _TRADEOFF_RE.finditer(body):
+            operands_key = _extract_tradeoff_operands(body, m)
+            if not operands_key:
+                continue
+            key = hashlib.sha1(operands_key.encode()).hexdigest()[:12]
+            if key not in seen_in_entry:
+                seen_in_entry.add(key)
+                phrase_entry_counts[key] += 1
+
+    return sum(1 for v in phrase_entry_counts.values() if v >= 2)
+
+
+def _constraint_class_emergence(
+    entries: list[dict[str, Any]],
+    embeddings: dict[str, list[float]],
+    *,
+    similarity_threshold: float = 0.80,
+) -> int:
+    """Count new embedding clusters in recent entries not present in the baseline.
+
+    A positive value indicates new concepts/entities appearing in recent
+    entries that were absent from the earlier conversation baseline.
+    """
+    n = len(entries)
+    if n < _MIN_ENTRIES_FOR_CONVERGENCE:
+        return 0
+
+    split = max(1, int(n * (1 - _RECENT_FRACTION)))
+    baseline_entries = entries[:split]
+    recent_entries = entries[split:]
+
+    baseline_vecs = [
+        embeddings[e["entry_id"]]
+        for e in baseline_entries
+        if e.get("entry_id") in embeddings
+    ]
+    recent_vecs = [
+        embeddings[e["entry_id"]]
+        for e in recent_entries
+        if e.get("entry_id") in embeddings
+    ]
+
+    if not baseline_vecs or not recent_vecs:
+        return 0
+
+    # Collect recent vectors that are dissimilar to all baseline vectors.
+    novel_vecs: list[list[float]] = [
+        rv
+        for rv in recent_vecs
+        if max((_cosine_similarity(rv, bv) for bv in baseline_vecs), default=0.0)
+        < similarity_threshold
+    ]
+    if not novel_vecs:
+        return 0
+
+    # Cluster the novel vectors so that five entries about the same new
+    # constraint count as one emerging class, not five.
+    clusters: list[list[list[float]]] = []
+    for vec in novel_vecs:
+        assigned = False
+        for cluster in clusters:
+            c = _centroid(cluster)
+            if c is not None and _cosine_similarity(vec, c) >= similarity_threshold:
+                cluster.append(vec)
+                assigned = True
+                break
+        if not assigned:
+            clusters.append([vec])
+
+    return len(clusters)
+
+
+def _compute_thread_convergence(
+    graph_dir: Path,
+    topic: str,
+) -> dict[str, Any]:
+    """Compute the four convergence signals for a single thread.
+
+    Args:
+        graph_dir: Baseline graph directory.
+        topic: Thread topic identifier.
+
+    Returns:
+        Dict with keys ``semantic_novelty_decline``, ``concern_cluster_recurrence``,
+        ``tradeoff_recurrence``, ``constraint_class_emergence``, and
+        ``entry_count`` (int). Signals are None when insufficient data.
+    """
+    entries = list(storage.load_thread_entries(graph_dir, topic))
+    entry_count = len(entries)
+
+    if entry_count < _MIN_ENTRIES_FOR_CONVERGENCE:
+        return {
+            "entry_count": entry_count,
+            "semantic_novelty_decline": None,
+            "concern_cluster_recurrence": None,
+            "tradeoff_recurrence": None,
+            "constraint_class_emergence": None,
+            "note": f"insufficient_data (need {_MIN_ENTRIES_FOR_CONVERGENCE}, have {entry_count})",
+        }
+
+    embeddings = _load_topic_embeddings(graph_dir, topic)
+
+    return {
+        "entry_count": entry_count,
+        "semantic_novelty_decline": _semantic_novelty_decline(entries, embeddings),
+        "concern_cluster_recurrence": _concern_cluster_recurrence(entries, embeddings),
+        "tradeoff_recurrence": _tradeoff_recurrence(entries),
+        "constraint_class_emergence": _constraint_class_emergence(entries, embeddings),
+    }
+
+
+def _topic_last_entry_timestamp(graph_dir: Path, topic: str) -> str:
+    """Return the last entry's ISO timestamp for a topic, or '' if unreadable.
+
+    Reads the final line of entries.jsonl directly to avoid loading the full
+    entry list. Uses entry data rather than filesystem mtime so the sort order
+    is stable after git clone/pull/checkout operations.
+    """
+    p = graph_dir / "threads" / topic / "entries.jsonl"
+    last_ts = ""
+    try:
+        with p.open("rb") as f:
+            # Scan from end to find the last non-empty line.
+            f.seek(0, 2)
+            size = f.tell()
+            if size == 0:
+                return ""
+            # Read up to 4 KB from the end — enough for any single entry line.
+            f.seek(max(0, size - 4096))
+            tail = f.read().decode("utf-8", errors="replace")
+            for raw in reversed(tail.splitlines()):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                    last_ts = obj.get("timestamp", "") or ""
+                except json.JSONDecodeError:
+                    continue
+                break
+    except OSError:
+        pass
+    return last_ts
+
+
+def compute_convergence_signals(
+    threads_dir: Path,
+    topics: list[str],
+    *,
+    max_threads: int = 20,
+) -> dict[str, dict[str, Any]]:
+    """Compute convergence signals for a list of thread topics.
+
+    Processes up to ``max_threads`` topics, prioritising the most recently
+    active threads so that the cap always covers the threads that are actually
+    moving rather than an arbitrary ``Path.iterdir()`` slice.
+
+    Topics with < 10 entries get a ``note: insufficient_data`` entry rather
+    than computed signals.
+
+    Args:
+        threads_dir: Threads repository root.
+        topics: List of thread topic identifiers to process.
+        max_threads: Cap on topics processed (avoids tick overruns for large repos).
+
+    Returns:
+        Dict mapping topic → convergence signal dict. Topics that error are
+        omitted rather than propagating exceptions.
+    """
+    graph_dir = storage.get_graph_dir(threads_dir)
+
+    # Sort by last-entry timestamp descending — most-recently-active threads first.
+    # Uses entry data rather than filesystem mtime so the order is stable after
+    # git clone/pull/checkout operations that reset all file mtimes.
+    sorted_topics = sorted(
+        topics,
+        key=lambda t: _topic_last_entry_timestamp(graph_dir, t),
+        reverse=True,
+    )
+
+    result: dict[str, dict[str, Any]] = {}
+    for topic in sorted_topics[:max_threads]:
+        try:
+            result[topic] = _compute_thread_convergence(graph_dir, topic)
+        except Exception as exc:
+            logger.debug(
+                "pulse_snapshot_lib: convergence signals failed for %r: %s", topic, exc
+            )
+
+    return result

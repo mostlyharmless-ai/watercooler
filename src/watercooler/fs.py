@@ -153,8 +153,8 @@ def read_body(maybe_path: str | Path | None) -> str:
 # =============================================================================
 
 # Category subdirectories that hold thread .md files.
-# discover_thread_files() uses this as an allowlist when a structured layout
-# is detected (i.e. threads/ subdir exists).
+# list_markdown_thread_topics() uses this as an allowlist when a structured
+# layout is detected (i.e. threads/ subdir exists).
 THREAD_CATEGORIES: tuple[str, ...] = (
     "threads",
     "reference",
@@ -208,80 +208,64 @@ _SKIP_PREFIXES = (".", "_")
 _SKIP_DIRS = {".backups", ".git", "graph", "__pycache__"}
 
 
-def discover_thread_files(
-    threads_dir: Path,
-    category: Optional[str] = None,
-) -> List[Path]:
-    """Discover thread .md files in threads_dir, including subdirectories.
+def list_markdown_thread_topics(threads_dir: Path) -> List[str]:
+    """List thread topic names from .md files on disk.
 
-    .. deprecated::
-        This function scans .md files on disk. In graph-first architecture, use
-        ``watercooler.baseline_graph.storage.list_thread_topics()`` to enumerate
-        threads from the graph. Retained only for .md projection writes and
-        graph rebuild/reconciliation paths.
+    Scans the structured layout (root + ``THREAD_CATEGORIES``) or a flat
+    layout for thread markdown files and returns their topic stems, sorted
+    and de-duplicated.
+
+    Graph is the source of truth for reads; this disk scan exists only for
+    graph rebuild / reconciliation paths where the graph may be empty or
+    stale (cold-start recovery). For general thread enumeration use
+    ``watercooler.baseline_graph.storage.list_thread_topics()`` instead.
 
     Args:
         threads_dir: Root threads directory
-        category: If provided, only scan that subdirectory
 
     Returns:
-        Sorted list of .md file paths
+        Sorted, de-duplicated list of thread topic names
     """
-    import warnings
-    warnings.warn(
-        "discover_thread_files() is deprecated; use "
-        "storage.list_thread_topics() instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
     if not threads_dir.exists():
         return []
 
-    results: List[Path] = []
+    files: List[Path] = []
     structured = has_structured_layout(threads_dir)
 
-    if category:
-        sub = threads_dir / category
-        if sub.is_dir():
-            results.extend(
-                p for p in sub.glob("*.md")
-                if p.is_file() and not p.name.startswith(tuple(_SKIP_PREFIXES))
-            )
-    elif structured:
+    if structured:
         # Structured layout: allowlist scan — root + THREAD_CATEGORIES only
-        results.extend(
+        files.extend(
             p for p in threads_dir.glob("*.md")
-            if p.is_file() and not p.name.startswith(tuple(_SKIP_PREFIXES))
+            if p.is_file() and not p.name.startswith(_SKIP_PREFIXES)
         )
         for cat in THREAD_CATEGORIES:
             sub = threads_dir / cat
             if sub.is_dir():
-                results.extend(
+                files.extend(
                     p for p in sub.glob("*.md")
-                    if p.is_file() and not p.name.startswith(tuple(_SKIP_PREFIXES))
+                    if p.is_file() and not p.name.startswith(_SKIP_PREFIXES)
                 )
     else:
         # Flat layout: blocklist scan (backward compat)
-        results.extend(
+        files.extend(
             p for p in threads_dir.glob("*.md")
-            if p.is_file() and not p.name.startswith(tuple(_SKIP_PREFIXES))
+            if p.is_file() and not p.name.startswith(_SKIP_PREFIXES)
         )
         try:
             for sub in threads_dir.iterdir():
                 if (
                     sub.is_dir()
                     and sub.name not in _SKIP_DIRS
-                    and not sub.name.startswith(tuple(_SKIP_PREFIXES))
+                    and not sub.name.startswith(_SKIP_PREFIXES)
                 ):
-                    results.extend(
+                    files.extend(
                         p for p in sub.glob("*.md")
-                        if p.is_file() and not p.name.startswith(tuple(_SKIP_PREFIXES))
+                        if p.is_file() and not p.name.startswith(_SKIP_PREFIXES)
                     )
         except OSError:
             pass
 
-    results.sort(key=lambda p: p.name)
-    return results
+    return sorted({p.stem for p in files})
 
 
 def find_thread_path(topic: str, threads_dir: Path) -> Optional[Path]:

@@ -3,7 +3,7 @@
 Pure functions over the hosted FalkorDB — `<org>_<repo>_t1` — exposing:
 
 - ``upsert_embedding(database, entry_id, topic, embedding, group_id)`` —
-  called by the hosted ``watercooler_semantic_upsert_embedding`` MCP tool.
+  called by the hosted ``watercooler_semantic`` MCP tool (``action="upsert"``).
 - ``delete_embedding(database, entry_id, group_id)`` — hosted delete.
 - ``search_semantic_entries(database, group_id, query_embedding, ...)`` —
   hosted semantic-entry search backing ``watercooler_search(mode="entries",
@@ -784,7 +784,7 @@ def find_similar_t1(
             "error": "no_embedding",
             "message": (
                 f"Hosted T1 has no embedding for entry {entry_id} in group "
-                f"{group_id}; upsert via watercooler_semantic_upsert_embedding "
+                f"{group_id}; upsert via watercooler_semantic (action=upsert) "
                 "first."
             ),
             "source_entry_id": entry_id,

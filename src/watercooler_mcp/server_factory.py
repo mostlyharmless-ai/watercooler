@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 from fastmcp import FastMCP
 
+from .aliases import apply_alias_forwarding
 from .capabilities import (
     DAEMON_TOOL_NAMES,
     GRAPH_TOOL_NAMES,
@@ -243,9 +244,7 @@ _HOSTED_EXCLUDED_GRAPH_TOOLS: frozenset[str] = frozenset(
     {
         "watercooler_graph_enrich",
         "watercooler_graph_project",
-        "watercooler_graph_recover",
         "watercooler_sync_repair",
-        "watercooler_reindex",
     }
 )
 
@@ -293,6 +292,12 @@ def memory_tools_for_surface(runtime: ToolRuntime) -> set[str]:
 
         result: set[str] = set()
         for name in REMOTE_CAPABLE_MEMORY_TOOL_NAMES - migration_tools:
+            if name in MIXED_TOOL_NAMES:
+                # Mixed tools always register locally — their hybrid wrapper
+                # resolves capability per (tool, args) and routes
+                # local/remote/disabled at call time.
+                result.add(name)
+                continue
             cap = tool_capability(name)
             target = profile.resolve_execution_target(
                 cap,
@@ -311,29 +316,13 @@ def memory_tools_for_surface(runtime: ToolRuntime) -> set[str]:
 def migration_tools_for_surface(runtime: ToolRuntime) -> set[str]:
     """Return the migration tool names that should be registered locally.
 
-    Migration tools are local-only maintenance operations and must NOT
-    appear on any hosted surface (full or premium).
+    Empty since PR4a: watercooler_migration_preflight folded into
+    watercooler_bulk_index(preflight_only=True) and
+    watercooler_migrate_to_memory_backend retired in favour of the idempotent
+    watercooler_bulk_index. Retained as a stable hook in the registration
+    sequence in case migration-only tooling returns.
     """
-    if runtime.surface in ("hosted_premium", "hosted_full"):
-        return set()
-
-    if runtime.surface == "local_hybrid":
-        # Hybrid: migration tools are disabled by default.
-        profile = runtime.capability_profile
-        target = profile.resolve_execution_target(
-            "memory_migration",
-            local_available=True,
-            remote_available=runtime.premium_client is not None,
-        )
-        if target == "local":
-            return {
-                "watercooler_migration_preflight",
-                "watercooler_migrate_to_memory_backend",
-            }
-        return set()
-
-    # local_full
-    return {"watercooler_migration_preflight", "watercooler_migrate_to_memory_backend"}
+    return set()
 
 
 def mountable_remote_tools_for_hybrid(runtime: ToolRuntime) -> set[str]:
@@ -384,6 +373,12 @@ def build_mcp_server(runtime: ToolRuntime) -> FastMCP:
         "hosted_premium": " (Premium)",
     }.get(surface, "")
     mcp = FastMCP(name=f"Watercooler Cloud{name_suffix}")
+
+    # Alias forwarding — installed first so retired tool names are rewritten
+    # to their canonical tool before capability resolution and dispatch run.
+    # Ships inert in PR1a (empty registry); populated as later consolidation
+    # PRs retire names. See watercooler_mcp/aliases.py.
+    apply_alias_forwarding(mcp)
 
     # Resources (all surfaces)
     from .resources import register_resources
@@ -472,15 +467,6 @@ def build_mcp_server(runtime: ToolRuntime) -> FastMCP:
         from .tools.daemon import register_daemon_tools
 
         register_daemon_tools(mcp)
-
-    # Decision extractor admin tool (local-only — the extractor daemon
-    # never runs in hosted scopes). Gated independently of
-    # _register_daemons_locally so the tool remains available on
-    # local_hybrid even when the observability daemon tools route to Railway.
-    if surface in ("local_full", "local_hybrid"):
-        from .tools.daemon import register_decision_extractor_admin_tools
-
-        register_decision_extractor_admin_tools(mcp)
 
     # Graph tools (selected per surface)
     from .tools.graph import register_graph_tools

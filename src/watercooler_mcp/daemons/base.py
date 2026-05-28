@@ -22,6 +22,7 @@ from .state import (
     Finding,
     _findings_strict_namespace,
     append_findings,
+    count_findings,
     load_checkpoint,
     load_findings,
     save_checkpoint,
@@ -315,6 +316,21 @@ class BaseDaemon(ABC):
         """
         with self._status_lock:
             status_val = self._status.value
+        # ``persisted_findings_count`` reads the on-disk JSONL line count
+        # so consumers see the current on-disk total — surviving process
+        # restarts unlike ``total_findings`` (the in-memory session
+        # counter that resets each daemon reboot).  Note: the count
+        # reflects the file post-compaction; ``_maybe_compact`` rotates
+        # the JSONL once it exceeds ``_MAX_FINDINGS_LINES``, keeping
+        # only the most recent ``_COMPACT_KEEP_LINES`` entries, so this
+        # is the visible on-disk total, not an all-time accumulator.
+        # Closes #682 Gap 1.  Cheap (non-parsing line count) so safe to
+        # call on every ``daemon_status`` query.
+        persisted = count_findings(
+            self.name,
+            namespace=self.state_namespace,
+            _allow_unscoped=True,
+        )
         return {
             "name": self.name,
             "status": status_val,
@@ -323,6 +339,7 @@ class BaseDaemon(ABC):
             "interval": self.interval,
             "total_ticks": self._total_ticks,
             "total_findings": self._total_findings,
+            "persisted_findings_count": persisted,
             "last_run": self._checkpoint.last_run,
             "last_run_duration": self._checkpoint.last_run_duration,
             "last_findings_count": self._checkpoint.findings_produced,

@@ -30,7 +30,9 @@ from watercooler.config_schema import DecisionExtractorConfig
 from watercooler.decision_extraction import (
     DECISION_EXTRACTED_TAG,
     HAS_DECISIONS_TAG,
+    classify_gate_outcome,
     extract_decision,
+    format_candidate_note_body,
 )
 
 from .base import BaseDaemon
@@ -47,10 +49,16 @@ _CURSOR_GC_INTERVAL = 24
 CAT_SUCCESS = "extraction_success"
 CAT_PUSH_FAILED = "extraction_push_failed"
 CAT_REJECTED = "extraction_rejected"
+CAT_REJECTED_HARD_GATE = "extraction_rejected_hard_gate"
+CAT_REJECTED_RATE_CAP = "extraction_rejected_rate_cap"
 CAT_FAILED = "extraction_failed"
 CAT_PARSE_FAILURE = "extraction_parse_failure"
 CAT_RATE_LIMITED = "extraction_rate_limited"
 CAT_CAP_REACHED = "extraction_cap_reached"
+CAT_CANDIDATE_NOTE = "extraction_candidate_note"
+
+# Candidate Note tag written to thread entries and source entries.
+CANDIDATE_EXTRACTION_TAG = "candidate_extraction"
 
 # P1.3: error_type strings that map to the LLM-attempt counter. Anything
 # else is treated as infrastructure and maps to the write-failure counter.
@@ -114,6 +122,59 @@ def _build_decision_annotation_hook(
                 target_type="thread",
                 kind="tag",
                 value=HAS_DECISIONS_TAG,
+                actor=actor,
+                timestamp=now,
+            ),
+        ]
+
+        for event in events:
+            append_annotation(thread_dir, event)
+
+    return _annotate
+
+
+def _build_candidate_note_annotation_hook(
+    source_entry_id: str,
+    candidate_entry_id: str,
+) -> Callable[[str, Path, str], None]:
+    """Build a post-write hook that annotates source entry ↔ candidate Note.
+
+    Writes 3 annotation events:
+    1. Tag candidate Note ``candidate_extraction``
+    2. Xref source entry → candidate Note
+    3. Xref candidate Note → source entry
+    """
+
+    def _annotate(topic: str, threads_dir: Path, entry_id: str) -> None:
+        thread_dir = get_thread_graph_dir(get_graph_dir(threads_dir), topic)
+        now = datetime.now(timezone.utc).isoformat()
+        actor = "ExtractDecisionsDaemon"
+
+        events = [
+            AnnotationEvent(
+                id=str(ULID()),
+                target_id=candidate_entry_id,
+                target_type="entry",
+                kind="tag",
+                value=CANDIDATE_EXTRACTION_TAG,
+                actor=actor,
+                timestamp=now,
+            ),
+            AnnotationEvent(
+                id=str(ULID()),
+                target_id=source_entry_id,
+                target_type="entry",
+                kind="xref",
+                value=candidate_entry_id,
+                actor=actor,
+                timestamp=now,
+            ),
+            AnnotationEvent(
+                id=str(ULID()),
+                target_id=candidate_entry_id,
+                target_type="entry",
+                kind="xref",
+                value=source_entry_id,
                 actor=actor,
                 timestamp=now,
             ),
@@ -214,9 +275,7 @@ class ExtractDecisionsDaemon(BaseDaemon):
             self._resolved_code_root = ctx.code_root
             return ctx.threads_dir, ctx.code_root
         except Exception as exc:
-            logger.debug(
-                "DAEMON[decision_extractor]: could not resolve paths: %s", exc
-            )
+            logger.debug("DAEMON[decision_extractor]: could not resolve paths: %s", exc)
             return None, None
 
     # ------------------------------------------------------------------
@@ -349,9 +408,7 @@ class ExtractDecisionsDaemon(BaseDaemon):
                 summary = e.get("summary", "") or ""
                 agent = e.get("agent", "unknown")
                 ts = e.get("timestamp", "")
-                context_parts.append(
-                    f"\n---\n[{ts}] {agent}: {title}\n{summary}"
-                )
+                context_parts.append(f"\n---\n[{ts}] {agent}: {title}\n{summary}")
 
         result = "\n".join(context_parts)
         self._thread_context_cache[topic] = result
@@ -428,7 +485,8 @@ class ExtractDecisionsDaemon(BaseDaemon):
 
         # 4. Filter by min_extraction_score
         scored_findings = [
-            f for f in detector_findings
+            f
+            for f in detector_findings
             if f.details.get("score", 0) >= cfg.min_extraction_score
         ]
 
@@ -441,7 +499,8 @@ class ExtractDecisionsDaemon(BaseDaemon):
         processed_set = set(self._get_processed_ids())
         processed_source_keys = set(self._get_processed_source_keys())
         candidates = [
-            f for f in scored_findings
+            f
+            for f in scored_findings
             if f.finding_id not in processed_set
             and self._source_key(f.topic, f.entry_id) not in processed_source_keys
         ]
@@ -495,46 +554,50 @@ class ExtractDecisionsDaemon(BaseDaemon):
             llm_count = llm_attempts.get(source_key, 0)
             write_count = write_attempts.get(source_key, 0)
             if llm_count >= cfg.max_extraction_attempts:
-                findings.append(Finding(
-                    finding_id=_make_finding_id(),
-                    daemon_name=self.name,
-                    severity="warning",
-                    category=CAT_CAP_REACHED,
-                    topic=finding.topic,
-                    entry_id=finding.entry_id,
-                    message=(
-                        f"LLM extraction cap reached ({llm_count} attempts); "
-                        f"entry permanently skipped"
-                    ),
-                    details={
-                        "source_entry_id": finding.entry_id,
-                        "reason": "llm_failure",
-                        "attempts": llm_count,
-                        "cap": cfg.max_extraction_attempts,
-                    },
-                ))
+                findings.append(
+                    Finding(
+                        finding_id=_make_finding_id(),
+                        daemon_name=self.name,
+                        severity="warning",
+                        category=CAT_CAP_REACHED,
+                        topic=finding.topic,
+                        entry_id=finding.entry_id,
+                        message=(
+                            f"LLM extraction cap reached ({llm_count} attempts); "
+                            f"entry permanently skipped"
+                        ),
+                        details={
+                            "source_entry_id": finding.entry_id,
+                            "reason": "llm_failure",
+                            "attempts": llm_count,
+                            "cap": cfg.max_extraction_attempts,
+                        },
+                    )
+                )
                 processed_this_tick.append(finding.finding_id)
                 processed_source_keys_this_tick.append(source_key)
                 continue
             if write_count >= cfg.max_write_failure_attempts:
-                findings.append(Finding(
-                    finding_id=_make_finding_id(),
-                    daemon_name=self.name,
-                    severity="warning",
-                    category=CAT_CAP_REACHED,
-                    topic=finding.topic,
-                    entry_id=finding.entry_id,
-                    message=(
-                        f"Write failure cap reached ({write_count} attempts); "
-                        f"entry permanently skipped"
-                    ),
-                    details={
-                        "source_entry_id": finding.entry_id,
-                        "reason": "write_failure",
-                        "attempts": write_count,
-                        "cap": cfg.max_write_failure_attempts,
-                    },
-                ))
+                findings.append(
+                    Finding(
+                        finding_id=_make_finding_id(),
+                        daemon_name=self.name,
+                        severity="warning",
+                        category=CAT_CAP_REACHED,
+                        topic=finding.topic,
+                        entry_id=finding.entry_id,
+                        message=(
+                            f"Write failure cap reached ({write_count} attempts); "
+                            f"entry permanently skipped"
+                        ),
+                        details={
+                            "source_entry_id": finding.entry_id,
+                            "reason": "write_failure",
+                            "attempts": write_count,
+                            "cap": cfg.max_write_failure_attempts,
+                        },
+                    )
+                )
                 processed_this_tick.append(finding.finding_id)
                 processed_source_keys_this_tick.append(source_key)
                 continue
@@ -549,7 +612,15 @@ class ExtractDecisionsDaemon(BaseDaemon):
                     findings.append(result_finding)
                     # Check if we should mark processed
                     cat = result_finding.category
-                    if cat in (CAT_SUCCESS, CAT_PUSH_FAILED, CAT_REJECTED, CAT_PARSE_FAILURE):
+                    if cat in (
+                        CAT_SUCCESS,
+                        CAT_PUSH_FAILED,
+                        CAT_REJECTED,
+                        CAT_REJECTED_HARD_GATE,
+                        CAT_REJECTED_RATE_CAP,
+                        CAT_PARSE_FAILURE,
+                        CAT_CANDIDATE_NOTE,
+                    ):
                         processed_this_tick.append(finding.finding_id)
                         processed_source_keys_this_tick.append(source_key)
                     elif cat == CAT_FAILED:
@@ -578,14 +649,19 @@ class ExtractDecisionsDaemon(BaseDaemon):
                         topic=finding.topic,
                         entry_id=finding.entry_id,
                         message=f"Extraction error: {str(exc)[:200]}",
-                        details={"source_entry_id": finding.entry_id, "error_type": type(exc).__name__},
+                        details={
+                            "source_entry_id": finding.entry_id,
+                            "error_type": type(exc).__name__,
+                        },
                     )
                 )
                 self._last_tick_failed += 1
 
         # 10. Update cursor
         if processed_this_tick:
-            updated = self._append_unique(self._get_processed_ids(), processed_this_tick)
+            updated = self._append_unique(
+                self._get_processed_ids(), processed_this_tick
+            )
             self._set_processed_ids(updated)
         if processed_source_keys_this_tick:
             updated_keys = self._append_unique(
@@ -670,7 +746,10 @@ class ExtractDecisionsDaemon(BaseDaemon):
                 topic=topic,
                 entry_id=source_entry_id,
                 message="LLM unavailable during extraction",
-                details={"source_entry_id": source_entry_id, "error_type": "llm_unavailable"},
+                details={
+                    "source_entry_id": source_entry_id,
+                    "error_type": "llm_unavailable",
+                },
             )
 
         if extraction_result.rejection_reason == "llm_parse_failure":
@@ -687,29 +766,59 @@ class ExtractDecisionsDaemon(BaseDaemon):
             )
 
         if not extraction_result.passed:
+            rr = extraction_result.rejection_reason or ""
+            detector_score = finding.details.get("score", 0)
+
+            # Candidate-Note path: soft-gate failure or confidence-3 extraction
+            # with detector score >= threshold. Route to thread-visible Note.
+            is_candidate_eligible = (
+                rr in ("soft_gate_failure",)
+                or (
+                    rr.startswith("low_confidence_")
+                    and extraction_result.confidence >= 3
+                )
+            ) and detector_score >= cfg.min_extraction_score
+
+            if is_candidate_eligible and extraction_result.extraction is not None:
+                return self._emit_candidate_note(
+                    finding=finding,
+                    entry_dict=entry_dict,
+                    extraction_result=extraction_result,
+                    threads_dir=threads_dir,
+                    code_root=code_root,
+                    tick_date=tick_date,
+                )
+
+            # Hard-fail path: private Finding only.
             self._last_tick_rejected += 1
-            failed_gates = []
-            if extraction_result.gate_results:
-                failed_gates = [
-                    g for g, r in extraction_result.gate_results.items()
+            failed_gates = (
+                [
+                    g
+                    for g, r in extraction_result.gate_results.items()
                     if not r.get("passed", False)
                 ]
+                if extraction_result.gate_results
+                else []
+            )
+            gate_class = classify_gate_outcome(extraction_result.gate_results)
+            cat = CAT_REJECTED_HARD_GATE if gate_class == "hard_fail" else CAT_REJECTED
             return Finding(
                 finding_id=_make_finding_id(),
                 daemon_name=self.name,
                 severity="info",
-                category=CAT_REJECTED,
+                category=cat,
                 topic=topic,
                 entry_id=source_entry_id,
                 message=(
-                    f"Extraction rejected: {extraction_result.rejection_reason} "
+                    f"Extraction rejected: {rr} "
                     f"(confidence={extraction_result.confidence})"
                 ),
                 details={
                     "source_entry_id": source_entry_id,
                     "confidence": extraction_result.confidence,
-                    "rejection_reason": extraction_result.rejection_reason,
+                    "rejection_reason": rr,
                     "failed_gates": failed_gates,
+                    "gate_classification": gate_class,
                 },
             )
 
@@ -730,7 +839,9 @@ class ExtractDecisionsDaemon(BaseDaemon):
                 },
             )
 
-        decision_title = extraction_result.extraction.decision_statement or "Extracted Decision"
+        decision_title = (
+            extraction_result.extraction.decision_statement or "Extracted Decision"
+        )
         if len(decision_title) > 80:
             decision_title = decision_title[:77] + "..."
 
@@ -815,6 +926,175 @@ class ExtractDecisionsDaemon(BaseDaemon):
         )
 
     # ------------------------------------------------------------------
+    # Candidate Note emission
+    # ------------------------------------------------------------------
+
+    def _get_candidate_note_timestamps(self) -> dict[str, list[str]]:
+        """Return per-topic lists of ISO timestamps for emitted candidate Notes."""
+        return self._checkpoint.extras.get("candidate_note_timestamps", {})
+
+    def _set_candidate_note_timestamps(self, data: dict[str, list[str]]) -> None:
+        self._checkpoint.extras["candidate_note_timestamps"] = data
+
+    def _candidate_note_count_in_window(self, topic: str) -> int:
+        """Count candidate Notes emitted for topic in the last 7 days."""
+        from datetime import timedelta
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        timestamps = self._get_candidate_note_timestamps().get(topic, [])
+        return sum(1 for t in timestamps if t >= cutoff)
+
+    def _record_candidate_note_timestamp(self, topic: str) -> None:
+        data = self._get_candidate_note_timestamps()
+        from datetime import timedelta
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        existing = [t for t in data.get(topic, []) if t >= cutoff]
+        existing.append(datetime.now(timezone.utc).isoformat())
+        data[topic] = existing
+        self._set_candidate_note_timestamps(data)
+
+    def _emit_candidate_note(
+        self,
+        finding: Finding,
+        entry_dict: dict[str, Any],
+        extraction_result: Any,
+        threads_dir: Path,
+        code_root: Path,
+        tick_date: str,
+    ) -> Finding:
+        """Emit a thread-visible candidate Note for an ambiguous extraction."""
+        cfg = self._config
+        topic = finding.topic
+        source_entry_id = finding.entry_id or ""
+
+        # Rate cap check
+        window_count = self._candidate_note_count_in_window(topic)
+        cap = cfg.candidate_note_rate_cap_per_thread_per_week
+        if window_count >= cap:
+            return Finding(
+                finding_id=_make_finding_id(),
+                daemon_name=self.name,
+                severity="info",
+                category=CAT_REJECTED_RATE_CAP,
+                topic=topic,
+                entry_id=source_entry_id,
+                message=(
+                    f"Candidate Note rate cap reached ({window_count}/{cap} in 7d) "
+                    f"for thread {topic}"
+                ),
+                details={
+                    "source_entry_id": source_entry_id,
+                    "window_count": window_count,
+                    "cap": cap,
+                },
+                repo=str(code_root),
+            )
+
+        candidate_body = format_candidate_note_body(extraction_result, entry_dict)
+        if not candidate_body:
+            self._last_tick_failed += 1
+            return Finding(
+                finding_id=_make_finding_id(),
+                daemon_name=self.name,
+                severity="warning",
+                category=CAT_FAILED,
+                topic=topic,
+                entry_id=source_entry_id,
+                message="Candidate Note body formatter returned empty string",
+                details={"source_entry_id": source_entry_id},
+            )
+
+        decision_statement = (
+            extraction_result.extraction.decision_statement
+            if extraction_result.extraction
+            else None
+        ) or "Candidate extraction"
+        candidate_title = (
+            decision_statement[:77] + "..."
+            if len(decision_statement) > 80
+            else decision_statement
+        )
+        candidate_entry_id = str(ULID())
+
+        write_result = daemon_write_entry(
+            topic,
+            code_root=code_root,
+            title=f"[Candidate] {candidate_title}",
+            body=candidate_body,
+            agent="ExtractDecisionsDaemon",
+            role="scribe",
+            entry_type="Note",
+            entry_id=candidate_entry_id,
+            agent_spec="decision-extractor",
+            user_tag="system",
+            post_write_hooks=[
+                _build_candidate_note_annotation_hook(
+                    source_entry_id, candidate_entry_id
+                ),
+            ],
+        )
+
+        if write_result.written:
+            self._record_candidate_note_timestamp(topic)
+            self._increment_daily_count(tick_date)
+
+        if write_result.written and write_result.pushed:
+            return Finding(
+                finding_id=_make_finding_id(),
+                daemon_name=self.name,
+                severity="info",
+                category=CAT_CANDIDATE_NOTE,
+                topic=topic,
+                entry_id=source_entry_id,
+                message=(
+                    f"Candidate Note emitted (confidence={extraction_result.confidence}, "
+                    f"reason={extraction_result.rejection_reason}) → {write_result.entry_id}"
+                ),
+                details={
+                    "entry_id": write_result.entry_id,
+                    "source_entry_id": source_entry_id,
+                    "confidence": extraction_result.confidence,
+                    "rejection_reason": extraction_result.rejection_reason,
+                    "topic": topic,
+                },
+                repo=str(code_root),
+            )
+
+        if write_result.written and not write_result.pushed:
+            return Finding(
+                finding_id=_make_finding_id(),
+                daemon_name=self.name,
+                severity="warning",
+                category=CAT_PUSH_FAILED,
+                topic=topic,
+                entry_id=source_entry_id,
+                message=f"Candidate Note written locally but push failed: {write_result.error}",
+                details={
+                    "entry_id": write_result.entry_id,
+                    "source_entry_id": source_entry_id,
+                    "confidence": extraction_result.confidence,
+                    "topic": topic,
+                    "error": write_result.error,
+                },
+            )
+
+        self._last_tick_failed += 1
+        return Finding(
+            finding_id=_make_finding_id(),
+            daemon_name=self.name,
+            severity="warning",
+            category=CAT_FAILED,
+            topic=topic,
+            entry_id=source_entry_id,
+            message=f"Candidate Note write failed: {write_result.error}",
+            details={
+                "source_entry_id": source_entry_id,
+                "error_type": "write_failure",
+            },
+        )
+
+    # ------------------------------------------------------------------
     # Status summary
     # ------------------------------------------------------------------
 
@@ -822,20 +1102,22 @@ class ExtractDecisionsDaemon(BaseDaemon):
         base = super().status_summary()
         tick_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         daily_count = self._get_daily_count(tick_date)
-        base.update({
-            "last_tick_candidates_evaluated": self._last_tick_candidates,
-            "last_tick_extracted": self._last_tick_extracted,
-            "last_tick_push_failed": self._last_tick_push_failed,
-            "last_tick_rejected": self._last_tick_rejected,
-            "last_tick_failed": self._last_tick_failed,
-            "last_tick_rate_limited": self._last_tick_rate_limited,
-            "daily_extractions_count": daily_count,
-            "daily_extractions_remaining": max(
-                0, self._config.max_extractions_per_day - daily_count
-            ),
-            "processed_ids_count": len(self._get_processed_ids()),
-            "processed_source_keys_count": len(self._get_processed_source_keys()),
-            "llm_extraction_attempts_count": len(self._get_llm_attempts()),
-            "write_failure_attempts_count": len(self._get_write_attempts()),
-        })
+        base.update(
+            {
+                "last_tick_candidates_evaluated": self._last_tick_candidates,
+                "last_tick_extracted": self._last_tick_extracted,
+                "last_tick_push_failed": self._last_tick_push_failed,
+                "last_tick_rejected": self._last_tick_rejected,
+                "last_tick_failed": self._last_tick_failed,
+                "last_tick_rate_limited": self._last_tick_rate_limited,
+                "daily_extractions_count": daily_count,
+                "daily_extractions_remaining": max(
+                    0, self._config.max_extractions_per_day - daily_count
+                ),
+                "processed_ids_count": len(self._get_processed_ids()),
+                "processed_source_keys_count": len(self._get_processed_source_keys()),
+                "llm_extraction_attempts_count": len(self._get_llm_attempts()),
+                "write_failure_attempts_count": len(self._get_write_attempts()),
+            }
+        )
         return base

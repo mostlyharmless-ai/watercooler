@@ -1,14 +1,18 @@
 ---
 name: update-agent-context
 description: |
-  This skill should be used to keep CLAUDE.md and AGENTS.md compact, current, and
-  internally consistent. It runs in two phases: Phase 1 performs a one-time structural
-  refactor of CLAUDE.md using a Karpathy-inspired behavioral scaffold and derives
-  AGENTS.md from it by stripping Claude Code-specific sections. Phase 2 extracts
-  durable project conventions from Watercooler Decision entries since the last update
-  and patches a bounded generated section. Use when CLAUDE.md has grown verbose or
-  stale, when AGENTS.md has drifted from CLAUDE.md, or when significant project
-  decisions have accumulated since the last refresh.
+  This skill should be used to keep CLAUDE.md, AGENTS.md, and the skill files
+  themselves compact, current, and internally consistent. It runs in three phases:
+  Phase 1 performs a one-time structural refactor of CLAUDE.md using a
+  Karpathy-inspired behavioral scaffold and derives AGENTS.md from it by stripping
+  Claude Code-specific sections. Phase 2 extracts durable project conventions from
+  Watercooler Decision entries since the last update and patches a bounded
+  generated section. Phase 3 audits the local skill surface against the live MCP
+  tool surface and the in-process alias registry (`TOOL_ALIASES` in
+  `aliases.py`), surfacing skill files that reference retired or renamed tools.
+  Use when CLAUDE.md has grown verbose or stale, when AGENTS.md has drifted
+  from CLAUDE.md, when significant project decisions have accumulated since the
+  last refresh, or after a watercooler-cloud tool-surface consolidation lands.
 ---
 
 # Update Agent Context
@@ -19,29 +23,61 @@ Keeps `CLAUDE.md` and `AGENTS.md` short, current, and auditable. `CLAUDE.md` is 
 source of truth; `AGENTS.md` is derived from it. The skill edits the working tree and
 shows a diff — it does not commit. Use `/ship` to commit after review.
 
-Arguments: `/update-agent-context [--phase1 | --phase2 | --both]`
+Arguments: `/update-agent-context [--phase1 | --phase2 | --phase3 | --all]`
 
-Default when no flag is given: ask the user which phase to run.
+`--all` runs Phase 1, then Phase 2, then Phase 3 in sequence. Default when no
+flag is given: ask the user which phase to run.
+
+Phase 3 is read-only — it audits the skill surface and produces a punch list.
+It does not edit any file. Run it after any watercooler-cloud tool-surface
+consolidation, or whenever a skill call unexpectedly fails because its tool
+name no longer exists.
 
 ---
 
-## Phase 1 — Structural Refactor
+## Phase 1 — Structural Refactor or From-Scratch Seed
 
-Run once (or after a major tool or role refactor) to rewrite `CLAUDE.md` using the
-approved structure and derive a fresh `AGENTS.md`.
+Run to (re)build `CLAUDE.md` on the approved structure and derive a fresh
+`AGENTS.md`. Phase 1 has two modes; Step 0 selects between them.
+
+### Step 0: Select mode
+
+Check whether `CLAUDE.md` exists at the repo root.
+
+- **Refactor mode** — `CLAUDE.md` exists. The current file is the primary
+  content reservoir: carry its section content forward, fact-checked against
+  source (Step 4). This is the common case (also use it after a major tool or
+  role refactor).
+- **From-scratch seed mode** — `CLAUDE.md` is absent. There is no reservoir;
+  every section's content must be built from the grounding sources named in
+  Steps 3–4 (source files, onboarding seeds, observed codebase patterns) plus
+  the per-section content checklists in Step 5. Steps that read or diff the old
+  file — Step 2, and the "carry forward" half of Step 4 — are skipped. Where a
+  micro-convention has no file or seed source, infer it from the dominant
+  pattern in the codebase and **mark it `inferred` in the Step 8 diff** so the
+  user can confirm or correct it.
+
+State the selected mode at the top of the run.
 
 ### Step 1: Measure
 
-Compute current sizes:
+Compute current sizes, measuring only files that exist (in from-scratch seed
+mode neither file is present, and a new repo may lack `AGENTS.md` even in
+refactor mode — a bare `wc CLAUDE.md AGENTS.md` would exit non-zero):
 
 ```bash
-wc -l -w CLAUDE.md AGENTS.md
+for f in CLAUDE.md AGENTS.md; do [ -f "$f" ] && wc -l -w "$f"; done
 ```
 
-Record the numbers. The target for `CLAUDE.md` post-refactor is **≤ 300 lines and
-≤ 2,000 words** (proxy for 2,000–3,000 tokens). Report both before and after.
+Record the numbers. The target for `CLAUDE.md` is **≤ 300 lines and ≤ 2,000
+words** (proxy for 2,000–3,000 tokens). Report both before and after. When a
+file does not exist its "before" is `0` — the loop above simply prints nothing
+for it.
 
 ### Step 2: Record drift facts
+
+**Refactor mode only — skip in from-scratch seed mode (there is no prior file
+to drift from).**
 
 Read `CLAUDE.md` and `AGENTS.md` and note concrete mismatches that must be fixed,
 for example:
@@ -54,16 +90,18 @@ for example:
 Load and call `mcp__watercooler__watercooler_roles` with `code_path` set to
 the repo root. Use the returned role names and summaries to confirm the six canonical
 roles (`planner`, `critic`, `implementer`, `tester`, `pm`, `scribe`). Do not copy
-role prose into `CLAUDE.md`; point to `watercooler_role_details` instead.
+role prose into `CLAUDE.md`; point to `watercooler_roles` instead.
 
 If Watercooler is unavailable, proceed with local files only and note the limitation.
 
 ### Step 4: Verify project facts against source
 
-Before drafting prose, ground every concrete claim that will appear in the **Project
-Snapshot** and **Development Workflow** sections. Read these source files directly
-and use only what they say — do not carry over claims from the old `CLAUDE.md` /
-`AGENTS.md` without re-checking.
+Before drafting prose, ground every concrete claim that will appear in the
+**Project Snapshot**, **Repository Conventions**, **Development Workflow**, and
+**Security & Publishing** sections. Read these source files directly and use only
+what they say. In refactor mode, do not carry a claim over from the old
+`CLAUDE.md` / `AGENTS.md` without re-checking it here; in from-scratch seed mode
+there is nothing to carry — build every claim directly from these sources.
 
 Required reads:
 
@@ -79,6 +117,26 @@ Required reads:
   example path so the bullet does not rot when files move.
 - `README.md` "Requirements" / "Install" sections — cross-check Python version
   and install-extras claims.
+- `pyproject.toml` `[tool.black]` / `[tool.ruff]` / `[tool.mypy]` tables
+  **(where present)** — ground the Repository Conventions claims that *are*
+  mechanically enforced: line length, import ordering (isort/ruff), and the
+  type-check gate. Config-enforced conventions are facts, not preferences.
+  Pared-down builds may omit these tables; when a table is absent, fall back to
+  observed code and mark the item `inferred`.
+- `SECURITY.md` — the vulnerability-disclosure contact and process; the single
+  source for the Security & Publishing "Vulnerabilities" claim.
+- A release / publish-pipeline config (a Copybara file, a release-automation
+  workflow, etc.) **if the repo has one** — the source for any
+  Security & Publishing "publish pipeline" claim. Many repos have none (and a
+  downstream/open-core mirror typically does not ship its own publish config);
+  skip silently when absent.
+- `CONTRIBUTING.md` / `.github/PULL_REQUEST_TEMPLATE*` (if present) — branch
+  and commit conventions and PR expectations.
+- `git log --format='%H %s%n%b' -30` — confirm the actual commit-message style
+  (Conventional Commits or not) and whether commits carry a `Signed-off-by`
+  trailer. The Development Workflow commit rules must match observed history,
+  not an aspiration. The sign-off identity itself is **not** invented here — if
+  a sign-off convention is in use, point at it; do not hardcode an address.
 - **Watercooler onboarding seeds (when present)** — discover seed threads
   written by the `watercooler-onboarding` skill via the `onboarding` thread
   tag. These are higher-trust than the prior `CLAUDE.md` because their bodies
@@ -183,31 +241,102 @@ and add one sentence of local context:
 4. **Goal-Driven Execution** — Transform tasks into verifiable goals. State a brief
    plan for multi-step work; loop until verified.
 
+**Project Snapshot** — a ~150-token orientation: one-line product description,
+supported language/runtime range, core tooling, test layout, and the docs vs
+internal-docs split. Ground the facts per Step 4; the product one-liner comes
+from `onboarding-overview` / `onboarding-product-charter` (or `README.md` when no
+seed exists). The `docs/` (user-facing) vs internal-docs split and any
+solution-writeup location are conventions — source them from an onboarding seed
+or a Decision entry, not invention.
+
+**Repository Conventions** — enumerate the project's concrete conventions, one
+short bullet each. Cover this checklist; source each item as noted, and in
+from-scratch mode mark any item with no file/seed source as `inferred`:
+- **Layout** — package layout, test-directory layout, bundled-data location.
+  Source: observed directory structure (Step 4 `tests/` read + a top-level `ls`).
+- **Type hints / type-check gate** — whether hints are required and the checker.
+  Source: `[tool.mypy]` config + observed signatures.
+- **Docstrings** — style (e.g. Google) and where required. Source: onboarding
+  seed or the dominant codebase pattern.
+- **Errors** — exception-raising norms. Source: seed or dominant pattern.
+- **Imports** — ordering, absolute vs relative. Source: `[tool.ruff]` isort
+  config (config-enforced = fact, not preference).
+- **Naming** — casing per identifier kind, CLI command casing, role names,
+  entry-type names. Source: role names from `watercooler_roles`; entry types
+  from the code enum; casing from observed code.
+- **Dependencies** — core-minimal policy and the bar for adding a dependency.
+  Source: a Decision entry or onboarding seed.
+- **Comments** — default density. Source: Behavioral Principles + dominant pattern.
+- **Coverage** — target, if any. Source: CI config or a Decision entry; mark
+  `inferred` if neither states a number.
+- **Markdown** — wrap width and heading style. Source: `[tool.black]` /
+  editorconfig line length where it applies; otherwise observed.
+
+**Development Workflow** — cover this checklist, grounded per Step 4:
+- **Branches** — naming / prefix scheme. Source: `CONTRIBUTING.md` or observed
+  branch names in `git log` / `git branch -a`.
+- **Commits** — message convention and any `Signed-off-by` requirement. Source:
+  the `git log` read in Step 4 — state only what history actually shows.
+- **Pull requests** — required CI and merge style. Source: `.github/workflows/`
+  for the CI matrix (name only OSes/versions that appear); merge style from
+  `CONTRIBUTING.md` or observed merge commits.
+- **Tests** — how to run them and notable markers. Source: `pyproject.toml`
+  pytest config + `tests/` layout.
+- **Quality gate** — the exact lint/format/type command(s). Source: the
+  `[tool.*]` configs + any `Makefile` / CI lint step.
+- **Install** — the dev-install command and required extras. Source:
+  `pyproject.toml` extras + `README.md`.
+- **Risky actions** — the confirm-before rule for destructive / shared-state
+  operations. Source: Behavioral Principles (carry the project-local wording).
+
 **Watercooler Protocol** — condense to a single focused section. Must preserve:
 - Identity setup: per-call `agent_func` in the format `<platform>:<model>:<role>`. There
   is no `set_agent` / `watercooler_set_agent` shortcut — set `agent_func` on every
-  write call (`say`, `ack`, `handoff`, `set_status`). Verify against the registered
-  tool surface in `src/watercooler_mcp/capabilities.py` before claiming a setter
-  tool exists.
+  write call (`write`, `say`, `ack`, `handoff`, `set_status`). Verify against the
+  registered tool surface in `src/watercooler_mcp/capabilities.py` before claiming a
+  setter tool exists.
 - `code_path` discipline: always set to the repo root being worked on.
 - Graph-first reads: baseline graph (JSON) is the sole source of truth; `.md` files
   are write-only projections. Always start with `summary_only=true`.
 - Mandatory MCP use: never read/write thread files directly.
-- Write discipline: `say` / `ack` / `handoff` / `set_status` only via MCP tools.
+- Write discipline: `watercooler_write` is the preferred first-choice write tool
+  (it wraps `say`/`ack`/`handoff`); the primitives `say` / `ack` / `handoff` /
+  `set_status` remain available for explicit coordination control. All writes go
+  through MCP tools only.
 - `Spec:` marker: first line of every entry body.
-- Pointer to `watercooler_role_details` for full role behavior — do not repeat prose.
+- Pointer to `watercooler_roles` for full role behavior — do not repeat prose.
 - **Intent-first modification rule**: before modifying existing code or state, query
   watercooler threads and semantic search to understand the *intent* behind the current
   state. Do not infer design constraints from code alone.
 - Proactive recall: run `watercooler_smart_query` before starting significant work.
 
+**Security & Publishing** — cover this checklist, grounded per Step 4. Omit any
+bullet whose subject the project does not have — the checklist is a menu, not a
+mandate:
+- **Secrets** — the never-commit rule and where required env vars are documented.
+- **Input validation** — the validate-at-boundaries norm. Source: Behavioral
+  Principles or a Decision entry.
+- **Vulnerabilities** — the disclosure contact and process, taken from
+  `SECURITY.md` verbatim. Do not invent an address.
+- **Reference-only code surfaces** — when the project has a deployed-vs-reference
+  split (e.g. a Slack formatter whose production copy lives elsewhere), keep a
+  one-line warning naming which file is authoritative. Load-bearing: it stops
+  agents editing the wrong file.
+- **Publish pipeline** — include only when the repo publishes a downstream
+  artifact or mirror: the pipeline and the rule against hand-pushing it. Source:
+  the release/publish-pipeline config found in Step 4. A repo that *is* the
+  published downstream (e.g. an open-core mirror) usually has no such config —
+  omit the bullet.
+
 **Sections to eliminate or replace with pointers:**
 - Full docstring / type-hint examples → keep as one-line bullet, remove code blocks
 - Testing guidelines with code blocks → keep as bullets only
 - Module organization inventory → remove (derivable from codebase)
-- Role definitions section → replace with pointer to `watercooler_role_details`
+- Role definitions section → replace with pointer to `watercooler_roles`
 - Full tool usage protocol → replace with condensed Watercooler Protocol section
-- Slack integration architecture → remove or link out; not needed in `CLAUDE.md`
+- Verbose Slack integration *architecture* prose → cut. But keep the one-line
+  reference-only warning (per the Security & Publishing checklist) — that warning
+  must survive the refactor, not be removed with the prose around it.
 
 ### Step 6: Validate invariants
 
@@ -219,9 +348,11 @@ Before writing, verify the draft preserves all of these. If any is missing, add 
       `watercooler_set_agent` reference (verify against
       `src/watercooler_mcp/capabilities.py`)
 - [ ] `Spec:` marker write discipline preserved
+- [ ] Write discipline names `watercooler_write` as the preferred write tool,
+      with `say` / `ack` / `handoff` / `set_status` as the explicit-control fallback
 - [ ] `code_path` alignment rule
 - [ ] Intent-first modification rule (query threads before changing state)
-- [ ] No repeated role prose (pointer to `watercooler_role_details` only)
+- [ ] No repeated role prose (pointer to `watercooler_roles` only)
 - [ ] No large tool inventories
 - [ ] No stale "stdlib-only" absolutes that conflict with current deps
 - [ ] Project Snapshot facts match source: Python range matches
@@ -232,18 +363,27 @@ Before writing, verify the draft preserves all of these. If any is missing, add 
 
 ### Step 7: Derive AGENTS.md
 
-Generate `AGENTS.md` from the new `CLAUDE.md` by stripping Claude Code-specific
-sections **by header name**:
+`AGENTS.md` is `CLAUDE.md` with the Claude-Code-specific *mechanics* removed — it
+keeps every section, including `## Watercooler Protocol`. Apply these edits to a
+copy of the new `CLAUDE.md`:
 
-Sections to strip:
-- `## Claude Watercooler Protocol (Session Rules)` → replace with a condensed
-  equivalent that removes MCP tool invocation mechanics but keeps the behavioral
-  rules (graph-first, intent-first, proactive recall).
-- Any section that references Claude Code hooks, `ToolSearch` protocol, or
-  MCP-client-specific identity details.
+- **Drop the `**Tool invocation:**` subsection** of `## Watercooler Protocol` —
+  the `ToolSearch` / `mcp__<server>__<tool>` / Serena call mechanics are
+  Claude-Code-specific. Keep the rest of the section (graph-first reads,
+  intent-first rule, identity, write discipline, storage contract).
+- **Neutralize Claude-Code-flavored examples** — `agent_func` examples and the
+  like should use platform-neutral identities, not a single client's.
+- **Drop skill-name references** — replace `<skill-name>` skill mentions (e.g.
+  "follow the `editorial-publishing` skill") with the underlying doc or process;
+  AGENTS.md is read by agents that have no Claude Code skill catalog.
+- **Cut anything referencing Claude Code hooks** or MCP-client-specific identity
+  details.
 
-Preserve: repo facts, graph-first claims, security rules, commit policy, Karpathy
-behavioral principles, mandatory Watercooler MCP requirements, intent-first rule.
+Do not strip whole sections by header name — the difference between the two
+files is small and subsection-level. Preserve everything else verbatim in
+intent: repo facts, graph-first claims, security rules, commit policy (including
+the sign-off rule), Karpathy behavioral principles, mandatory Watercooler MCP
+requirements, intent-first rule, and the full `## Project Conventions` block.
 
 Add this marker as the first line of `AGENTS.md`:
 ```
@@ -486,8 +626,8 @@ Notes on these calls:
   tags, decision candidates, dimension scores) onto `coordinator_lead`-style
   findings; without it you only get the bare finding.
 - `unacknowledged_only=True` filters out findings that have already been triaged
-  via `watercooler_acknowledge_finding`, so the skill doesn't repeatedly re-surface
-  the same items run after run.
+  via `watercooler_daemon_findings(action="acknowledge")`, so the skill doesn't
+  repeatedly re-surface the same items run after run.
 
 How to use the findings:
 
@@ -600,6 +740,12 @@ user sees both adds and revisions/removals in one diff.
 Edit only the `## Project Conventions` section of `CLAUDE.md`. Do not touch any
 other section.
 
+**Hand-added bullets survive re-runs.** Any bullet already in the block that carries
+a valid trailing ULID comment (`<!-- 01KXXXXX... -->`) was hand-authored against a
+Decision entry and is subject to Step 7 re-validation like any other bullet — it is
+not dropped merely because it was hand-added rather than machine-extracted. Only
+bullets *without* a ULID (unprovenanced additions) must be removed.
+
 Cap: **20 bullets maximum, ≤ 500 tokens**. Each bullet must meet all seven
 candidate acceptance rules:
 
@@ -700,14 +846,222 @@ Update the footer comment to today's date:
 
 ---
 
+## Phase 3 — Skill-Surface Audit
+
+Read-only. Detects drift between local skill files and the live MCP tool
+surface, classifying every reference as OK, DRIFTED, COSMETIC, or
+NEEDS-REVIEW. Produces a punch list; does not edit any file.
+
+Phase 3 exists because watercooler-cloud tool consolidations (e.g. the
+2026-05 PR1a–PR6 arc that took the surface from 52 to 34) retire tool names
+behind non-discoverable alias forwarders. Per-PR doc sweeps catch most
+references inside watercooler-cloud, but skill copies in
+`~/.claude/skills/`, downstream repos, and personal `CLAUDE.md` files
+routinely drift — silently when an alias still forwards, loudly when it is
+removed in the next minor release. Phase 3 catches both classes.
+
+Phase 3 reads only public-shippable sources: `TOOL_MATRIX` (live surface)
+and `TOOL_ALIASES` (renamed-with-forwarder map) from `src/watercooler_mcp/`.
+Both ship with every open-core install via Copybara's `src/**` glob, so the
+audit works identically in private and public contexts. Behavioral-change
+signals (same name, shifted semantics — e.g. PR2's keyword-search AND→OR
+default) are intentionally not tracked here; they are handled at retirement
+time by sweeping affected skill text in the same PR (see PR #828 as the
+pattern), not by a post-hoc audit.
+
+### Step 1: Enumerate the live MCP tool surface
+
+The authoritative list of currently registered tools is whatever the agent's
+session has loaded. Inside Claude Code, list every tool whose name matches
+`mcp__[a-z0-9_-]+__watercooler_[a-z_]+` from the deferred-tool roster (the
+"available tools" surface, not just the tools already invoked). Record this
+as the **live set**.
+
+If running outside an MCP-aware session, derive the live set from
+`TOOL_MATRIX` keys specifically — that dict is the registration-only source
+of truth for what FastMCP exposes. **Do not free-text grep
+`capabilities.py`**: the file legitimately contains retired tool names
+inside helper docstrings (e.g. `resolve_find_similar_capability()` mentions
+`watercooler_find_similar` in its docstring even though the name is no
+longer discoverable), and a bare grep would readmit those names into the
+live set and silently misclassify stale references as OK.
+
+Preferred — import the dict directly when the package is installed:
+
+```bash
+python3 -c "from watercooler_mcp.capabilities import TOOL_MATRIX; print('\n'.join(sorted(TOOL_MATRIX.keys())))"
+```
+
+Fallback — AST-parse the file when the package is not importable (e.g.
+auditing a checkout without an env):
+
+```bash
+python3 - <<'PY'
+import ast, pathlib
+tree = ast.parse(pathlib.Path("src/watercooler_mcp/capabilities.py").read_text())
+for node in ast.walk(tree):
+    if (
+        isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "TOOL_MATRIX"
+    ):
+        for key in node.value.keys:
+            if isinstance(key, ast.Constant):
+                print(key.value)
+        break
+PY
+```
+
+Both forms return only the dict keys, so retired names cited in helper
+docstrings or in `_ARG_RESOLVERS` keyed by old name cannot leak into the
+live set. (Aliases are also intentionally excluded — they are forwarders
+registered by `AliasForwardingMiddleware`, not entries in `TOOL_MATRIX`.)
+
+Cross-check: the count should match the surface count reported in the most
+recent consolidation thread entry (34 after PR6 on 2026-05-22). A mismatch
+means a registration changed since you last pulled — refresh the checkout
+before continuing.
+
+### Step 2: Load the alias registry
+
+Read `TOOL_ALIASES` from `src/watercooler_mcp/aliases.py`. Each key is a
+retired tool name; each value is a `ToolAlias` dataclass naming the
+canonical replacement plus `rename_args` / `inject_args` for argument
+adaptation and the `since` PR tag. Preferred — import directly when the
+package is installed:
+
+```bash
+python3 -c "from watercooler_mcp.aliases import TOOL_ALIASES; \
+  import json; print(json.dumps({k: vars(v) for k, v in TOOL_ALIASES.items()}, default=str))"
+```
+
+Fallback — AST-parse the file when the package is not importable (same
+pattern as Step 1's `TOOL_MATRIX` fallback). The registry is declared as
+an annotated assignment (`TOOL_ALIASES: dict[str, ToolAlias] = {...}`)
+whose value is a dict literal of `<retired_name>: ToolAlias(...)` pairs;
+walk for that shape and extract the four fields Phase 3 uses
+(`canonical`, `rename_args`, `inject_args`, `since`):
+
+```bash
+python3 - <<'PY'
+import ast, json, pathlib
+tree = ast.parse(pathlib.Path("src/watercooler_mcp/aliases.py").read_text())
+
+def lit(node):
+    """Render an ast.Constant / ast.Dict as a JSON-safe value;
+    fall back to source for callables (e.g. `guard=lambda args: ...`)."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Dict):
+        return {lit(k): lit(v) for k, v in zip(node.keys, node.values)}
+    return ast.unparse(node)
+
+aliases = {}
+for node in ast.walk(tree):
+    if (
+        isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "TOOL_ALIASES"
+        and isinstance(node.value, ast.Dict)
+    ):
+        for key_node, val_node in zip(node.value.keys, node.value.values):
+            if not (isinstance(key_node, ast.Constant)
+                    and isinstance(val_node, ast.Call)):
+                continue
+            aliases[key_node.value] = {
+                kw.arg: lit(kw.value)
+                for kw in val_node.keywords
+                if kw.arg in {"canonical", "rename_args", "inject_args", "since"}
+            }
+        break
+
+print(json.dumps(aliases, indent=2, default=str))
+PY
+```
+
+`TOOL_ALIASES` is the source of truth for live alias forwarding (it's what
+`AliasForwardingMiddleware` reads at request time). It covers the only
+class of drift Phase 3 needs to label specifically: names that still call
+through but are scheduled for removal one minor release later.
+
+Retirements with no forwarder ("the name is just gone") are deliberately
+not enumerated anywhere — when one of those names appears in a skill file,
+Step 4 surfaces it as `NEEDS-REVIEW` and the user investigates by hand
+(read `aliases.py` git history, or ask a maintainer).
+
+### Step 3: Scan skill files for tool references
+
+Grep these locations (paths exist when applicable):
+
+- `~/.claude/skills/**/SKILL.md` and `**/SKILL.public.md` — user-level
+  skills
+- `~/.claude/CLAUDE.md` — user-global instructions
+- `<repo_root>/.claude/skills/**/SKILL.md` — project-level skills
+- `<repo_root>/CLAUDE.md`, `<repo_root>/AGENTS.md` — project agent context
+
+Pattern (single grep, both forms):
+
+```bash
+grep -rnE "(mcp__[a-z0-9_-]+__)?watercooler_[a-z_]+" \
+  ~/.claude/skills/ ~/.claude/CLAUDE.md \
+  .claude/skills/ CLAUDE.md AGENTS.md 2>/dev/null
+```
+
+Strip the `mcp__<server>__` prefix so each hit is a bare `watercooler_*`
+name comparable to the live set and manifest keys.
+
+### Step 4: Classify each hit
+
+For every grep result, look up the bare name in (live set, `TOOL_ALIASES`)
+and apply this classification:
+
+| Classification | Meaning | Trigger |
+|---|---|---|
+| **OK** | Name is in the live set | No action needed — skip from the report |
+| **DRIFTED** | Call works via alias forwarder; will break when the alias is removed (one minor release later) | Name absent from live set AND present in `TOOL_ALIASES`. Report the canonical replacement plus any `rename_args` / `inject_args` from the alias entry. |
+| **COSMETIC** | Historical reference in audit/inventory/change-log text — not a call site | Name present in `TOOL_ALIASES` AND the surrounding line is explanatory (e.g. inside a table comparing old→new, inside `.claude/skills/watercooler-tool-audit/`, or framed as past tense — "was replaced by", "is now"). Use judgment; when ambiguous, prefer DRIFTED. |
+| **NEEDS-REVIEW** | Name absent from both the live set and `TOOL_ALIASES` | Either a retirement that landed without a forwarder, a typo, or a name from an unfamiliar fork. The user investigates by hand — read `src/watercooler_mcp/aliases.py` git history, search the consolidation thread, or ask a maintainer. The audit cannot disambiguate further from public sources alone. |
+
+Behavioral-change tracking is intentionally not part of Phase 3. Shifts
+that retain a tool's name (e.g. PR2's AND→OR keyword-search default,
+PR1b's authority resolution) are addressed at retirement time by sweeping
+affected skill text in the same PR — see PR #828 as the established
+pattern.
+
+### Step 5: Report
+
+Render the result as a single markdown table sorted by `file:line`, plus a
+per-file rollup with DRIFTED / COSMETIC / NEEDS-REVIEW counts and a
+one-line suggested fix per file. For DRIFTED hits, include the canonical
+replacement and any `rename_args` / `inject_args` the caller will need.
+
+Table columns: `File`, `Line`, `Hit`, `Class`, `Canonical`, `Notes` (the
+alias entry's `since` PR tag, when present).
+
+Stop here. Phase 3 does **not** edit any file. The punch list is the
+deliverable; the user decides whether to patch in-place or wait for the
+next downstream skill-sync.
+
+### Step 6: Footer (rarely needed)
+
+If Phase 3 was the sole reason for the run and it surfaced no actionable
+drift in CLAUDE.md / AGENTS.md, leave the `agent-context-refresh`
+last-updated footer unchanged. CLAUDE.md/AGENTS.md staleness is the
+domain of Phase 1's drift-fact step; Phase 3's domain is the wider skill
+ecosystem.
+
+---
+
 ## Degraded Paths
 
-| Condition | Phase 1 | Phase 2 |
-|---|---|---|
-| Watercooler unavailable | Proceed with static refactor; skip role fetch; note limitation | Stop with clear error — no evidence, no extraction |
-| T2 unavailable (open-core) | No impact | Continue with T1 evidence only; skip `smart_query` |
-| No decisions since last update | No impact | Report "no new candidates found"; skip patch |
-| No onboarding seeds present (no canonical topics from `watercooler-onboarding` exist) | Skip the seed reads in Step 4; note in drift facts that running `/watercooler-onboarding` would strengthen the next refresh | Skip Step 4.5; report the gap in the candidate list and recommend running `/watercooler-onboarding` before the next Phase 2 |
+| Condition | Phase 1 | Phase 2 | Phase 3 |
+|---|---|---|---|
+| Watercooler unavailable | Proceed with static refactor; skip role fetch; note limitation | Stop with clear error — no evidence, no extraction | No impact — Phase 3 reads source files only, not the graph |
+| T2 unavailable (open-core) | No impact | Continue with T1 evidence only; skip `smart_query` | No impact |
+| No decisions since last update | No impact | Report "no new candidates found"; skip patch | n/a |
+| No onboarding seeds present (no canonical topics from `watercooler-onboarding` exist) | Skip the seed reads in Step 4; note in the run report that running `/watercooler-onboarding` would strengthen the next refresh | Skip Step 4.5; report the gap in the candidate list and recommend running `/watercooler-onboarding` before the next Phase 2 | No impact |
+| From-scratch seed mode + no onboarding seeds (hardest case — no `CLAUDE.md`, no seeds) | Build Repository Conventions / Development Workflow / Security & Publishing from source files and observed codebase patterns; mark every unsourced micro-convention `inferred` in the Step 8 diff; recommend `/watercooler-onboarding` then a Phase 2 run to firm them up | n/a | No impact |
+| Outside Claude Code (no deferred-tool roster to enumerate the live set) | n/a | n/a | Fall back to the `TOOL_MATRIX` and `TOOL_ALIASES` AST/import paths in Steps 1 and 2; note the fallback in the report header |
 
 ---
 

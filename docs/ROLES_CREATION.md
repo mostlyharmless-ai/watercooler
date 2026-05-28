@@ -101,7 +101,7 @@ Wear `scribe` when the contribution is to preserve what has already happened: re
 
 ---
 
-For the complete behavioral guidance — `instructions`, `entry_style`, and `when_to_use` for each role — call `watercooler_role_details(code_path=".", role="<name>")` to retrieve the full spec. If your project has a `.watercooler/roles.toml` file (many do), it contains the annotated role definitions and is designed to be read directly. If not, the bundled definitions live in the package at `src/watercooler/data/roles.toml`.
+For the complete behavioral guidance — `instructions`, `entry_style`, and `when_to_use` for each role — call `watercooler_roles(code_path=".", role="<name>")` to retrieve the full spec. If your project has a `.watercooler/roles.toml` file (many do), it contains the annotated role definitions and is designed to be read directly. If not, the bundled definitions live in the package at `src/watercooler/data/roles.toml`.
 
 ---
 
@@ -311,7 +311,7 @@ Custom roles are available immediately after saving `.watercooler/roles.toml` �
 watercooler_roles(code_path=".")
 
 # Inspect the full definition for a specific role
-watercooler_role_details(code_path=".", role="security-audit")
+watercooler_roles(code_path=".", role="security-audit")
 ```
 
 **Step 2 — Confirm write-time acceptance with a test entry:**
@@ -333,7 +333,7 @@ If the role name is not in the active set, `watercooler_say` returns an error li
 **What to expect if something is wrong:**
 
 - **Unrecognized role name at write time** → `ValueError: Invalid role 'my-role'. Valid roles are: critic, implementer, ...` — fix the role name in your TOML key or your write call.
-- **Missing fields (description, produces, etc.)** → silently default to `""` or `[]`. No error is raised. Check `watercooler_role_details()` output to confirm fields are populated as expected.
+- **Missing fields (description, produces, etc.)** → silently default to `""` or `[]`. No error is raised. Check `watercooler_roles(role="<name>")` output to confirm fields are populated as expected.
 
 > **Warning — silent TOML parse failures.** If `.watercooler/roles.toml`
 > is malformed (unclosed triple-quote string, invalid key, bad
@@ -348,6 +348,6 @@ If the role name is not in the active set, `watercooler_say` returns an error li
 ## See also
 
 - [CONFIGURATION.md](./CONFIGURATION.md#custom-roles-watercoolerrolestoml) — compact field reference and minimal example; also covers the full `.watercooler/` directory structure
-- [TOOLS-REFERENCE.md](./TOOLS-REFERENCE.md) — `watercooler_say`, `watercooler_roles`, and `watercooler_role_details` parameter reference
+- [TOOLS-REFERENCE.md](./TOOLS-REFERENCE.md) — `watercooler_say` and `watercooler_roles` parameter reference
 - [WORKFLOW_EXAMPLES.md](./WORKFLOW_EXAMPLES.md) — multi-role thread patterns showing roles in practice across real project arcs
 - [QUICKSTART.md](./QUICKSTART.md) — where the `--role` flag is introduced in the context of basic thread operations

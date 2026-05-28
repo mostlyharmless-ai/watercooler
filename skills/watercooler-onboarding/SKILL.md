@@ -9,21 +9,17 @@ allowed-tools:
   - Skill
   - ToolSearch
   - mcp__watercooler__watercooler_health
-  - mcp__watercooler__watercooler_whoami
   - mcp__watercooler__watercooler_roles
-  - mcp__watercooler__watercooler_role_details
   - mcp__watercooler__watercooler_list_threads
   - mcp__watercooler__watercooler_read_thread
   - mcp__watercooler__watercooler_list_thread_entries
   - mcp__watercooler__watercooler_get_thread_entry
-  - mcp__watercooler__watercooler_get_thread_entry_range
   - mcp__watercooler__watercooler_pulse_snapshot
   - mcp__watercooler__watercooler_smart_query
   - mcp__watercooler__watercooler_daemon_findings
   - mcp__watercooler__watercooler_search
   - mcp__watercooler__watercooler_say
-  - mcp__watercooler__watercooler_annotate
-  - mcp__watercooler__watercooler_get_annotations
+  - mcp__watercooler__watercooler_annotations
 ---
 
 # Watercooler Repository Bootstrap
@@ -63,13 +59,13 @@ entries.
 Load and run in parallel:
 
 ```
-ToolSearch: select:mcp__watercooler__watercooler_health,mcp__watercooler__watercooler_whoami,mcp__watercooler__watercooler_roles
+ToolSearch: select:mcp__watercooler__watercooler_health,mcp__watercooler__watercooler_roles
 ```
 
 Call:
 
 - `watercooler_health(code_path=".")`
-- `watercooler_whoami()`
+- `watercooler_health(code_path=".", detail="identity")`
 - `watercooler_roles(code_path=".")`
 
 If health fails or reports write-path degradation:
@@ -230,7 +226,7 @@ After Step 2.0 (mandatory reads) and Step 2.1 (discovery recipes), enrich the lo
 Front-load all tools for context discovery:
 
 ```
-ToolSearch: select:mcp__watercooler__watercooler_list_threads,mcp__watercooler__watercooler_pulse_snapshot,mcp__watercooler__watercooler_smart_query,mcp__watercooler__watercooler_daemon_findings,mcp__watercooler__watercooler_search,mcp__watercooler__watercooler_get_thread_entry,mcp__watercooler__watercooler_get_thread_entry_range
+ToolSearch: select:mcp__watercooler__watercooler_list_threads,mcp__watercooler__watercooler_pulse_snapshot,mcp__watercooler__watercooler_smart_query,mcp__watercooler__watercooler_daemon_findings,mcp__watercooler__watercooler_search,mcp__watercooler__watercooler_get_thread_entry
 ```
 
 Run in parallel:
@@ -260,7 +256,7 @@ Use:
 
 ```
 watercooler_get_thread_entry(topic=<topic>, entry_id=<id>, code_path=".")
-watercooler_get_thread_entry_range(topic=<topic>, start_index=<n>, end_index=<m>, code_path=".")
+watercooler_get_thread_entry(topic=<topic>, index=<n>, to_index=<m>, code_path=".")
 ```
 
 Then run:
@@ -490,7 +486,7 @@ Skip this step only in dry-run mode or when Step 0 says writing is unsafe.
 Load:
 
 ```
-ToolSearch: select:mcp__watercooler__watercooler_say,mcp__watercooler__watercooler_annotate
+ToolSearch: select:mcp__watercooler__watercooler_say,mcp__watercooler__watercooler_annotations
 ```
 
 Write each seed entry with `watercooler_say`:
@@ -508,6 +504,12 @@ watercooler_say(
 )
 ```
 
+This step uses `watercooler_say`, not the otherwise-preferred `watercooler_write`
+wrapper: seeding needs `create_if_missing=true`, a mandatory `Onboarding: ` title
+prefix, and an explicit `entry_type` — none of which `watercooler_write` exposes.
+This is the documented "title / entry-type override" case for using a primitive
+directly.
+
 **Title rule (mandatory).** Every onboarding-written entry title MUST begin
 with `Onboarding: ` (bootstrap) or `Onboarding refresh: ` (refresh runs). The
 prefix makes seed entries discoverable in the dashboard search box without
@@ -519,7 +521,8 @@ ad-hoc additions in the same thread.
 seed topic, apply the `onboarding` tag at thread level:
 
 ```
-watercooler_annotate(
+watercooler_annotations(
+  action="add",
   topic="<seed-topic>",
   target_id="<seed-topic>",
   target_type="thread",
@@ -574,7 +577,7 @@ silent partial failures.
    watercooler_list_threads(tags="onboarding", code_path=".", format="json")
    ```
    Confirm every seed topic written this run appears in the result. Any
-   missing topic means the `watercooler_annotate` write silently failed
+   missing topic means the `watercooler_annotations` write silently failed
    (likely a write-path race or transient lock contention). For each missing
    topic, re-issue the tag-write call and re-run this batch query.
 
@@ -582,7 +585,7 @@ silent partial failures.
    one re-attempt).** For each topic still absent from the tag-filter
    result, call:
    ```
-   watercooler_get_annotations(topic=<name>, code_path=".")
+   watercooler_annotations(action="get", topic=<name>, code_path=".")
    ```
    and inspect `annotation_states[<name>].tags` for the literal value
    `onboarding`. This distinguishes "tag exists but list-filter is stale"

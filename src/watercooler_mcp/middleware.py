@@ -198,28 +198,35 @@ T = TypeVar("T")
 _DEFAULT_TOOL_TIMEOUT: float = 50.0  # Under MCP SDK's 60s hard limit
 
 _TOOL_TIMEOUTS: dict[str, float] = {
-    # Baseline graph sync status check
-    "watercooler_baseline_sync_status": 180.0,
+    # Baseline graph — the scope="sync" path scans every thread.
+    "watercooler_baseline_graph": 180.0,
     "watercooler_graph_enrich": 300.0,
-    "watercooler_graph_recover": 300.0,
-    # Memory pipeline operations (clustering, embedding generation)
-    "watercooler_leanrag_run_pipeline": 300.0,
+    # Bulk index — the run_pipeline= mode runs LeanRAG clustering/embedding;
+    # the preflight and queueing paths return fast but share the ceiling.
+    "watercooler_bulk_index": 300.0,
     # Graphiti episode ingestion (fire-and-forget returns fast, but config
     # loading or backend init can stall — 120s safety net)
     "watercooler_graphiti_add_episode": 120.0,
     # Smart query T3 escalation can be slow
     "watercooler_smart_query": 120.0,
-    # Federation: fan-out + merge, bounded by max_total_timeout (default 2s)
-    "watercooler_federated_search": 5.0,
 }
 
 
 def get_tool_timeout(tool_name: str) -> float:
     """Return the configured timeout for a tool, or the default.
 
-    Used by the hosted JSON-RPC adapter and local instrumentation.
+    Used by the hosted JSON-RPC adapter and local instrumentation. A retired
+    tool name forwards to a canonical tool (see aliases.py); the hosted
+    adapter resolves the timeout from the *incoming* name before alias
+    rewriting, so the alias is canonicalized here — a deprecated name gets the
+    timeout of the tool that actually runs (e.g. watercooler_leanrag_run_pipeline
+    → watercooler_bulk_index's 300s, not the default).
     """
-    return _TOOL_TIMEOUTS.get(tool_name, _DEFAULT_TOOL_TIMEOUT)
+    from .aliases import resolve_alias
+
+    alias = resolve_alias(tool_name)
+    canonical = alias.canonical if alias is not None else tool_name
+    return _TOOL_TIMEOUTS.get(canonical, _DEFAULT_TOOL_TIMEOUT)
 
 
 def setup_instrumentation() -> None:
@@ -634,10 +641,17 @@ def run_with_sync(
                         raise PushError(
                             message=(
                                 f"Entry committed locally but push to remote failed for '{topic}'. "
-                                "Run `watercooler_sync` to retry."
+                                "The entry is safe in the local worktree — fix the push side "
+                                "(auth/network); it syncs on the next successful write. "
+                                "Inspect with watercooler_sync_repair(diagnose_only=True)."
                             ),
                             context={"topic": topic or ""},
-                            recovery_hint="Run `watercooler_sync` or manually push the worktree.",
+                            recovery_hint=(
+                                "Fix push auth/network and verify with `git push --dry-run`. "
+                                "The entry is preserved locally — watercooler_sync_repair "
+                                "recovers it by pushing/rebasing (it does not discard "
+                                "local-only commits unless discard_local_commits=True)."
+                            ),
                             cause=push_cause,
                         )
                 else:
@@ -757,7 +771,9 @@ def run_with_graph_sync(
                 if not pushed and isinstance(result, str):
                     result += (
                         "\n\n⚠️ Entry committed locally but push to remote failed. "
-                        "Run `watercooler_sync` to retry."
+                        "The entry is safe in the local worktree — fix the push side "
+                        "(auth/network); it syncs on the next successful write or via "
+                        "watercooler_sync_repair."
                     )
         except TimeoutError:
             log_warning("[SYNC] Worktree lock timeout for graph sync")

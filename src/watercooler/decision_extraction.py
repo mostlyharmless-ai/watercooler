@@ -28,7 +28,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, TypedDict
+from typing import Any, Callable, Literal, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +36,10 @@ logger = logging.getLogger(__name__)
 # Data types
 # ---------------------------------------------------------------------------
 
+
 class GateResult(TypedDict):
     """Result of a single gate evaluation."""
+
     passed: bool
     reason: str
 
@@ -45,6 +47,7 @@ class GateResult(TypedDict):
 @dataclass
 class LLMExtraction:
     """Raw structured output from LLM extraction call."""
+
     gates: dict[str, GateResult]
     confidence: int
     decision_statement: Optional[str]
@@ -58,6 +61,7 @@ class LLMExtraction:
 @dataclass
 class ExtractionResult:
     """Enriched extraction result with post-LLM validation applied."""
+
     entry_id: str
     topic: str
     passed: bool
@@ -79,11 +83,35 @@ class ExtractionResult:
 DECISION_EXTRACTED_TAG = "decision_extracted"
 HAS_DECISIONS_TAG = "has_decisions"
 
-_CRITICAL_GATES = frozenset({"g1_commitment", "g2_not_superseded", "g7_authority", "g8_self_contained"})
-_EXPECTED_GATES = frozenset({
-    "g1_commitment", "g2_not_superseded", "g3_quotable", "g4_rationale",
-    "g5_scope", "g6_temporal", "g7_authority", "g8_self_contained",
-})
+# Hard-fail gates: any failure is a private rejection (no thread-visible output).
+# g3_quotable is enforced separately via _validate_g3_quotable; include here so
+# classify_gate_outcome() correctly labels it as hard_fail for callers.
+HARD_FAIL_GATES = frozenset(
+    {"g1_commitment", "g2_not_superseded", "g3_quotable", "g7_authority"}
+)
+
+# Candidate-fallback gates: failure routes to a thread-visible candidate Note
+# instead of a private Finding. g8 was previously CRITICAL; moved here so that
+# self-contained ambiguity is surfaced rather than silently dropped.
+CANDIDATE_FALLBACK_GATES = frozenset(
+    {"g4_rationale", "g5_scope", "g6_temporal", "g8_self_contained"}
+)
+
+# Internal alias used by _validate_gate_consistency (excludes g3 — that has its
+# own enforcement block with richer rejection_reason taxonomy).
+_CRITICAL_GATES = frozenset({"g1_commitment", "g2_not_superseded", "g7_authority"})
+_EXPECTED_GATES = frozenset(
+    {
+        "g1_commitment",
+        "g2_not_superseded",
+        "g3_quotable",
+        "g4_rationale",
+        "g5_scope",
+        "g6_temporal",
+        "g7_authority",
+        "g8_self_contained",
+    }
+)
 _MAX_FIELD_CHARS = 2000
 _FENCE_PATTERN = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL)
 _THREAD_CONTEXT_OPEN = "[[[THREAD_CONTEXT_START]]]"
@@ -100,15 +128,17 @@ _PROMPT_DELIMITERS = (
     "<candidate_entry>",
     "</candidate_entry>",
 )
-_QUOTE_TRANSLATION = str.maketrans({
-    "\u2018": "'",
-    "\u2019": "'",
-    "\u201c": '"',
-    "\u201d": '"',
-    "\u2013": "-",
-    "\u2014": "-",
-    "\u2212": "-",
-})
+_QUOTE_TRANSLATION = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +151,10 @@ decision traces using an 8-gate checklist and a 5-point confidence rubric.
 
 ## 8-Gate Checklist
 
-Apply each gate in sequence. Stop at the first CRITICAL gate failure \
-(gates 1, 2, 7, 8 are critical).
+Apply each gate in sequence. Gates 1, 2, 7 are critical — failure there \
+produces a private rejection. Gates 4, 5, 6, 8 are soft-fail — failure \
+routes to a candidate Note for human review. Gate 3 is enforced separately \
+via quote validation.
 
 **Gate 1 — Explicit commitment?** Does the entry contain a clear point where \
 a choice was made? Require "we decided", "the plan is", "we will", or \
@@ -149,7 +181,8 @@ arbitrates them.
 
 **Gate 8 — Survives deletion of context?** Would this trace be fair without \
 the rest of the thread? If missing context would mislead future readers, \
-do not emit.
+mark g8_self_contained as failed and continue — the entry will be routed to a \
+candidate Note for human confirmation rather than emitted as a Decision.
 
 ## 5-Point Confidence Rubric
 
@@ -226,7 +259,9 @@ def _build_user_prompt(
         if summary:
             body_text = summary + f"\n\n[body truncated from {len(body)} chars]"
         else:
-            body_text = body[:max_body_chars] + f"\n\n[body truncated from {len(body)} chars]"
+            body_text = (
+                body[:max_body_chars] + f"\n\n[body truncated from {len(body)} chars]"
+            )
     else:
         body_text = body
 
@@ -235,13 +270,13 @@ def _build_user_prompt(
     thread_context = _strip_prompt_delimiters(thread_context)
 
     # Sanitize metadata fields using the same delimiter stripping.
-    entry_id = _strip_prompt_delimiters(str(entry.get('entry_id', 'unknown')))
-    thread_topic = _strip_prompt_delimiters(str(entry.get('thread_topic', 'unknown')))
-    agent = _strip_prompt_delimiters(str(entry.get('agent', 'unknown')))
-    role = _strip_prompt_delimiters(str(entry.get('role', 'unknown')))
-    entry_type = _strip_prompt_delimiters(str(entry.get('entry_type', 'Note')))
-    timestamp = _strip_prompt_delimiters(str(entry.get('timestamp', 'unknown')))
-    title = _strip_prompt_delimiters(str(entry.get('title', '(untitled)')))
+    entry_id = _strip_prompt_delimiters(str(entry.get("entry_id", "unknown")))
+    thread_topic = _strip_prompt_delimiters(str(entry.get("thread_topic", "unknown")))
+    agent = _strip_prompt_delimiters(str(entry.get("agent", "unknown")))
+    role = _strip_prompt_delimiters(str(entry.get("role", "unknown")))
+    entry_type = _strip_prompt_delimiters(str(entry.get("entry_type", "Note")))
+    timestamp = _strip_prompt_delimiters(str(entry.get("timestamp", "unknown")))
+    title = _strip_prompt_delimiters(str(entry.get("title", "(untitled)")))
 
     prompt = f"""\
 You are evaluating a thread entry as a potential decision trace.
@@ -262,7 +297,8 @@ Body:
 {body_text}
 {_CANDIDATE_ENTRY_CLOSE}
 
-Apply each gate in sequence. Stop at the first critical failure (gates 1, 2, 7, 8).
+Apply each gate in sequence. Stop at the first critical failure (gates 1, 2, 7).
+Gate 8 failure is soft — continue and report g8_self_contained.passed=false.
 Then score confidence 0-5 using the rubric.
 If confidence >= 3, extract the decision.
 Respond with ONLY the JSON schema specified in the system prompt."""
@@ -273,6 +309,7 @@ Respond with ONLY the JSON schema specified in the system prompt."""
 # ---------------------------------------------------------------------------
 # Response parsing
 # ---------------------------------------------------------------------------
+
 
 def _parse_llm_response(raw: str) -> Optional[LLMExtraction]:
     """Parse LLM response into LLMExtraction. Strip-fences fallback only."""
@@ -325,11 +362,7 @@ def _parse_llm_response(raw: str) -> Optional[LLMExtraction]:
     raw_quotes = data.get("verbatim_quotes", [])
     if not isinstance(raw_quotes, list):
         raw_quotes = []
-    quotes = [
-        str(q)[:_MAX_FIELD_CHARS]
-        for q in raw_quotes
-        if q and str(q).strip()
-    ]
+    quotes = [str(q)[:_MAX_FIELD_CHARS] for q in raw_quotes if q and str(q).strip()]
 
     return LLMExtraction(
         gates=gates,
@@ -353,6 +386,7 @@ def _try_json_parse(text: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 # Post-LLM validation
 # ---------------------------------------------------------------------------
+
 
 def _normalize_whitespace(text: str) -> str:
     """Collapse internal whitespace to single space, strip edges."""
@@ -404,6 +438,7 @@ def _validate_gate_consistency(
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def extract_decision(
     entry: dict[str, Any],
     thread_context: str,
@@ -429,7 +464,9 @@ def extract_decision(
     topic = str(entry.get("thread_topic", "unknown"))
 
     # Build prompts
-    user_prompt, effective_body = _build_user_prompt(entry, thread_context, max_body_chars)
+    user_prompt, effective_body = _build_user_prompt(
+        entry, thread_context, max_body_chars
+    )
 
     # Call LLM
     raw_response = llm_complete(SYSTEM_PROMPT, user_prompt)
@@ -470,9 +507,7 @@ def extract_decision(
     # ------------------------------------------------------------------
 
     # 1. Gate consistency check
-    gate_rejection = _validate_gate_consistency(
-        extraction.gates, extraction.confidence
-    )
+    gate_rejection = _validate_gate_consistency(extraction.gates, extraction.confidence)
     if gate_rejection:
         return ExtractionResult(
             entry_id=entry_id,
@@ -538,7 +573,9 @@ def extract_decision(
         # Quotes may come from summary text shown to the LLM. Those are still
         # not valid decision evidence because the summary is a paraphrase, not
         # source text from the candidate entry.
-        effective_rejection = _validate_quotes(extraction.verbatim_quotes, effective_body)
+        effective_rejection = _validate_quotes(
+            extraction.verbatim_quotes, effective_body
+        )
         if effective_rejection is None:
             quote_rejection = "summary_only_quote_evidence"
     if quote_rejection:
@@ -554,7 +591,29 @@ def extract_decision(
             llm_tokens_used=approx_tokens,
         )
 
-    # 3. Confidence threshold
+    # 3. Soft-gate check: g4/g5/g6/g8 failures route to candidate-Note path.
+    # Hard gates (g1/g2/g7) were already checked; g3 was checked above.
+    # Report "soft_gate_failure" so the daemon can distinguish this from a
+    # hard rejection and emit a thread-visible candidate Note.
+    soft_failed = [
+        g
+        for g in CANDIDATE_FALLBACK_GATES
+        if extraction.gates.get(g) and not extraction.gates[g].get("passed", True)
+    ]
+    if soft_failed:
+        return ExtractionResult(
+            entry_id=entry_id,
+            topic=topic,
+            passed=False,
+            confidence=extraction.confidence,
+            gate_results=extraction.gates,
+            decision_body=None,
+            rejection_reason="soft_gate_failure",
+            extraction=extraction,
+            llm_tokens_used=approx_tokens,
+        )
+
+    # 4. Confidence threshold
     if extraction.confidence < min_confidence:
         return ExtractionResult(
             entry_id=entry_id,
@@ -614,17 +673,19 @@ def format_decision_body(result: ExtractionResult, entry: dict[str, Any]) -> str
     if result.confidence < 4:
         warning = ext.warning or "Confidence below 4"
         lines.append(f"Warning: {warning}")
-    lines.extend([
-        "",
-        "## Decision",
-        ext.decision_statement or "(no statement)",
-        "",
-        "## Rationale",
-        ext.rationale or "(no rationale)",
-        "",
-        "## Scope",
-        ext.scope or "(no scope)",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Decision",
+            ext.decision_statement or "(no statement)",
+            "",
+            "## Rationale",
+            ext.rationale or "(no rationale)",
+            "",
+            "## Scope",
+            ext.scope or "(no scope)",
+        ]
+    )
     if ext.alternatives_considered:
         lines.extend(["", "## Alternatives Considered", ext.alternatives_considered])
     # Build human-readable source entry reference
@@ -636,15 +697,125 @@ def format_decision_body(result: ExtractionResult, entry: dict[str, Any]) -> str
     if title:
         entry_ref = f'{entry_ref} — "{title}"'
 
-    lines.extend([
-        "",
-        "## Evidence",
-        f"Source entry: {entry_ref} "
-        f"(thread: {entry.get('thread_topic', 'unknown')})",
-        f"Agent: {entry.get('agent', 'unknown')} | "
-        f"Role: {entry.get('role', 'unknown')} | "
-        f"{entry.get('timestamp', 'unknown')}",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Evidence",
+            f"Source entry: {entry_ref} "
+            f"(thread: {entry.get('thread_topic', 'unknown')})",
+            f"Agent: {entry.get('agent', 'unknown')} | "
+            f"Role: {entry.get('role', 'unknown')} | "
+            f"{entry.get('timestamp', 'unknown')}",
+        ]
+    )
     for quote in ext.verbatim_quotes:
         lines.append(f"> {quote}")
+    return "\n".join(lines)
+
+
+def classify_gate_outcome(
+    gate_results: dict[str, GateResult],
+) -> Literal["pass", "candidate_fallback", "hard_fail"]:
+    """Return the strictest classification for a set of gate results.
+
+    - ``hard_fail`` if any gate in HARD_FAIL_GATES failed.
+    - ``candidate_fallback`` if only gates in CANDIDATE_FALLBACK_GATES failed.
+    - ``pass`` if all gate results are passing (or gate_results is empty).
+
+    Does not re-run enforcement logic — only reads gate_results as reported.
+    """
+    for gate_name in HARD_FAIL_GATES:
+        g = gate_results.get(gate_name)
+        if g and not g.get("passed", True):
+            return "hard_fail"
+    for gate_name in CANDIDATE_FALLBACK_GATES:
+        g = gate_results.get(gate_name)
+        if g and not g.get("passed", True):
+            return "candidate_fallback"
+    return "pass"
+
+
+def format_candidate_note_body(
+    result: ExtractionResult,
+    entry: dict[str, Any],
+) -> str:
+    """Format an ambiguous extraction as a candidate Note body.
+
+    Used when extraction reaches the candidate-fallback path:
+    soft-gate failures or confidence-3 with all hard gates passing.
+    """
+    ext = result.extraction
+    if ext is None:
+        return ""
+
+    failed_gates = [
+        g for g, r in result.gate_results.items() if not r.get("passed", True)
+    ]
+
+    entry_ref = f"`{entry.get('entry_id', 'unknown')}`"
+    index = entry.get("index")
+    if index is not None:
+        entry_ref = f"#{index} {entry_ref}"
+    entry_title = entry.get("title") or ""
+    if entry_title:
+        entry_ref = f'{entry_ref} — "{entry_title}"'
+
+    gate_reasons = "; ".join(
+        f"{g}: {result.gate_results[g].get('reason', '')}"
+        for g in failed_gates
+        if g in result.gate_results
+    )
+
+    if not gate_reasons:
+        # Low-confidence path: all gates passed but confidence <= 3
+        warning_text = result.extraction.warning if result.extraction else None
+        gate_reasons = f"low_confidence_3 (confidence {result.confidence}/5 below promotion threshold)"
+        if warning_text:
+            gate_reasons += f"; extractor warning: {warning_text}"
+
+    lines = [
+        "Spec: decision-extractor",
+        "[automated: decision_extractor]",
+        "Candidate-Type: Decision",
+        "Candidate-Status: needs_human_confirmation",
+        "Surface-Kind: decision",
+        "Promotable: true",
+        "Authority: none",
+        f"Confidence: {result.confidence}/5",
+        f"Failed-Gates: {', '.join(failed_gates) if failed_gates else 'none'}",
+        f"Source-Entry: {entry.get('entry_id', 'unknown')}",
+        "",
+        "## Candidate Decision",
+        ext.decision_statement or "(no statement extracted)",
+        "",
+        "## Why this is a candidate, not a Decision",
+        gate_reasons,
+    ]
+
+    if "g8_self_contained" in failed_gates:
+        lines.append("")
+        lines.append(
+            "Not self-contained. Requires human-supplied context before promotion."
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Evidence",
+        ]
+    )
+    for quote in ext.verbatim_quotes:
+        lines.append(f"> {quote}")
+
+    lines.extend(
+        [
+            "",
+            "## Source",
+            f"Source entry: {entry_ref} (thread: {entry.get('thread_topic', 'unknown')})",
+            f"Agent: {entry.get('agent', 'unknown')} | "
+            f"Role: {entry.get('role', 'unknown')} | "
+            f"{entry.get('timestamp', 'unknown')}",
+        ]
+    )
+
     return "\n".join(lines)

@@ -218,6 +218,68 @@ class TestPersistence:
         assert loaded[0].finding_id == "f4"
         assert loaded[4].finding_id == "f0"
 
+    def test_count_findings_returns_zero_when_no_file(
+        self, tmp_path, monkeypatch
+    ):
+        """Cold-start: no findings.jsonl yet → 0 (not an error)."""
+        from watercooler_mcp.daemons.state import count_findings
+
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path
+        )
+        assert count_findings("brand_new_daemon") == 0
+
+    def test_count_findings_matches_persisted_total(
+        self, tmp_path, monkeypatch
+    ):
+        """After appending N findings, ``count_findings`` returns N.
+
+        Closes #682 Gap 1 — ``persisted_findings_count`` must reflect
+        the on-disk total, not just the in-memory session counter.
+        """
+        from watercooler_mcp.daemons.state import count_findings
+
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path
+        )
+        findings = [
+            Finding(
+                finding_id=f"f{i}",
+                daemon_name="test_count",
+                severity="info",
+                category="test_cat",
+                topic="t",
+                created_at=float(i),
+            )
+            for i in range(7)
+        ]
+        append_findings("test_count", findings)
+        assert count_findings("test_count") == 7
+
+    def test_count_findings_skips_blank_lines(self, tmp_path, monkeypatch):
+        """Blank lines are not findings — the counter must skip them.
+
+        Defensive: an interrupted append could leave a stray empty
+        line; we don't want it inflating the persisted count.
+        """
+        from watercooler_mcp.daemons.state import count_findings
+
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path
+        )
+        # Manually craft a findings file with embedded blank lines.
+        daemon_dir = tmp_path / "test_blanks"
+        daemon_dir.mkdir(parents=True)
+        (daemon_dir / "findings.jsonl").write_text(
+            '{"finding_id":"f1","daemon_name":"test_blanks","severity":"info","category":"x","topic":"t","created_at":1.0}\n'
+            "\n"
+            '{"finding_id":"f2","daemon_name":"test_blanks","severity":"info","category":"x","topic":"t","created_at":2.0}\n'
+            "\n"
+            "\n",
+            encoding="utf-8",
+        )
+        assert count_findings("test_blanks") == 2
+
     def test_load_findings_with_filters(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path

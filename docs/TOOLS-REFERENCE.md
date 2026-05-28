@@ -32,6 +32,7 @@ Reference for public CLI commands and MCP tools in open-source Watercooler.
 | `config init` | Generate annotated `config.toml` | `--user`, `--project`, `--force` | `watercooler config init --user` |
 | `config show` | Show resolved config | `--json`, `--sources`, `--project-path` | `watercooler config show --sources` |
 | `config validate` | Validate config files | `--strict`, `--project-path` | `watercooler config validate --strict` |
+| `setup-stop-hook` | Wire `watercooler-stop-hook` as a Stop hook | — | `watercooler setup-stop-hook` |
 
 ### Group 2 — Extended
 
@@ -117,12 +118,12 @@ appropriate tool.
 
 | Category | Tools | `code_path` | `agent_func` |
 |---|---|---|---|
-| Thread read | `list_threads`, `read_thread`, `list_thread_entries`, `get_thread_entry`, `get_thread_entry_range` | required | not used |
+| Thread read | `list_threads`, `read_thread`, `list_thread_entries`, `get_thread_entry` | required | not used |
 | Thread write | `say`, `ack`, `handoff`, `set_status` | required | required |
 | Thread admin | `delete_entry`, `delete_thread`, `archive_thread` | optional | not used |
-| Annotations | `annotate`, `remove_annotation`, `get_annotations` | optional | not used |
-| Search / graph | `search`, `smart_query`, `find_similar`, `federated_search`, `graph_enrich`, `graph_project`, `graph_recover`, `sync_repair` | varies | not used |
-| Utility / status | `health`, `whoami`, `roles`, `role_details`, `reindex` | varies | not used |
+| Annotations | `annotations` | optional | not used |
+| Search / graph | `search` (incl. `seed_entry_id=`/`federated=` modes), `smart_query`, `graph_enrich`, `graph_project`, `sync_repair` | varies | not used |
+| Utility / status | `health`, `roles` | varies | not used |
 
 `agent_func` format:
 `"<platform>:<model>:<role>"` — for example,
@@ -138,27 +139,18 @@ Canonical roles: `planner`, `critic`, `implementer`, `tester`, `pm`, `scribe`.
 | `watercooler_read_thread` | read-only |
 | `watercooler_list_thread_entries` | read-only |
 | `watercooler_get_thread_entry` | read-only |
-| `watercooler_get_thread_entry_range` | read-only |
 | `watercooler_roles` | read-only |
-| `watercooler_role_details` | read-only |
 | `watercooler_health` | read-only |
-| `watercooler_whoami` | read-only |
-| `watercooler_baseline_graph_stats` | read-only |
-| `watercooler_baseline_sync_status` | read-only |
+| `watercooler_baseline_graph` | read-only |
 | `watercooler_access_stats` | read-only |
 | `watercooler_search` | read-only |
 | `watercooler_smart_query` | read-only |
-| `watercooler_find_similar` | read-only |
-| `watercooler_federated_search` | read-only |
 | `watercooler_follow_xref` | read-only |
-| `watercooler_graph_recover` | instruction-only |
-| `watercooler_reindex` | idempotent |
 | `watercooler_say` | mutating |
 | `watercooler_ack` | mutating |
 | `watercooler_handoff` | mutating |
 | `watercooler_set_status` | mutating |
-| `watercooler_annotate` | mutating |
-| `watercooler_remove_annotation` | mutating |
+| `watercooler_annotations` | mutating (`action="get"` is read-only) |
 | `watercooler_archive_thread` | mutating |
 | `watercooler_graph_enrich` | mutating but resumable |
 | `watercooler_graph_project` | mutating but resumable |
@@ -218,6 +210,7 @@ List entry headers with summaries before fetching full bodies.
 | `limit` | int | no | Max entries (default: all from offset) |
 | `format` | string | no | `"json"` (default) or `"markdown"` |
 | `code_branch` | string | no | Branch filter; pass `"*"` for all |
+| `filter` | string | no | In-thread keyword search — case-insensitive substring matched against each entry's title and body; only matching entries are returned |
 
 **Example:**
 ```python
@@ -226,40 +219,29 @@ watercooler_list_thread_entries(topic="feature-auth", code_path=".", offset=0, l
 
 ### `watercooler_get_thread_entry`
 
-Get a single entry by index or entry ID.
+Get a single entry, or a contiguous range of entries.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `topic` | string | yes | Thread topic identifier |
 | `code_path` | string | yes | Path to code repo root |
-| `index` | int | one of† | Zero-based entry index |
+| `index` | int | one of† | Zero-based entry index; the range start when `to_index` is set |
 | `entry_id` | string | one of† | ULID from entry footer |
+| `to_index` | int | no | Inclusive end index — set it to return the range `index .. to_index` |
+| `summary_only` | bool | no | Range form only: return summaries, no bodies (default: false) |
 | `format` | string | no | `"json"` (default) or `"markdown"` |
+| `code_branch` | string | no | Range form only: branch filter; pass `"*"` for all |
 
-† Provide `index` or `entry_id`, not both.
+† Provide `index` or `entry_id` for a single entry, not both. For a range,
+pass `index` (the start, default 0) together with `to_index`; `entry_id`
+cannot be combined with `to_index`.
 
-**Example:**
+**Examples:**
 ```python
+# Single entry
 watercooler_get_thread_entry(topic="feature-auth", code_path=".", index=0)
-```
-
-### `watercooler_get_thread_entry_range`
-
-Return a contiguous range of entries.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `topic` | string | yes | Thread topic identifier |
-| `code_path` | string | yes | Path to code repo root |
-| `start_index` | int | no | Start index (default: 0) |
-| `end_index` | int | no | Inclusive end index (default: last entry) |
-| `summary_only` | bool | no | Return summaries only (default: false) |
-| `format` | string | no | `"json"` (default) or `"markdown"` |
-| `code_branch` | string | no | Branch filter; pass `"*"` for all |
-
-**Example:**
-```python
-watercooler_get_thread_entry_range(topic="feature-auth", code_path=".", start_index=0, end_index=4)
+# Contiguous range (inclusive)
+watercooler_get_thread_entry(topic="feature-auth", code_path=".", index=0, to_index=4)
 ```
 
 ## Thread write tools
@@ -307,8 +289,8 @@ Add an entry without flipping the ball.
 explicit in the thread record.
 
 > **Not to be confused with daemon findings.** To acknowledge a daemon finding,
-> use [`watercooler_acknowledge_finding`](#watercooler_acknowledge_finding).
-> `watercooler_ack` writes a thread entry; it does not mark findings as seen.
+> use `watercooler_daemon_findings(action="acknowledge")`. `watercooler_ack`
+> writes a thread entry; it does not mark findings as seen.
 
 **Example:**
 ```python
@@ -368,82 +350,44 @@ watercooler_set_status(
 
 ### `watercooler_health`
 
-Check server health, git auth, and setup status.
+Check server health, git auth, and setup status. With `detail="identity"`,
+returns the resolved agent identity and a write-readiness assessment instead
+(folded-in `watercooler_whoami`).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `code_path` | string | no | Repo path for context-aware checks |
+| `detail` | string | no | `"identity"` → resolved agent identity + write-readiness |
 
 **Example:**
 ```python
-watercooler_health()
-```
-
-### `watercooler_whoami`
-
-Get your resolved agent identity.
-
-No parameters.
-
-**Example:**
-```python
-watercooler_whoami()
+watercooler_health()                      # full health check
+watercooler_health(detail="identity")      # who am I + write-readiness
 ```
 
 ### `watercooler_roles`
 
-List all valid role names for a project.
+List the project's roles, or — with `role` — return one role's full
+behavioral specification.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `code_path` | string | yes | Path to repo root |
-| `format` | string | no | `"markdown"` (default) or `"json"` |
+| `role` | string | no | Role name. Empty → catalog; set → that role's full spec |
 
 **Example:**
 ```python
-watercooler_roles(code_path=".")
+watercooler_roles(code_path=".")                  # catalog
+watercooler_roles(code_path=".", role="critic")   # one role's full spec
 ```
 
-### `watercooler_role_details`
+### `watercooler_baseline_graph`
 
-Return the full behavioral specification for a single role.
+Baseline-graph diagnostics, selected by `scope`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `code_path` | string | yes | Path to repo root |
-| `role` | string | yes | Role name to look up |
-| `format` | string | no | `"markdown"` (default) or `"json"` |
-
-**Example:**
-```python
-watercooler_role_details(code_path=".", role="critic")
-```
-
-### `watercooler_reindex`
-
-Rebuild the thread index from source data.
-
-No parameters.
-
-**Example:**
-```python
-watercooler_reindex()
-```
-
-### `watercooler_baseline_graph_stats`
-
-Get thread and entry counts from the baseline graph.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `code_path` | string | yes | Path to code repo root |
-
-### `watercooler_baseline_sync_status`
-
-Check whether each thread's baseline graph is up to date.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
+| `scope` | string | no | `"stats"` (default — thread/entry counts + status breakdown) or `"sync"` (per-thread baseline-graph sync health) |
 | `code_path` | string | yes | Path to code repo root |
 
 ### `watercooler_access_stats`
@@ -466,7 +410,7 @@ Search entries and thread content.
 | `code_path` | string | yes | Path to code repo root |
 | `mode` | string | no | `"auto"` or `"entries"` on open-core; `"entities"`, `"episodes"`, and `"facts"` require a memory backend (hosted builds) |
 | `limit` | int | no | Max results (default: 10) |
-| `query_operator` | string | no | `"AND"` (default) or `"OR"` |
+| `query_operator` | string | no | `"OR"` (default — any token matches, ranked by token-match count) or `"AND"` (every token required) |
 | `semantic` | bool | no | Use embedding search (default: false) |
 | `tags` | string | no | Comma-separated tag names; all must be present |
 | `flag` | string | no | Flag value substring match |
@@ -512,26 +456,28 @@ watercooler_smart_query(
 )
 ```
 
-### `watercooler_find_similar`
+### `watercooler_search(seed_entry_id=...)` — seeded similarity
 
-Find entries semantically similar to a given entry.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `entry_id` | string | yes | Source entry ULID |
-| `code_path` | string | yes | Path to code repo root |
-| `limit` | int | no | Max results (default: 5) |
-| `similarity_threshold` | float | no | Minimum cosine similarity, 0.0–1.0 |
-| `use_embeddings` | bool | no | Use embedding similarity (default: true) |
-
-### `watercooler_federated_search`
-
-Fan a keyword query across all configured namespaces and return merged,
-ranked results. Requires `federation.enabled = true` in config.
-See [Federation](FEDERATION.md) for setup and configuration details.
+Find entries semantically similar to a given entry — the seeded-similarity
+mode of `watercooler_search` (folded-in `watercooler_find_similar`).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `seed_entry_id` | string | yes | Source entry ULID |
+| `code_path` | string | no | Path to code repo root |
+| `limit` | int | no | Max results (default: 10) |
+| `semantic_threshold` | float | no | Minimum cosine similarity, 0.0–1.0 |
+
+### `watercooler_search(federated=True)` — federated search
+
+Fan a keyword query across configured namespaces and return merged, ranked
+results — the federated mode of `watercooler_search` (folded-in
+`watercooler_federated_search`). Requires `federation.enabled = true` in
+config. See [Federation](FEDERATION.md) for setup details.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `federated` | bool | yes | `True` triggers federated search |
 | `query` | string | yes | Search text. Max 500 characters. |
 | `code_path` | string | no | Primary repo root. Determines which namespace is "local". |
 | `namespaces` | string | no | Comma-separated namespace IDs to query. Leave empty to query all configured namespaces. |
@@ -541,12 +487,6 @@ Results are scored with a multiplicative formula: `normalize(base_score) × name
 
 The response includes a `namespace_status` map so you can tell whether
 each secondary succeeded, timed out, or was skipped.
-
-### `watercooler_graph_recover`
-
-Return instructions for graph recovery.
-
-No parameters. Returns instructions for manual recovery.
 
 ### `watercooler_graph_enrich`
 
@@ -595,23 +535,25 @@ watercooler_sync_repair(code_path=".")
 
 ## Annotation tools
 
-### `watercooler_annotate`
+### `watercooler_annotations`
 
-Add a reaction, tag, flag, cross-reference, or pin to an entry or thread.
+Add, read, or remove annotations on an entry or thread, selected by `action`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `action` | string | yes | `"add"`, `"get"`, or `"remove"` |
 | `topic` | string | yes | Thread topic identifier |
-| `target_id` | string | yes | Entry ID or thread topic |
-| `target_type` | string | yes | `"entry"` or `"thread"` |
-| `kind` | string | yes | `reaction`, `tag`, `flag`, `xref`, or `pin` |
-| `value` | string | yes* | Annotation payload; ignored for `pin` |
+| `target_id` | string | varies | Entry ID or thread topic. Required for `add`/`remove`; for `get`, omit to return all annotation states for the thread |
+| `target_type` | string | for add/remove | `"entry"` or `"thread"` |
+| `kind` | string | for add/remove | `add`: `reaction`, `tag`, `flag`, `xref`, `pin`. `remove`: `tag_remove`, `flag_clear`, `xref_remove`, `unpin`, `reaction_remove` |
+| `value` | string | varies | Annotation payload (ignored for `pin`/`unpin`) |
 | `code_path` | string | no | Path to code repo root |
-| `actor` | string | no | Who is adding the annotation |
+| `actor` | string | no | Who is making the change (add/remove) |
 
 **Example:**
 ```python
-watercooler_annotate(
+watercooler_annotations(
+    action="add",
     topic="feature-auth",
     target_id="01ABC...",
     target_type="entry",
@@ -619,53 +561,13 @@ watercooler_annotate(
     value="needs_review",
     code_path="."
 )
-```
-
-### `watercooler_remove_annotation`
-
-Remove an annotation from an entry or thread.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `topic` | string | yes | Thread topic identifier |
-| `target_id` | string | yes | Entry ID or thread topic |
-| `target_type` | string | yes | `"entry"` or `"thread"` |
-| `kind` | string | yes | `tag_remove`, `flag_clear`, `xref_remove`, `unpin`, or `reaction_remove` |
-| `value` | string | no | Annotation payload for removal |
-| `code_path` | string | no | Path to code repo root |
-| `actor` | string | no | Who is removing the annotation |
-
-**Example:**
-```python
-watercooler_remove_annotation(
-    topic="feature-auth",
-    target_id="01ABC...",
-    target_type="entry",
-    kind="tag_remove",
-    value="needs_review",
-    code_path="."
-)
-```
-
-### `watercooler_get_annotations`
-
-Read annotations for an entry or thread.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `topic` | string | yes | Thread topic identifier |
-| `code_path` | string | no | Path to code repo root |
-| `target_id` | string | no | Entry ID or thread topic. Omit to return all annotation states for the thread |
-
-**Example:**
-```python
-watercooler_get_annotations(topic="feature-auth", code_path=".")
+watercooler_annotations(action="get", topic="feature-auth", code_path=".")
 ```
 
 ### `watercooler_follow_xref`
 
 Resolve an entry's annotation xrefs into entry summaries in a single call.
-Bundles `watercooler_get_annotations` + per-xref `watercooler_get_thread_entry`
+Bundles `watercooler_annotations` (`action="get"`) + per-xref `watercooler_get_thread_entry`
 into one round-trip. Output ordering mirrors `annotation_state.xrefs`.
 
 | Parameter | Type | Required | Description |
@@ -762,7 +664,7 @@ Retrieve findings reported by the background daemon.
 | `limit` | int | no | Max results (default: 50) |
 | `unacknowledged_only` | bool | no | Return only unacknowledged findings (default: false) |
 | `enrich` | bool | no | Overlay additional context onto premium `coordinator_lead` findings (default: false). Has no effect on open-core daemons. |
-| `code_path` | string | no | Path to the code repository root (default: `.`). Used to derive `repo_key` for S3 pulse-context enrichment. Supply an explicit value (e.g., from `watercooler_whoami()["code_path"]`) in multi-repo workspaces or when the MCP server's working directory may differ from the target repository. |
+| `code_path` | string | no | Path to the code repository root (default: `.`). Used to derive `repo_key` for S3 pulse-context enrichment. Supply an explicit value in multi-repo workspaces or when the MCP server's working directory may differ from the target repository. |
 
 **Available daemons (open-core):** `sync_guard`, `thread_auditor`, `decision_detector`, `decision_extractor`, `decision_stance`
 
@@ -916,23 +818,31 @@ watercooler_daemon_status(daemon="pulse_snapshot", trigger=True)
 watercooler_pulse_snapshot(code_path=".")
 ```
 
-### `watercooler_acknowledge_finding`
-Mark a daemon finding as acknowledged. | Safety: **mutating** (`daemon_control`) | Prerequisites: daemon
+### `watercooler_daemon_findings(action="acknowledge")`
+Mark one or more daemon findings as acknowledged. | Safety: **mutating** (`daemon_control`, L3) | Prerequisites: daemon
 
-Acknowledged findings are excluded from future `watercooler_daemon_findings(unacknowledged_only=True)` queries. The operation is idempotent — acknowledging an already-acknowledged finding returns `acknowledged: true` without error. Returns `status: "not_found"` when the finding ID is absent or the daemon's findings file does not exist.
+The acknowledge action of `watercooler_daemon_findings` (default `action="list"`).
+Acknowledged findings are excluded from future
+`watercooler_daemon_findings(unacknowledged_only=True)` queries.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `daemon_name` | string | yes | Daemon that owns the finding (from `findings[].daemon_name`, e.g., `project_coordinator`) |
-| `finding_id` | string | yes | Finding ID to acknowledge (from `findings[].finding_id`) |
+| `action` | string | yes | `"acknowledge"` |
+| `daemon` | string | yes | Daemon that owns the finding(s) (from `findings[].daemon_name`, e.g., `project_coordinator`) |
+| `finding_id` | string | one of† | A single finding ID to acknowledge |
+| `finding_ids` | list[str] | one of† | A list of finding IDs to acknowledge in one call (bulk) |
+
+† Provide `finding_id` and/or `finding_ids`.
 
 **Response shape:**
 
 | Field | Type | Description |
 |---|---|---|
-| `status` | string | `"ok"` on success, `"not_found"` when the ID is absent, `"error"` on unexpected failure |
-| `acknowledged` | bool | `true` when the finding was successfully marked acknowledged |
-| `finding_id` | string | Echo of the requested finding ID |
+| `status` | string | `"ok"`, `"partial"`, `"not_found"`, or `"error"` |
+| `daemon_name` | string | The owning daemon |
+| `acknowledged` | list[str] | Finding IDs successfully marked acknowledged |
+| `not_found` | list[str] | Finding IDs that did not resolve |
+| `errors` | list | Per-id errors, if any |
 
 **Example — consume, act, acknowledge loop:**
 ```python
@@ -941,15 +851,15 @@ result = watercooler_daemon_findings(
     daemon="decision_detector",
     unacknowledged_only=True,
 )
-# 2. Act on each finding
-for finding in result["findings"]:
-    # ... review the candidate, post a Decision entry if appropriate ...
-    # 3. Acknowledge when done
-    watercooler_acknowledge_finding(
-        daemon_name=finding["daemon_name"],
-        finding_id=finding["finding_id"],
-    )
-# → {"status": "ok", "acknowledged": true, "finding_id": "..."}
+# 2. Act on each finding, collecting the ids you've handled
+done = [f["finding_id"] for f in result["findings"]]
+# 3. Acknowledge them in one bulk call
+watercooler_daemon_findings(
+    action="acknowledge",
+    daemon="decision_detector",
+    finding_ids=done,
+)
+# → {"status": "ok", "acknowledged": [...], "not_found": [], "errors": []}
 ```
 
 ---

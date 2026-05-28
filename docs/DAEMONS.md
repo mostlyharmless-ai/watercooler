@@ -49,6 +49,69 @@ analysis, T2 indexing) ship only in premium and hosted deployments.
 Configuring them in an open-source install has no effect — the daemon
 entries are absent from the registry.
 
+## External daemons (third-party registration)
+
+Third-party Python packages can register their own `BaseDaemon`
+subclasses with the local `DaemonManager` without modifying
+watercooler-cloud source. Configure them under `[mcp.daemons.external]`:
+
+```toml
+[mcp.daemons]
+enabled = true
+
+[mcp.daemons.external]
+modules = [
+    "codex.daemons.gap_scanner:GapScanner",
+    "myorg.observability:HeartbeatDaemon",
+]
+```
+
+Each entry is an importable `"module.path:ClassName"` spec. At
+`init_daemons` time, after the built-in daemons are registered, the
+loader imports each module, fetches the class, instantiates it with
+**no arguments**, and registers it. Failures are captured per-entry
+via `DaemonManager.record_registration_failure` and surface in the
+`registration_errors` field of `watercooler_daemon_status` — they do
+not crash startup.
+
+### Contract (J.1 — in-process loader)
+
+This loader is intentionally narrow. External daemon classes must:
+
+- **Be importable in the running MCP server process.** The loader uses
+  `importlib.import_module`; the package must already be installed
+  (e.g. via `pip install -e ...`) into the same Python environment as
+  watercooler-cloud. There is no out-of-process loading, no manifest
+  resolution, no auto-install.
+- **Have a no-argument constructor.** The loader instantiates the
+  class as `ClassName()`. Daemons that need configuration must read it
+  themselves (e.g. via `watercooler.config_facade.config`) inside
+  `__init__`, mirroring the built-in pattern. There is no per-daemon
+  config block under `[mcp.daemons.external]`.
+- **Run under the existing local `DaemonManager` lifecycle.** Once
+  registered, the daemon's threading, ticking, sleep/wake, checkpoint
+  persistence, and atexit shutdown all flow through the same
+  machinery as built-in daemons. There is no sidecar process, no RPC,
+  no container isolation.
+
+### Out of scope (deferred to J.2)
+
+The plan's longer-term external-daemon goals — sidecar / container-
+friendly registration, RPC-based daemons, manifest-based discovery,
+out-of-process supervision — are **not** delivered by this loader.
+Codex-side consumers should not assume sibling-container registration
+exists today. If you need any of those, treat them as J.2 follow-up
+work.
+
+### Hosted mode behaviour
+
+`init_daemons` short-circuits in hosted mode (the
+`HostedDaemonCoordinator` owns daemons per request scope), so external
+daemons configured this way **do not register** in hosted deployments.
+The same is true when another process on the machine already owns the
+daemon PID lock — that process is the one running daemons; this one
+only reads findings.
+
 ## Enabling daemons
 
 The master switch and per-daemon settings live under `[mcp.daemons]` in
@@ -445,18 +508,25 @@ roadmap.
 
 ## Acknowledging findings
 
-Findings accumulate until acknowledged. Use `watercooler_acknowledge_finding`
-to mark one as seen:
+Findings accumulate until acknowledged. Use
+`watercooler_daemon_findings(action="acknowledge", ...)` to mark one — or
+several — as seen:
 
 ```
-watercooler_acknowledge_finding(
-    daemon_name="decision_detector",
-    finding_id="<finding_id>"
+watercooler_daemon_findings(
+    action="acknowledge",
+    daemon="decision_detector",
+    finding_id="<finding_id>"          # single
+)
+watercooler_daemon_findings(
+    action="acknowledge",
+    daemon="decision_detector",
+    finding_ids=["<id1>", "<id2>"]     # bulk
 )
 ```
 
 The `finding_id` comes from the `id` field on each finding returned by
-`watercooler_daemon_findings`.
+`watercooler_daemon_findings` (the default `action="list"`).
 
 To list only unacknowledged findings:
 
@@ -468,10 +538,10 @@ watercooler_daemon_findings(
 )
 ```
 
-> **Note:** `watercooler_acknowledge_finding` is distinct from
-> `watercooler_ack`. The latter is a thread-entry tool that takes a `topic`
-> and writes an `Ack` entry to the thread without flipping the ball; it does
-> not touch daemon findings.
+> **Note:** `watercooler_daemon_findings(action="acknowledge")` is distinct
+> from `watercooler_ack`. The latter is a thread-entry tool that takes a
+> `topic` and writes an `Ack` entry to the thread without flipping the ball;
+> it does not touch daemon findings.
 
 ---
 

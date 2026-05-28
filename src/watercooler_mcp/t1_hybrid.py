@@ -2,9 +2,9 @@
 
 The MCP layer registers ``upsert_embedding`` / ``delete_embedding`` callbacks
 with :mod:`watercooler.baseline_graph.sync`. In hybrid mode those callbacks
-forward to the hosted ``watercooler_semantic_upsert_embedding`` /
-``watercooler_semantic_delete_embedding`` tools via ``premium_client`` and
-append a Stage-A handoff receipt.
+forward to the hosted ``watercooler_semantic`` tool (``action="upsert"`` /
+``action="delete"``) via ``premium_client`` and append a Stage-A handoff
+receipt.
 
 Keeping this in a dedicated module (rather than :mod:`memory_sync`) makes
 the T1 vs T2 separation explicit in the MCP tree, mirroring the split-surface
@@ -171,7 +171,9 @@ def _submit_t1_upsert(
     }
     try:
         text = _run_coro_in_fresh_loop(
-            premium.call_tool_text("watercooler_semantic_upsert_embedding", args)
+            premium.call_tool_text(
+                "watercooler_semantic", {"action": "upsert", **args}
+            )
         )
     except Exception as e:
         logger.warning(
@@ -233,7 +235,9 @@ def _submit_t1_delete(
     args = {"entry_id": entry_id, "group_id": group_id, "topic": topic}
     try:
         text = _run_coro_in_fresh_loop(
-            premium.call_tool_text("watercooler_semantic_delete_embedding", args)
+            premium.call_tool_text(
+                "watercooler_semantic", {"action": "delete", **args}
+            )
         )
     except Exception as e:
         logger.warning(

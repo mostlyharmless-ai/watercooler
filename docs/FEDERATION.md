@@ -8,8 +8,9 @@ your primary repo and any configured secondary repos side-by-side.
 
 Federation is useful when your project spans multiple repositories that
 share context — for example, a backend API repo and a frontend app repo.
-Instead of switching repos and re-running searches, `watercooler_federated_search`
-fans the query out to every configured namespace and merges the results.
+Instead of switching repos and re-running searches,
+`watercooler_search(federated=True)` fans the query out to every configured
+namespace and merges the results.
 
 Federation is **read-only** and **keyword-based** (Phase 1). It surfaces
 awareness of neighbouring repos; it does not merge their data.
@@ -90,7 +91,8 @@ watercooler_health(code_path="/home/alice/projects/ui-app")
 ### Step 3 — Search across namespaces
 
 ```
-watercooler_federated_search(
+watercooler_search(
+    federated=True,
     query="authentication design",
     code_path="/home/alice/projects/api-backend"
 )
@@ -206,12 +208,16 @@ recency_floor = 0.7
 recency_half_life_days = 60
 ```
 
-## `watercooler_federated_search` tool
+## `watercooler_search(federated=True)` — federated mode
+
+Federated search is the `federated=` mode of `watercooler_search` (folded-in
+`watercooler_federated_search`, PR6 D5).
 
 ### Parameters
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `federated` | bool | yes | `True` triggers the federated path. |
 | `query` | string | yes | Search text. Max 500 characters. |
 | `code_path` | string | no | Primary repository root. Its directory basename becomes the primary namespace ID. |
 | `namespaces` | string | no | Comma-separated secondary namespace labels to query. Leave empty to query all configured secondaries. |
@@ -360,5 +366,5 @@ Phase 1 federation has the following known constraints:
 ## Related documentation
 
 - [Configuration](CONFIGURATION.md) — full config reference
-- [Tools reference](TOOLS-REFERENCE.md) — `watercooler_federated_search` entry
+- [Tools reference](TOOLS-REFERENCE.md) — `watercooler_search` federated mode
 - [Troubleshooting](TROUBLESHOOTING.md) — general MCP and sync issues

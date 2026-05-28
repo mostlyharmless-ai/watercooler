@@ -212,9 +212,9 @@ After running, sanity-check the result:
 # T1 to hybrid: hosted T1 should now be populated
 watercooler migrate t1 --to hybrid --dry-run    # should report 0 pushed
 
-# Cross-check: find_similar against an entry that previously errored
-mcp-cli call watercooler_find_similar \
-  --arg entry_id=01YOUR_ENTRY_ID --arg limit=5
+# Cross-check: seeded similarity against an entry that previously errored
+mcp-cli call watercooler_search \
+  --arg seed_entry_id=01YOUR_ENTRY_ID --arg limit=5
 # Expect: list of similar entries, no "no_embedding" error
 
 # T1 to stdio: count the local Entry nodes
@@ -326,8 +326,8 @@ watercooler migrate t1 --to hybrid --limit 100 \
   --local-port 16379 --checkpoint $CKPT
 
 # Verify a few of the entries from Stage A landed in hosted T1:
-mcp-cli call watercooler_find_similar \
-  --arg entry_id=<one_of_the_pushed_entry_ids> --arg limit=3
+mcp-cli call watercooler_search \
+  --arg seed_entry_id=<one_of_the_pushed_entry_ids> --arg limit=3
 # Expect: 3 hits via "hosted_t1_hnsw"
 
 # Stage B: medium batch
@@ -359,8 +359,8 @@ railway ssh "redis-cli GRAPH.QUERY <org>_<repo>_t1 \
 
 # Semantic-search smoke test against an old entry that previously
 # returned no_embedding:
-mcp-cli call watercooler_find_similar \
-  --arg entry_id=<your_oldest_entry_id> --arg limit=5
+mcp-cli call watercooler_search \
+  --arg seed_entry_id=<your_oldest_entry_id> --arg limit=5
 ```
 
 ### 5. Cleanup
@@ -409,7 +409,7 @@ written.
 v0.4.2-dev: nested topics (e.g. `fix/something`) were silently
 skipped by the orphan-branch scanner. Fixed in PR #<TBD>; if you're
 running an older watercooler-cloud, manually push affected entries
-via `watercooler_semantic_upsert_embedding` or upgrade.
+via `watercooler_semantic` (`action="upsert"`) or upgrade.
 
 **`railway ssh ... -- "<command>"` errors with `--: command not
 found`.** — your Railway CLI version handles the `--` separator

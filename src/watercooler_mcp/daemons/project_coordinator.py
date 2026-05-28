@@ -184,14 +184,107 @@ class ProjectCoordinatorDaemon(BaseDaemon):
             )
             return None
 
+    # Pre-#561 flat-shape detection keys.  When any of these appear at
+    # the root of ``checkpoint.extras`` it's the legacy shape (extras
+    # stored flat under root) and ``_load_extras`` migrates it to the
+    # ``projects[scope_id]["project_coordinator"]`` nesting that
+    # pulse_snapshot, analysis_snapshot, and trend_snapshot already use.
+    # Mirrors every key ``CoordinatorExtras.to_dict()`` persists
+    # (`project_coordinator_lib.py:133-145`). ``corpus_signal_inputs``
+    # is included defensively even though it's tick-scoped and not
+    # currently persisted — if a future change starts persisting it
+    # at root, the migration would clean it up too.
+    _LEGACY_FLAT_EXTRAS_KEYS = (
+        "seen_contributors",
+        "burst_baselines",
+        "active_signals",
+        "last_stance_signatures",
+        "cleared_stance_fids",
+        "corpus_signal_inputs",
+    )
+
     def _load_extras(self) -> None:
-        """Load extras from checkpoint on first tick."""
-        raw = self._checkpoint.extras or {}
-        self._extras = CoordinatorExtras.from_dict(raw)
+        """Load extras from checkpoint, scoped by ``self._scope_id``.
+
+        Closes #561.  Pre-fix: ``extras`` was flat at the checkpoint
+        root and ``self._extras`` was effectively shared across any
+        repos this daemon ever served.  Post-fix: extras live under
+        ``projects[scope_id]["project_coordinator"]`` so the multi-repo
+        invariants `aware_new_contributor` / `aware_burst` already use
+        per-repo state and hold across federated deployments.
+
+        Migration is one-shot: when the legacy flat shape is detected
+        at root, this load reads it (preserving in-memory state) and
+        the next ``_save_extras`` call writes to the new path AND
+        deletes the legacy keys from the checkpoint.
+        """
+        cp = self._checkpoint
+        assert cp is not None  # always set in __init__
+        raw = cp.extras or {}
+        scope_key = self._scope_id or "_unscoped"
+
+        # Preferred path: nested under projects[scope_id]["project_coordinator"]
+        projects = raw.get("projects") if isinstance(raw, dict) else None
+        if isinstance(projects, dict):
+            scope_state = projects.get(scope_key, {})
+            if isinstance(scope_state, dict):
+                pc_extras = scope_state.get("project_coordinator")
+                if isinstance(pc_extras, dict):
+                    self._extras = CoordinatorExtras.from_dict(pc_extras)
+                    return
+
+        # Migration: legacy flat shape — fields at root.
+        if isinstance(raw, dict) and any(
+            k in raw for k in self._LEGACY_FLAT_EXTRAS_KEYS
+        ):
+            self._extras = CoordinatorExtras.from_dict(raw)
+            logger.info(
+                "DAEMON[project_coordinator]: migrating pre-#561 flat extras "
+                "to projects[%s][project_coordinator] on next save",
+                scope_key,
+            )
+            return
+
+        # No data yet — fresh start.
+        self._extras = CoordinatorExtras()
 
     def _save_extras(self) -> None:
-        """Persist extras to checkpoint."""
-        self._checkpoint.extras = self._extras.to_dict()
+        """Persist extras under ``projects[scope_id]["project_coordinator"]``.
+
+        Per #561 — aligned with the established pattern used by
+        ``pulse_snapshot`` (``project_coordinator.py`` previously wrote
+        flat-at-root, which would have shared seen_contributors and
+        burst_baselines across repos in any future multi-repo
+        deployment).  Also clears legacy flat keys from the checkpoint
+        so the migration is one-shot.
+        """
+        scope_key = self._scope_id or "_unscoped"
+        # Mutate the existing extras dict in place so callers passing
+        # the dict by reference (e.g. multi-scope shared checkpoint
+        # tests, future hosted-coordinator scenarios) see updates.
+        cp = self._checkpoint
+        assert cp is not None  # always set in __init__
+        if not isinstance(cp.extras, dict):
+            cp.extras = {}
+        extras_dict = cp.extras
+
+        projects = extras_dict.get("projects")
+        if not isinstance(projects, dict):
+            projects = {}
+            extras_dict["projects"] = projects
+
+        scope_state = projects.get(scope_key)
+        if not isinstance(scope_state, dict):
+            scope_state = {}
+            projects[scope_key] = scope_state
+
+        scope_state["project_coordinator"] = self._extras.to_dict()
+
+        # Migration cleanup: remove legacy flat keys at root so a future
+        # `_load_extras` doesn't see both shapes and pick the stale one.
+        for legacy_key in self._LEGACY_FLAT_EXTRAS_KEYS:
+            extras_dict.pop(legacy_key, None)
+        # No explicit write-back — extras_dict IS self._checkpoint.extras.
 
     def _load_thread_tags(self, graph_dir: Path, topic: str) -> set[str]:
         """Load annotation tags for a thread (read-only)."""

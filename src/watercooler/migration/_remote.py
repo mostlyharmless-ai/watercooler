@@ -103,8 +103,9 @@ def upsert_remote_embedding(
     """
     raw = call_remote_tool(
         client,
-        "watercooler_semantic_upsert_embedding",
+        "watercooler_semantic",
         {
+            "action": "upsert",
             "entry_id": entry.entry_id,
             "topic": entry.thread_topic,
             "group_id": target_group_id,
@@ -129,7 +130,7 @@ def list_remote_embeddings(
 ) -> Iterator[RemoteEntry]:
     """Yield every Entry node from hosted T1 via the list-embeddings tool.
 
-    The hosted tool ``watercooler_semantic_list_embeddings`` is the
+    The hosted tool ``watercooler_semantic`` (``action="list"``) is the
     server-side enumeration primitive added for migration. Pagination is
     cursor-style (offset by entry_id) so concurrent writes during the
     pull are handled deterministically.
@@ -144,8 +145,9 @@ def list_remote_embeddings(
         request_cursor = cursor  # what we're SENDING this iteration
         raw = call_remote_tool(
             client,
-            "watercooler_semantic_list_embeddings",
+            "watercooler_semantic",
             {
+                "action": "list",
                 "group_id": target_group_id,
                 "cursor": request_cursor,
                 "limit": page_size,

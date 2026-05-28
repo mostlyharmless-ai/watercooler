@@ -1339,6 +1339,11 @@ def create_http_app():
         version="1.0.0",
     )
 
+    # Expose resolve_api_key_fn on app.state so route handlers (e.g.
+    # health_check) can perform inline Bearer auth without relying on
+    # the middleware, which explicitly skips non-MCP paths.
+    app.state.resolve_api_key_fn = resolve_api_key
+
     # Get HTTP config from unified config system
     def _get_http_config() -> tuple[str, int, int]:
         """Get HTTP config (cors_origins, max_request_size, request_timeout)."""
@@ -1496,12 +1501,44 @@ def create_http_app():
     )
 
     @app.get("/health")
-    async def health_check():
-        """Health check endpoint for load balancers and diagnostics."""
+    async def health_check(request: StarletteRequest):
+        """Health check endpoint for load balancers and diagnostics.
+
+        Unauthenticated callers receive a minimal liveness response
+        (status + mode only) — sufficient for load balancers. A valid
+        Bearer token (same API key as the MCP endpoint) is required to
+        access the full diagnostic response including deployment profile,
+        circuit breaker state, and cache stats. Local mode always returns
+        the full response without requiring auth.
+        """
+        import asyncio
+
         hosted = is_hosted_mode()
-        health: dict = {
+
+        # Minimal public-safe response — sufficient for liveness checks.
+        minimal: dict = {
             "status": "healthy",
             "mode": "hosted" if hosted else "local",
+        }
+
+        # Full diagnostics are auth-gated in hosted mode. Local mode is
+        # unrestricted (no auth required).
+        is_authenticated = not hosted
+        if hosted:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer ") and len(auth_header) > 7:
+                api_key = auth_header[7:].strip()
+                resolve_fn = getattr(request.app.state, "resolve_api_key_fn", None)
+                if resolve_fn is not None:
+                    token_info = await asyncio.to_thread(resolve_fn, api_key)
+                    is_authenticated = token_info is not None
+
+        if not is_authenticated:
+            return minimal
+
+        # Authenticated path: full diagnostics (unchanged from prior implementation).
+        health: dict = {
+            **minimal,
             "cache": (
                 cache.stats() if hasattr(cache, "stats") else {"backend": "unknown"}
             ),

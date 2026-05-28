@@ -149,6 +149,88 @@ def test_list_thread_entries_returns_headers(patched_context):
     assert "body" not in first
 
 
+def test_list_thread_entries_keyword_filter_matches_body(patched_context):
+    """#325 — filter= narrows to entries whose body contains the keyword."""
+    result = server.list_thread_entries(
+        topic="entry-access-tools", code_path=".", filter="Line A"
+    )
+    payload = _extract_payload(result)
+    assert payload["filter"] == "Line A"
+    assert payload["entry_count"] == 1
+    assert len(payload["entries"]) == 1
+    assert payload["entries"][0]["index"] == 0
+
+
+def test_list_thread_entries_keyword_filter_matches_title_caseless(patched_context):
+    """#325 — the filter matches the entry title, case-insensitively."""
+    result = server.list_thread_entries(
+        topic="entry-access-tools", code_path=".", filter="closing"
+    )
+    payload = _extract_payload(result)
+    assert payload["entry_count"] == 1
+    assert payload["entries"][0]["index"] == 1
+
+
+def test_list_thread_entries_keyword_filter_no_match(patched_context):
+    result = server.list_thread_entries(
+        topic="entry-access-tools", code_path=".", filter="zzz-no-such-keyword"
+    )
+    payload = _extract_payload(result)
+    assert payload["entry_count"] == 0
+    assert payload["entries"] == []
+
+
+def test_list_thread_entries_no_filter_returns_all(patched_context):
+    """A blank filter is a no-op — all entries returned, no filter field."""
+    result = server.list_thread_entries(topic="entry-access-tools", code_path=".")
+    payload = _extract_payload(result)
+    assert payload["entry_count"] == 2
+    assert "filter" not in payload
+
+
+def test_list_thread_entries_hosted_markdown_echoes_filter(monkeypatch):
+    """#325 — the hosted markdown path filters AND echoes [filter: ...] in the
+    header, matching the local path (PR #826 review)."""
+    from watercooler_mcp.tools import thread_query as tq
+
+    class _E:
+        def __init__(self, index, title, body):
+            self.index = index
+            self.title = title
+            self.body = body
+            self.entry_id = f"id{index}"
+            self.timestamp = "2026-01-01T00:00:00Z"
+            self.role = "implementer"
+            self.entry_type = "Note"
+            self.agent = "Tester"
+
+        def __getattr__(self, _name):
+            # Stub any other ThreadEntry field the header payload reads.
+            return ""
+
+    entries = [
+        _E(0, "OAuth design", "body discussing oauth"),
+        _E(1, "Unrelated note", "nothing relevant here"),
+    ]
+    fake_ctx = type("Ctx", (), {"code_branch": None, "code_repo": "x/y"})()
+
+    monkeypatch.setattr(
+        tq.validation, "_validate_thread_context", lambda _cp: (None, fake_ctx)
+    )
+    monkeypatch.setattr(tq, "is_hosted_context", lambda _c: True)
+    monkeypatch.setattr(
+        tq, "load_thread_entries_hosted", lambda _t: (None, entries)
+    )
+
+    result = tq._list_thread_entries_impl(
+        topic="t", code_path=".", format="markdown", filter="oauth"
+    )
+    text = result.content[0].text
+    assert "[filter: oauth]" in text
+    assert "OAuth design" in text
+    assert "Unrelated note" not in text
+
+
 def test_get_thread_entry_by_index(patched_context):
     result = server.get_thread_entry(topic="entry-access-tools", index=1, code_path=".")
     payload = _extract_payload(result)
@@ -191,10 +273,10 @@ def test_get_thread_entry_index_id_mismatch(patched_context):
 
 
 def test_get_thread_entry_range_inclusive(patched_context):
-    result = server.get_thread_entry_range(
+    result = server.get_thread_entry(
         topic="entry-access-tools",
-        start_index=0,
-        end_index=1,
+        index=0,
+        to_index=1,
         code_path=".",
     )
     payload = _extract_payload(result)
@@ -205,7 +287,12 @@ def test_get_thread_entry_range_inclusive(patched_context):
 
 
 def test_entry_range_handles_open_end(patched_context):
-    result = server.get_thread_entry_range(
+    # Open-ended ranges are not exposed by the unified watercooler_get_thread_entry
+    # tool (it requires an explicit to_index); the underlying range helper still
+    # supports end_index=None and is exercised directly here.
+    from watercooler_mcp.tools.thread_query import _get_thread_entry_range_impl
+
+    result = _get_thread_entry_range_impl(
         topic="entry-access-tools",
         start_index=1,
         end_index=None,
@@ -231,10 +318,10 @@ def test_invalid_range_returns_error(patched_context):
     from watercooler_mcp.errors import IndexOutOfRangeError
 
     with pytest.raises(IndexOutOfRangeError) as exc_info:
-        server.get_thread_entry_range(
+        server.get_thread_entry(
             topic="entry-access-tools",
-            start_index=5,
-            end_index=6,
+            index=5,
+            to_index=6,
             code_path=".",
         )
     assert "out of range" in str(exc_info.value).lower() or "must be" in str(exc_info.value).lower()
@@ -264,10 +351,10 @@ def test_get_thread_entry_markdown(patched_context):
 
 
 def test_get_thread_entry_range_markdown(patched_context):
-    result = server.get_thread_entry_range(
+    result = server.get_thread_entry(
         topic="entry-access-tools",
-        start_index=0,
-        end_index=1,
+        index=0,
+        to_index=1,
         code_path=".",
         format="markdown",
     )

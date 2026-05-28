@@ -157,7 +157,7 @@ class TestSearchQuery:
         assert query.query is None
         assert query.semantic is False
         assert query.limit == 10
-        assert query.query_operator == "AND"
+        assert query.query_operator == "OR"
         assert query.combine == "AND"
         assert query.include_threads is True
         assert query.include_entries is True
@@ -299,56 +299,58 @@ class TestHelperFunctions:
     def test_matches_keyword_found(self):
         """Test keyword matching when found."""
         node = {"title": "Authentication Feature", "body": "JWT tokens"}
-        matches, fields = _matches_keyword(node, "auth")
+        matches, fields, _ratio = _matches_keyword(node, "auth")
         assert matches is True
         assert "title" in fields
 
     def test_matches_keyword_not_found(self):
         """Test keyword matching when not found."""
         node = {"title": "Bug Fix", "body": "Some fix"}
-        matches, fields = _matches_keyword(node, "auth")
+        matches, fields, _ratio = _matches_keyword(node, "auth")
         assert matches is False
         assert fields == []
 
     def test_matches_keyword_empty_query(self):
         """Test keyword matching with empty query."""
         node = {"title": "Test"}
-        matches, fields = _matches_keyword(node, "")
+        matches, fields, _ratio = _matches_keyword(node, "")
         assert matches is True
         assert fields == []
 
     def test_matches_keyword_case_insensitive(self):
         """Test keyword matching is case insensitive."""
         node = {"title": "AUTHENTICATION"}
-        matches, fields = _matches_keyword(node, "auth")
+        matches, fields, _ratio = _matches_keyword(node, "auth")
         assert matches is True
 
     def test_matches_keyword_multi_word_same_field(self):
         """Test multi-word query where all tokens appear in the same field."""
         node = {"title": "Long polling notification mechanism", "body": "Details here"}
-        matches, fields = _matches_keyword(node, "long polling notification")
+        matches, fields, _ratio = _matches_keyword(node, "long polling notification")
         assert matches is True
         assert "title" in fields
 
     def test_matches_keyword_multi_word_cross_field(self):
         """Test multi-word query where tokens span different fields."""
         node = {"title": "Authentication setup", "body": "Uses OAuth2 flow with refresh tokens"}
-        matches, fields = _matches_keyword(node, "authentication OAuth2")
+        matches, fields, _ratio = _matches_keyword(node, "authentication OAuth2")
         assert matches is True
         assert "title" in fields
         assert "body" in fields
 
     def test_matches_keyword_multi_word_partial_miss(self):
-        """Test multi-word query where one token is missing — should not match."""
+        """AND mode: a multi-word query where one token is missing must not match."""
         node = {"title": "Auth setup", "body": "Login flow"}
-        matches, fields = _matches_keyword(node, "auth database migration")
+        matches, fields, _ratio = _matches_keyword(
+            node, "auth database migration", query_operator="AND"
+        )
         assert matches is False
         assert fields == []
 
     def test_matches_keyword_multi_word_or_mode(self):
         """Test OR keyword mode matches when any token is present."""
         node = {"title": "Auth setup", "body": "Login flow"}
-        matches, fields = _matches_keyword(
+        matches, fields, _ratio = _matches_keyword(
             node,
             "auth database migration",
             query_operator="OR",
@@ -359,7 +361,7 @@ class TestHelperFunctions:
     def test_matches_keyword_multi_word_or_mode_miss(self):
         """Test OR keyword mode still fails when no tokens are present."""
         node = {"title": "Bug setup", "body": "Login flow"}
-        matches, fields = _matches_keyword(
+        matches, fields, _ratio = _matches_keyword(
             node,
             "auth database migration",
             query_operator="OR",
@@ -370,14 +372,14 @@ class TestHelperFunctions:
     def test_matches_keyword_single_word_backward_compat(self):
         """Test single-word query still does substring matching (backward compat)."""
         node = {"title": "AUTHENTICATION"}
-        matches, fields = _matches_keyword(node, "auth")
+        matches, fields, _ratio = _matches_keyword(node, "auth")
         assert matches is True
         assert "title" in fields
 
     def test_matches_keyword_multi_word_case_insensitive(self):
         """Test multi-word query with mixed case tokens."""
         node = {"title": "Advisory Lock Timeout", "body": "P1002 error during deploy"}
-        matches, fields = _matches_keyword(node, "Advisory P1002")
+        matches, fields, _ratio = _matches_keyword(node, "Advisory P1002")
         assert matches is True
         assert "title" in fields
         assert "body" in fields
@@ -385,9 +387,41 @@ class TestHelperFunctions:
     def test_matches_keyword_whitespace_only(self):
         """Test whitespace-only query treated as empty (matches everything)."""
         node = {"title": "Anything"}
-        matches, fields = _matches_keyword(node, "   ")
+        matches, fields, _ratio = _matches_keyword(node, "   ")
         assert matches is True
         assert fields == []
+
+    def test_matches_keyword_default_operator_is_or(self):
+        """The default query_operator is OR (PR2) — a partial multi-word match
+        succeeds without passing query_operator explicitly."""
+        node = {"title": "Auth setup", "body": "Login flow"}
+        matches, fields, ratio = _matches_keyword(node, "auth database migration")
+        assert matches is True
+        assert "title" in fields
+        assert ratio == pytest.approx(1 / 3)
+
+    def test_matches_keyword_ratio_full_match(self):
+        """token-match ratio is 1.0 when every query token is found."""
+        node = {"title": "Auth setup", "body": "database migration done"}
+        matches, _fields, ratio = _matches_keyword(node, "auth database migration")
+        assert matches is True
+        assert ratio == pytest.approx(1.0)
+
+    def test_matches_keyword_ratio_empty_query(self):
+        """An empty query matches everything with ratio 1.0."""
+        matches, fields, ratio = _matches_keyword({"title": "x"}, "")
+        assert matches is True
+        assert fields == []
+        assert ratio == 1.0
+
+    def test_matches_keyword_ratio_and_mode_miss_is_zero(self):
+        """AND mode that fails returns ratio 0.0."""
+        node = {"title": "Auth setup"}
+        matches, _fields, ratio = _matches_keyword(
+            node, "auth database", query_operator="AND"
+        )
+        assert matches is False
+        assert ratio == 0.0
 
     def test_matches_time_range_within(self):
         """Test time range matching when within range."""
@@ -459,6 +493,22 @@ class TestSearchGraph:
         results = search_graph(populated_graph, query)
         assert results.count == 1
         assert results.results[0].entry.role == "planner"
+
+    def test_search_filter_only_no_token_bonus(self, populated_graph):
+        """Regression (PR2 review): a filter-only search (no keyword query)
+        must not receive the token-match bonus. token_ratio defaults to 0.0,
+        so the +TOKEN_MATCH_WEIGHT term is only added when a keyword query
+        actually participated."""
+        query = SearchQuery(
+            role="planner",
+            include_threads=False,
+            include_entries=True,
+        )
+        results = search_graph(populated_graph, query)
+        assert results.count == 1
+        # Base 1.0 + small field boosts only; the +8 token bonus must be
+        # absent for a query-less search (the bug scored such results ~9).
+        assert results.results[0].score < 2.0
 
     def test_search_by_entry_type(self, populated_graph):
         """Test filtering by entry type."""

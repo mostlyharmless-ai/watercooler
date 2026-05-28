@@ -120,21 +120,3 @@ class TestResolveRecoveryTargets:
         topics, errors = resolve_recovery_targets(tmp_path, mode="stale")
         assert topics == []
         assert errors == []
-
-
-# ================================================================== #
-# _graph_recover_impl stub
-# ================================================================== #
-
-
-class TestGraphRecoverImplStub:
-    """Test that the MCP tool returns the script redirect message."""
-
-    @pytest.mark.anyio
-    async def test_recover_impl_returns_script_message(self):
-        from watercooler_mcp.tools.graph import _graph_recover_impl
-
-        result = await _graph_recover_impl(MagicMock())
-        output = json.loads(result)
-        assert output["status"] == "moved_to_script"
-        assert "recover_baseline_graph.py" in output["script"]

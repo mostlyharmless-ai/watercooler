@@ -41,12 +41,20 @@ from .errors import (
 from .manager import DaemonManager
 from .state import DaemonCheckpoint, Finding, ThreadCheckpoint
 
-# Public daemon implementations — ship in the open-core build.
-from .auditor import ThreadAuditorDaemon
-from .decision_detector import DetectDecisionsDaemon
-from .decision_extractor import ExtractDecisionsDaemon
-from .project_coordinator import ProjectCoordinatorDaemon
-from .sync_guard import SyncGuardDaemon
+# Public daemon implementations are exposed lazily via __getattr__ (below):
+# the daemon-class modules import heavy/optional deps (e.g. ``ulid``), and
+# importing a lightweight sibling such as ``watercooler_mcp.daemons.state``
+# — used by the operator CLI ``scripts/reset_decision_extractor.py`` — must
+# not drag the whole daemon fleet (and its deps) in. ``init_daemons`` already
+# imports each daemon class function-locally, so nothing here needs them
+# eagerly. Module name for each is in ``_LAZY_DAEMON_CLASSES``.
+_LAZY_DAEMON_CLASSES: dict[str, str] = {
+    "ThreadAuditorDaemon": ".auditor",
+    "DetectDecisionsDaemon": ".decision_detector",
+    "ExtractDecisionsDaemon": ".decision_extractor",
+    "ProjectCoordinatorDaemon": ".project_coordinator",
+    "SyncGuardDaemon": ".sync_guard",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -260,16 +268,25 @@ def daemon_runtime_location(daemon_name: str) -> str:
 
 
 def __getattr__(name: str):
-    """Deprecated-name re-exports (PEP 562).
+    """Lazy attribute resolution (PEP 562).
 
-    ``LOCAL_DAEMON_NAMES`` was the frozenset that used to gate premium
-    daemon registration.  PR #653 replaced it with per-daemon ``enabled``
-    flags plus capability-based routing; there is no longer a meaningful
-    "local vs premium" partition to expose.  The shim returns an empty
-    frozenset so legacy callers fail gracefully with a deprecation
-    warning rather than an AttributeError.  Remove after two minor
-    releases.
+    Two roles:
+
+    - **Lazy daemon classes** — the public daemon implementations in
+      ``__all__`` are imported on first access, not at package import time,
+      so importing a lightweight sibling module does not pull every daemon
+      (and its deps) in. See ``_LAZY_DAEMON_CLASSES``.
+    - **Deprecated-name shim** — ``LOCAL_DAEMON_NAMES`` was the frozenset
+      that used to gate premium daemon registration. PR #653 replaced it
+      with per-daemon ``enabled`` flags plus capability-based routing; the
+      shim returns an empty frozenset with a ``DeprecationWarning`` so
+      legacy callers fail gracefully. Remove after two minor releases.
     """
+    if name in _LAZY_DAEMON_CLASSES:
+        import importlib
+
+        module = importlib.import_module(_LAZY_DAEMON_CLASSES[name], __name__)
+        return getattr(module, name)
     if name == "LOCAL_DAEMON_NAMES":
         import warnings
 
@@ -325,7 +342,52 @@ def ensure_hosted_scope_for_current_context(reason: str = "") -> None:
 # ------------------------------------------------------------------ #
 
 _PIDFILE_DIR = Path.home() / ".watercooler" / "daemons"
-_PIDFILE_NAME = "daemon.pid"
+# Legacy pidfile name from before per-repo locks (PR L1 of
+# `daemon-architecture-audit-2026-05`, entry
+# `01KR5RCWK0F0EM1YVKWRJPD239`).  Honoured for one release as a
+# soft-migration fallback when ``repo_key`` cannot be derived; logged
+# as a deprecation warning so operators know to upgrade.
+_LEGACY_PIDFILE_NAME = "daemon.pid"
+
+
+def _pidfile_path(repo_key: str) -> Path:
+    """Return the per-repo pidfile path for *repo_key*.
+
+    Empty *repo_key* falls back to the legacy single-fleet
+    ``daemon.pid`` so callers that can't resolve a repo (CWD outside a
+    watercooler repo, early boot, etc.) still get a working lock with
+    pre-L1 single-fleet semantics.  Operators see a deprecation
+    warning in that path.
+    """
+    if not repo_key:
+        return _PIDFILE_DIR / _LEGACY_PIDFILE_NAME
+    return _PIDFILE_DIR / f"{repo_key}.pid"
+
+
+def _resolve_repo_key_from_cwd() -> str:
+    """Derive a deterministic repo_key from the current working directory.
+
+    Empty string when CWD doesn't resolve to a watercooler repo (e.g.
+    server launched from ``$HOME``); callers fall back to the legacy
+    lock in that case.
+
+    Uses ``derive_repo_key`` (SHA-1 of resolved code_root, 12 hex
+    chars) — same hash other daemons use for per-repo state, so the
+    pidfile name lines up with whichever repo the daemon fleet
+    actually watches.
+    """
+    try:
+        from watercooler_mcp.config import resolve_thread_context
+        from watercooler.pulse_snapshot_lib import derive_repo_key
+    except Exception:  # noqa: BLE001 — fail-open to legacy lock
+        return ""
+    try:
+        ctx = resolve_thread_context(Path.cwd())
+        if ctx and ctx.code_root:
+            return derive_repo_key(Path(ctx.code_root))
+    except Exception:  # noqa: BLE001 — same fail-open
+        pass
+    return ""
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -348,22 +410,31 @@ def _pid_is_alive(pid: int) -> bool:
         raise
 
 
-def _try_acquire_daemon_lock() -> bool:
-    """Try to acquire the cross-process daemon PID lock.
+def _try_acquire_daemon_lock(repo_key: str = "") -> bool:
+    """Try to acquire the cross-process daemon PID lock for *repo_key*.
 
-    Returns True if this process now owns daemons, False if another
-    live process already holds the lock.
+    Returns True if this process now owns daemons for that repo, False
+    if another live process already holds the lock for the same repo.
 
-    Lock semantics:
-    - PID file at ~/.watercooler/daemons/daemon.pid
-    - Contains: pid=<PID> (plus metadata)
-    - If the file exists and the PID is alive → another process owns daemons
-    - If the file exists but the PID is dead → stale lock, take over
-    - If the file doesn't exist → acquire
+    Per-repo lock semantics (post-L1):
+    - PID file at ``~/.watercooler/daemons/<repo_key>.pid`` (or
+      ``daemon.pid`` when *repo_key* is empty — legacy single-fleet
+      fallback).
+    - Contains: ``pid=<PID>`` (plus metadata).
+    - If the file exists and the PID is alive → another process owns
+      daemons FOR THIS REPO; this process returns False and operates
+      read-only over disk findings.
+    - If the file exists but the PID is dead → stale lock, take over.
+    - If the file doesn't exist → acquire.
+
+    Multiple processes on one machine can co-own daemons across
+    different repos because each repo has its own lock file.  Closes
+    the failure mode Jay observed 2026-05-08: pre-L1, the first MCP
+    server to boot won the only lock and other repos were blind.
     """
     global _daemon_pidfile
 
-    pidfile = _PIDFILE_DIR / _PIDFILE_NAME
+    pidfile = _pidfile_path(repo_key)
     _PIDFILE_DIR.mkdir(parents=True, exist_ok=True)
 
     # Atomic exclusive-create: O_CREAT|O_EXCL is atomic on POSIX,
@@ -391,17 +462,20 @@ def _try_acquire_daemon_lock() -> bool:
 
         if _pid_is_alive(holder_pid):
             logger.info(
-                "DAEMONS: another process (PID %d) is running daemons, "
-                "skipping daemon registration in this process (PID %d)",
+                "DAEMONS: another process (PID %d) is running daemons "
+                "for this repo (lock=%s), skipping daemon registration "
+                "in this process (PID %d)",
                 holder_pid,
+                pidfile.name,
                 os.getpid(),
             )
             return False
 
         # Stale lock — holder is dead, take over
         logger.info(
-            "DAEMONS: stale daemon lock from PID %d (dead), taking over",
+            "DAEMONS: stale daemon lock from PID %d (dead, lock=%s), taking over",
             holder_pid,
+            pidfile.name,
         )
     except (ValueError, OSError) as exc:
         logger.warning("DAEMONS: could not read pidfile, removing: %s", exc)
@@ -418,6 +492,48 @@ def _try_acquire_daemon_lock() -> bool:
         # Another process won the race after we removed the stale lock
         logger.info("DAEMONS: lost lock race after stale removal: %s", exc)
         return False
+
+
+def _list_sibling_fleets() -> list[dict[str, Any]]:
+    """Scan ``~/.watercooler/daemons/`` for live sibling daemon fleets.
+
+    Returns one dict per *.pid file whose holder PID is alive and is
+    NOT this process.  Surfaced via ``watercooler_daemon_status`` so
+    operators running multiple MCP servers across different repos can
+    see the full picture from any of their sessions.
+
+    Each entry: ``{"repo_key": str, "pid": int, "pidfile": str}``.
+    Empty list when only this process owns a fleet (or no fleets at
+    all).  Defensive: parse failures are skipped silently — a stale
+    or corrupt pidfile shouldn't break ``daemon_status``.
+    """
+    fleets: list[dict[str, Any]] = []
+    if not _PIDFILE_DIR.exists():
+        return fleets
+    our_pid = os.getpid()
+    try:
+        candidates = list(_PIDFILE_DIR.glob("*.pid"))
+    except OSError:
+        return fleets
+    for pidfile in candidates:
+        try:
+            content = pidfile.read_text(encoding="utf-8").strip()
+            if content.startswith("pid="):
+                holder_pid = int(content.split()[0].split("=")[1])
+            else:
+                holder_pid = int(content)
+        except (ValueError, OSError):
+            continue
+        if holder_pid == our_pid:
+            continue
+        if not _pid_is_alive(holder_pid):
+            continue
+        # Strip ``.pid`` suffix; legacy ``daemon.pid`` becomes "daemon".
+        repo_key = pidfile.stem
+        fleets.append(
+            {"repo_key": repo_key, "pid": holder_pid, "pidfile": pidfile.name}
+        )
+    return fleets
 
 
 def _release_daemon_lock() -> None:
@@ -459,12 +575,18 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
     """
     global _manager
 
+    # Resolve repo_key from CWD before constructing the manager so the
+    # per-repo PID lock and the manager's repo binding line up.  Empty
+    # string falls back to the legacy single-fleet ``daemon.pid``;
+    # operators see a deprecation log via ``_try_acquire_daemon_lock``.
+    repo_key = _resolve_repo_key_from_cwd()
+
     with _init_lock:
         if _manager is not None:
             logger.debug("DAEMONS: already initialised, skipping")
             return _manager
 
-        _manager = DaemonManager()
+        _manager = DaemonManager(repo_key=repo_key)
         atexit.register(_shutdown_daemons)
 
     # In hosted mode, use the HostedDaemonCoordinator instead of a
@@ -483,12 +605,27 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
         _coordinator.start_reaper()
         atexit.register(lambda: _coordinator.stop() if _coordinator else None)
         return _manager  # _manager stays empty; coordinator owns scoped managers
-    elif not _try_acquire_daemon_lock():
-        # Cross-process singleton: only one process runs daemons
-        logger.info(
-            "DAEMONS: deferring to existing daemon owner — "
-            "this process will read findings but not produce them"
-        )
+    elif not _try_acquire_daemon_lock(repo_key):
+        # Cross-process per-repo singleton: only one process runs
+        # daemons FOR THIS REPO at a time.  Other repos on the same
+        # machine each have their own pidfile and can co-own daemons
+        # in parallel — see ``_pidfile_path`` + ``_list_sibling_fleets``.
+        if repo_key:
+            logger.info(
+                "DAEMONS: deferring to existing daemon owner for repo_key=%s — "
+                "this process will read findings but not produce them",
+                repo_key,
+            )
+        else:
+            logger.warning(
+                "DAEMONS: could not derive repo_key from CWD; falling back "
+                "to legacy daemon.pid lock. Multi-repo concurrent MCP "
+                "servers will be blind to each other's repos until CWD "
+                "resolves to a watercooler repo at MCP server boot. "
+                "Deprecated path; will be removed once L1 migration "
+                "settles. See `daemon-architecture-audit-2026-05` "
+                "entry `01KR5RCWK0F0EM1YVKWRJPD239`."
+            )
         return _manager
 
     # Load config to decide which daemons to register
@@ -497,262 +634,399 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
 
         wc_config = config.full()
         daemons_config = wc_config.mcp.daemons
+    except Exception as exc:
+        # Config-load failure: daemons can't be registered at all.  Record
+        # under a synthetic ``_config`` daemon so ``watercooler_daemon_status``
+        # surfaces the reason instead of returning a silent empty fleet.
+        _manager.record_registration_failure("_config", exc)
+        if start:
+            _manager.start_all()
+        return _manager
 
-        if not daemons_config.enabled:
-            logger.info("DAEMONS: globally disabled in config")
-            return _manager
+    if not daemons_config.enabled:
+        logger.info("DAEMONS: globally disabled in config")
+        if start:
+            _manager.start_all()
+        return _manager
 
-        # Registration is config-driven: each daemon's ``enabled`` flag
-        # (and, for premium daemons, ``route``) in config.toml decides
-        # whether and where it registers.  ``daemon_execution_policy`` is
-        # the single decision function — it returns ``"local"``,
-        # ``"hosted"``, or ``"skip"`` per daemon.  In stdio/http mode the
-        # policy always says ``local`` (no hosted coordinator exists).
-        # In hybrid/proxy mode premium daemons default to ``hosted`` so
-        # the Railway-side coordinator owns them; users override with
-        # ``[mcp.daemons.<name>] route = "local"``.
-        _transport = getattr(wc_config.mcp, "transport", "stdio")
+    # Registration is config-driven: each daemon's ``enabled`` flag
+    # (and, for premium daemons, ``route``) in config.toml decides
+    # whether and where it registers.  ``daemon_execution_policy`` is
+    # the single decision function — it returns ``"local"``,
+    # ``"hosted"``, or ``"skip"`` per daemon.  In stdio/http mode the
+    # policy always says ``local`` (no hosted coordinator exists).
+    # In hybrid/proxy mode premium daemons default to ``hosted`` so
+    # the Railway-side coordinator owns them; users override with
+    # ``[mcp.daemons.<name>] route = "local"``.
+    _transport = getattr(wc_config.mcp, "transport", "stdio")
 
-        def _local_ok(name: str) -> bool:
-            sub_cfg = getattr(daemons_config, name, None)
-            if sub_cfg is None:
-                return True
-            decision = daemon_execution_policy(
-                name, sub_cfg, _transport, in_hosted_coordinator=False
+    def _local_ok(name: str) -> bool:
+        sub_cfg = getattr(daemons_config, name, None)
+        if sub_cfg is None:
+            return True
+        decision = daemon_execution_policy(
+            name, sub_cfg, _transport, in_hosted_coordinator=False
+        )
+        if decision == "local":
+            return True
+        if decision == "hosted":
+            logger.info(
+                "DAEMONS: %s routes to hosted coordinator "
+                "(transport=%s, route=%s)",
+                name,
+                _transport,
+                getattr(sub_cfg, "route", "auto"),
             )
-            if decision == "local":
-                return True
-            if decision == "hosted":
-                logger.info(
-                    "DAEMONS: %s routes to hosted coordinator "
-                    "(transport=%s, route=%s)",
-                    name,
-                    _transport,
-                    getattr(sub_cfg, "route", "auto"),
-                )
-            return False
+        return False
 
-        # Split-brain check for t2_indexer: running it locally while the
-        # ``memory_ingest`` tool surface routes remote means the local
-        # daemon writes to a backend the advertised memory tools do not
-        # see.  Warn at startup rather than letting it fail silently.
-        if (
-            daemons_config.t2_indexer.enabled
-            and _local_ok("t2_indexer")
-            and _transport == "hybrid"
-        ):
-            user_routes = getattr(wc_config.mcp, "capability_routes", None) or {}
-            ingest_route = (
-                user_routes.get("memory_ingest", "remote")
-                if isinstance(user_routes, dict)
-                else "remote"
+    def _safe_register(name: str, factory):
+        """Construct + register a daemon, capturing any failure structurally.
+
+        Mirrors the hosted-side ``_record_failure`` shape (PR #755) so that
+        local-mode silent registration failures surface via
+        ``watercooler_daemon_status`` instead of becoming "your daemons
+        didn't register and you have no way to know why."
+        """
+        try:
+            _manager.register(factory())
+        except Exception as exc:  # noqa: BLE001 — capture any registration failure
+            _manager.record_registration_failure(name, exc)
+
+    # Split-brain check for t2_indexer: running it locally while the
+    # ``memory_ingest`` tool surface routes remote means the local
+    # daemon writes to a backend the advertised memory tools do not
+    # see.  Warn at startup rather than letting it fail silently.
+    if (
+        daemons_config.t2_indexer.enabled
+        and _local_ok("t2_indexer")
+        and _transport == "hybrid"
+    ):
+        user_routes = getattr(wc_config.mcp, "capability_routes", None) or {}
+        ingest_route = (
+            user_routes.get("memory_ingest", "remote")
+            if isinstance(user_routes, dict)
+            else "remote"
+        )
+        if ingest_route != "local":
+            logger.warning(
+                "DAEMONS: t2_indexer runs locally (route=%s) but hybrid "
+                "``memory_ingest`` tools route remote — the advertised "
+                "memory tools will not see the indexer's output. To align, "
+                'also set ``[mcp.capability_routes] memory_ingest = "local"``.',
+                getattr(daemons_config.t2_indexer, "route", "auto"),
             )
-            if ingest_route != "local":
-                logger.warning(
-                    "DAEMONS: t2_indexer runs locally (route=%s) but hybrid "
-                    "``memory_ingest`` tools route remote — the advertised "
-                    "memory tools will not see the indexer's output. To align, "
-                    'also set ``[mcp.capability_routes] memory_ingest = "local"``.',
-                    getattr(daemons_config.t2_indexer, "route", "auto"),
-                )
 
-        # Register thread auditor if enabled
-        if daemons_config.thread_auditor.enabled:
+    # Register thread auditor if enabled
+    if daemons_config.thread_auditor.enabled:
+        try:
             from .auditor import ThreadAuditorDaemon
-
-            auditor = ThreadAuditorDaemon(
-                interval=daemons_config.thread_auditor.interval,
-                config=daemons_config.thread_auditor,
+        except Exception as exc:  # noqa: BLE001
+            _manager.record_registration_failure("thread_auditor", exc)
+        else:
+            _safe_register(
+                "thread_auditor",
+                lambda: ThreadAuditorDaemon(
+                    interval=daemons_config.thread_auditor.interval,
+                    config=daemons_config.thread_auditor,
+                ),
             )
-            _manager.register(auditor)
 
-        # Register content scout if enabled (private — not in open-core build)
-        if daemons_config.content_scout.enabled:
-            try:
-                from .content_scout import ContentScoutDaemon
-            except ImportError as exc:
-                logger.debug(
-                    "ContentScoutDaemon not available (open-core build): %s", exc
-                )
-            else:
-                scout = ContentScoutDaemon(
+    # Register content scout if enabled (private — not in open-core build)
+    if daemons_config.content_scout.enabled:
+        try:
+            from .content_scout import ContentScoutDaemon
+        except ImportError as exc:
+            logger.debug(
+                "ContentScoutDaemon not available (open-core build): %s", exc
+            )
+        else:
+            _safe_register(
+                "content_scout",
+                lambda: ContentScoutDaemon(
                     interval=daemons_config.content_scout.interval,
                     config=daemons_config.content_scout,
-                )
-                _manager.register(scout)
+                ),
+            )
 
-        # Register content refiner if enabled (private — not in open-core build)
-        if daemons_config.content_refiner.enabled:
-            try:
-                from .content_refiner import ContentRefinerDaemon
-            except ImportError as exc:
-                logger.debug(
-                    "ContentRefinerDaemon not available (open-core build): %s", exc
-                )
-            else:
-                refiner = ContentRefinerDaemon(
+    # Register content refiner if enabled (private — not in open-core build)
+    if daemons_config.content_refiner.enabled:
+        try:
+            from .content_refiner import ContentRefinerDaemon
+        except ImportError as exc:
+            logger.debug(
+                "ContentRefinerDaemon not available (open-core build): %s", exc
+            )
+        else:
+            _safe_register(
+                "content_refiner",
+                lambda: ContentRefinerDaemon(
                     interval=daemons_config.content_refiner.interval,
                     config=daemons_config.content_refiner,
-                )
-                _manager.register(refiner)
+                ),
+            )
 
-        # Register decision detector if enabled (local + hosted — ships in open-core build)
-        if daemons_config.decision_detector.enabled:
+    # Register decision detector if enabled (local + hosted — ships in open-core build)
+    if daemons_config.decision_detector.enabled:
+        try:
             from .decision_detector import DetectDecisionsDaemon
-
-            detector = DetectDecisionsDaemon(
-                interval=daemons_config.decision_detector.interval,
-                config=daemons_config.decision_detector,
+        except Exception as exc:  # noqa: BLE001
+            _manager.record_registration_failure("decision_detector", exc)
+        else:
+            _safe_register(
+                "decision_detector",
+                lambda: DetectDecisionsDaemon(
+                    interval=daemons_config.decision_detector.interval,
+                    config=daemons_config.decision_detector,
+                ),
             )
-            _manager.register(detector)
 
-        # Register decision extractor if enabled (local + hosted — ships in open-core build)
-        if daemons_config.decision_extractor.enabled:
+    # Register decision extractor if enabled (local + hosted — ships in open-core build)
+    if daemons_config.decision_extractor.enabled:
+        try:
             from .decision_extractor import ExtractDecisionsDaemon
-
-            extractor = ExtractDecisionsDaemon(
-                interval=daemons_config.decision_extractor.interval,
-                config=daemons_config.decision_extractor,
+        except Exception as exc:  # noqa: BLE001
+            _manager.record_registration_failure("decision_extractor", exc)
+        else:
+            _safe_register(
+                "decision_extractor",
+                lambda: ExtractDecisionsDaemon(
+                    interval=daemons_config.decision_extractor.interval,
+                    config=daemons_config.decision_extractor,
+                ),
             )
-            _manager.register(extractor)
 
-        # Register project coordinator if enabled
-        if daemons_config.project_coordinator.enabled and _local_ok(
-            "project_coordinator"
-        ):
+    # Register project coordinator if enabled
+    if daemons_config.project_coordinator.enabled and _local_ok(
+        "project_coordinator"
+    ):
+        try:
             from .project_coordinator import ProjectCoordinatorDaemon
-
-            coordinator = ProjectCoordinatorDaemon(
-                interval=daemons_config.project_coordinator.interval,
-                config=daemons_config.project_coordinator,
+        except Exception as exc:  # noqa: BLE001
+            _manager.record_registration_failure("project_coordinator", exc)
+        else:
+            _safe_register(
+                "project_coordinator",
+                lambda: ProjectCoordinatorDaemon(
+                    interval=daemons_config.project_coordinator.interval,
+                    config=daemons_config.project_coordinator,
+                ),
             )
-            _manager.register(coordinator)
 
-        # Register the open-core decision-stance daemon if enabled and the
-        # premium coordinator is not running anywhere (any route). This is
-        # the conflict-resolution gate: when the coordinator is active in any
-        # form (local or hosted), its richer signal mix wins and we skip the
-        # open-core fallback to avoid double emission of stance_advisory
-        # findings under the same ``stance:{role}`` topic.
-        pc_cfg = daemons_config.project_coordinator
-        coordinator_active = pc_cfg.enabled and (
-            getattr(pc_cfg, "route", "auto") != "disabled"
-        )
-        if daemons_config.decision_stance.enabled and not coordinator_active:
+    # Register the open-core decision-stance daemon if enabled and the
+    # premium coordinator is not running anywhere (any route). This is
+    # the conflict-resolution gate: when the coordinator is active in any
+    # form (local or hosted), its richer signal mix wins and we skip the
+    # open-core fallback to avoid double emission of stance_advisory
+    # findings under the same ``stance:{role}`` topic.
+    pc_cfg = daemons_config.project_coordinator
+    coordinator_active = pc_cfg.enabled and (
+        getattr(pc_cfg, "route", "auto") != "disabled"
+    )
+    if daemons_config.decision_stance.enabled and not coordinator_active:
+        try:
             from .decision_stance import DecisionStanceDaemon
-
-            stance = DecisionStanceDaemon(
-                interval=daemons_config.decision_stance.interval,
-                config=daemons_config.decision_stance,
+        except Exception as exc:  # noqa: BLE001
+            _manager.record_registration_failure("decision_stance", exc)
+        else:
+            _safe_register(
+                "decision_stance",
+                lambda: DecisionStanceDaemon(
+                    interval=daemons_config.decision_stance.interval,
+                    config=daemons_config.decision_stance,
+                ),
             )
-            _manager.register(stance)
 
-        # Register coordinator refiner if enabled
-        if daemons_config.coordinator_refiner.enabled and _local_ok(
-            "coordinator_refiner"
-        ):
-            try:
-                from .coordinator_refiner import CoordinatorRefinerDaemon
-            except ImportError as exc:
-                logger.debug(
-                    "CoordinatorRefinerDaemon not available (open-core build): %s", exc
-                )
-            else:
-                coord_refiner = CoordinatorRefinerDaemon(
+    # Register coordinator refiner if enabled
+    if daemons_config.coordinator_refiner.enabled and _local_ok(
+        "coordinator_refiner"
+    ):
+        try:
+            from .coordinator_refiner import CoordinatorRefinerDaemon
+        except ImportError as exc:
+            logger.debug(
+                "CoordinatorRefinerDaemon not available (open-core build): %s", exc
+            )
+        else:
+            _safe_register(
+                "coordinator_refiner",
+                lambda: CoordinatorRefinerDaemon(
                     interval=daemons_config.coordinator_refiner.interval,
                     config=daemons_config.coordinator_refiner,
-                )
-                _manager.register(coord_refiner)
+                ),
+            )
 
-        # Register pulse snapshot daemon if enabled
-        if daemons_config.pulse_snapshot.enabled and _local_ok("pulse_snapshot"):
-            try:
-                from .pulse_snapshot import PulseSnapshotDaemon
-            except ImportError as exc:
-                logger.debug(
-                    "PulseSnapshotDaemon not available (open-core build): %s", exc
-                )
-            else:
-                pulse = PulseSnapshotDaemon(
+    # Register pulse snapshot daemon if enabled
+    if daemons_config.pulse_snapshot.enabled and _local_ok("pulse_snapshot"):
+        try:
+            from .pulse_snapshot import PulseSnapshotDaemon
+        except ImportError as exc:
+            logger.debug(
+                "PulseSnapshotDaemon not available (open-core build): %s", exc
+            )
+        else:
+            _safe_register(
+                "pulse_snapshot",
+                lambda: PulseSnapshotDaemon(
                     interval=daemons_config.pulse_snapshot.interval,
                     config=daemons_config.pulse_snapshot,
-                )
-                _manager.register(pulse)
+                ),
+            )
 
-        # Register pulse report daemon if enabled
-        if daemons_config.pulse_report.enabled and _local_ok("pulse_report"):
-            try:
-                from .pulse_report import PulseReportDaemon
-            except ImportError as exc:
-                logger.debug(
-                    "PulseReportDaemon not available (open-core build): %s", exc
-                )
-            else:
-                pulse_report = PulseReportDaemon(
+    # Register pulse report daemon if enabled
+    if daemons_config.pulse_report.enabled and _local_ok("pulse_report"):
+        try:
+            from .pulse_report import PulseReportDaemon
+        except ImportError as exc:
+            logger.debug(
+                "PulseReportDaemon not available (open-core build): %s", exc
+            )
+        else:
+            _safe_register(
+                "pulse_report",
+                lambda: PulseReportDaemon(
                     interval=daemons_config.pulse_report.interval,
                     config=daemons_config.pulse_report,
-                )
-                _manager.register(pulse_report)
+                ),
+            )
 
-        # Register analysis snapshot daemon if enabled
-        if daemons_config.analysis_snapshot.enabled and _local_ok("analysis_snapshot"):
-            try:
-                from .analysis_snapshot import AnalysisSnapshotDaemon
-            except ImportError as exc:
-                logger.debug(
-                    "AnalysisSnapshotDaemon not available (open-core build): %s", exc
-                )
-            else:
-                analysis = AnalysisSnapshotDaemon(
+    # Register analysis snapshot daemon if enabled
+    if daemons_config.analysis_snapshot.enabled and _local_ok("analysis_snapshot"):
+        try:
+            from .analysis_snapshot import AnalysisSnapshotDaemon
+        except ImportError as exc:
+            logger.debug(
+                "AnalysisSnapshotDaemon not available (open-core build): %s", exc
+            )
+        else:
+            _safe_register(
+                "analysis_snapshot",
+                lambda: AnalysisSnapshotDaemon(
                     interval=daemons_config.analysis_snapshot.interval,
                     config=daemons_config.analysis_snapshot,
-                )
-                _manager.register(analysis)
+                ),
+            )
 
-        # Register trend snapshot daemon if enabled
-        if daemons_config.trend_snapshot.enabled and _local_ok("trend_snapshot"):
-            try:
-                from .trend_snapshot import TrendSnapshotDaemon
-            except ImportError as exc:
-                logger.debug(
-                    "TrendSnapshotDaemon not available (open-core build): %s", exc
-                )
-            else:
-                trend = TrendSnapshotDaemon(
+    # Register trend snapshot daemon if enabled
+    if daemons_config.trend_snapshot.enabled and _local_ok("trend_snapshot"):
+        try:
+            from .trend_snapshot import TrendSnapshotDaemon
+        except ImportError as exc:
+            logger.debug(
+                "TrendSnapshotDaemon not available (open-core build): %s", exc
+            )
+        else:
+            _safe_register(
+                "trend_snapshot",
+                lambda: TrendSnapshotDaemon(
                     interval=daemons_config.trend_snapshot.interval,
                     config=daemons_config.trend_snapshot,
-                )
-                _manager.register(trend)
+                ),
+            )
 
-        # Register sync guard if enabled
-        if daemons_config.sync_guard.enabled:
+    # Register sync guard if enabled
+    if daemons_config.sync_guard.enabled:
+        try:
             from .sync_guard import SyncGuardDaemon
+        except Exception as exc:  # noqa: BLE001
+            _manager.record_registration_failure("sync_guard", exc)
+        else:
+            _safe_register(
+                "sync_guard",
+                lambda: SyncGuardDaemon(
+                    interval=daemons_config.sync_guard.interval
+                ),
+            )
 
-            guard = SyncGuardDaemon(interval=daemons_config.sync_guard.interval)
-            _manager.register(guard)
+    # Register T2 indexer if enabled — also gated internally by the
+    # memory backend configuration (enabled + queue + graphiti).
+    if daemons_config.t2_indexer.enabled and _local_ok("t2_indexer"):
+        try:
+            _try_register_t2_indexer(_manager)
+        except Exception as t2_exc:
+            _manager.record_registration_failure("t2_indexer", t2_exc)
 
-        # Register T2 indexer if enabled — also gated internally by the
-        # memory backend configuration (enabled + queue + graphiti).
-        if daemons_config.t2_indexer.enabled and _local_ok("t2_indexer"):
-            try:
-                _try_register_t2_indexer(_manager)
-            except Exception as t2_exc:
-                logger.warning("DAEMONS: could not register t2_indexer: %s", t2_exc)
-
-    except Exception as exc:
-        logger.warning("DAEMONS: config load error, no daemons registered: %s", exc)
-        # Don't register defaults — daemons are opt-in, and without config
-        # we can't confirm the user opted in.
+    # External daemons (workstream J) — load after built-ins so
+    # third-party subclasses stack on top without competing for default
+    # ordering. Failures are captured via record_registration_failure so
+    # they surface in watercooler_daemon_status alongside built-ins.
+    _register_external_daemons(_manager, daemons_config.external)
 
     if start:
         _manager.start_all()
 
     logger.info(
-        "DAEMONS: initialised (%d daemons registered, PID %d owns lock)",
+        "DAEMONS: initialised (%d daemons registered, PID %d owns lock=%s, repo_key=%s)",
         len(_manager.daemon_names),
         os.getpid(),
+        _daemon_pidfile.name if _daemon_pidfile else "<none>",
+        repo_key or "<legacy>",
     )
     return _manager
+
+
+def _register_external_daemons(manager: DaemonManager, external_config) -> None:
+    """Load + register external BaseDaemon subclasses from
+    ``[mcp.daemons.external] modules`` (workstream J.1 — in-process
+    loader).
+
+    Each entry is ``"module.path:ClassName"``. The class is imported,
+    instantiated with no arguments, and registered. Per-entry failures
+    are captured via :meth:`DaemonManager.record_registration_failure`
+    so they surface in :func:`watercooler_daemon_status` alongside
+    built-in registration errors. No outer try/except — each spec
+    succeeds or fails independently.
+
+    Contract (deliberately narrow; see ``docs/DAEMONS.md`` "External
+    daemons" for the user-facing version):
+
+    * Class must be importable in this MCP server process — same
+      Python env, no out-of-process loading, no manifest resolution.
+    * Class must have a no-argument constructor. Daemons that need
+      config read it themselves inside ``__init__``.
+    * Lifecycle (threading, ticking, sleep/wake, checkpoint
+      persistence, shutdown) flows through the existing local
+      DaemonManager — no sidecar / RPC / container.
+    * Hosted-mode short-circuit applies: this function never runs when
+      ``init_daemons`` defers to the HostedDaemonCoordinator or to
+      another lock-holding process.
+
+    Container-friendly / sidecar / RPC / manifest registration is J.2
+    and is **not** implemented here.
+    """
+    import importlib
+
+    specs = getattr(external_config, "modules", None) or []
+    for spec in specs:
+        # Until we can read the instance's .name attribute, the spec
+        # string itself is the most useful failure label.
+        label = f"external:{spec}"
+        try:
+            if ":" not in spec:
+                raise ValueError(
+                    f"external daemon spec must be 'module.path:ClassName', got {spec!r}"
+                )
+            module_path, class_name = spec.split(":", 1)
+            module_path = module_path.strip()
+            class_name = class_name.strip()
+            if not module_path or not class_name:
+                raise ValueError(
+                    f"external daemon spec must be 'module.path:ClassName', got {spec!r}"
+                )
+            mod = importlib.import_module(module_path)
+            cls = getattr(mod, class_name)
+            instance = cls()
+            # Switch to the real daemon name now that we have it — so a
+            # subsequent register() failure (e.g. duplicate name) records
+            # against the actual daemon, not the bare spec.
+            label = getattr(instance, "name", label) or label
+            manager.register(instance)
+            logger.info(
+                "DAEMONS: registered external daemon %s from %s",
+                class_name,
+                module_path,
+            )
+        except Exception as exc:  # noqa: BLE001 — capture any failure
+            manager.record_registration_failure(label, exc)
 
 
 def _try_register_t2_indexer(manager: DaemonManager) -> None:

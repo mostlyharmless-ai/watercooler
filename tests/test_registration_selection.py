@@ -21,7 +21,6 @@ from watercooler_mcp.tools.migration import (
 )
 from watercooler_mcp.tools import graph as graph_mod
 from watercooler_mcp.tools import memory as memory_mod
-from watercooler_mcp.tools import migration as migration_mod
 
 
 def _tool_names(mcp: FastMCP) -> set[str]:
@@ -45,13 +44,13 @@ class TestGraphRegistration:
 
     def test_register_selected_subset(self):
         mcp = FastMCP(name="test")
-        selected = {"watercooler_search", "watercooler_find_similar"}
+        selected = {"watercooler_search", "watercooler_access_stats"}
         register_graph_tools(mcp, selected=selected)
         names = _tool_names(mcp)
         assert "watercooler_search" in names
-        assert "watercooler_find_similar" in names
+        assert "watercooler_access_stats" in names
         # Should NOT have registered others
-        assert "watercooler_baseline_graph_stats" not in names
+        assert "watercooler_baseline_graph" not in names
         assert "watercooler_graph_enrich" not in names
 
     def test_module_globals_populated(self):
@@ -82,11 +81,11 @@ class TestMemoryRegistration:
 
     def test_register_selected_subset(self):
         mcp = FastMCP(name="test")
-        selected = {"watercooler_smart_query", "watercooler_get_entity_edge"}
+        selected = {"watercooler_smart_query", "watercooler_graph_trace"}
         register_memory_tools(mcp, selected=selected)
         names = _tool_names(mcp)
         assert "watercooler_smart_query" in names
-        assert "watercooler_get_entity_edge" in names
+        assert "watercooler_graph_trace" in names
         assert "watercooler_bulk_index" not in names
 
     def test_module_globals_populated(self):
@@ -101,25 +100,14 @@ class TestMemoryRegistration:
 
 
 class TestMigrationRegistration:
-    def test_register_all_when_selected_is_none(self):
+    def test_no_migration_tools_registered(self):
+        """PR4a retired both migration tools — migration_preflight folded into
+        watercooler_bulk_index(preflight_only=True), migrate_to_memory_backend
+        superseded by watercooler_bulk_index — so the module registers nothing."""
         mcp = FastMCP(name="test")
         register_migration_tools(mcp)
-        names = _tool_names(mcp)
-        for tool_name in MIGRATION_BUILDERS:
-            assert tool_name in names, f"Expected {tool_name} to be registered"
-
-    def test_register_selected_subset(self):
-        mcp = FastMCP(name="test")
-        selected = {"watercooler_migration_preflight"}
-        register_migration_tools(mcp, selected=selected)
-        names = _tool_names(mcp)
-        assert "watercooler_migration_preflight" in names
-        assert "watercooler_migrate_to_memory_backend" not in names
-
-    def test_module_globals_populated(self):
-        mcp = FastMCP(name="test")
-        register_migration_tools(mcp, selected={"watercooler_migration_preflight"})
-        assert migration_mod.migration_preflight is not None
+        assert _tool_names(mcp) == set()
+        assert MIGRATION_BUILDERS == {}
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +131,6 @@ class TestToolBuildersConsistency:
         expected = REMOTE_CAPABLE_MEMORY_TOOL_NAMES - migration_tools
         assert set(MEMORY_BUILDERS.keys()) == expected
 
-    def test_migration_builders_has_two_tools(self):
-        assert set(MIGRATION_BUILDERS.keys()) == {
-            "watercooler_migration_preflight",
-            "watercooler_migrate_to_memory_backend",
-        }
+    def test_migration_builders_is_empty(self):
+        """PR4a folded/retired both migration tools — migration.py registers none."""
+        assert MIGRATION_BUILDERS == {}

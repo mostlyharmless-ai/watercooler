@@ -1,8 +1,9 @@
 """Diagnostic tools for watercooler MCP server.
 
 Tools:
-- watercooler_health: Server health check
-- watercooler_whoami: Agent identity
+- watercooler_health: Server health check; detail="identity" returns the
+  resolved agent identity and a write-readiness assessment (folded-in
+  watercooler_whoami).
 """
 
 import os
@@ -31,7 +32,6 @@ from ..observability import log_debug
 
 # Module-level references to registered tools (populated by register_diagnostic_tools)
 health = None
-whoami = None
 
 # Rate limit warning threshold (10% remaining triggers warning)
 RATE_LIMIT_WARNING_THRESHOLD = 0.1
@@ -403,6 +403,14 @@ def _describe_storage_mode(threads_dir: Path) -> str:
     # guard refuses the write — health and guard must agree. The
     # directory's NAME (e.g. ``_local``) is a convention, not a
     # guarantee, and is deliberately not a short-circuit here.
+    # A worktree-path directory with no .git is a bootstrap that scaffolded
+    # the topic-directory tree but never bound the git worktree (issue
+    # #787). That is distinct from genuine local-only mode — a real
+    # operational failure — so surface it as its own state rather than
+    # mislabelling it "local-only".
+    if is_under_worktrees and git_entry is None and threads_dir.exists():
+        return "scaffold-only (bootstrap incomplete — re-run onboarding)"
+
     local_only = (
         git_entry is None
         or not origin_url
@@ -919,7 +927,51 @@ def _health_hosted_impl(ctx: Context) -> str:
     return "\n".join(status_lines)
 
 
-def _health_impl(ctx: Context, code_path: str = "") -> str:
+def _health_identity_impl(ctx: Context, code_path: str = "") -> str:
+    """Resolved agent identity plus a write-readiness assessment.
+
+    Folds in the retired watercooler_whoami and addresses #327: a bare
+    identity check should tell the agent whether the write tools
+    (say/ack/handoff) will accept a call, not just echo a client id.
+    """
+    try:
+        client_id = get_effective_client_id(ctx)
+        session_id = get_effective_session_id(ctx)
+        agent = get_agent_name(client_id)
+    except Exception as e:  # pragma: no cover - defensive
+        return f"Error determining identity: {str(e)}"
+
+    lines = [
+        f"You are: {agent}",
+        f"Client ID: {client_id or 'None'}",
+        f"Session ID: {session_id or 'None'}",
+        "",
+        "Write readiness:",
+    ]
+    try:
+        context = resolve_thread_context(Path(code_path) if code_path else None)
+        threads_dir = context.threads_dir
+        # Observational only — an identity probe must not mutate the
+        # filesystem (the retired watercooler_whoami never did). Report
+        # whether the dir exists / is writable; do NOT create it.
+        if threads_dir.exists():
+            state = "writable" if os.access(threads_dir, os.W_OK) else "NOT writable"
+        else:
+            parent = threads_dir.parent
+            creatable = parent.exists() and os.access(parent, os.W_OK)
+            state = "absent, creatable" if creatable else "absent, parent not writable"
+        lines.append(f"  Threads dir: {threads_dir} ({state})")
+    except Exception as e:
+        lines.append(f"  Threads dir: unresolved ({e})")
+    lines.append(
+        "  agent_func: write tools require an explicit agent_func in "
+        "'<platform>:<model>:<role>' form, passed per call — it is not "
+        "server state and cannot be pre-verified here."
+    )
+    return "\n".join(lines)
+
+
+def _health_impl(ctx: Context, code_path: str = "", detail: str = "") -> str:
     """Check server health and configuration including branch parity status.
 
     Returns server version, configured agent identity, threads directory,
@@ -927,6 +979,8 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
 
     Args:
         code_path: Optional path to code repository for parity checks.
+        detail: Pass ``"identity"`` for the resolved agent identity and a
+            write-readiness assessment (folded-in watercooler_whoami).
 
     Example output:
         Watercooler MCP Server v0.1.0
@@ -936,6 +990,9 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
         Threads Dir Exists: True
         Branch Parity: clean
     """
+    if str(detail).strip().lower() == "identity":
+        return _health_identity_impl(ctx, code_path)
+
     # Hosted mode guard — additive early return
     from ..auth import is_hosted_mode
     if is_hosted_mode():
@@ -1220,6 +1277,54 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
                     if parity == "stuck_rebase_or_merge":
                         status_lines.append("  → Run: watercooler sync-repair")
 
+                    # no_upstream: the thread branch isn't tracking any
+                    # remote — it was bootstrapped against a remote that is
+                    # gone/unreachable, or never published (issue #689).
+                    # Surface the remotes + a concrete republish command.
+                    if parity == "no_upstream":
+                        try:
+                            remote_names = sorted(
+                                r.name for r in _parity_repo.remotes
+                            )
+                        except Exception:
+                            remote_names = []
+                        # Which remotes already carry the thread branch —
+                        # republishing there repairs tracking instead of
+                        # forking history onto a second remote.
+                        published: list[str] = []
+                        try:
+                            suffix = "/watercooler/threads"
+                            rbr = _parity_repo.git.branch(
+                                "-r", "--list", f"*{suffix}"
+                            )
+                            for line in rbr.splitlines():
+                                ref = line.strip()
+                                if ref and " -> " not in ref and ref.endswith(suffix):
+                                    published.append(ref[: -len(suffix)])
+                        except Exception:
+                            pass
+                        if remote_names:
+                            status_lines.append(
+                                f"  Remotes: {', '.join(remote_names)}"
+                            )
+                            from watercooler.sync_repair import suggest_publish_remote
+                            _tgt = suggest_publish_remote(
+                                remote_names, sorted(set(published))
+                            )
+                            _arg = (
+                                f"publish_remote='{_tgt}'" if _tgt
+                                else "publish_remote='<remote>'"
+                            )
+                            status_lines.append(
+                                "  → Thread branch has no remote upstream — "
+                                f"publish it: watercooler_sync_repair({_arg})"
+                            )
+                        else:
+                            status_lines.append(
+                                "  → Thread branch has no remote upstream and "
+                                "no git remotes are configured."
+                            )
+
                     # Honest semantics: "safe for reads" means local data is
                     # at least as current as the remote — not just "did the
                     # fetch complete." A behind-only worktree serves stale
@@ -1353,38 +1458,13 @@ def _health_impl(ctx: Context, code_path: str = "") -> str:
         return _format_warnings_for_response(f"Watercooler MCP Server\nStatus: Error\nError: {str(e)}")
 
 
-def _whoami_impl(ctx: Context) -> str:
-    """Get your resolved agent identity.
-
-    Returns the agent name that will be used when you create entries.
-    Automatically detects your identity from the MCP client.
-
-    Example:
-        You are: Claude
-    """
-    import logging as _logging
-    _log = _logging.getLogger(__name__)
-    _log.debug("WHOAMI: entered _whoami_impl")
-    try:
-        client_id = get_effective_client_id(ctx)
-        session_id = get_effective_session_id(ctx)
-        agent = get_agent_name(client_id)
-        debug_info = f"\nClient ID: {client_id or 'None'}\nSession ID: {session_id or 'None'}"
-        _log.debug("WHOAMI: returning result")
-        return f"You are: {agent}{debug_info}"
-    except Exception as e:
-        _log.debug("WHOAMI: error: %s", e)
-        return f"Error determining identity: {str(e)}"
-
-
 def register_diagnostic_tools(mcp):
     """Register diagnostic tools with the MCP server.
 
     Args:
         mcp: The FastMCP server instance
     """
-    global health, whoami
+    global health
 
     # Register tools and store references for testing
     health = mcp.tool(name="watercooler_health")(_health_impl)
-    whoami = mcp.tool(name="watercooler_whoami")(_whoami_impl)

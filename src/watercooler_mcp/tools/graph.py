@@ -1,15 +1,13 @@
 """Graph tools for watercooler MCP server.
 
 Tools:
-- watercooler_baseline_graph_stats: Graph statistics
-- watercooler_search: Search threads and entries (tier-aware routing)
-- watercooler_find_similar: Find similar entries
-- watercooler_baseline_sync_status: Baseline graph sync health
+- watercooler_baseline_graph: Graph statistics + sync health (scope=stats|sync)
+- watercooler_search: Search threads/entries; also seeded similarity
+  (seed_entry_id=) and federated search (namespaces=)
 - watercooler_access_stats: Access statistics
 
 New Tool Suite (Fresh Suite Design):
 - watercooler_graph_enrich: Generate/regenerate summaries and embeddings
-- watercooler_graph_recover: Rebuild graph from markdown (emergency recovery)
 - watercooler_graph_project: Generate markdown from graph (source of truth)
 """
 
@@ -557,7 +555,7 @@ def _search_baseline_impl(
     flag: str = "",
     pinned: bool | None = None,
     limit: int = 10,
-    query_operator: str = "AND",
+    query_operator: str = "OR",
     combine: str = "AND",
     include_threads: bool = True,
     include_entries: bool = True,
@@ -617,7 +615,7 @@ def _search_baseline_impl(
         pinned=pinned,
         limit=limit,
         query_operator=(
-            query_operator.upper() if query_operator.upper() in ("AND", "OR") else "AND"
+            query_operator.upper() if query_operator.upper() in ("AND", "OR") else "OR"
         ),
         combine=combine.upper() if combine.upper() in ("AND", "OR") else "AND",
         include_threads=include_threads,
@@ -958,10 +956,8 @@ def _search_leanrag_impl(
 
 
 # Module-level references to registered tools (populated by register_graph_tools)
-baseline_graph_stats = None
+baseline_graph_tool = None
 search_graph_tool = None
-find_similar_entries_tool = None
-baseline_sync_status_tool = None
 access_stats_tool = None
 
 
@@ -1059,7 +1055,7 @@ async def _search_graph_impl(
     entry_type: str = "",
     agent: str = "",
     limit: int = 10,
-    query_operator: str = "AND",
+    query_operator: str = "OR",
     combine: str = "AND",
     include_threads: bool = True,
     include_entries: bool = True,
@@ -1073,10 +1069,25 @@ async def _search_graph_impl(
     superseded_end: str = "",
     prioritize_decisions: bool = True,
     decision_boost: float = 1.5,
+    seed_entry_id: str = "",
+    use_embeddings: bool = True,
+    federated: bool = False,
+    namespaces: str = "",
 ) -> str:
     """Structured search with tier-aware routing and filter control (role, time,
     thread_topic, semantic). Use when you know what backend/tier you want.
     For open-ended NL questions, use watercooler_smart_query instead.
+
+    Two mode selectors fold in former standalone tools:
+    - ``seed_entry_id`` — return entries semantically similar to that entry
+      (folded-in ``watercooler_find_similar``; capability ``semantic_similarity``).
+      ``use_embeddings=False`` falls back to the same-thread heuristic.
+    - ``federated`` / ``namespaces`` — search across federated watercooler
+      namespaces (folded-in ``watercooler_federated_search``; capability
+      ``federation_search``). ``federated=True`` searches all configured
+      namespaces; ``namespaces`` (comma-separated) optionally narrows the set
+      and on its own also triggers the federated path.
+    Seeded similarity and federated search are mutually exclusive.
 
     Supports keyword search, semantic search with embeddings, time-based filtering,
     and metadata filters. Routes to the appropriate backend based on configuration.
@@ -1114,9 +1125,11 @@ async def _search_graph_impl(
             pinned entries (includes unannotated items which are implicitly not pinned),
             None=no filter (default).
         limit: Maximum results to return (default: 10, max: 100).
-        query_operator: How to combine query tokens - "AND" or "OR" (default: AND).
-            Only affects baseline keyword search. AND requires every token in
-            the query to appear somewhere in the entry; OR requires any token.
+        query_operator: How to combine query tokens - "OR" or "AND" (default: OR).
+            Only affects baseline keyword search. OR (default) matches any
+            token and ranks results by how many of the query's tokens matched,
+            so an entry matching every token ranks highest; AND requires every
+            token to appear in the entry.
         combine: How to combine filters - "AND" or "OR" (default: AND).
         include_threads: Include thread nodes in results (default: True).
         include_entries: Include entry nodes in results (default: True).
@@ -1184,22 +1197,50 @@ async def _search_graph_impl(
           relate to Y". Returns episodic records from Graphiti.
 
     Keyword Search Tips:
-        - **Getting 0 results from a multi-word query? Add `query_operator="OR"`.**
-          The default is AND — every token must appear in the same entry.
-          `query="decided committed resolved"` returns nothing unless all three
-          words are present together. Switch to OR when your query is a list of
-          synonyms or candidate keywords rather than a phrase:
-              # Phrase / co-occurrence — AND is correct (default)
-              watercooler_search(query="long polling", mode="entries")
-
-              # Keyword union / broad recall — use OR
+        - The default `query_operator` is **OR**: any token may match, and
+          results are ranked by how many of the query's tokens matched — an
+          entry matching every token ranks highest. List the relevant
+          keywords; adding a term no longer risks 0 results.
+              # Broad recall (default) — ranked by token-match count
               watercooler_search(
-                  query="decided resolved committed opted agreed chosen",
-                  query_operator="OR", mode="entries"
+                  query="decided resolved committed opted agreed", mode="entries"
+              )
+
+              # Strict phrase / co-occurrence — require every token
+              watercooler_search(
+                  query="long polling", query_operator="AND", mode="entries"
               )
         - Single-word queries do substring matching: "auth" matches "authentication".
         - Use short tokens (1-3 words each) for best results.
     """
+    # Mode dispatch (PR6 D4/D5) — seeded similarity and federated search fold
+    # in the former watercooler_find_similar / watercooler_federated_search;
+    # each resolves its own capability per-(tool, args) via _ARG_RESOLVERS.
+    federated_mode = bool(federated or namespaces)
+    if seed_entry_id and federated_mode:
+        return json.dumps({
+            "error": "seed_entry_id cannot be combined with federated search",
+        })
+    if seed_entry_id:
+        return _find_similar_entries_impl(
+            ctx,
+            entry_id=seed_entry_id,
+            code_path=code_path,
+            limit=limit,
+            similarity_threshold=semantic_threshold,
+            use_embeddings=use_embeddings,
+        )
+    if federated_mode:
+        from .federation import _federated_search_impl
+
+        return await _federated_search_impl(
+            ctx,
+            query=query,
+            code_path=code_path,
+            namespaces=namespaces,
+            limit=limit,
+        )
+
     try:
         error, context = validation._require_context(code_path)
         if error:
@@ -1522,8 +1563,8 @@ def _find_similar_hosted(
 
     Plan v20 Phase 8 (d). Opens a per-call connection to the hosted FalkorDB,
     fetches the source embedding by entry_id, then runs a KNN query via the
-    HNSW vector index. The `watercooler_semantic_upsert_embedding` tool is
-    responsible for populating both the embedding node and the index.
+    HNSW vector index. The `watercooler_semantic` tool (`action="upsert"`)
+    is responsible for populating both the embedding node and the index.
 
     Errors are returned as a structured JSON payload rather than raised, so
     the caller (``_find_similar_entries_impl``) can report the failure as a
@@ -1691,16 +1732,24 @@ async def _baseline_sync_status_impl(
     - Error: last sync attempt failed
     - Pending: sync in progress
 
+    Also runs a T1-only on-disk integrity check (no Graphiti/T2 needed):
+    entry-count mismatches, corrupt JSONL lines, and thread markdown that
+    has no graph data. Results are in ``integrity_ok`` / ``integrity_issues``.
+
     Use this to diagnose baseline graph issues before running reconcile.
 
     Args:
         code_path: Path to code repository (for resolving threads dir).
 
     Returns:
-        JSON health report with thread statuses and recommendations.
+        JSON health report with thread statuses, integrity findings, and
+        recommendations.
     """
     try:
-        from watercooler.baseline_graph.sync import check_graph_health
+        from watercooler.baseline_graph.sync import (
+            check_baseline_integrity,
+            check_graph_health,
+        )
         from watercooler.baseline_graph.reader import is_graph_available
         from dataclasses import asdict
 
@@ -1724,9 +1773,10 @@ async def _baseline_sync_status_impl(
         # Check if graph exists at all
         graph_available = is_graph_available(threads_dir)
 
-        # Get health report.
+        # Get health + integrity reports.
         # Run in thread to avoid blocking event loop (#128).
         health = await asyncio.to_thread(check_graph_health, threads_dir)
+        integrity = await asyncio.to_thread(check_baseline_integrity, threads_dir)
 
         output = {
             "graph_available": graph_available,
@@ -1737,6 +1787,11 @@ async def _baseline_sync_status_impl(
             "error_threads": health.error_threads,
             "pending_threads": health.pending_threads,
             "error_details": health.error_details,
+            "integrity_ok": integrity.ok,
+            "integrity_issues": [
+                {"topic": i.topic, "kind": i.kind, "detail": i.detail}
+                for i in integrity.issues
+            ],
             "recommendations": [],
         }
 
@@ -1754,6 +1809,12 @@ async def _baseline_sync_status_impl(
             output["recommendations"].append(
                 f"{health.error_threads} threads have sync errors. "
                 "Check error_details and run watercooler_graph_enrich on affected topics."
+            )
+        if not integrity.ok:
+            output["recommendations"].append(
+                f"{len(integrity.issues)} baseline integrity issue(s) detected "
+                "(see integrity_issues). Run scripts/recover_baseline_graph.py "
+                "to rebuild graph data from markdown for the affected topics."
             )
 
         return json.dumps(output, indent=2)
@@ -1955,49 +2016,6 @@ async def _graph_enrich_impl(
         return f"Error enriching graph: {str(e)}"
 
 
-async def _graph_recover_impl(
-    ctx: Context,
-    code_path: str = "",
-) -> str:
-    """Graph recovery from markdown (moved to scripts/).
-
-    Graph recovery is an extraordinary operation that reads .md files to
-    rebuild graph data. It has been moved out of the MCP runtime to
-    scripts/recover_baseline_graph.py.
-
-    Usage:
-        ./scripts/recover_baseline_graph.py /path/to/threads --mode stale
-        ./scripts/recover_baseline_graph.py /path/to/threads --mode all --dry-run
-
-    In normal operation, the graph is the sole source of truth and .md files
-    are write-only projections. If the graph is lost, restore from git history
-    (git checkout <commit> -- graph/) or run the recovery script.
-
-    Args:
-        code_path: Unused (retained for tool registration compatibility).
-
-    Returns:
-        Instructions for using the recovery script.
-    """
-    return json.dumps(
-        {
-            "action": "graph_recover",
-            "status": "moved_to_script",
-            "message": (
-                "Graph recovery has been moved out of the MCP runtime. "
-                "Use scripts/recover_baseline_graph.py instead. "
-                "For routine issues, try: git checkout <commit> -- graph/"
-            ),
-            "script": "scripts/recover_baseline_graph.py",
-            "examples": [
-                "./scripts/recover_baseline_graph.py /path/to/threads --mode stale",
-                "./scripts/recover_baseline_graph.py /path/to/threads --mode all --dry-run",
-            ],
-        },
-        indent=2,
-    )
-
-
 def _graph_project_impl(
     ctx: Context,
     code_path: str = "",
@@ -2099,8 +2117,11 @@ def _annotate_impl(
 
     Args:
         topic: Thread topic identifier
-        target_id: Entry ID (for entries) or thread topic (for threads)
-        target_type: "entry" or "thread"
+        target_id: Entry ID, thread topic, or opaque URI (see target_type)
+        target_type: "entry", "thread", or "uri". Use "uri" to annotate
+            content-addressed or namespace-scoped identifiers
+            (e.g. ``codex://sha256:<hex>``) that are not entry/thread
+            nodes in this graph.
         kind: Annotation kind — reaction, tag, flag, xref, or pin
         value: Emoji name (for reaction), tag name, agent/reason (for flag),
             or target entry_id (for xref). Ignored for pin.
@@ -2127,7 +2148,7 @@ def _annotate_impl(
     if kind not in add_kinds:
         return f"Error: kind must be one of {sorted(add_kinds)}, got '{kind}'"
     if target_type not in VALID_TARGET_TYPES:
-        return f"Error: target_type must be 'entry' or 'thread', got '{target_type}'"
+        return f"Error: target_type must be one of {sorted(VALID_TARGET_TYPES)}, got '{target_type}'"
     if kind != "pin" and not value:
         return f"Error: value is required for kind '{kind}'"
 
@@ -2224,8 +2245,11 @@ def _remove_annotation_impl(
 
     Args:
         topic: Thread topic identifier
-        target_id: Entry ID (for entries) or thread topic (for threads)
-        target_type: "entry" or "thread"
+        target_id: Entry ID, thread topic, or opaque URI (see target_type)
+        target_type: "entry", "thread", or "uri". Use "uri" to annotate
+            content-addressed or namespace-scoped identifiers
+            (e.g. ``codex://sha256:<hex>``) that are not entry/thread
+            nodes in this graph.
         kind: Removal kind — tag_remove, flag_clear, xref_remove, or unpin
         value: Tag name, flag reason, or xref entry_id to remove. Ignored for unpin.
         code_path: Path to the code repository
@@ -2249,7 +2273,7 @@ def _remove_annotation_impl(
     if kind not in remove_kinds:
         return f"Error: kind must be one of {sorted(remove_kinds)}, got '{kind}'"
     if target_type not in VALID_TARGET_TYPES:
-        return f"Error: target_type must be 'entry' or 'thread', got '{target_type}'"
+        return f"Error: target_type must be one of {sorted(VALID_TARGET_TYPES)}, got '{target_type}'"
 
     error, context = validation._require_context(code_path)
     if error:
@@ -2710,6 +2734,8 @@ def _sync_repair_impl(
     regenerate_cache: bool = False,
     migrate: bool = False,
     confirm_migrate: bool = False,
+    discard_local_commits: bool = False,
+    publish_remote: str = "",
 ) -> str:
     """Diagnose and fix orphan branch sync issues.
 
@@ -2720,6 +2746,12 @@ def _sync_repair_impl(
         regenerate_cache: If True, rebuild manifest + search-index from per-thread data
         migrate: If True, one-time cleanup of globally-committed derived files
         confirm_migrate: Must be True to execute migrate without dry_run
+        discard_local_commits: If True, local-only commits are destructively
+            reset away (after recovery-log capture). Default False — local-only
+            commits are recovered by pushing/rebasing them, never discarded.
+        publish_remote: If set, publish the thread branch to this remote and
+            set upstream tracking — the opt-in repair for an orphan branch
+            with no usable remote (the diagnose report's no_upstream state).
 
     Returns:
         JSON report of findings or actions taken
@@ -2759,22 +2791,116 @@ def _sync_repair_impl(
         dry_run=dry_run,
         regenerate_cache=regenerate_cache,
         migrate=migrate,
+        discard_local_commits=discard_local_commits,
+        publish_remote=publish_remote,
     )
     return json.dumps({"actions": actions}, indent=2)
 
 
+def _annotations_impl(
+    action: str,
+    topic: str,
+    target_id: str = "",
+    target_type: str = "",
+    kind: str = "",
+    value: str = "",
+    code_path: str = "",
+    actor: str = "",
+) -> str:
+    """Add, read, or remove annotations on an entry, thread, or URI target.
+
+    Selected by ``action``:
+    - action="add": add an annotation — reaction, tag, flag, xref, or pin.
+      Requires target_id, target_type ("entry"|"thread"|"uri"), kind, value.
+    - action="get": read annotations. With no target_id, returns every
+      annotation state for the thread.
+    - action="remove": remove an annotation — tag_remove, flag_clear,
+      xref_remove, or unpin. Requires target_id, target_type, kind.
+
+    Args:
+        action: "add", "get", or "remove".
+        topic: Thread topic identifier.
+        target_id: Entry ID, thread topic, or opaque URI (see target_type).
+            Empty (action="get") returns every annotation state for the
+            thread.
+        target_type: "entry", "thread", or "uri" (add / remove). Use "uri"
+            to annotate content-addressed, derived-artifact, or
+            materialized-view identifiers that are not entry/thread nodes
+            in this graph. Examples:
+
+            - ``codex://sha256:<hex>`` (codex item by content hash)
+            - ``artifact://thumbnail/<id>`` (derived thumbnail by id)
+            - ``artifact://embedding/<model_id>/<item_id>`` (vector by model + item)
+            - ``view://collection/<slug>`` (materialized collection view)
+            - ``view://predicate/<name>`` (materialized predicate view)
+
+            Downstream code treats target_id as an opaque string key
+            regardless of target_type; this surface does not constrain
+            URI scheme or validate scheme-specific structure.
+        kind: Annotation kind (add / remove).
+        value: Tag / emoji / flag / xref value (add / remove; ignored for
+            pin and unpin).
+        code_path: Path to the code repository.
+        actor: Who is making the change (add / remove).
+
+    Returns:
+        Confirmation text (add / remove) or JSON annotation state (get).
+    """
+    normalized = (action or "").strip().lower()
+    if normalized == "add":
+        return _annotate_impl(
+            topic, target_id, target_type, kind, value, code_path, actor
+        )
+    if normalized == "remove":
+        return _remove_annotation_impl(
+            topic, target_id, target_type, kind, value, code_path, actor
+        )
+    if normalized == "get":
+        return _get_annotations_impl(topic, code_path, target_id)
+    return json.dumps({
+        "error": f"unknown action: {action!r}; expected 'add', 'get', or 'remove'"
+    })
+
+
 # Module-level references for annotation tools
-annotate_tool = None
-remove_annotation_tool = None
-get_annotations_tool = None
+annotations_tool = None
 delete_entry_tool = None
 delete_thread_tool = None
 archive_thread_tool = None
 
 # Module-level references for new tools
 graph_enrich_tool = None
-graph_recover_tool = None
 graph_project_tool = None
+
+
+async def _baseline_graph_impl(
+    ctx: Context,
+    scope: str = "stats",
+    code_path: str = "",
+) -> str:
+    """Baseline-graph diagnostics, selected by ``scope``.
+
+    - scope="stats" (default): thread / entry counts and status breakdown —
+      useful for sizing before building a baseline graph.
+    - scope="sync": per-thread baseline-graph sync health (Synced / Stale /
+      Error). This does NOT check FalkorDB or memory-tier health — use
+      watercooler_diagnose_memory for that.
+
+    Args:
+        scope: "stats" or "sync".
+        code_path: Path to code repository (for resolving threads dir).
+
+    Returns:
+        JSON with the requested diagnostics.
+    """
+    normalized = (scope or "").strip().lower()
+    if normalized == "sync":
+        return await _baseline_sync_status_impl(ctx, code_path)
+    if normalized in ("", "stats"):
+        return _baseline_graph_stats_impl(ctx, code_path)
+    return json.dumps({
+        "error": f"unknown scope: {scope!r}; expected 'stats' or 'sync'"
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -2782,17 +2908,12 @@ graph_project_tool = None
 # ---------------------------------------------------------------------------
 
 TOOL_BUILDERS: dict[str, tuple] = {
-    "watercooler_baseline_graph_stats": (_baseline_graph_stats_impl, "baseline_graph_stats"),
+    "watercooler_baseline_graph": (_baseline_graph_impl, "baseline_graph_tool"),
     "watercooler_search": (_search_graph_impl, "search_graph_tool"),
-    "watercooler_find_similar": (_find_similar_entries_impl, "find_similar_entries_tool"),
-    "watercooler_baseline_sync_status": (_baseline_sync_status_impl, "baseline_sync_status_tool"),
     "watercooler_access_stats": (_access_stats_impl, "access_stats_tool"),
     "watercooler_graph_enrich": (_graph_enrich_impl, "graph_enrich_tool"),
-    "watercooler_graph_recover": (_graph_recover_impl, "graph_recover_tool"),
     "watercooler_graph_project": (_graph_project_impl, "graph_project_tool"),
-    "watercooler_annotate": (_annotate_impl, "annotate_tool"),
-    "watercooler_remove_annotation": (_remove_annotation_impl, "remove_annotation_tool"),
-    "watercooler_get_annotations": (_get_annotations_impl, "get_annotations_tool"),
+    "watercooler_annotations": (_annotations_impl, "annotations_tool"),
     "watercooler_delete_entry": (_delete_entry_impl, "delete_entry_tool"),
     "watercooler_delete_thread": (_delete_thread_impl, "delete_thread_tool"),
     "watercooler_archive_thread": (_archive_thread_impl, "archive_thread_tool"),
@@ -2803,25 +2924,16 @@ TOOL_BUILDERS: dict[str, tuple] = {
 def _build_hybrid_search_wrapper(runtime):
     """Build a hybrid wrapper for ``watercooler_search``.
 
-    The wrapper intercepts the call, resolves the capability based on
-    the ``mode`` argument, then routes to local, remote, or disabled.
+    Resolves the capability per ``(tool, args)`` — by ``mode``/``semantic``,
+    or the ``seed_entry_id`` / ``namespaces`` mode selectors (PR6 D4/D5) —
+    then routes the call local / remote / disabled.
     """
     import functools
-    from ..capabilities import resolve_search_capability
+    from ..capabilities import tool_capability
 
     @functools.wraps(_search_graph_impl)
     async def _hybrid_search(ctx, **kwargs):
-        mode = kwargs.get("mode", "auto")
-        query = kwargs.get("query", "")
-        semantic = kwargs.get("semantic", False)
-        # Infer actual mode for capability resolution
-        resolved_mode = infer_search_mode(mode, query, semantic)
-        # Codex review: pass ``semantic`` through so that semantic entry
-        # search resolves to ``semantic_similarity`` (remote in hybrid)
-        # rather than falling back to ``baseline_search`` (local).
-        capability = resolve_search_capability(
-            resolved_mode, query=query, semantic=semantic
-        )
+        capability = tool_capability("watercooler_search", kwargs)
         target = runtime.capability_profile.resolve_execution_target(
             capability,
             local_available=True,
@@ -2851,40 +2963,6 @@ def _build_hybrid_search_wrapper(runtime):
     return _hybrid_search
 
 
-def _build_hybrid_find_similar_wrapper(runtime):
-    """Build a hybrid wrapper for ``watercooler_find_similar``."""
-    import functools
-    from ..capabilities import resolve_find_similar_capability
-
-    @functools.wraps(_find_similar_entries_impl)
-    async def _hybrid_find_similar(ctx, **kwargs):
-        capability = resolve_find_similar_capability()
-        target = runtime.capability_profile.resolve_execution_target(
-            capability,
-            local_available=True,
-            remote_available=runtime.premium_client is not None,
-        )
-        if target == "remote":
-            if runtime.premium_client is None:
-                return json.dumps({
-                    "error": "remote_unavailable",
-                    "capability": capability,
-                    "message": "Remote premium client is not configured.",
-                })
-            return await runtime.premium_client.call_tool_text(
-                "watercooler_find_similar", kwargs
-            )
-        if target == "disabled":
-            return json.dumps({
-                "error": "capability_disabled",
-                "capability": capability,
-            }, indent=2)
-        # Local execution: _find_similar_entries_impl is sync
-        return _find_similar_entries_impl(ctx, **kwargs)
-
-    return _hybrid_find_similar
-
-
 def register_graph_tools(mcp, *, selected=None, runtime=None):
     """Register graph tools with the MCP server.
 
@@ -2895,10 +2973,10 @@ def register_graph_tools(mcp, *, selected=None, runtime=None):
         runtime: Optional ToolRuntime. When surface is ``local_hybrid``,
             mixed tools get hybrid wrappers that route local/remote/disabled.
     """
-    global baseline_graph_stats, search_graph_tool
-    global find_similar_entries_tool, baseline_sync_status_tool, access_stats_tool
-    global graph_enrich_tool, graph_recover_tool, graph_project_tool
-    global annotate_tool, remove_annotation_tool, get_annotations_tool
+    global baseline_graph_tool, search_graph_tool
+    global access_stats_tool
+    global graph_enrich_tool, graph_project_tool
+    global annotations_tool
     global delete_entry_tool, delete_thread_tool, archive_thread_tool
 
     _globals = globals()
@@ -2910,7 +2988,5 @@ def register_graph_tools(mcp, *, selected=None, runtime=None):
         if runtime is not None and getattr(runtime, "surface", None) == "local_hybrid":
             if tool_name == "watercooler_search":
                 actual_impl = _build_hybrid_search_wrapper(runtime)
-            elif tool_name == "watercooler_find_similar":
-                actual_impl = _build_hybrid_find_similar_wrapper(runtime)
         registered = mcp.tool(name=tool_name)(actual_impl)
         _globals[global_name] = registered

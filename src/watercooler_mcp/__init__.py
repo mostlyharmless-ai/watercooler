@@ -17,6 +17,21 @@ try:
 except PackageNotFoundError:
     __version__ = "0.0.0-dev"  # Fallback for editable installs without metadata
 
-from .server import mcp
-
 __all__ = ["mcp"]
+
+
+def __getattr__(name: str):
+    """Lazily expose ``mcp`` (PEP 562).
+
+    Importing ``watercooler_mcp`` must not eagerly pull in the FastMCP server
+    stack: lightweight submodules — e.g. ``watercooler_mcp.daemons`` helpers
+    driven by operator CLI scripts such as
+    ``scripts/reset_decision_extractor.py`` — must be importable without
+    ``fastmcp`` installed. ``watercooler_mcp.mcp`` and
+    ``from watercooler_mcp import mcp`` still resolve, on first access.
+    """
+    if name == "mcp":
+        from .server import mcp
+
+        return mcp
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
