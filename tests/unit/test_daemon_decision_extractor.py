@@ -350,7 +350,20 @@ class TestExtractDecisionsDaemon:
         assert findings[0].category == CAT_REJECTED
         assert "low_confidence" in findings[0].details.get("rejection_reason", "")
 
-    def test_tick_rejects_hallucinated_quote(self, tmp_path, monkeypatch):
+    def test_tick_routes_hallucinated_quote_to_candidate_note(
+        self, tmp_path, monkeypatch
+    ):
+        """High-confidence extraction with quotes that don't match the source
+        body routes to a thread-visible candidate Note instead of a private
+        rejection — the candidate body marks the quote evidence as unverified
+        so a human can confirm or reject. This is the dominant production
+        rejection bucket; surfacing it is the whole point of the candidate
+        path.
+        """
+        from watercooler_mcp.daemons.decision_extractor import CAT_CANDIDATE_NOTE
+        from watercooler_mcp.daemons.daemon_write import DaemonWriteResult
+        from ulid import ULID
+
         monkeypatch.setattr(
             "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
         )
@@ -358,22 +371,31 @@ class TestExtractDecisionsDaemon:
         entry = _make_entry(body="We decided to use PostgreSQL.")
         _write_graph_thread(threads_dir, "test-topic", entries=[entry])
 
-        # Quote doesn't match source
         llm = MockLLMClient(
             response=_llm_response_pass(quotes=["We decided to use MySQL"])
         )
         daemon = _make_daemon(tmp_path, threads_dir=threads_dir, llm_client=llm)
         daemon._resolved_code_root = tmp_path
 
-        with patch(
-            "watercooler_mcp.daemons.decision_extractor.load_findings",
-            return_value=[_make_detector_finding()],
+        with (
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.load_findings",
+                return_value=[_make_detector_finding()],
+            ),
+            patch(
+                "watercooler_mcp.daemons.decision_extractor.daemon_write_entry",
+                return_value=DaemonWriteResult(
+                    written=True,
+                    pushed=True,
+                    entry_id=str(ULID()),
+                    error=None,
+                ),
+            ),
         ):
             findings = daemon.tick()
 
         assert len(findings) == 1
-        assert findings[0].category == CAT_REJECTED
-        assert "hallucinated_quote" in findings[0].details.get("rejection_reason", "")
+        assert findings[0].category == CAT_CANDIDATE_NOTE
 
     def test_tick_handles_llm_unavailable(self, tmp_path, monkeypatch):
         monkeypatch.setattr(

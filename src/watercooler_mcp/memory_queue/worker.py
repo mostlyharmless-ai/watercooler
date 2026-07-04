@@ -36,6 +36,32 @@ logger = logging.getLogger(__name__)
 # that a backend is "known" but has no handler registered yet.
 _SENTINEL = object()
 
+# #941: substrings (lowercased match) that identify a provider rate-limit /
+# quota failure. These surface through BackendError as e.g.
+# "RuntimeError: Failed to add episode: Rate limit exceeded. Please try
+# again later." (the exhausted-OpenAI-credits incident) or OpenAI's
+# "You exceeded your current quota". Matching errs toward throttle
+# classification — the throttle ramp retries longer, which is the safe
+# direction for a false positive.
+_RATE_LIMIT_MARKERS = (
+  "rate limit",
+  "rate_limit",
+  "ratelimit",
+  "too many requests",
+  "error code: 429",
+  "status 429",
+  "http 429",
+  "exceeded your current quota",
+  "quota exceeded",
+  "insufficient_quota",
+)
+
+
+def _is_rate_limit_error(error_msg: str) -> bool:
+  """True when the error text indicates a provider rate limit / quota 429."""
+  lowered = error_msg.lower()
+  return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+
 
 @dataclass
 class _WorkerThreadState:
@@ -374,12 +400,20 @@ class MemoryTaskWorker:
         isinstance(exc, ImportError)
         or isinstance(exc, _PermanentTaskError)
       )
+      # #941: a provider rate limit is the provider's state, not the
+      # task's — route to the throttle ramp instead of burning the
+      # 3-attempt budget (which converted an exhausted-credits provider
+      # into 100% permanent dead-letters in ~96s per task).
+      is_throttled = not is_permanent and _is_rate_limit_error(error_msg)
       logger.warning(
-        "MEMORY_QUEUE: task %s failed (attempt %d/%d, permanent=%s): %s",
-        task.task_id, task.attempt, task.max_attempts, is_permanent, error_msg,
+        "MEMORY_QUEUE: task %s failed (attempt %d/%d, permanent=%s, throttled=%s): %s",
+        task.task_id, task.attempt, task.max_attempts, is_permanent,
+        is_throttled, error_msg,
       )
       self._reset_thread_backend(loop, reason="task_error")
-      self._queue.fail(task.task_id, error_msg, permanent=is_permanent)
+      self._queue.fail(
+        task.task_id, error_msg, permanent=is_permanent, throttled=is_throttled
+      )
 
   def _reset_thread_backend(
     self, loop: asyncio.AbstractEventLoop, reason: str

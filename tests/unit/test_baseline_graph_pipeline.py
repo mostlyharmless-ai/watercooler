@@ -538,6 +538,34 @@ class TestBaselineGraphRunner:
         runner = BaselineGraphRunner(mock_config, verbose=True)
         assert runner.verbose is True
 
+    def test_extractive_pipeline_scrubs_authority_language(self, tmp_path):
+        """extractive_only summarization must apply the authority guard, not persist a
+        laundering-prone summary as a current-schema (v2) record (#878)."""
+        from watercooler.baseline_graph.parser import ParsedThread, ParsedEntry
+        from watercooler.baseline_graph.summarizer import _launders_authority
+
+        threads_dir = tmp_path / "threads"
+        threads_dir.mkdir()
+        config = PipelineConfig(threads_dir=threads_dir, extractive_only=True)
+        runner = BaselineGraphRunner(config)
+
+        entry = ParsedEntry(
+            entry_id="x-1", index=0, agent="a", role="planner", entry_type="Note",
+            title="N", timestamp="t",
+            body="We decided to ship the rollout next week.", summary="",
+        )
+        thread = ParsedThread(
+            topic="x", title="X", status="OPEN", ball="", last_updated="",
+            summary="", entries=[entry],
+        )
+        runner._summarize_threads([thread])
+
+        # A Note-only thread (0 Decision/0 Closure) must not surface decision language.
+        assert not _launders_authority(
+            thread.summary, allow_decision=False, allow_outcome=False
+        )
+        assert "decided to ship" not in thread.summary.lower()
+
     def test_clear_cache_fresh_mode(self, mock_config):
         """Test cache clearing in fresh mode."""
         mock_config.fresh = True

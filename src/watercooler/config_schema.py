@@ -6,12 +6,15 @@ Uses Pydantic for schema enforcement and clear error messages.
 
 from __future__ import annotations
 
+import logging
 import os
 import warnings
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
 
 # Premium daemon routing — where does this daemon run?
 #
@@ -30,18 +33,6 @@ DaemonRoute = Literal["auto", "local", "hosted", "disabled"]
 class CommonConfig(BaseModel):
     """Shared settings for both MCP and Dashboard."""
 
-    # Threads repo naming pattern
-    # Placeholders: {org}, {repo}, {namespace}
-    # HTTPS is the default - works with credential helpers and tokens without SSH agent
-    threads_pattern: str = Field(
-        default="https://github.com/{org}/{repo}-threads.git",
-        description="URL pattern for threads repos. Placeholders: {org}, {repo}, {namespace}",
-    )
-    threads_suffix: str = Field(
-        default="-threads",
-        description="Suffix appended to code repo name for threads repo. "
-        "Override with WATERCOOLER_THREADS_SUFFIX env var.",
-    )
     templates_dir: str = Field(
         default="",
         description="Path to templates directory (empty = use bundled)",
@@ -153,6 +144,25 @@ class SyncConfig(BaseModel):
         default=60.0,
         ge=0,
         description="Seconds before considering sync stale",
+    )
+    commit_queue_max_depth: int = Field(
+        default=2000,
+        ge=1,
+        description=(
+            "Max pending tasks in the single-writer commit queue before "
+            "backpressure. Tiered: <60% accept, 60-90% accept+advisory, "
+            ">=100% reject (QueueFullError) -> writer retries with retry_after."
+        ),
+    )
+    default_confirm: Literal["accepted", "committed", "pushed"] = Field(
+        default="accepted",
+        description=(
+            "Default write-behind confirmation level for ordinary writes. "
+            "'accepted' returns once the entry is durable in the graph + the "
+            "commit is queued (write-behind); 'committed'/'pushed' block on the "
+            "committer receipt. Decision/Closure/supersession + hosted force "
+            "'pushed' regardless."
+        ),
     )
 
     class Config:
@@ -316,6 +326,26 @@ class GraphConfig(BaseModel):
     embedding_model: str = Field(
         default="",
         description="Model for embeddings (empty = resolve from unified config)",
+    )
+
+    # Async write path (Phase A — fan-out / #903)
+    async_enrichment: bool = Field(
+        default=True,
+        description=(
+            "Run entry enrichment (summary/embedding) + memory-backend sync "
+            "asynchronously via the memory-task queue instead of inline under the "
+            "write lock, so the topic lock is held only for the fast append+commit "
+            "(fixes the fan-out timeout / stale-lock self-block, #903). Falls back to "
+            "inline when the queue/worker is unavailable. False = always inline."
+        ),
+    )
+    enrich_structured: bool = Field(
+        default=False,
+        description=(
+            "Run the LLM summarizer for structured entries (Decision/Plan/PR/Closure, "
+            "and onboarding-*/history-* topics). Off by default: their bodies are "
+            "self-describing templates and the summarizer mis-fires on them (#902)."
+        ),
     )
 
     # Behavior
@@ -644,34 +674,123 @@ class ContentRefinerConfig(BaseModel):
         return v
 
 
-class CompoundConfig(BaseModel):
-    """Per-project opt-in for compound artifact generation.
+class LearningsConfig(BaseModel):
+    """Configuration for the Learnings daemon (extract/propose tier).
 
-    When ``enabled = true``, compound artifact generation is activated.
-    The ``generate_compound_artifacts()`` function in
-    ``watercooler_mcp.daemons.compound`` serves as the callable hook; callers
-    are responsible for dispatching it at the appropriate point (e.g. thread
-    closure). Full dispatch wiring is tracked in issue #214.
+    The Learnings daemon (``ExtractLearningsDaemon`` in
+    ``watercooler_mcp.daemons.learnings``) mines closed threads for reusable
+    learnings, mirroring ``ExtractDecisionsDaemon``. Per the Phase 1 build
+    authorization (Decision ``01KV2D50W2FYBW0SA6Y9Y081V9`` on thread
+    ``workflow-packs-prepare-work-discovery-2026-05-29``) it is **default-off**
+    and ships only the L1 annotation + findings layer; thread-visible learning
+    Notes and L2 promotion candidates are separately gated and also default-off.
 
-    Compound artifacts are visible workflow artifacts that imply a process
-    step was completed. They require explicit opt-in per project.
+    Authority posture: the daemon never writes Decision / Closure / supersession
+    / status (authority-ladder guardrail ``01KS0JTK0RT4EC0M92PMX19XRA``). L3
+    promotion stays human via the ``update-agent-context`` skill /
+    ``watercooler_promote_candidate``.
     """
 
     enabled: bool = Field(
         default=False,
-        description="Enable compound artifact generation (must be explicitly opted in)",
+        description="Enable the Learnings daemon (opt-in; off by default)",
     )
-    auto_report_on_closure: bool = Field(
-        default=True,
-        description="Generate report when thread closes (if enabled)",
+    emit_mode: Literal["monitor", "warn", "enforce"] = Field(
+        default="monitor",
+        description=(
+            "Graduation dial for thread-visible emission. Reversible L1 graph "
+            "annotations and daemon findings emit in ALL modes; thread-visible "
+            "learning Notes / promotion candidates require advancing past "
+            "'monitor' (a later increment, gated on the precision eval). "
+            "'monitor' = reversible annotations + findings only, no thread "
+            "entries (the authorized default-off posture); it is not "
+            "side-effect-free — use the daemon's dry_run for findings-only runs."
+        ),
     )
-    auto_learnings: bool = Field(
-        default=True,
-        description="Extract learnings from threads (if enabled)",
+    interval: float = Field(
+        default=1800.0,
+        ge=60.0,
+        description="Seconds between extraction cycles (default 30 min)",
     )
-    auto_suggestions: bool = Field(
+    emit_learning_notes: bool = Field(
+        default=False,
+        description=(
+            "Emit thread-visible learning Notes (body-stamped "
+            "advisory_until_phase_1a). Default-off until L1 output is validated "
+            "(enablement gate #3)."
+        ),
+    )
+    emit_promotion_candidates: bool = Field(
+        default=False,
+        description=(
+            "Emit L2 promotion-candidate Notes on root-cause recurrence. "
+            "Default-off; binds on a disposition owner + candidate TTL policy "
+            "(critic conditions F1/F2) before enablement."
+        ),
+    )
+    recurrence_threshold: int = Field(
+        default=3,
+        ge=2,
+        le=20,
+        description=(
+            "root_cause recurrence count that triggers an L2 promotion candidate"
+        ),
+    )
+    index_solutions_docs: bool = Field(
         default=True,
-        description="Generate suggestions from threads (if enabled)",
+        description=(
+            "Join solution write-ups (frontmatter pr:) from solutions_dirs to "
+            "enrich learnings and dedup against already-captured work "
+            "(consume-not-duplicate; interoperates with Compound Engineering "
+            "when present, but does not require it)"
+        ),
+    )
+    solutions_dirs: List[str] = Field(
+        default_factory=lambda: ["docs/solutions"],
+        description=(
+            "Code-repo-relative directories scanned for pr:-tagged solution "
+            "write-ups. Defaults to Compound Engineering's docs/solutions; "
+            "override per project (this repo uses dev_docs/solutions). Missing "
+            "dirs are skipped (degrades to graph-only signals); first dir wins "
+            "on a duplicate pr:."
+        ),
+    )
+    synthesize_notes: bool = Field(
+        default=False,
+        description=(
+            "Run the LLM synthesis pass that drafts the missing learning for a "
+            "capture-gap thread. Off by default (LLM cost). Under emit_mode="
+            "'monitor' a passing draft is recorded as a 'shadow_learning_note' "
+            "finding (never a thread Note); this is the candidate the precision "
+            "eval measures before emission graduates."
+        ),
+    )
+    min_confidence: int = Field(
+        default=3,
+        ge=0,
+        le=5,
+        description=(
+            "Minimum draft confidence (0-5) for a synthesized learning to pass "
+            "(mirrors the decision extractor's tunable floor)."
+        ),
+    )
+    max_syntheses_per_tick: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Hard cap on LLM synthesis calls per tick — bounds the burst when "
+            "synthesize_notes is first enabled on a backlog of capture-gap threads."
+        ),
+    )
+    max_tick_duration: float = Field(
+        default=120.0,
+        ge=1.0,
+        description=(
+            "Soft per-tick wall-clock budget, in seconds. Checked between topics "
+            "(not a hard ceiling): an in-flight synthesis can overrun by up to one "
+            "LLM call before the scan stops. The scan restarts from the first "
+            "topic each tick, so it bounds burst, not cumulative, wall-clock."
+        ),
     )
 
 
@@ -1285,6 +1404,93 @@ class SyncGuardConfig(BaseModel):
     )
 
 
+class T2HealthProbeConfig(BaseModel):
+    """Configuration for the T2 health probe daemon (synthetic liveness).
+
+    Opt-in. Only meaningful under ``hybrid``/``proxy`` transport (a remote T2
+    channel must exist); a no-op otherwise. Runs scheduled synthetic ``facts``
+    probes and posts Slack alerts on state transitions.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable the T2 health probe daemon (scheduled synthetic T2 "
+            "liveness checks + Slack alerts on state change). Opt-in; only "
+            "meaningful under hybrid/proxy transport."
+        ),
+    )
+    interval: float = Field(
+        default=300.0,
+        ge=30.0,
+        description="Seconds between probes",
+    )
+    timeout_s: float = Field(
+        default=8.0,
+        ge=1.0,
+        le=45.0,
+        description="Per-probe timeout (kept under the ~50s middleware ceiling)",
+    )
+    amber_ms: float = Field(
+        default=3000.0,
+        ge=0.0,
+        description="Latency (ms) above which a working channel is flagged amber",
+    )
+
+
+class EnrichSupersessionConfig(BaseModel):
+    """Configuration for the supersession-enrichment daemon (#991 / earned-edge RFC P2).
+
+    Opt-in. Records (or, in emit mode, writes) one-hop ``superseded_by`` links on
+    superseded T2 edges. Report-only by default; the links are afforded earned edges,
+    never authored — ratification is a separate human step.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable the supersession-enrichment daemon (opt-in, requires global "
+            "daemons.enabled=True)."
+        ),
+    )
+    interval: float = Field(
+        default=900.0,
+        ge=30.0,
+        description="Seconds between enrichment ticks",
+    )
+    emit_mode: str = Field(
+        default="monitor",
+        pattern="^(monitor|emit)$",
+        description=(
+            "'monitor' (report-only: compute the superseded_by links that would be "
+            "written, make no changes) or 'emit' (write the afforded links)."
+        ),
+    )
+    emit_bases: List[str] = Field(
+        default=["same_source_and_name", "same_source", "same_name"],
+        description=(
+            "Successor-match bases eligible for afforded superseded_by writes in "
+            "emit mode (tiered emit, ratified 2026-07-02). 'temporal_only' is "
+            "excluded by default: timing-adjacency-only matches can be "
+            "ingestion-order artifacts; they stay reported in findings but "
+            "unwritten. Valid values: same_source_and_name, same_source, "
+            "same_name, temporal_only."
+        ),
+    )
+
+    @field_validator("emit_bases")
+    @classmethod
+    def _validate_emit_bases(cls, v: List[str]) -> List[str]:
+        valid = {"same_source_and_name", "same_source", "same_name", "temporal_only"}
+        unknown = set(v) - valid
+        if unknown:
+            raise ValueError(
+                f"emit_bases contains unknown bases {sorted(unknown)}; "
+                f"valid: {sorted(valid)}"
+            )
+        return v
+
+
 class T2IndexerConfig(BaseModel):
     """Configuration for the T2 indexer daemon.
 
@@ -1373,6 +1579,44 @@ class ExternalDaemonsConfig(BaseModel):
 class DaemonsConfig(BaseModel):
     """Daemon management configuration."""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_compound_to_learnings(cls, data: object) -> object:
+        """Migrate the retired ``[mcp.daemons.compound]`` key to ``learnings``.
+
+        ``compound`` was an unimplemented stub (issue #214); its concrete
+        successor is the Learnings daemon (``[mcp.daemons.learnings]``). A stale
+        ``compound`` table is accepted with a warning and, unless ``learnings``
+        already sets ``enabled`` explicitly, its ``enabled`` opt-in carries over
+        so an existing activation is not silently lost.
+        """
+        if not (isinstance(data, dict) and "compound" in data):
+            return data
+        # Defensive copy: the input may be a live reference into a larger parsed
+        # config (e.g. McpConfig(daemons=<dict>)); never mutate the caller's map.
+        data = dict(data)
+        compound = data.pop("compound")
+        msg = (
+            "[mcp.daemons.compound] is deprecated and has been renamed to "
+            "[mcp.daemons.learnings]; migrate your config. The compound table is "
+            "dropped (its `enabled` flag carries over to learnings) and will be "
+            "removed entirely in a future release."
+        )
+        # DeprecationWarning is filtered out in the server runtime; also log so a
+        # live operator with a stale config gets a visible signal.
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        logger.warning("watercooler.config: %s", msg)
+        if isinstance(compound, dict) and compound.get("enabled"):
+            existing = data.get("learnings")
+            if existing is None:
+                data["learnings"] = {"enabled": True}
+            elif isinstance(existing, dict) and existing.get("enabled") is None:
+                # Partial learnings table (e.g. only `interval`): carry the
+                # opt-in in without clobbering the other keys.
+                data["learnings"] = {**existing, "enabled": True}
+            # else: learnings.enabled set explicitly, or a model instance — respect it.
+        return data
+
     enabled: bool = Field(
         default=False,
         description="Enable daemon management system globally (opt-in per project)",
@@ -1388,9 +1632,9 @@ class DaemonsConfig(BaseModel):
         default=None,
         description="Shared LLM config for all daemons ([mcp.daemons.llm])",
     )
-    compound: CompoundConfig = Field(
-        default_factory=CompoundConfig,
-        description="Compound artifact generation settings (off by default)",
+    learnings: LearningsConfig = Field(
+        default_factory=LearningsConfig,
+        description="Learnings daemon settings (extract/propose tier; off by default)",
     )
     thread_auditor: ThreadAuditorConfig = Field(
         default_factory=ThreadAuditorConfig,
@@ -1451,6 +1695,14 @@ class DaemonsConfig(BaseModel):
     t2_indexer: T2IndexerConfig = Field(
         default_factory=T2IndexerConfig,
         description="T2 indexer daemon settings (graphiti ingestion)",
+    )
+    t2_health_probe: T2HealthProbeConfig = Field(
+        default_factory=T2HealthProbeConfig,
+        description="T2 health probe daemon settings (synthetic T2 liveness + alerting)",
+    )
+    enrich_supersession: EnrichSupersessionConfig = Field(
+        default_factory=EnrichSupersessionConfig,
+        description="Supersession-enrichment daemon settings (one-hop superseded_by, #991)",
     )
 
 
@@ -1677,10 +1929,6 @@ class ValidationConfig(BaseModel):
         default=False,
         description="Fail on violation (vs warn)",
     )
-    check_branch_pairing: bool = Field(
-        default=True,
-        description="Validate branch pairing",
-    )
     check_commit_footers: bool = Field(
         default=True,
         description="Validate commit footers",
@@ -1754,16 +2002,18 @@ class LLMServiceConfig(BaseModel):
         description="Prompt template for entry summarization. Use {context} and {content} placeholders.",
     )
     thread_summary_prompt: str = Field(
-        default="Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any.",
+        default="Summarize this development thread in 2-3 sentences. Describe the main topic and the state of the discussion. Mention a decision only if the thread contains a Decision entry, and an outcome only if it contains a Closure entry.",
         description="Prompt template for thread summarization. Use {title} and {entries} placeholders.",
     )
-    # Few-shot example for summarization (improves format compliance)
+    # Few-shot example for summarization (improves format compliance). Kept
+    # deliberately domain-neutral — the prior OAuth2/JWT example bled its subject
+    # matter into unrelated security summaries on weak local models (#902/#788).
     summary_example_input: str = Field(
-        default="Implemented OAuth2 authentication with JWT tokens. Added refresh token rotation and secure cookie storage.",
+        default="Refactored the date-parsing helper to accept ISO-8601 offsets and added unit tests for the boundary cases.",
         description="Example input for few-shot summarization prompt.",
     )
     summary_example_output: str = Field(
-        default="OAuth2 authentication implemented with JWT tokens, refresh rotation, and secure cookie storage.\ntags: #authentication #OAuth2 #JWT #security",
+        default="Refactored the date-parsing helper to accept ISO-8601 offsets, with new boundary-case unit tests.\ntags: #refactor #date-parsing #tests",
         description="Example output for few-shot summarization prompt.",
     )
 

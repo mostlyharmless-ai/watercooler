@@ -349,6 +349,284 @@ class TestWriteImplAuthorityGuardrails:
         assert "❌" in result
 
 
+class TestWriteImplStructuredAuthority:
+    """watercooler_write persists queryable human ownership for decision/closure (#879)."""
+
+    @staticmethod
+    def _latest_node(threads_dir, result):
+        import re
+        from watercooler.baseline_graph.writer import get_entries_for_thread
+
+        m = re.search(r"Entry-ID:\s*([0-9A-HJKMNP-TV-Z]{26})", result)
+        assert m, f"no Entry-ID in response:\n{result}"
+        eid = m.group(1)
+        for node in get_entries_for_thread(threads_dir, "test-topic"):
+            if node.get("entry_id") == eid:
+                return node
+        raise AssertionError(f"entry {eid} not found in graph")
+
+    def _write(self, threads_dir, **kw):
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        return _write_impl(
+            topic="test-topic", ctx=ctx, code_path=str(threads_dir.parent), **kw
+        )
+
+    def test_decision_persists_human_ownership(self, sample_thread, threads_dir):
+        result = self._write(
+            threads_dir,
+            body="Spec: planner\nWe chose Postgres.",
+            role="planner",
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            authority_mode="decision",
+            authorization_text="Human approved.",
+            human_authorized_by="github:caleb",
+        )
+        node = self._latest_node(threads_dir, result)
+        assert node["entry_type"] == "Decision"
+        assert node["decision_origin"] == "agent_authored"
+        assert node["authority_basis"] == "human_endorsed"
+        assert node["human_authorized_by"] == "github:caleb"
+
+    def test_closure_persists_human_ownership(self, sample_thread, threads_dir):
+        result = self._write(
+            threads_dir,
+            body="Spec: pm\nShipped.",
+            role="pm",
+            agent_func="Claude Code:claude-sonnet-4-6:pm",
+            authority_mode="closure",
+            authorization_text="Human signed off.",
+            human_authorized_by="wc:user:jay",
+        )
+        node = self._latest_node(threads_dir, result)
+        assert node["entry_type"] == "Closure"
+        assert node["human_authorized_by"] == "wc:user:jay"
+
+    def test_actor_identity_not_conflated_with_authorizer(self, sample_thread, threads_dir):
+        # An agent executes the write under human authorization: actor_class stays
+        # "agent" while the accountable human is recorded separately.
+        result = self._write(
+            threads_dir,
+            body="Spec: planner\nWe chose Postgres.",
+            role="planner",
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            authority_mode="decision",
+            authorization_text="Human approved.",
+            human_authorized_by="github:caleb",
+        )
+        node = self._latest_node(threads_dir, result)
+        assert node["actor_class"] == "agent"
+        assert node["actor_class"] != "human"
+        assert node["human_authorized_by"] == "github:caleb"
+
+    def test_decision_without_owner_is_agent_not_human(self, sample_thread, threads_dir):
+        result = self._write(
+            threads_dir,
+            body="Spec: planner\nWe chose Postgres.",
+            role="planner",
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            authority_mode="decision",
+            authorization_text="Authorized in thread.",
+        )
+        node = self._latest_node(threads_dir, result)
+        assert node["actor_class"] == "agent"
+        assert node["decision_origin"] == "agent_authored"
+        assert node["authority_basis"] == "none"
+        assert "human_authorized_by" not in node
+
+    def test_crlf_and_markup_scrubbed_in_metadata(self, sample_thread, threads_dir):
+        result = self._write(
+            threads_dir,
+            body="Spec: planner\nWe chose Postgres.",
+            role="planner",
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            authority_mode="decision",
+            authorization_text="Human approved.",
+            human_authorized_by="github:caleb\nHuman-Authorized-By: evil<x>",
+        )
+        node = self._latest_node(threads_dir, result)
+        val = node["human_authorized_by"]
+        assert "\n" not in val and "\r" not in val
+        assert "<" not in val and ">" not in val
+
+
+class TestWriteImplMoralDelegation:
+    """watercooler_write surfaces a procedural moral-delegation note (#880)."""
+
+    def _write(self, threads_dir, **kw):
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        return _write_impl(
+            topic="test-topic", ctx=ctx, code_path=str(threads_dir.parent), **kw
+        )
+
+    def test_value_laden_decision_with_owner_shows_ownership_satisfied(
+        self, sample_thread, threads_dir
+    ):
+        result = self._write(
+            threads_dir,
+            body="Spec: planner\nWe should preserve user consent before logging.",
+            role="planner",
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            authority_mode="decision",
+            authorization_text="Human approved.",
+            human_authorized_by="github:caleb",
+        )
+        node = TestWriteImplStructuredAuthority._latest_node(threads_dir, result)
+        body = node["body"]
+        assert "moral-delegation" in body
+        assert "github:caleb" in body
+        # Structured marker so a body-level audit query finds agent-authored
+        # value-laden Decisions, not just daemon-routed candidates.
+        assert "Moral-Delegation-Warning: true" in body
+        # Procedural — agent write is NOT blocked.
+        assert "✅" in result
+        assert "not a moral-substance block" in body
+
+    def test_value_laden_decision_without_owner_warns_visibly(
+        self, sample_thread, threads_dir
+    ):
+        result = self._write(
+            threads_dir,
+            body="Spec: planner\nWe should preserve user consent before logging.",
+            role="planner",
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            authority_mode="decision",
+            authorization_text="Authorized in thread.",
+        )
+        node = TestWriteImplStructuredAuthority._latest_node(threads_dir, result)
+        body = node["body"]
+        # Value-laden content cannot SILENTLY become a Decision: the warning is
+        # visible even though the write is not blocked.
+        assert "moral-delegation" in body
+        assert "no recorded accountable human" in body
+        assert "Moral-Delegation-Warning: true" in body
+        assert "✅" in result
+
+    def test_factual_decision_has_no_moral_note(self, sample_thread, threads_dir):
+        result = self._write(
+            threads_dir,
+            body="Spec: planner\nWe chose Postgres for session storage.",
+            role="planner",
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            authority_mode="decision",
+            authorization_text="Human approved.",
+            human_authorized_by="github:caleb",
+        )
+        node = TestWriteImplStructuredAuthority._latest_node(threads_dir, result)
+        assert "moral-delegation" not in node["body"]
+
+    def test_ordinary_note_never_gets_moral_note(self, sample_thread, threads_dir):
+        result = self._write(
+            threads_dir,
+            body="Spec: planner\nWe should preserve user consent before logging.",
+            role="planner",
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            authority_mode="ordinary",
+        )
+        node = TestWriteImplStructuredAuthority._latest_node(threads_dir, result)
+        assert "moral-delegation" not in node["body"]
+
+    def test_ethical_authorization_prose_does_not_trigger_warning(
+        self, sample_thread, threads_dir
+    ):
+        # A factual Decision must NOT be flagged just because the authorization
+        # prose contains ethical language — the classifier runs on the Decision
+        # content, before authorization_text is appended.
+        result = self._write(
+            threads_dir,
+            body="Spec: planner\nWe chose Postgres for session storage.",
+            role="planner",
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            authority_mode="decision",
+            authorization_text="Human approved — this is the right thing to do for our users.",
+            human_authorized_by="github:caleb",
+        )
+        node = TestWriteImplStructuredAuthority._latest_node(threads_dir, result)
+        body = node["body"]
+        # The ethical phrase is present (in the authorization marker) but the
+        # structured warning marker must NOT be.
+        assert "the right thing to do" in body
+        assert "Moral-Delegation-Warning: true" not in body
+        assert "moral-delegation: value-laden" not in body
+
+
+class TestWriteImplAntiAnthropomorphism:
+    """watercooler_write surfaces an advisory marker for first-person
+    interiority (#895). Advisory only — the write is never blocked."""
+
+    def _write(self, threads_dir, **kw):
+        ctx = type("Ctx", (), {"client_id": "test"})()
+        return _write_impl(
+            topic="test-topic", ctx=ctx, code_path=str(threads_dir.parent), **kw
+        )
+
+    def test_interiority_note_appends_marker(self, sample_thread, threads_dir):
+        result = self._write(
+            threads_dir,
+            body="Spec: critic\nI'm worried the cache invalidation is racy.",
+            role="critic",
+            agent_func="Claude Code:claude-sonnet-4-6:critic",
+        )
+        node = TestWriteImplStructuredAuthority._latest_node(threads_dir, result)
+        body = node["body"]
+        assert "Anthropomorphism-Advisory: interiority" in body
+        assert "anti-anthropomorphism" in body
+        assert '"I' in body  # the verbatim span is quoted
+        # Advisory, not a gate — the write succeeds.
+        assert "✅" in result
+
+    def test_procedural_first_person_is_not_flagged(self, sample_thread, threads_dir):
+        result = self._write(
+            threads_dir,
+            body="Spec: implementer\nI searched the threads and found three matches.",
+            role="implementer",
+            agent_func="Claude Code:claude-sonnet-4-6:implementer",
+        )
+        node = TestWriteImplStructuredAuthority._latest_node(threads_dir, result)
+        assert "Anthropomorphism-Advisory" not in node["body"]
+
+    def test_impersonal_prose_is_not_flagged(self, sample_thread, threads_dir):
+        result = self._write(
+            threads_dir,
+            body="Spec: critic\nThis analysis suggests the cache is the bottleneck.",
+            role="critic",
+            agent_func="Claude Code:claude-sonnet-4-6:critic",
+        )
+        node = TestWriteImplStructuredAuthority._latest_node(threads_dir, result)
+        assert "Anthropomorphism-Advisory" not in node["body"]
+
+    def test_authorization_prose_does_not_trip_lint(self, sample_thread, threads_dir):
+        # Human authorization prose with first-person interiority must NOT flag
+        # the agent body — the lint runs on the content, before the auth append.
+        result = self._write(
+            threads_dir,
+            body="Spec: planner\nWe chose Postgres for session storage.",
+            role="planner",
+            agent_func="Claude Code:claude-sonnet-4-6:planner",
+            authority_mode="decision",
+            authorization_text="I believe this is right.",
+            human_authorized_by="github:caleb",
+        )
+        node = TestWriteImplStructuredAuthority._latest_node(threads_dir, result)
+        body = node["body"]
+        assert "I believe this is right" in body  # present in auth marker
+        assert "Anthropomorphism-Advisory" not in body  # but not flagged
+
+    def test_applies_to_ordinary_note_not_only_decisions(
+        self, sample_thread, threads_dir
+    ):
+        # Unlike the moral gate (decision/closure only), the lint covers any
+        # entry type.
+        result = self._write(
+            threads_dir,
+            body="Spec: critic\nIn good conscience I cannot recommend this.",
+            role="critic",
+            agent_func="Claude Code:claude-sonnet-4-6:critic",
+            authority_mode="ordinary",
+        )
+        node = TestWriteImplStructuredAuthority._latest_node(threads_dir, result)
+        assert "Anthropomorphism-Advisory: interiority" in node["body"]
+
+
 class TestWriteImplControlTransfer:
     def test_auto_routes_to_say(self, sample_thread, threads_dir):
         ctx = type("Ctx", (), {"client_id": "test"})()

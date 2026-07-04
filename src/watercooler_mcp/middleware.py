@@ -303,6 +303,106 @@ def setup_instrumentation() -> None:
         pass
 
 
+def _wait_for_commit_receipt(
+    queue, task_id: str, sync_status, topic, *, timeout: float, poll: float = 0.05,
+    raise_on_timeout: bool = False,
+) -> bool:
+    """Block until the committer daemon produces a terminal receipt (Phase B).
+
+    ``completed`` -> sync_status committed+pushed. ``dead_letter`` -> raise
+    PushError (committed locally, push failed). Timeout -> the entry is durable in
+    the graph and the commit is queued, so mark queued and return (eventual — the
+    daemon owns it; unlike the pre-Phase-B inline timeout this leaves no held lock
+    and no uncommitted entry).
+
+    ``raise_on_timeout`` is set for confirmed writes (``confirm`` in
+    ``committed``/``pushed`` — forced for Decision/Closure): a timeout must NOT be
+    reported as a clean success, so it raises ``PushError`` (the entry is still
+    durable + queued; only the push confirmation is missing). The ``accepted``
+    path never reaches here, so write-behind is unaffected.
+    """
+    import time as _t
+
+    from .sync.errors import PushError
+
+    deadline = _t.monotonic() + timeout
+    while _t.monotonic() < deadline:
+        receipt = queue.get_receipt(task_id)
+        if receipt is not None:
+            if receipt.get("terminal_state") == "completed":
+                if sync_status is not None:
+                    sync_status["committed"] = True
+                    sync_status["pushed"] = True
+                return True
+            err = receipt.get("last_error") or "commit/push failed after retries"
+            if sync_status is not None:
+                sync_status["committed"] = True
+                sync_status["error"] = err
+            raise PushError(
+                message=(
+                    f"Entry queued for commit but the committer could not push for "
+                    f"'{topic}'. The entry is safe (durable in the graph + committed "
+                    "locally); fix the push side. Inspect with "
+                    "watercooler_sync_repair(diagnose_only=True)."
+                ),
+                context={"topic": topic or "", "task_id": task_id},
+                recovery_hint=(
+                    "Fix push auth/network; watercooler_sync_repair recovers "
+                    "local-only commits by pushing/rebasing."
+                ),
+            )
+        _t.sleep(poll)
+    if sync_status is not None:
+        sync_status["queued"] = True
+    log_warning(
+        f"[SYNC] commit receipt wait timed out for {topic}/{task_id}; entry is "
+        "durable + queued, push pending (the committer will flush it)."
+    )
+    if raise_on_timeout:
+        raise PushError(
+            message=(
+                f"Confirmed write for '{topic}' did not receive a commit receipt "
+                "within the wait window. The entry is durable in the graph and "
+                "queued, but its push is UNCONFIRMED — do not treat it as on "
+                "origin. Verify with watercooler_sync_repair(diagnose_only=True)."
+            ),
+            context={"topic": topic or "", "task_id": task_id},
+            recovery_hint=(
+                "The committer will flush the queued commit; re-check origin or "
+                "run watercooler_sync_repair to confirm/replay the push."
+            ),
+        )
+    return False
+
+
+def _emit_queue_advisory(queue, sync_cfg, sync_status) -> None:
+    """Yellow-tier backpressure advisory (Phase C, cooperative load-shed).
+
+    On a successful enqueue, if the commit queue is >=60% full, annotate
+    ``sync_status`` with ``backpressure``/``queue_depth``/``est_lag_s`` so a
+    fanning-out caller can throttle its own spawn rate. Purely advisory — the
+    write still succeeds; only red (``QueueFullError``) rejects the enqueue.
+    """
+    if sync_status is None:
+        return
+    try:
+        depth = queue.depth()
+        max_depth = getattr(sync_cfg, "commit_queue_max_depth", 2000)
+        if max_depth <= 0 or depth < 0.6 * max_depth:
+            return
+        bw = max(getattr(sync_cfg, "batch_window", 5.0), 0.1)
+        mbs = max(getattr(sync_cfg, "max_batch_size", 50), 1)
+        sync_status["backpressure"] = True
+        sync_status["backpressure_tier"] = (
+            "red" if depth >= max_depth else "yellow"
+        )
+        sync_status["queue_depth"] = depth
+        sync_status["queue_max_depth"] = max_depth
+        sync_status["est_lag_s"] = round(depth / (mbs / bw), 1)
+    except Exception:  # pragma: no cover - advisory only, never break a write
+        pass
+
+
 def run_with_sync(
     context: ThreadContext,
     commit_title: str,
@@ -314,6 +414,7 @@ def run_with_sync(
     priority_flush: bool = False,
     skip_validation: bool = False,
     sync_status: dict[str, object] | None = None,
+    confirm: str | None = None,
 ) -> T:
     """Execute operation with git sync.
 
@@ -476,6 +577,39 @@ def run_with_sync(
             result = operation()
 
             if topic and entry_id and context.threads_dir:
+                # Phase A (#903): when async enrichment is enabled AND a draining
+                # queue worker exists, defer the LLM summary/embedding + memory sync
+                # so the write lock is held only for the fast append+commit. The
+                # entry is already durable in the graph, so deferral is safe; we fall
+                # back to the inline path below when the queue/worker is unavailable
+                # (so enrichment is never silently dropped).
+                _enqueued = False
+                try:
+                    _graph_cfg = get_watercooler_config().mcp.graph
+                    if getattr(_graph_cfg, "async_enrichment", True):
+                        from .memory_queue import MemoryTask, get_queue, get_worker
+
+                        if get_queue() is not None and get_worker() is not None:
+                            get_queue().enqueue(
+                                MemoryTask(
+                                    backend="enrichment",
+                                    entry_id=entry_id,
+                                    topic=topic,
+                                    threads_dir=str(context.threads_dir),
+                                )
+                            )
+                            _enqueued = True
+                            log_debug(
+                                f"[GRAPH] enrichment enqueued (async) for {topic}/{entry_id}"
+                            )
+                except Exception as _enq_err:
+                    log_warning(
+                        f"[GRAPH] async enrichment enqueue failed for "
+                        f"{topic}/{entry_id}; running inline: {_enq_err}"
+                    )
+                if _enqueued:
+                    return result
+
                 # Enrichment (summaries/embeddings) - optional, best-effort
                 try:
                     # Check if enrichment is configured and services are available
@@ -586,7 +720,130 @@ def run_with_sync(
 
         # Commit and push in the worktree
         if context.threads_dir and (context.threads_dir / ".git").exists():
-            # Use worktree lock from pre-write phase if held (no gap)
+            # Phase B (#904): when the single-writer committer daemon is active,
+            # hand commit+push to it instead of committing on this thread — exactly
+            # one writer touches the worktree, so the concurrent-commit race is
+            # structurally gone. Release the worktree lock FIRST (the daemon needs
+            # it; holding it here would deadlock the receipt wait), enqueue a commit
+            # task, then block on its receipt to preserve the confirmed-write
+            # contract. Falls back to the inline commit below when the committer is
+            # unavailable (so nothing breaks when daemons aren't running).
+            _committer_handled = False
+            try:
+                _sync_cfg = get_watercooler_config().mcp.sync
+                if (
+                    getattr(_sync_cfg, "async_sync", False) is True
+                    and topic
+                    and entry_id
+                ):
+                    from .daemons import get_daemon_manager
+
+                    _mgr = get_daemon_manager()
+                    _committer = _mgr.get_daemon("committer") if _mgr else None
+                    if _committer is not None:
+                        from .daemons.committer import get_commit_queue
+                        from .memory_queue.errors import QueueFullError
+                        from .memory_queue.task import MemoryTask
+
+                        # Phase C: write-behind confirmation level. 'accepted'
+                        # returns once the entry is durable in the graph + the
+                        # commit is queued; 'committed'/'pushed' block on the
+                        # receipt (the Phase B contract, kept for Decisions etc).
+                        _confirm = confirm or getattr(
+                            _sync_cfg, "default_confirm", "accepted"
+                        )
+                        _cq = get_commit_queue()
+                        _commit_task = MemoryTask(
+                            backend="commit",
+                            entry_id=entry_id,
+                            topic=topic,
+                            threads_dir=str(context.threads_dir),
+                            content=commit_message,
+                        )
+                        try:
+                            _task_id = _cq.enqueue(_commit_task)
+                        except QueueFullError as _qf:
+                            # Red tier: the commit queue is saturated. The entry
+                            # is already durable in the graph, so degrade
+                            # gracefully — keep the worktree lock and commit
+                            # inline below (never drop the write). Surface the
+                            # backpressure so a fanning-out caller can throttle.
+                            if sync_status is not None:
+                                sync_status["backpressure"] = True
+                                sync_status["backpressure_tier"] = "red"
+                                sync_status["retry_after"] = round(
+                                    max(getattr(_sync_cfg, "batch_window", 5.0),
+                                        0.1), 1
+                                )
+                                sync_status["queue_depth"] = _qf.context.get(
+                                    "depth"
+                                )
+                                sync_status["queue_max_depth"] = _qf.context.get(
+                                    "max_depth"
+                                )
+                            log_warning(
+                                f"[SYNC] commit queue full for {topic}/"
+                                f"{entry_id}; committing inline (backpressure)"
+                            )
+                        else:
+                            # Enqueued: the daemon owns the worktree now. Release
+                            # our lock (it needs it; holding it would deadlock a
+                            # confirm wait) and never double-commit inline.
+                            if pre_write_wt_lock:
+                                pre_write_wt_lock.release()
+                                pre_write_wt_lock = None
+                            _committer_handled = True
+                            try:
+                                _committer.wake()
+                            except Exception:
+                                pass
+                            _emit_queue_advisory(_cq, _sync_cfg, sync_status)
+                            if _confirm == "accepted":
+                                # Write-behind: durable + queued, return now.
+                                if sync_status is not None:
+                                    sync_status["accepted"] = True
+                                    sync_status["queued"] = True
+                                    sync_status["commit_task_id"] = _task_id
+                            else:
+                                # Confirmed write (committed/pushed — forced for
+                                # Decision/Closure): a receipt-wait timeout must
+                                # surface, not silently return queued-success.
+                                _wait_for_commit_receipt(
+                                    _cq, _task_id, sync_status, topic,
+                                    timeout=min(
+                                        45.0,
+                                        getattr(_sync_cfg, "max_delay", 30.0)
+                                        + 15.0,
+                                    ),
+                                    raise_on_timeout=True,
+                                )
+            except PushError:
+                raise
+            except Exception as _async_err:
+                if _committer_handled:
+                    # Task enqueued — the daemon owns it; never double-commit inline.
+                    if sync_status is not None:
+                        sync_status["queued"] = True
+                    log_warning(
+                        f"[SYNC] commit receipt wait error for {topic}/{entry_id} "
+                        f"(entry queued, eventual): {_async_err}"
+                    )
+                else:
+                    log_warning(
+                        f"[SYNC] async commit setup failed for {topic}/{entry_id}; "
+                        f"committing inline: {_async_err}"
+                    )
+            if _committer_handled:
+                return result
+
+            # Inline commit path. Reached when the committer is absent OR under
+            # red-tier backpressure (commit queue full) while the daemon may also
+            # be draining. This is NOT a single-writer path: data safety here rests
+            # entirely on the worktree lock below, which the committer daemon also
+            # takes. acquire_worktree_lock -> AdvisoryLock uses O_CREAT|O_EXCL file
+            # creation, so it mutually excludes the request thread and the daemon
+            # thread *in-process* (unlike an fcntl POSIX lock, which would not).
+            # Use the lock from the pre-write phase if still held (no gap).
             worktree_lock = pre_write_wt_lock
             pre_write_wt_lock = None  # ownership transferred
             try:
@@ -603,6 +860,7 @@ def run_with_sync(
                 if topic:
                     stage_paths = paths_to_stage_for_topic(
                         context.threads_dir, topic, include_missing=True,
+                        include_decision_index=True,
                     )
                     if stage_paths:
                         # --all stages deletions as well as additions
@@ -747,6 +1005,7 @@ def run_with_graph_sync(
             if topic:
                 stage_paths = paths_to_stage_for_topic(
                     context.threads_dir, topic, include_missing=True,
+                    include_decision_index=True,
                 )
                 if stage_paths:
                     threads_repo.git.add("--all", "--", *stage_paths)

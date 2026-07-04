@@ -241,58 +241,23 @@ class BaseDaemon(ABC):
         logger.info("DAEMON[%s]: loop entered, interval=%.1fs", self.name, self.interval)
 
         while not self._stop.is_set():
-            try:
-                # Wait for unpause
-                self._paused.wait()
-                if self._stop.is_set():
-                    break
+            # Wait for unpause
+            self._paused.wait()
+            if self._stop.is_set():
+                break
 
-                # Sleep until next tick or wake
-                if self.tick_on_interval:
-                    self._wake.wait(timeout=self.interval)
-                else:
-                    # Event-driven: sleep indefinitely until wake()
-                    self._wake.wait()
-                self._wake.clear()
+            # Sleep until next tick or wake
+            if self.tick_on_interval:
+                self._wake.wait(timeout=self.interval)
+            else:
+                # Event-driven: sleep indefinitely until wake()
+                self._wake.wait()
+            self._wake.clear()
 
-                if self._stop.is_set():
-                    break
+            if self._stop.is_set():
+                break
 
-                # Refresh hosted worktree if stale (Railway mode)
-                if self._hosted_worktree is not None:
-                    logger.info("DAEMON[%s]: refreshing worktree", self.name)
-                    self._hosted_worktree.refresh_if_stale()
-
-                # Run one tick
-                logger.info("DAEMON[%s]: tick starting", self.name)
-                start = time.monotonic()
-                findings = self.tick()
-                duration = time.monotonic() - start
-
-                # Persist findings
-                if findings:
-                    append_findings(self.name, findings, namespace=self.state_namespace)
-
-                # Update checkpoint
-                self._checkpoint.last_run = time.time()
-                self._checkpoint.last_run_duration = duration
-                self._checkpoint.findings_produced = len(findings)
-                save_checkpoint(self._checkpoint, namespace=self.state_namespace)
-
-                self._total_ticks += 1
-                self._total_findings += len(findings)
-                self._last_error = None
-
-                logger.info(
-                    "DAEMON[%s]: tick completed in %.2fs, %d findings",
-                    self.name, duration, len(findings),
-                )
-
-            except Exception as exc:
-                self._checkpoint.error_count += 1
-                save_checkpoint(self._checkpoint, namespace=self.state_namespace)
-                self._last_error = f"{type(exc).__name__}: {exc}"
-                logger.exception("DAEMON[%s]: tick error: %s", self.name, exc)
+            if not self._tick_once():
                 # Brief sleep to avoid tight loop on persistent errors.
                 # Floor of 0.5s prevents >2 retries/sec for low-interval daemons.
                 time.sleep(min(5.0, max(0.5, self.interval / 10)))
@@ -300,6 +265,99 @@ class BaseDaemon(ABC):
         with self._status_lock:
             self._status = DaemonStatus.STOPPED
         logger.debug("DAEMON[%s]: loop exited", self.name)
+
+    def _tick_once(self) -> bool:
+        """Run one tick with full bookkeeping. Returns False on tick error.
+
+        Shared by the owned-thread loop (``_loop``) and the fleet-scheduler
+        managed path (``run_tick_once``).
+        """
+        try:
+            # Refresh hosted worktree if stale (Railway mode)
+            if self._hosted_worktree is not None:
+                logger.info("DAEMON[%s]: refreshing worktree", self.name)
+                self._hosted_worktree.refresh_if_stale()
+
+            logger.info("DAEMON[%s]: tick starting", self.name)
+            start = time.monotonic()
+            findings = self.tick()
+            duration = time.monotonic() - start
+
+            if findings:
+                append_findings(self.name, findings, namespace=self.state_namespace)
+
+            self._checkpoint.last_run = time.time()
+            self._checkpoint.last_run_duration = duration
+            self._checkpoint.findings_produced = len(findings)
+            save_checkpoint(self._checkpoint, namespace=self.state_namespace)
+
+            self._total_ticks += 1
+            self._total_findings += len(findings)
+            self._last_error = None
+
+            logger.info(
+                "DAEMON[%s]: tick completed in %.2fs, %d findings",
+                self.name, duration, len(findings),
+            )
+            return True
+
+        except Exception as exc:
+            try:
+                self._checkpoint.error_count += 1
+                save_checkpoint(self._checkpoint, namespace=self.state_namespace)
+            except Exception:
+                # A failing checkpoint write must not escape into the
+                # scheduler pool / kill the loop thread.
+                logger.exception(
+                    "DAEMON[%s]: checkpoint save failed on error path", self.name
+                )
+            self._last_error = f"{type(exc).__name__}: {exc}"
+            logger.exception("DAEMON[%s]: tick error: %s", self.name, exc)
+            return False
+
+    # ------------------------------------------------------------------ #
+    # Fleet-scheduler managed mode (Design (hosted) v4)
+    # ------------------------------------------------------------------ #
+
+    def mark_managed(self) -> None:
+        """Mark this daemon as fleet-scheduler managed (RUNNING, no own thread)."""
+        if not self.enabled:
+            return
+        with self._status_lock:
+            self._status = DaemonStatus.RUNNING
+
+    def run_tick_once(self) -> bool:
+        """Run one scheduler-driven tick. Returns False on tick error.
+
+        Pool threads are shared across tenants, so the daemon's scope
+        context must be installed per call and cleared afterwards — a
+        context left on the worker thread would leak one tenant's
+        identity into another tenant's tick.
+        """
+        assert self._checkpoint is not None, (
+            f"DAEMON[{self.name}]: _checkpoint not initialized before "
+            "run_tick_once. Fleet registration must _configure() the daemon "
+            "(namespace + checkpoint) before scheduling it."
+        )
+        installed = False
+        if self._scope_context is not None:
+            try:
+                from watercooler_mcp.context import set_worker_context
+
+                set_worker_context(self._scope_context)
+                installed = True
+            except Exception:
+                pass  # best-effort; mirrors _loop
+        try:
+            return self._tick_once()
+        finally:
+            if installed:
+                try:
+                    from watercooler_mcp.context import clear_worker_context
+
+                    clear_worker_context()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ #
     # Health reporting

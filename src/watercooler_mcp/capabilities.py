@@ -107,11 +107,14 @@ HYBRID_DEFAULT_ROUTES: dict[str, RouteChoice] = {
 # vs disabled per call. watercooler_bulk_index is mixed because its modes span
 # capabilities — default ingest (memory_ingest, remote) vs preflight_only= /
 # run_pipeline= (memory_migration / memory_admin_cluster, disabled by default);
-# a bare-name mount would expose the disabled modes (PR4a review).
+# a bare-name mount would expose the disabled modes (PR4a review). list_decisions
+# is mixed because include_supersession=True performs a T2 memory read while
+# the default listing remains baseline-only.
 MIXED_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "watercooler_search",
         "watercooler_bulk_index",
+        "watercooler_list_decisions",
     }
 )
 
@@ -242,6 +245,13 @@ TOOL_MATRIX: dict[str, ToolSpec] = {
         "threads_core", "L1", arg_sensitive=True,
         note="authority_mode=ordinary → L1; decision/closure → L3",
     ),
+    # Promotion is human-authorized — writes a supported promoted entry and a
+    # CandidateDisposition Note. Requires human_authorized_by.
+    "watercooler_promote_candidate": ToolSpec(
+        "threads_core", "L3",
+        note="promotion writes a supported entry + CandidateDisposition; "
+        "human_authorized_by required",
+    ),
     # ── Thread state admin ───────────────────────────────────────────────
     "watercooler_delete_entry": ToolSpec("thread_state_admin", "L3"),
     "watercooler_delete_thread": ToolSpec("thread_state_admin", "L3"),
@@ -263,7 +273,10 @@ TOOL_MATRIX: dict[str, ToolSpec] = {
     ),
     "watercooler_baseline_graph": ToolSpec("baseline_search", "L1"),
     "watercooler_access_stats": ToolSpec("baseline_search", "L1"),
-    "watercooler_list_decisions": ToolSpec("baseline_search", "L1"),
+    "watercooler_list_decisions": ToolSpec(
+        "baseline_search", "L1", arg_sensitive=True,
+        note="include_supersession=True → memory_query; default listing → baseline_search",
+    ),
     # ── Semantic similarity ──────────────────────────────────────────────
     # PR3b: hosted T1 embedding upsert/list/delete, action-selected.
     "watercooler_semantic": ToolSpec(
@@ -300,6 +313,10 @@ TOOL_MATRIX: dict[str, ToolSpec] = {
     # ── Roles / diagnostics ──────────────────────────────────────────────
     "watercooler_roles": ToolSpec("diagnostics", "L1"),
     "watercooler_health": ToolSpec("diagnostics", "L1"),
+    "watercooler_health_probe": ToolSpec("diagnostics", "L1"),
+    # watercooler_init mutates durable state (scaffolds, binds the worktree,
+    # opt-in pushes) — diagnostics capability, L2 authority (never auto-invoked).
+    "watercooler_init": ToolSpec("diagnostics", "L2"),
 }
 
 # Derived from TOOL_MATRIX — the authoritative source. Do not edit directly.
@@ -382,6 +399,12 @@ _ARG_RESOLVERS: dict[str, Callable[[dict[str, Any]], CapabilityId]] = {
         if args.get("run_pipeline")
         else "memory_ingest"
     ),
+    # watercooler_list_decisions: default listing is a baseline graph read;
+    # include_supersession=True enriches from T2/Graphiti and must route as
+    # memory_query in hybrid.
+    "watercooler_list_decisions": lambda args: (
+        "memory_query" if args.get("include_supersession") else "baseline_search"
+    ),
     # watercooler_daemon_findings (PR5 D1): action="acknowledge" is the
     # folded-in acknowledge_finding (daemon_control); listing is daemon_observe.
     "watercooler_daemon_findings": lambda args: (
@@ -419,6 +442,12 @@ _AUTHORITY_ARG_RESOLVERS: dict[str, Callable[[dict[str, Any]], AuthorityLevel]] 
         if str(args.get("action", "")).strip().lower() == "acknowledge"
         else "L1"
     ),
+    # watercooler_health_probe: the probe itself is a read-only diagnostic (L1),
+    # but alert=True dispatches a Slack webhook — an externally visible side
+    # effect that must not ride read-only authority. Escalate to L2 (control),
+    # matching the read-vs-side-effect split used by annotations/semantic/
+    # bulk_index. (Lighter than the L3 durable-record mutations.)
+    "watercooler_health_probe": lambda args: ("L2" if args.get("alert") else "L1"),
 }
 
 

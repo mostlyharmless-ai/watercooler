@@ -1,23 +1,25 @@
-"""Tests for decision extraction annotation hooks.
+"""Tests for decision extraction annotation events.
 
-Verifies that _build_decision_annotation_hook writes the expected
-AnnotationEvents when invoked as a post_write_hooks callback.
+Verifies that ``_build_decision_annotation_events`` produces the expected
+AnnotationEvents. They are applied here directly (the events would be committed
+inside ``run_with_sync`` via ``daemon_write_entry(annotation_events=...)`` in
+production) and the folded annotation state is asserted.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-
-import pytest
 
 from watercooler.baseline_graph.annotations import (
     AnnotationEvent,
+    append_annotation,
     get_annotation_state,
     load_annotation_events,
 )
 from watercooler.baseline_graph.storage import get_graph_dir, get_thread_graph_dir
 from watercooler_mcp.daemons.decision_extractor import (
-    _build_decision_annotation_hook,
+    _build_decision_annotation_events,
 )
 
 
@@ -29,13 +31,18 @@ def _setup_thread_dir(tmp_path: Path, topic: str = "test-topic") -> Path:
     return thread_dir
 
 
-class TestBuildDecisionAnnotationHook:
+def _apply(thread_dir: Path, events: Sequence[AnnotationEvent]) -> None:
+    """Apply built events the way the synced write transaction would."""
+    for event in events:
+        append_annotation(thread_dir, event)
+
+
+class TestBuildDecisionAnnotationEvents:
     def test_writes_four_events(self, tmp_path):
         topic = "test-topic"
         thread_dir = _setup_thread_dir(tmp_path, topic)
 
-        hook = _build_decision_annotation_hook("SRC_ENTRY", "DEC_ENTRY")
-        hook(topic, tmp_path, "DEC_ENTRY")
+        _apply(thread_dir, _build_decision_annotation_events(topic, "SRC_ENTRY", "DEC_ENTRY"))
 
         events = load_annotation_events(thread_dir)
         assert len(events) == 4
@@ -44,8 +51,7 @@ class TestBuildDecisionAnnotationHook:
         topic = "test-topic"
         thread_dir = _setup_thread_dir(tmp_path, topic)
 
-        hook = _build_decision_annotation_hook("SRC_ENTRY", "DEC_ENTRY")
-        hook(topic, tmp_path, "DEC_ENTRY")
+        _apply(thread_dir, _build_decision_annotation_events(topic, "SRC_ENTRY", "DEC_ENTRY"))
 
         state = get_annotation_state(thread_dir, "SRC_ENTRY")
         assert "decision_extracted" in state.tags
@@ -54,8 +60,7 @@ class TestBuildDecisionAnnotationHook:
         topic = "test-topic"
         thread_dir = _setup_thread_dir(tmp_path, topic)
 
-        hook = _build_decision_annotation_hook("SRC_ENTRY", "DEC_ENTRY")
-        hook(topic, tmp_path, "DEC_ENTRY")
+        _apply(thread_dir, _build_decision_annotation_events(topic, "SRC_ENTRY", "DEC_ENTRY"))
 
         state = get_annotation_state(thread_dir, "SRC_ENTRY")
         assert "DEC_ENTRY" in state.xrefs
@@ -64,8 +69,7 @@ class TestBuildDecisionAnnotationHook:
         topic = "test-topic"
         thread_dir = _setup_thread_dir(tmp_path, topic)
 
-        hook = _build_decision_annotation_hook("SRC_ENTRY", "DEC_ENTRY")
-        hook(topic, tmp_path, "DEC_ENTRY")
+        _apply(thread_dir, _build_decision_annotation_events(topic, "SRC_ENTRY", "DEC_ENTRY"))
 
         state = get_annotation_state(thread_dir, "DEC_ENTRY")
         assert "SRC_ENTRY" in state.xrefs
@@ -74,22 +78,18 @@ class TestBuildDecisionAnnotationHook:
         topic = "test-topic"
         thread_dir = _setup_thread_dir(tmp_path, topic)
 
-        hook = _build_decision_annotation_hook("SRC_ENTRY", "DEC_ENTRY")
-        hook(topic, tmp_path, "DEC_ENTRY")
+        _apply(thread_dir, _build_decision_annotation_events(topic, "SRC_ENTRY", "DEC_ENTRY"))
 
         state = get_annotation_state(thread_dir, topic)
         assert "has_decisions" in state.tags
 
     def test_has_decisions_tag_idempotent(self, tmp_path):
-        """Calling the hook twice should not duplicate the thread tag."""
+        """Applying two decisions' events should not duplicate the thread tag."""
         topic = "test-topic"
         thread_dir = _setup_thread_dir(tmp_path, topic)
 
-        hook1 = _build_decision_annotation_hook("SRC1", "DEC1")
-        hook1(topic, tmp_path, "DEC1")
-
-        hook2 = _build_decision_annotation_hook("SRC2", "DEC2")
-        hook2(topic, tmp_path, "DEC2")
+        _apply(thread_dir, _build_decision_annotation_events(topic, "SRC1", "DEC1"))
+        _apply(thread_dir, _build_decision_annotation_events(topic, "SRC2", "DEC2"))
 
         state = get_annotation_state(thread_dir, topic)
         # Tag list is deduplicated at materialization level
@@ -99,8 +99,7 @@ class TestBuildDecisionAnnotationHook:
         topic = "test-topic"
         thread_dir = _setup_thread_dir(tmp_path, topic)
 
-        hook = _build_decision_annotation_hook("SRC_ENTRY", "DEC_ENTRY")
-        hook(topic, tmp_path, "DEC_ENTRY")
+        _apply(thread_dir, _build_decision_annotation_events(topic, "SRC_ENTRY", "DEC_ENTRY"))
 
         events = load_annotation_events(thread_dir)
         for event in events:
@@ -108,11 +107,6 @@ class TestBuildDecisionAnnotationHook:
 
     def test_all_events_have_unique_ids(self, tmp_path):
         topic = "test-topic"
-        thread_dir = _setup_thread_dir(tmp_path, topic)
-
-        hook = _build_decision_annotation_hook("SRC_ENTRY", "DEC_ENTRY")
-        hook(topic, tmp_path, "DEC_ENTRY")
-
-        events = load_annotation_events(thread_dir)
+        events = _build_decision_annotation_events(topic, "SRC_ENTRY", "DEC_ENTRY")
         ids = [e.id for e in events]
         assert len(ids) == len(set(ids))

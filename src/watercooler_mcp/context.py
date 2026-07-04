@@ -13,7 +13,7 @@ Usage:
 
     set_http_context(HttpRequestContext(
         user_id="user_123",
-        repo="org/repo-threads",
+        repo="org/repo",
         branch="main",
         github_token="ghp_...",
     ))
@@ -57,7 +57,7 @@ class HttpRequestContext:
 
     Attributes:
         user_id: User identifier from X-User-ID header. Required.
-        repo: Repository full name (e.g., "org/repo-threads") from X-Repo header.
+        repo: Repository full name (e.g., "org/repo") from X-Repo header.
         branch: Branch name from X-Branch header. Defaults to "main".
         github_token: GitHub OAuth token for API authentication.
     """

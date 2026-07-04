@@ -16,7 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from watercooler.baseline_graph.storage import get_graph_dir, get_thread_graph_dir
+from watercooler.baseline_graph.storage import (
+    decision_index_path,
+    get_graph_dir,
+    get_thread_graph_dir,
+)
 from watercooler.fs import thread_path
 from watercooler.lock import AdvisoryLock
 
@@ -123,7 +127,11 @@ def acquire_worktree_lock(
 
 
 def paths_to_stage_for_topic(
-    threads_dir: Path, topic: str, *, include_missing: bool = False,
+    threads_dir: Path,
+    topic: str,
+    *,
+    include_missing: bool = False,
+    include_decision_index: bool = False,
 ) -> List[str]:
     """Resolve file paths that should be staged for a topic write.
 
@@ -133,6 +141,10 @@ def paths_to_stage_for_topic(
     - Per-thread graph directory (meta.json, entries.jsonl, edges.jsonl, search-index.jsonl)
     - Markdown projection (threads/<topic>.md or <topic>.md)
     - .gitignore (only if modified by _ensure_watercooler_gitignored this process)
+    - The repo-level decisions index, when ``include_decision_index`` is set and
+      the file exists (Decision writes/deletes mutate it; it lives OUTSIDE the
+      per-topic dir so the topic-scoped staging would otherwise leave it
+      uncommitted).
 
     Design invariant: all per-topic writes MUST land inside these paths.
     """
@@ -148,6 +160,15 @@ def paths_to_stage_for_topic(
     if md_path.exists() or include_missing:
         rel = md_path.relative_to(threads_dir)
         paths.append(str(rel))
+
+    # Repo-level decisions index. Guard on existence (not include_missing): the
+    # file is only ever rewritten in place, never recreated-by-deletion, so a
+    # never-existed index has nothing to stage — and `git add -- <pathspec>` on a
+    # never-tracked, absent path would error.
+    if include_decision_index:
+        idx_path = decision_index_path(graph_dir)
+        if idx_path.exists():
+            paths.append(str(idx_path.relative_to(threads_dir)))
 
     # Stage .gitignore if we modified it (ensures it's committed with the topic write)
     gitignore_modified = _ensure_watercooler_gitignored(threads_dir)

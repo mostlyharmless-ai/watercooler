@@ -44,6 +44,7 @@ from .baseline_graph.projector import (
 )
 from .lock import AdvisoryLock
 from .fs import lock_path_for_topic, thread_path
+from .promotion import ULID_PATTERN, scrub_authority_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,8 @@ def append_entry(
     entry_id: str | None = None,
     code_branch: Optional[str] = None,
     code_root: Optional[Path] = None,
+    authority_fields: Optional[dict] = None,
+    support_fields: Optional[dict] = None,
 ) -> Path:
     """Append a structured entry using graph-canonical approach.
 
@@ -165,6 +168,13 @@ def append_entry(
         registry: Optional agent registry
         user_tag: Optional user tag for agent identification
         entry_id: Entry ID (required for graph-canonical)
+        authority_fields: Optional dict with Phase 1a authority-ladder
+            provenance fields to attach to the entry node. Recognised keys:
+            ``actor_class``, ``decision_origin``, ``authority_source``,
+            ``authority_basis``, ``source_entry_id``, ``human_authorized_by``,
+            ``confidence``, ``gate_results``. Unknown keys are ignored. ``None`` (default)
+            leaves the entry's authority fields as their EntryData defaults
+            (all ``None``), producing the legacy node shape.
 
     Returns:
         Path to updated thread file
@@ -203,19 +213,80 @@ def append_entry(
         now = _now_iso()
 
         # 4. Create entry node in graph
-        entry_data = EntryData(
-            entry_id=entry_id,
-            thread_topic=topic,
-            index=entry_index,
-            agent=canonical,
-            role=role,
-            entry_type=entry_type,
-            title=title,
-            body=body,
-            timestamp=now,
-            summary="",  # Summary generated later by enrichment
-            code_branch=code_branch,
-        )
+        entry_kwargs: dict = {
+            "entry_id": entry_id,
+            "thread_topic": topic,
+            "index": entry_index,
+            "agent": canonical,
+            "role": role,
+            "entry_type": entry_type,
+            "title": title,
+            "body": body,
+            "timestamp": now,
+            "summary": "",  # Summary generated later by enrichment
+            "code_branch": code_branch,
+        }
+        if authority_fields:
+            # Whitelist the recognised keys; ignore unknowns.
+            for key in (
+                "actor_class",
+                "decision_origin",
+                "authority_source",
+                "authority_basis",
+                "source_entry_id",
+                "human_authorized_by",
+                "confidence",
+                "gate_results",
+            ):
+                if key in authority_fields and authority_fields[key] is not None:
+                    entry_kwargs[key] = authority_fields[key]
+            # Boundary clamp on ``confidence``: the entry_schema.json
+            # rubric is 1-5; a 0 (the extractor's "not a decision"
+            # value) would produce a schema-invalid node. The producer
+            # side (``_build_authority_fields``) already drops 0, but this
+            # boundary clamp closes the bug class structurally for any
+            # future caller passing ``authority_fields={"confidence": 0}``
+            # directly. Done here so a second daemon / promotion-helper
+            # caller can't silently reintroduce the schema-invalid path.
+            conf = entry_kwargs.get("confidence")
+            if conf is not None and not (
+                isinstance(conf, int) and 1 <= conf <= 5
+            ):
+                entry_kwargs.pop("confidence")
+            # Boundary scrub on ``human_authorized_by``: this value is durable,
+            # git-committed, and federation-visible, so it is sanitized at the
+            # write boundary (Cf/zero-width/bidi dropped, control/separator
+            # collapsed, angle brackets stripped, bounded to schema maxLength).
+            # The MCP/CLI producers already scrub, but doing it here closes the
+            # bug class structurally for any future caller passing the field
+            # directly. A value that scrubs to empty is dropped.
+            hab = entry_kwargs.get("human_authorized_by")
+            if hab is not None:
+                scrubbed = scrub_authority_identifier(str(hab))
+                if scrubbed:
+                    entry_kwargs["human_authorized_by"] = scrubbed
+                else:
+                    entry_kwargs.pop("human_authorized_by")
+            # Boundary clamp on ``source_entry_id``: that schema field is
+            # ULID-typed. Drop a non-ULID value rather than persist a node that
+            # would fail validation once it is enforced (mirrors the confidence
+            # clamp above; the producers already guard, this is defense in depth).
+            sid = entry_kwargs.get("source_entry_id")
+            if sid is not None and not ULID_PATTERN.match(str(sid)):
+                entry_kwargs.pop("source_entry_id")
+        if support_fields:
+            # §6 tether read-model (#896 Leg 2) — structured counterpart to the
+            # body markers. Whitelist the 5 recognised keys; ignore unknowns.
+            for key in (
+                "support_counts",
+                "dominant_tether",
+                "thin_support",
+                "thin_support_reason",
+                "support_evidence",
+            ):
+                if key in support_fields and support_fields[key] is not None:
+                    entry_kwargs[key] = support_fields[key]
+        entry_data = EntryData(**entry_kwargs)
 
         success = upsert_entry_node(
             threads_dir,
@@ -238,6 +309,26 @@ def append_entry(
         # 6. Reconstruct .md from graph (single source of truth)
         project_and_write_thread(threads_dir, topic)
 
+        # 7. Maintain the repo-level decisions index for Decision entries so the
+        # hosted reader needn't fan out over every thread. Best-effort: index
+        # maintenance must never fail a write. (Daemon-extracted Decisions apply
+        # their source xref after this point and re-upsert post-annotation in
+        # daemon_write_entry; here the source is whatever is in the graph now.)
+        if entry_type == "Decision":
+            try:
+                from watercooler.baseline_graph.decision_index import (
+                    upsert_decision_index_local,
+                )
+                from watercooler.baseline_graph.storage import get_graph_dir
+
+                upsert_decision_index_local(
+                    get_graph_dir(threads_dir), topic, entry_id
+                )
+            except Exception as idx_err:  # pragma: no cover - defensive
+                logger.warning(
+                    "decisions-index upsert failed (non-fatal): %s", idx_err
+                )
+
         logger.debug(f"Graph-canonical append_entry complete: {topic}/{entry_id}")
         return tp
 
@@ -258,25 +349,12 @@ def say(
     entry_id: str | None = None,
     code_branch: Optional[str] = None,
     code_root: Optional[Path] = None,
+    authority_fields: Optional[dict] = None,
+    support_fields: Optional[dict] = None,
 ) -> Path:
     """Quick team note with auto-ball-flip using graph-canonical approach.
 
-    Args:
-        topic: Thread topic
-        threads_dir: Directory containing threads
-        agent: Agent name (defaults to Team)
-        role: Agent role (defaults to role from registry)
-        title: Entry title (required)
-        entry_type: Entry type (default: "Note")
-        body: Entry body text
-        status: Optional status update
-        ball: Optional ball update (if not provided, auto-flips)
-        registry: Optional agent registry
-        user_tag: Optional user tag
-        entry_id: Entry ID (required for graph-canonical)
-
-    Returns:
-        Path to updated thread file
+    See ``append_entry`` for the ``authority_fields`` / ``support_fields`` params.
     """
     # Default agent to Team
     default_agent, _ = _default_agent_and_role(registry)
@@ -306,6 +384,8 @@ def say(
         entry_id=entry_id,
         code_branch=code_branch,
         code_root=code_root,
+        authority_fields=authority_fields,
+        support_fields=support_fields,
     )
 
 
@@ -325,25 +405,12 @@ def ack(
     entry_id: str | None = None,
     code_branch: Optional[str] = None,
     code_root: Optional[Path] = None,
+    authority_fields: Optional[dict] = None,
+    support_fields: Optional[dict] = None,
 ) -> Path:
     """Acknowledge without auto-flipping ball using graph-canonical approach.
 
-    Args:
-        topic: Thread topic
-        threads_dir: Directory containing threads
-        agent: Agent name (defaults to Team)
-        role: Agent role (defaults to role from registry)
-        title: Entry title (defaults to "Ack")
-        entry_type: Entry type (default: "Note")
-        body: Entry body text (defaults to "ack")
-        status: Optional status update
-        ball: Optional ball update (does NOT auto-flip)
-        registry: Optional agent registry
-        user_tag: Optional user tag
-        entry_id: Entry ID (required for graph-canonical)
-
-    Returns:
-        Path to updated thread file
+    See ``append_entry`` for the ``authority_fields`` / ``support_fields`` params.
     """
     # Default agent to Team
     default_agent, _ = _default_agent_and_role(registry)
@@ -376,6 +443,8 @@ def ack(
         entry_id=entry_id,
         code_branch=code_branch,
         code_root=code_root,
+        authority_fields=authority_fields,
+        support_fields=support_fields,
     )
 
 

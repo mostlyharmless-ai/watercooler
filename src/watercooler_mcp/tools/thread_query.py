@@ -15,6 +15,7 @@ Modes:
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 from fastmcp import Context
 from fastmcp.tools.tool import ToolResult
@@ -55,6 +56,10 @@ from watercooler.baseline_graph.reader import (
     format_thread_markdown,
     get_branches_with_entries,
     format_branch_discovery_hint,
+)
+from watercooler.baseline_graph.summarizer import (
+    entry_type_counts,
+    format_entry_mix,
 )
 from ..errors import (
     ContextError,
@@ -422,6 +427,9 @@ def _list_threads_impl(
                         "has_ball": has_ball,
                     }
                     if scan and topic in entry_scan:
+                        t_obj["entry_type_counts"] = entry_type_counts(
+                            [{"entry_type": ge.entry_type} for ge in entry_scan[topic]]
+                        )
                         t_obj["entries"] = [
                             {
                                 "index": ge.index,
@@ -517,6 +525,41 @@ def _list_threads_impl(
         raise HostedModeError(f"Unexpected error listing threads: {e}", operation="list_threads")
 
 
+def _stance_block_markdown(context: Any) -> str:
+    """Best-effort stance block for summary_only markdown reads. Never raises.
+
+    Returns "" on any failure so the core thread summary is always returned
+    intact (authority ladder L1: advisory-only, best-effort).
+    """
+    try:
+        from ..stance_read_decoration import render_stance_markdown, resolve_stance_block
+
+        return render_stance_markdown(resolve_stance_block(context))
+    except Exception as exc:  # decoration must never break the core read
+        log_debug(f"stance decoration (markdown) skipped: {exc}")
+        return ""
+
+
+def _stance_block_json(context: Any) -> dict[str, Any] | None:
+    """Best-effort stance block for summary_only JSON reads. Never raises.
+
+    Returns None on any failure so the ``_stance_advisory`` peer key is simply
+    omitted rather than breaking the read. Note: unlike the markdown wrapper
+    (which returns "" and is skipped when there are no bullets), a successful
+    JSON render always returns a populated dict — the peer key is intentionally
+    always present on local summary_only reads so a JSON consumer gets the
+    machine-readable ``salience_status``/``stance_block_status`` even when the
+    stance is empty (plan C10: diagnosable, not silently absent).
+    """
+    try:
+        from ..stance_read_decoration import render_stance_json, resolve_stance_block
+
+        return render_stance_json(resolve_stance_block(context))
+    except Exception as exc:  # decoration must never break the core read
+        log_debug(f"stance decoration (json) skipped: {exc}")
+        return None
+
+
 def _read_thread_impl(
     topic: str,
     from_entry: int = 0,
@@ -544,7 +587,10 @@ def _read_thread_impl(
     Returns:
         Full thread content (or summary-only condensed view) including:
         - Thread metadata (status, ball owner, participants)
-        - All entries with timestamps, authors, roles, and types
+        - All entries with timestamps, authors, roles, and types. Each entry
+          carries a ``ref`` — the canonical citation
+          ``<thread_topic>:<index> (<entry_id>)``; the ``topic`` you queried with
+          is the write-back handle.
         - Current ball ownership status
     """
     try:
@@ -602,7 +648,7 @@ def _read_thread_impl(
                     "last_entry_at": meta.get("last_updated", ""),
                     "summary": meta.get("summary", ""),
                 },
-                "entries": [_entry_full_payload(entry) for entry in entries],
+                "entries": [_entry_full_payload(entry, topic=topic) for entry in entries],
             }
             warnings = _get_startup_warnings()
             if warnings:
@@ -668,6 +714,17 @@ def _read_thread_impl(
         if resolved_format == "markdown" and not summary_only:
             graph_thread, graph_entries = graph_result
             content = format_thread_markdown(graph_thread, graph_entries)
+            # Deterministic, non-LLM entry-type badge (same signal as summary_only/JSON).
+            # Inserted just after the title line so the leading "# <topic>" is preserved.
+            mix = format_entry_mix(
+                entry_type_counts([{"entry_type": e.entry_type} for e in graph_entries])
+            )
+            mix_line = f"Entry mix: {mix}"
+            nl = content.find("\n")
+            if nl != -1:
+                content = f"{content[:nl + 1]}{mix_line}\n{content[nl + 1:]}"
+            else:
+                content = f"{content}\n{mix_line}"
             return _format_warnings_for_response(hint_banner + parity_banner + content)
 
         # Load entries from graph (canonical)
@@ -679,13 +736,21 @@ def _read_thread_impl(
         title, status, ball, last = _get_thread_metadata(threads_dir, topic)
         thread_summary = _get_thread_summary(threads_dir, topic)
 
+        # Deterministic, non-LLM entry-type badge computed from the loaded entries.
+        # It is never sourced from the (LLM-generated) summary prose, so it cannot be
+        # laundered: a Note-only thread always reports 0 Decisions / 0 Closures here.
+        entry_mix_counts = entry_type_counts(
+            [{"entry_type": e.entry_type} for e in entries]
+        )
+
         if summary_only:
             if resolved_format == "markdown":
                 # Condensed "Cole's Notes" view
                 lines = [f"# {topic} — {title}"]
                 if thread_summary:
                     lines.append(f"\n{thread_summary}")
-                lines.append(f"\nStatus: {status} | Ball: {ball} | Entries: {len(entries)}\n")
+                lines.append(f"\nStatus: {status} | Ball: {ball} | Entries: {len(entries)}")
+                lines.append(f"Entry mix: {format_entry_mix(entry_mix_counts)}\n")
                 for entry in entries:
                     ts = entry.timestamp or "unknown"
                     t = entry.title or "(untitled)"
@@ -695,7 +760,11 @@ def _read_thread_impl(
                     lines.append(f"- [{entry.index}] {ts} — {t} ({eid_short})")
                     if s:
                         lines.append(f"  {s}")
-                return _format_warnings_for_response(hint_banner + "\n".join(lines))
+                body = "\n".join(lines)
+                stance_md = _stance_block_markdown(context)
+                if stance_md:
+                    body = f"{body}\n\n{stance_md}"
+                return _format_warnings_for_response(hint_banner + body)
 
             # JSON summary_only mode
             payload = {
@@ -703,6 +772,7 @@ def _read_thread_impl(
                 "format": "json",
                 "summary_only": True,
                 "entry_count": len(entries),
+                "entry_type_counts": entry_mix_counts,
                 "meta": {
                     "title": title,
                     "status": status,
@@ -714,6 +784,7 @@ def _read_thread_impl(
                     _entry_header_payload(
                         entry,
                         summary=summaries.get(entry.entry_id or "", ""),
+                        topic=topic,
                     )
                     for entry in entries
                 ],
@@ -726,6 +797,9 @@ def _read_thread_impl(
             if branch_hint:
                 payload["_hint"] = branch_hint
                 payload["_branches_with_entries"] = branches_with_entries_list
+            stance_json = _stance_block_json(context)
+            if stance_json is not None:
+                payload["_stance_advisory"] = stance_json
             return json.dumps(payload, indent=2)
 
         # Full JSON mode (with summaries included)
@@ -733,6 +807,7 @@ def _read_thread_impl(
             "topic": topic,
             "format": "json",
             "entry_count": len(entries),
+            "entry_type_counts": entry_mix_counts,
             "meta": {
                 "title": title,
                 "status": status,
@@ -744,6 +819,7 @@ def _read_thread_impl(
                 _entry_full_payload(
                     entry,
                     summary=summaries.get(entry.entry_id or "", ""),
+                    topic=topic,
                 )
                 for entry in entries
             ],
@@ -806,6 +882,11 @@ def _list_thread_entries_impl(
         filter: Optional keyword — case-insensitive substring matched against
             each entry's title and body. Only matching entries are returned
             (in-thread keyword search); pagination applies to the matches.
+
+    Returns:
+        Entry headers (metadata only). Each entry carries a ``ref`` — the
+        canonical citation ``<thread_topic>:<index> (<entry_id>)``; the ``topic``
+        you queried with is the write-back handle.
     """
 
     fmt_error, resolved_format = _resolve_format(format, default="json")
@@ -851,7 +932,7 @@ def _list_thread_entries_impl(
             "entry_count": total,
             "offset": start,
             "limit": limit,
-            "entries": [_entry_header_payload(entry) for entry in slice_entries],
+            "entries": [_entry_header_payload(entry, topic=topic) for entry in slice_entries],
         }
         if filter:
             payload["filter"] = filter
@@ -924,6 +1005,7 @@ def _list_thread_entries_impl(
             _entry_header_payload(
                 entry,
                 summary=summaries.get(entry.entry_id or "", ""),
+                topic=topic,
             )
             for entry in slice_entries
         ],
@@ -978,6 +1060,10 @@ def _get_thread_entry_impl(
     ``index .. to_index`` (``index`` defaults to 0), honouring ``summary_only``
     and ``code_branch`` filtering. ``summary_only`` and ``code_branch`` apply
     only to the range form.
+
+    Each returned entry carries a ``ref`` — the canonical citation
+    ``<thread_topic>:<index> (<entry_id>)``; the ``topic`` you queried with is
+    the write-back handle.
     """
 
     if to_index is not None:
@@ -1043,7 +1129,7 @@ def _get_thread_entry_impl(
             "topic": topic,
             "entry_count": len(entries),
             "index": selected.index,
-            "entry": _entry_full_payload(selected),
+            "entry": _entry_full_payload(selected, topic=topic),
         }
 
         if resolved_format == "markdown":
@@ -1098,7 +1184,7 @@ def _get_thread_entry_impl(
         "topic": topic,
         "entry_count": len(entries),
         "index": selected.index,
-        "entry": _entry_full_payload(selected, summary=entry_summary),
+        "entry": _entry_full_payload(selected, summary=entry_summary, topic=topic),
     }
 
     if resolved_format == "markdown":
@@ -1177,7 +1263,7 @@ def _get_thread_entry_range_impl(
             "entry_count": total,
             "start_index": start_index,
             "end_index": effective_end if selected_entries else None,
-            "entries": [_entry_full_payload(entry) for entry in selected_entries],
+            "entries": [_entry_full_payload(entry, topic=topic) for entry in selected_entries],
         }
 
         if resolved_format == "markdown":
@@ -1256,6 +1342,7 @@ def _get_thread_entry_range_impl(
                 _entry_header_payload(
                     entry,
                     summary=summaries.get(entry.entry_id or "", ""),
+                    topic=topic,
                 )
                 for entry in selected_entries
             ],
@@ -1270,6 +1357,7 @@ def _get_thread_entry_range_impl(
                 _entry_full_payload(
                     entry,
                     summary=summaries.get(entry.entry_id or "", ""),
+                    topic=topic,
                 )
                 for entry in selected_entries
             ],

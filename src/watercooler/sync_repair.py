@@ -42,6 +42,64 @@ DERIVED_FILE_PATTERNS = frozenset({
     "annotation_state.json",
 })
 
+# Derived directory prefixes (repo-relative, forward-slash separators). Any
+# tracked file under one of these paths is a regenerable projection — treated
+# the same as DERIVED_FILE_PATTERNS but matched by path prefix rather than
+# basename, because these are directories of per-topic files whose basenames
+# vary (e.g. Slack channel mappings written by the Slack integration).
+DERIVED_PATH_PREFIXES = frozenset({
+    ".watercooler/slack-mappings/",
+})
+
+
+def is_derived_file(rel_path: str) -> bool:
+    """Return True if a repo-relative path is a derived/regenerable cache.
+
+    Matches either a basename in :data:`DERIVED_FILE_PATTERNS` or a path under
+    any prefix in :data:`DERIVED_PATH_PREFIXES`. Such files can be safely
+    discarded from a dirty worktree to unblock sync — they are rebuilt on
+    demand and are never the canonical record.
+
+    Args:
+        rel_path: Repo-relative path (forward-slash or OS separators).
+    """
+    if not rel_path:
+        return False
+    normalized = rel_path.replace("\\", "/")
+    if Path(normalized).name in DERIVED_FILE_PATTERNS:
+        return True
+    return any(normalized.startswith(prefix) for prefix in DERIVED_PATH_PREFIXES)
+
+
+def is_untracked_write_once_projection(status: str, rel_path: str) -> bool:
+    """Return True if a dirty entry is an **untracked** write-once projection.
+
+    These are files matched only by a :data:`DERIVED_PATH_PREFIXES` prefix (e.g.
+    the Slack ``slack-mappings`` files, written by the integration *after* the
+    entry commit and committed lazily by the next write / committer pass) that
+    are not yet tracked in git. While untracked, such a file is the *sole* copy
+    of state not yet pushed to origin — the sync heal must not discard it blindly,
+    because the clean path can only restore *tracked* files from the index.
+
+    A tracked-modified projection is always restorable from origin (that churn is
+    exactly what the parity heal targets), and basename caches
+    (:data:`DERIVED_FILE_PATTERNS`, e.g. ``annotation_state.json``) are locally
+    regenerable — so neither is an untracked write-once projection here.
+
+    Args:
+        status: The two-char ``XY`` field from ``git status --porcelain``
+            (``"??"`` marks an untracked file).
+        rel_path: Repo-relative path of the entry.
+    """
+    if status.strip() != "??":
+        return False
+    normalized = rel_path.replace("\\", "/")
+    matched_by_basename = Path(normalized).name in DERIVED_FILE_PATTERNS
+    matched_by_prefix = any(
+        normalized.startswith(prefix) for prefix in DERIVED_PATH_PREFIXES
+    )
+    return matched_by_prefix and not matched_by_basename
+
 
 def _parse_porcelain_filename(entry: str) -> str:
     """Extract the filename from a git status --porcelain line.
@@ -119,8 +177,7 @@ class DiagnosticReport:
             return False
         for entry in self.dirty_files:
             filename = _parse_porcelain_filename(entry)
-            basename = Path(filename).name if filename else ""
-            if basename not in DERIVED_FILE_PATTERNS:
+            if not is_derived_file(filename):
                 return False
         return True
 
@@ -158,6 +215,7 @@ class DiagnosticReport:
             or self.stuck_merge
             or bool(self.stale_locks)
             or self.ahead > 0
+            or self.behind > 0
             or bool(self.dirty_files)
             or self.parity_state == "no_upstream"
         )
@@ -582,6 +640,52 @@ def repair(
             finally:
                 wt_lock.release()
 
+    # Fast-forward a behind-only worktree. This is the routine drift that
+    # sync_guard and the read path already heal — but the MANUAL tool did not,
+    # so an operator who reached for sync_repair on a silently-behind worktree
+    # got "No issues found" instead of a fix (bug-sync-worktree-poisoning).
+    # Fetch first (read-only, outside the lock — like the ahead path) so the
+    # behind count reflects the true remote even on a worktree that hasn't
+    # fetched recently; re-read state (earlier steps may have broken locks,
+    # cleaned derived dirt, or recovered local commits); then ff-merge only when
+    # cleanly fast-forwardable: behind, not ahead (diverged ahead is handled
+    # above), no dirty files, not mid rebase/merge.
+    if not dry_run and report.tracking:
+        subprocess.run(
+            ["git", "-C", td, "fetch", "origin"],
+            capture_output=True, text=True, timeout=30,
+        )
+    ff_report = diagnose(threads_dir) if not dry_run else report
+    if (
+        ff_report.behind > 0
+        and ff_report.ahead == 0
+        and not ff_report.dirty_files
+        and not (ff_report.stuck_rebase or ff_report.stuck_merge)
+        and ff_report.tracking
+    ):
+        verb = f"Fast-forward pull {ff_report.behind} commit(s) from {ff_report.tracking}"
+        if dry_run:
+            actions.append(f"[DRY RUN] {verb}")
+        else:
+            try:
+                wt_lock = acquire_worktree_lock(threads_dir)
+            except TimeoutError:
+                actions.append(f"FAILED: {verb}: worktree lock timeout")
+                return actions
+            try:
+                result = subprocess.run(
+                    ["git", "-C", td, "merge", "--ff-only", ff_report.tracking],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode == 0:
+                    actions.append(verb)
+                else:
+                    actions.append(
+                        f"FAILED: {verb}: {result.stderr.strip()[:200]}"
+                    )
+            finally:
+                wt_lock.release()
+
     # Verify manifest scan (manifest is always derived on-demand now)
     if regenerate_cache:
         graph_dir = get_graph_dir(threads_dir)
@@ -770,6 +874,11 @@ def format_report(report: DiagnosticReport) -> str:
             f"  -> {report.ahead} local-only commit(s): `watercooler sync-repair` "
             f"recovers these by push/rebase (preserved by default; reset away "
             f"only with discard_local_commits)"
+        )
+    if report.behind > 0 and report.ahead == 0:
+        lines.append(
+            f"  -> {report.behind} commit(s) behind: `watercooler sync-repair` "
+            f"fast-forwards these (the routine drift sync_guard/reads also heal)"
         )
 
     if report.parity_state == "no_upstream":

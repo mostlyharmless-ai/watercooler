@@ -54,6 +54,8 @@ _LAZY_DAEMON_CLASSES: dict[str, str] = {
     "ExtractDecisionsDaemon": ".decision_extractor",
     "ProjectCoordinatorDaemon": ".project_coordinator",
     "SyncGuardDaemon": ".sync_guard",
+    "T2HealthProbeDaemon": ".t2_health_probe",
+    "EnrichSupersessionDaemon": ".enrich_supersession",
 }
 
 logger = logging.getLogger(__name__)
@@ -85,6 +87,8 @@ __all__ = [
     "ExtractDecisionsDaemon",
     "ProjectCoordinatorDaemon",
     "SyncGuardDaemon",
+    "T2HealthProbeDaemon",
+    "EnrichSupersessionDaemon",
 ]
 
 # ------------------------------------------------------------------ #
@@ -110,6 +114,7 @@ _PREMIUM_DAEMONS: frozenset[str] = frozenset(
         "analysis_snapshot",
         "trend_snapshot",
         "t2_indexer",
+        "enrich_supersession",
     }
 )
 
@@ -161,6 +166,19 @@ def daemon_execution_policy(
     if daemon_name in _PREMIUM_DAEMONS and transport in ("hybrid", "proxy"):
         return "hosted"
     return "local"
+
+
+def is_coordinator_active(pc_cfg: Any) -> bool:
+    """Whether ``project_coordinator`` is active in ANY form (local or
+    hosted) — the conflict-resolution gate that decides whether the
+    open-core ``decision_stance`` fallback registers at all.
+
+    Single source of truth for this specific boolean, shared by
+    ``init_daemons`` (registration decision) and
+    ``daemons/findings_source.py`` (Stop-hook findings-source resolution)
+    so the two never independently re-derive it and drift apart.
+    """
+    return bool(pc_cfg.enabled) and getattr(pc_cfg, "route", "auto") != "disabled"
 
 
 # Backward-compat alias for the set retired in PR 4.  Use
@@ -328,7 +346,11 @@ def ensure_hosted_scope_for_current_context(reason: str = "") -> None:
     coord.ensure_scope(
         user_id=ctx.user_id,
         repo=ctx.repo,
-        branch=ctx.branch,
+        # Effective branch (defaults to "main"), not the raw nullable header — else a
+        # default-branch hosted request stores branch=None, and scope-aware daemon writes
+        # fall back to the server checkout's branch, hiding candidates from branch-filtered
+        # tenant reads (review #1041).
+        branch=ctx.effective_branch,
         github_token=ctx.github_token,
     )
     if reason:
@@ -645,6 +667,11 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
 
     if not daemons_config.enabled:
         logger.info("DAEMONS: globally disabled in config")
+        # Clear any stale sidecar so the Stop hook does not read a producer
+        # name from a prior run when daemons were enabled.
+        from .findings_source import write_active_stance_producer_sidecar
+
+        write_active_stance_producer_sidecar(None)
         if start:
             _manager.start_all()
         return _manager
@@ -716,6 +743,29 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
                 getattr(daemons_config.t2_indexer, "route", "auto"),
             )
 
+    # Split-brain check for enrich_supersession: same hazard as t2_indexer — it
+    # writes the shared T2 graph, so running it locally while memory tools route
+    # remote strands its ``superseded_by`` writes on a backend the tools can't see.
+    if (
+        daemons_config.enrich_supersession.enabled
+        and _local_ok("enrich_supersession")
+        and _transport == "hybrid"
+    ):
+        user_routes = getattr(wc_config.mcp, "capability_routes", None) or {}
+        ingest_route = (
+            user_routes.get("memory_ingest", "remote")
+            if isinstance(user_routes, dict)
+            else "remote"
+        )
+        if ingest_route != "local":
+            logger.warning(
+                "DAEMONS: enrich_supersession runs locally (route=%s) but hybrid "
+                "``memory_ingest`` tools route remote — its superseded_by writes "
+                "will not be visible to the advertised memory tools. To align, "
+                'also set ``[mcp.capability_routes] memory_ingest = "local"``.',
+                getattr(daemons_config.enrich_supersession, "route", "auto"),
+            )
+
     # Register thread auditor if enabled
     if daemons_config.thread_auditor.enabled:
         try:
@@ -730,6 +780,27 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
                     config=daemons_config.thread_auditor,
                 ),
             )
+
+    # Register the write-path committer (Phase B, #904): a single-writer
+    # group-commit daemon, gated on the async write path (mcp.sync.async_sync).
+    # It drains a dedicated commit queue (separate from the memory/enrichment
+    # queue). Until the write path is wired to enqueue commit tasks (the Phase B
+    # middleware flip) it simply idles on an empty queue — registering it now is
+    # the wiring step, not a behavior change.
+    _sync_cfg = getattr(wc_config.mcp, "sync", None)
+    if _sync_cfg is not None and getattr(_sync_cfg, "async_sync", False) is True:
+        def _make_committer():
+            from .committer import CommitterDaemon, get_commit_queue
+
+            return CommitterDaemon(
+                commit_queue=get_commit_queue(),
+                interval=getattr(_sync_cfg, "batch_window", 5.0),
+                max_batch_size=getattr(_sync_cfg, "max_batch_size", 50),
+                max_retries=getattr(_sync_cfg, "max_retries", 5),
+                stale_seconds=getattr(_sync_cfg, "stale_threshold", 60.0) * 2,
+            )
+
+        _safe_register("committer", _make_committer)
 
     # Register content scout if enabled (private — not in open-core build)
     if daemons_config.content_scout.enabled:
@@ -795,10 +866,41 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
                 ),
             )
 
-    # Register project coordinator if enabled
-    if daemons_config.project_coordinator.enabled and _local_ok(
-        "project_coordinator"
-    ):
+    # Register learnings daemon if enabled (local — ships in open-core build).
+    # Default-off; Phase 1 scaffolding emits only L1 annotations + findings.
+    # See Decision 01KV2D50W2FYBW0SA6Y9Y081V9.
+    if daemons_config.learnings.enabled:
+        try:
+            from .learnings import ExtractLearningsDaemon
+        except Exception as exc:  # noqa: BLE001
+            _manager.record_registration_failure("learnings", exc)
+        else:
+            _safe_register(
+                "learnings",
+                lambda: ExtractLearningsDaemon(
+                    interval=daemons_config.learnings.interval,
+                    config=daemons_config.learnings,
+                ),
+            )
+
+    # The active LOCAL stance_advisory producer (project_coordinator or
+    # decision_stance — mutually exclusive) is decided by the shared
+    # ``resolve_local_stance_producer``: the single config-derived encoding
+    # that the Stop-hook findings resolver also calls, so registration and
+    # delivery can never drift at the composition level. The result is
+    # serialized to a sidecar the Stop hook reads directly, avoiding a full
+    # config build + daemons-package import on every turn.
+    from .findings_source import (
+        resolve_local_stance_producer,
+        write_active_stance_producer_sidecar,
+    )
+
+    _active_stance_producer = resolve_local_stance_producer(daemons_config, _transport)
+    write_active_stance_producer_sidecar(_active_stance_producer)
+
+    # Register project coordinator if it is the active stance producer
+    # (enabled and locally routed).
+    if _active_stance_producer == "project_coordinator":
         try:
             from .project_coordinator import ProjectCoordinatorDaemon
         except Exception as exc:  # noqa: BLE001
@@ -812,17 +914,13 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
                 ),
             )
 
-    # Register the open-core decision-stance daemon if enabled and the
-    # premium coordinator is not running anywhere (any route). This is
-    # the conflict-resolution gate: when the coordinator is active in any
-    # form (local or hosted), its richer signal mix wins and we skip the
-    # open-core fallback to avoid double emission of stance_advisory
-    # findings under the same ``stance:{role}`` topic.
-    pc_cfg = daemons_config.project_coordinator
-    coordinator_active = pc_cfg.enabled and (
-        getattr(pc_cfg, "route", "auto") != "disabled"
-    )
-    if daemons_config.decision_stance.enabled and not coordinator_active:
+    # Register the open-core decision-stance daemon if it is the active
+    # stance producer — i.e. enabled and the premium coordinator is not
+    # running in any form (local or hosted). This conflict-resolution gate
+    # lives inside ``resolve_local_stance_producer`` and avoids double
+    # emission of stance_advisory findings under the same ``stance:{role}``
+    # topic.
+    if _active_stance_producer == "decision_stance":
         try:
             from .decision_stance import DecisionStanceDaemon
         except Exception as exc:  # noqa: BLE001
@@ -937,6 +1035,24 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
                 ),
             )
 
+    # Register the T2 health probe if enabled — scheduled synthetic T2 liveness
+    # + Slack alerting. Client-side monitor: always local (never the hosted
+    # coordinator). No-op internally unless transport is hybrid/proxy.
+    if daemons_config.t2_health_probe.enabled:
+        try:
+            from .t2_health_probe import T2HealthProbeDaemon
+        except Exception as exc:  # noqa: BLE001
+            _manager.record_registration_failure("t2_health_probe", exc)
+        else:
+            _safe_register(
+                "t2_health_probe",
+                lambda: T2HealthProbeDaemon(
+                    interval=daemons_config.t2_health_probe.interval,
+                    timeout_s=daemons_config.t2_health_probe.timeout_s,
+                    amber_ms=daemons_config.t2_health_probe.amber_ms,
+                ),
+            )
+
     # Register T2 indexer if enabled — also gated internally by the
     # memory backend configuration (enabled + queue + graphiti).
     if daemons_config.t2_indexer.enabled and _local_ok("t2_indexer"):
@@ -944,6 +1060,18 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
             _try_register_t2_indexer(_manager)
         except Exception as t2_exc:
             _manager.record_registration_failure("t2_indexer", t2_exc)
+
+    # Register the supersession-enrichment daemon if enabled — premium/hosted
+    # (writes the shared T2 FalkorDB graph, like ``t2_indexer``), so it only runs
+    # locally when routing keeps it local. Gated internally by the memory backend
+    # configuration (enabled + graphiti). Report-only by default (emit_mode="monitor").
+    if daemons_config.enrich_supersession.enabled and _local_ok("enrich_supersession"):
+        try:
+            _try_register_enrich_supersession(
+                _manager, daemons_config.enrich_supersession
+            )
+        except Exception as es_exc:
+            _manager.record_registration_failure("enrich_supersession", es_exc)
 
     # External daemons (workstream J) — load after built-ins so
     # third-party subclasses stack on top without competing for default
@@ -1099,6 +1227,74 @@ def _try_register_t2_indexer(manager: DaemonManager) -> None:
         logger.debug("T2IndexerDaemon not available (open-core build): %s", exc)
         return
     manager.register(T2IndexerDaemon(backend=graphiti_backend, code_root=code_root))
+
+
+def _try_register_enrich_supersession(manager: DaemonManager, cfg: Any) -> None:
+    """Register the supersession-enrichment daemon if graphiti is active (fail-closed).
+
+    Mirrors :func:`_try_register_t2_indexer`'s backend acquisition. The daemon resolves
+    its target graph from the backend's configured database (the canonical
+    ``<org>_<repo>_t2`` graph), so no explicit code_root pre-seed is required.
+    """
+    from watercooler.memory_config import get_memory_backend, is_memory_enabled
+
+    try:
+        backend_kind = get_memory_backend()
+    except ValueError:
+        return
+    if not (is_memory_enabled() and backend_kind == "graphiti"):
+        return
+
+    try:
+        from watercooler_memory.backends.graphiti import GraphitiBackend
+        from watercooler_mcp import memory as mem
+    except ImportError:
+        logger.warning(
+            "DAEMONS: graphiti imports unavailable, skipping enrich_supersession"
+        )
+        return
+
+    code_root: Optional[Path] = None
+    try:
+        from watercooler_mcp.config import resolve_thread_context
+
+        ctx = resolve_thread_context(Path.cwd())
+        code_root = ctx.code_root
+    except Exception as exc:
+        logger.debug(
+            "DAEMONS: could not resolve code_root for enrich_supersession: %s", exc
+        )
+
+    graphiti_config = mem.load_graphiti_config(code_path=code_root)
+    if graphiti_config is None:
+        logger.debug(
+            "DAEMONS: graphiti config unavailable, skipping enrich_supersession"
+        )
+        return
+
+    graphiti_backend = mem.get_graphiti_backend(graphiti_config)
+    if not isinstance(graphiti_backend, GraphitiBackend):
+        logger.debug(
+            "DAEMONS: graphiti backend unavailable, skipping enrich_supersession"
+        )
+        return
+
+    try:
+        from .enrich_supersession import EnrichSupersessionDaemon
+    except ImportError as exc:
+        logger.debug("EnrichSupersessionDaemon not available: %s", exc)
+        return
+
+    manager.register(
+        EnrichSupersessionDaemon(
+            backend=graphiti_backend,
+            interval=cfg.interval,
+            emit_mode=cfg.emit_mode,
+            emit_bases=frozenset(cfg.emit_bases),
+            code_root=code_root,
+            enabled=True,
+        )
+    )
 
 
 def _shutdown_daemons() -> None:

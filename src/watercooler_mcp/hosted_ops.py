@@ -267,13 +267,12 @@ def _get_github_client() -> tuple[str | None, GitHubClient | None]:
     if not token:
         return ("No GitHub token available for hosted mode", None)
 
-    # Use repo directly - dashboard sends the threads repo name
-    # (e.g., "org/repo-threads", not "org/repo")
-    threads_repo = http_ctx.repo
+    # The dashboard sends the plain repo name (e.g., "org/repo").
+    repo = http_ctx.repo
 
     client = GitHubClient(
         token=token,
-        repo=threads_repo,
+        repo=repo,
         branch=ORPHAN_BRANCH_NAME,
     )
     return (None, client)
@@ -955,9 +954,16 @@ def _write_per_thread_atomic(
     meta_sha: str | None = None,
     entries_sha: str | None = None,
     edges_sha: str | None = None,
+    extra_files: list[tuple[str, str]] | None = None,
+    extra_blob_shas: dict[str, "Optional[str]"] | None = None,
 ) -> tuple[str | None, dict]:
     """Write per-thread graph + .md projection + entry enrichment in
     ONE atomic git commit.
+
+    ``extra_files`` / ``extra_blob_shas`` let a caller fold an additional
+    repo-level file (e.g. the decisions index) into the same atomic commit with
+    its own conflict-check SHA — so it lands together with the entry and a
+    concurrent change to it triggers the caller's existing retry.
 
     Replaces the prior 3-step sequence (``_write_per_thread_graph`` →
     ``_write_md_projection`` → ``_enrich_entry_hosted``), which produced
@@ -1107,11 +1113,16 @@ def _write_per_thread_atomic(
     #    derived file that's always re-rendered from current state,
     #    so we deliberately don't conflict-check it — last-write-wins
     #    is the right semantics for a derived file.
+    if extra_files:
+        files.extend(extra_files)
+
     expected_blob_shas: dict[str, Optional[str]] = {
         meta_path: meta_sha,
         entries_path: entries_sha,
         edges_path: edges_sha,
     }
+    if extra_blob_shas:
+        expected_blob_shas.update(extra_blob_shas)
     try:
         commit_sha, _blob_shas = client.commit_files(
             files=files,
@@ -1257,143 +1268,6 @@ def _build_per_thread_graph_data(
     return meta, entries, edges
 
 
-def _update_thread_in_graph(
-    client: GitHubClient,
-    topic: str,
-    status: str | None = None,
-    ball: str | None = None,
-    title: str | None = None,
-    entry_id: str | None = None,
-    agent: str | None = None,
-    role: str | None = None,
-    entry_type: str | None = None,
-    entry_title: str | None = None,
-    body: str | None = None,
-    timestamp: str | None = None,
-    commit_suffix: str = "",
-    max_retries: int = DEFAULT_MAX_RETRIES,
-) -> bool:
-    """Update thread and optionally add entry in per-thread graph files.
-
-    Includes retry logic for handling concurrent write conflicts (SHA mismatch).
-
-    Args:
-        client: GitHub API client
-        topic: Thread topic
-        status: New status (optional)
-        ball: New ball owner (optional)
-        title: New title (optional)
-        entry_id: Entry ID to add (optional)
-        agent: Entry agent (required if entry_id provided)
-        role: Entry role (optional, defaults to "implementer")
-        entry_type: Entry type (optional, defaults to "Note")
-        entry_title: Entry title (required if entry_id provided)
-        body: Entry body (required if entry_id provided)
-        timestamp: Entry timestamp (required if entry_id provided)
-        commit_suffix: Suffix for commit message
-        max_retries: Maximum retry attempts for conflicts (default from WATERCOOLER_GRAPH_MAX_RETRIES env)
-
-    Returns:
-        True if graph was updated successfully, False otherwise.
-    """
-    import time
-
-    # Validate topic to prevent path traversal
-    topic_err = _validate_topic(topic)
-    if topic_err:
-        logger.warning("Topic validation failed: %s", topic_err)
-        return False
-
-    for attempt in range(max_retries):
-        try:
-            # Read current per-thread state
-            (
-                existing_meta,
-                existing_entries,
-                existing_edges,
-                meta_sha,
-                entries_sha,
-                edges_sha,
-            ) = _read_per_thread_graph(client, topic)
-
-            # Determine final values (use existing or defaults if not provided)
-            final_status = (
-                status
-                if status is not None
-                else (existing_meta.get("status", "OPEN") if existing_meta else "OPEN")
-            )
-            final_ball = (
-                ball
-                if ball is not None
-                else (existing_meta.get("ball", "") if existing_meta else "")
-            )
-            final_title = (
-                title
-                if title is not None
-                else (existing_meta.get("title", topic) if existing_meta else topic)
-            )
-
-            # Build updated per-thread data
-            meta, entries, edges = _build_per_thread_graph_data(
-                topic=topic,
-                status=final_status,
-                ball=final_ball,
-                title=final_title,
-                existing_meta=existing_meta,
-                existing_entries=existing_entries,
-                existing_edges=existing_edges,
-                entry_id=entry_id,
-                agent=agent,
-                role=role,
-                entry_type=entry_type,
-                entry_title=entry_title,
-                body=body,
-                timestamp=timestamp,
-            )
-
-            # Write per-thread graph files
-            commit_msg = f"[watercooler] {topic}: graph update{commit_suffix}"
-            new_meta_sha, new_entries_sha, new_edges_sha = _write_per_thread_graph(
-                client,
-                topic,
-                meta,
-                entries,
-                edges,
-                meta_sha,
-                entries_sha,
-                edges_sha,
-                commit_msg,
-            )
-
-            if new_meta_sha is not None:
-                log_debug(f"Per-thread graph update succeeded for {topic}")
-                return True
-
-            # Write failed but not due to conflict - don't retry
-            log_error(
-                f"Per-thread graph update failed for {topic} (attempt {attempt + 1})"
-            )
-            return False
-
-        except GitHubConflictError:
-            if attempt < max_retries - 1:
-                wait_time = _jittered_backoff(attempt)
-                log_debug(
-                    f"Per-thread graph conflict for {topic}, retrying in {wait_time:.3f}s"
-                )
-                _time_mod.sleep(wait_time)
-            else:
-                log_error(
-                    f"Per-thread graph update failed for {topic} after {max_retries} retries"
-                )
-
-        except GitHubAPIError as e:
-            log_error(f"Per-thread graph update failed for {topic}: {e}")
-            return False
-
-    return False
-
-
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -1510,7 +1384,7 @@ def _sync_entry_to_slack_site(
     rather than waiting for the next dashboard polling cycle.
 
     Args:
-        repo_full_name: GitHub repo (e.g., owner/repo-threads)
+        repo_full_name: GitHub repo (e.g., owner/repo)
         topic: Thread topic
         branch: Git branch
         entry_id: Entry ULID
@@ -1732,6 +1606,12 @@ def say_hosted(
             # at the edge, leaving ConnectedRepo.graphNodes stale and
             # the dashboard list out of sync with the orphan branch.
             commit_message = f"[watercooler] {topic}: {title}\n\nEntry-ID: {entry_id}"
+            # Fold a Decision write's index upsert into the same atomic commit
+            # (best-effort; empty for non-Decisions). Source is resolved
+            # same-thread; cross-thread is left to the reconcile backfill.
+            _idx_files, _idx_shas = _decision_index_extra_for_say(
+                client, topic, new_entries, entry_id, entry_type
+            )
             new_commit_sha, write_info = _write_per_thread_atomic(
                 client,
                 topic=topic,
@@ -1751,6 +1631,8 @@ def say_hosted(
                 meta_sha=meta_sha,
                 entries_sha=entries_sha,
                 edges_sha=edges_sha,
+                extra_files=_idx_files,
+                extra_blob_shas=_idx_shas,
             )
 
             if new_commit_sha:
@@ -2206,102 +2088,6 @@ def handoff_hosted(
 
 
 # ============================================================================
-# Entry Formatting Helpers
-# ============================================================================
-
-
-def _format_entry(
-    agent: str,
-    timestamp: str,
-    role: str,
-    entry_type: str,
-    title: str,
-    body: str,
-    entry_id: str,
-) -> str:
-    """Format a thread entry in markdown.
-
-    Returns:
-        Formatted entry string.
-    """
-    lines = [
-        f"Entry: {agent} (user) {timestamp}",
-        f"Role: {role}",
-        f"Type: {entry_type}",
-        f"Title: {title}",
-        f"<!-- Entry-ID: {entry_id} -->",
-        "",
-        body,
-    ]
-    return "\n".join(lines)
-
-
-def _create_thread_header(
-    topic: str,
-    created: str,
-    status: str = "OPEN",
-    ball: str = "Agent",
-    priority: str = "P2",
-) -> str:
-    """Create a thread header in markdown.
-
-    Returns:
-        Formatted header string.
-    """
-    lines = [
-        f"# {topic} — Thread",
-        f"Status: {status}",
-        f"Ball: {ball}",
-        f"Topic: {topic}",
-        f"Created: {created}",
-        f"Priority: {priority}",
-        "",
-        "---",
-    ]
-    return "\n".join(lines)
-
-
-def _update_ball_in_header(content: str, new_ball: str) -> str:
-    """Update the Ball: field in thread header.
-
-    Args:
-        content: Current thread content
-        new_ball: New ball owner
-
-    Returns:
-        Updated content with new ball owner.
-    """
-    # Replace Ball: line in header
-    return re.sub(
-        r"^Ball:\s*.+$",
-        f"Ball: {new_ball}",
-        content,
-        count=1,
-        flags=re.MULTILINE,
-    )
-
-
-def _update_status_in_header(content: str, new_status: str) -> str:
-    """Update the Status: field in thread header.
-
-    Args:
-        content: Current thread content
-        new_status: New status value
-
-    Returns:
-        Updated content with new status.
-    """
-    # Replace Status: line in header
-    return re.sub(
-        r"^Status:\s*.+$",
-        f"Status: {new_status}",
-        content,
-        count=1,
-        flags=re.MULTILINE,
-    )
-
-
-# ============================================================================
 # Hosted Reconciliation
 # ============================================================================
 
@@ -2509,6 +2295,17 @@ def reconcile_graph_hosted(
 
         log_debug(f"reconcile_graph_hosted: {successes} succeeded, {failures} failed")
 
+        # Rebuild the repo-level decisions index from the reconciled corpus so the
+        # hosted list_decisions fast path has a complete, fresh index. Best-effort.
+        decisions_indexed: int | None = None
+        idx_err, idx_count = build_decision_index_hosted()
+        if idx_err:
+            log_warning(
+                f"reconcile_graph_hosted: decisions index build failed: {idx_err}"
+            )
+        else:
+            decisions_indexed = idx_count
+
         return (
             None,
             {
@@ -2518,6 +2315,7 @@ def reconcile_graph_hosted(
                 "success_topics": list(results.keys()),
                 "failure_topics": list(errors.keys()),
                 "errors": errors,
+                "decisions_indexed": decisions_indexed,
             },
         )
 
@@ -2777,6 +2575,20 @@ def delete_entry_hosted(
             if not removed:
                 return (f"Error: Entry '{entry_id}' not found in thread '{topic}'.", {})
 
+            # Prune the decisions index in the same atomic commit if a Decision
+            # was deleted (best-effort; non-Decision deletes touch nothing).
+            removed_entry_type = next(
+                (
+                    e.get("entry_type")
+                    for e in existing_entries
+                    if e.get("entry_id") == entry_id
+                ),
+                None,
+            )
+            _idx_files, _idx_shas = _decision_index_extra_for_delete(
+                client, removed_entry_type, entry_id
+            )
+
             # Update meta.entry_count if a meta file exists (it's
             # optional — pre-meta threads still get the entries write).
             if existing_meta is not None:
@@ -2806,6 +2618,8 @@ def delete_entry_hosted(
                 meta_sha=meta_sha,
                 entries_sha=entries_sha,
                 edges_sha=edges_sha,
+                extra_files=_idx_files,
+                extra_blob_shas=_idx_shas,
             )
 
             if new_commit_sha is None:
@@ -2884,6 +2698,22 @@ def delete_thread_hosted(
                     content=json.dumps(manifest, indent=2) + "\n",
                     message=f"remove {topic} from manifest",
                     sha=manifest_file.sha,
+                )
+            except (GitHubNotFoundError, GitHubAPIError):
+                pass
+
+            # Cascade to the human-readable markdown projection. The graph is
+            # authoritative; threads/<topic>.md is a derived, write-only
+            # projection. Best-effort: a missing .md must never fail the delete,
+            # but a leftover .md can ghost-resurrect the thread via
+            # recover_graph(), so we remove it when the graph delete succeeded.
+            md_path = f"threads/{topic}.md"
+            try:
+                md_file = client.get_file(md_path)
+                client.delete_file(
+                    path=md_path,
+                    message=f"delete thread {topic}: markdown projection",
+                    sha=md_file.sha,
                 )
             except (GitHubNotFoundError, GitHubAPIError):
                 pass
@@ -3047,6 +2877,193 @@ def load_entries_hosted(topic: str) -> tuple[str | None, list[dict]]:
         return (f"GitHub API error loading entries for {topic}: {e}", [])
 
 
+def _read_decision_index_raw(client) -> tuple[list[dict], "Optional[str]"]:
+    """Read the repo-level decisions index records + blob SHA (``([], None)`` absent)."""
+    from watercooler.baseline_graph.storage import DECISION_INDEX_FILENAME
+
+    path = f"graph/baseline/{DECISION_INDEX_FILENAME}"
+    try:
+        index_file = client.get_file(path)
+    except GitHubNotFoundError:
+        return [], None
+    records: list[dict] = []
+    for line in (index_file.content or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            records.append(parsed)
+    return records, index_file.sha
+
+
+def _decision_index_extra_for_say(client, topic, new_entries, entry_id, entry_type):
+    """``(extra_files, extra_blob_shas)`` folding a Decision write's index upsert
+    into the same commit; empty when the entry isn't a Decision.
+
+    Best-effort + never-raise. Source is resolved same-thread (this topic's
+    current annotations); cross-thread sources are left to the reconcile backfill,
+    and an already-resolved source is never downgraded (see
+    ``upsert_record_in_list``).
+    """
+    if entry_type != "Decision":
+        return [], {}
+    try:
+        from watercooler.baseline_graph.decision_index import (
+            bare_entry_id,
+            build_decision_index_records,
+            index_records_to_jsonl,
+            upsert_record_in_list,
+        )
+        from watercooler.baseline_graph.storage import DECISION_INDEX_FILENAME
+
+        a_err, bundle = get_annotations_hosted(topic, target_id="")
+        states = {} if a_err else (bundle.get("annotation_states") or {})
+        built = build_decision_index_records({topic: new_entries}, {topic: states})
+        bare = bare_entry_id(entry_id)
+        record = next(
+            (r for r in built if bare_entry_id(r.get("entry_id")) == bare), None
+        )
+        if record is None:
+            return [], {}
+        current, sha = _read_decision_index_raw(client)
+        updated = upsert_record_in_list(current, record)
+        path = f"graph/baseline/{DECISION_INDEX_FILENAME}"
+        return [(path, index_records_to_jsonl(updated))], {path: sha}
+    except Exception as e:
+        log_warning(
+            f"say_hosted: decisions-index upsert delta failed (non-fatal): {e}"
+        )
+        return [], {}
+
+
+def _decision_index_extra_for_delete(client, removed_entry_type, entry_id):
+    """``(extra_files, extra_blob_shas)`` pruning a deleted Decision's row; empty
+    when the removed entry wasn't a Decision or nothing changed. Never-raise."""
+    if removed_entry_type != "Decision":
+        return [], {}
+    try:
+        from watercooler.baseline_graph.decision_index import (
+            index_records_to_jsonl,
+            remove_record_from_list,
+        )
+        from watercooler.baseline_graph.storage import DECISION_INDEX_FILENAME
+
+        current, sha = _read_decision_index_raw(client)
+        updated = remove_record_from_list(current, entry_id)
+        if len(updated) == len(current):
+            return [], {}
+        path = f"graph/baseline/{DECISION_INDEX_FILENAME}"
+        return [(path, index_records_to_jsonl(updated))], {path: sha}
+    except Exception as e:
+        log_warning(
+            f"delete_entry_hosted: decisions-index prune delta failed (non-fatal): {e}"
+        )
+        return [], {}
+
+
+def load_decision_index_hosted() -> tuple[str | None, list[dict] | None]:
+    """Load the repo-level decisions index from GitHub (hosted mode).
+
+    One ``get_file`` of ``graph/baseline/decisions-index.jsonl`` — the single
+    artifact that replaces the per-thread entries fan-out for list_decisions.
+
+    Returns:
+        ``(None, [records])`` on success (possibly an empty list).
+        ``(None, None)`` when the index file is ABSENT (404) — older or
+        pre-backfill repos; the caller falls back to the full per-thread scan,
+        this is NOT an error.
+        ``(error, None)`` on a real client/API failure.
+    """
+    from watercooler.baseline_graph.storage import DECISION_INDEX_FILENAME
+
+    error, client = _get_github_client()
+    if error or not client:
+        return (error or "Failed to create GitHub client", None)
+
+    path = f"graph/baseline/{DECISION_INDEX_FILENAME}"
+    try:
+        index_file = client.get_file(path)
+    except GitHubNotFoundError:
+        return (None, None)
+    except GitHubAPIError as e:
+        return (f"GitHub API error loading decisions index: {e}", None)
+
+    records: list[dict] = []
+    for line in (index_file.content or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        # Skip valid-JSON-but-non-dict lines (e.g. ``[]``, ``"bad"``, ``42``) from
+        # a corrupted/hand-edited index — otherwise the index reader would hand a
+        # non-dict to ``_list_decisions_from_index`` and ``rec.get(...)`` would
+        # crash hosted list_decisions. Mirrors ``load_entries_hosted``.
+        if isinstance(parsed, dict):
+            records.append(parsed)
+    return (None, records)
+
+
+def build_decision_index_hosted() -> tuple[str | None, int]:
+    """Rebuild the repo-level decisions index on GitHub from a full corpus scan.
+
+    Backfill/one-time use: this deliberately does the per-thread fan-out we avoid
+    on the read path (acceptable as a rare rebuild, not a per-read cost), then
+    writes ``graph/baseline/decisions-index.jsonl`` in one ``put_file``. Returns
+    ``(error, decision_count)``.
+    """
+    from watercooler.baseline_graph.decision_index import build_decision_index_records
+    from watercooler.baseline_graph.storage import DECISION_INDEX_FILENAME
+
+    err, entries_by_topic = load_all_entries_hosted()
+    if err:
+        return (err, 0)
+
+    annotations_by_topic: dict[str, dict] = {}
+    for topic in entries_by_topic:
+        a_err, bundle = get_annotations_hosted(topic, target_id="")
+        if a_err:
+            # A real annotation read error (NOT a 404 — that returns None +
+            # empty state) would index this topic's Decisions with missing
+            # source/extracted/confidence, silently degrading the durable read
+            # model while reporting success. Fail the rebuild instead.
+            return (f"Failed to load annotations for {topic}: {a_err}", 0)
+        annotations_by_topic[topic] = bundle.get("annotation_states") or {}
+
+    records = build_decision_index_records(entries_by_topic, annotations_by_topic)
+
+    error, client = _get_github_client()
+    if error or not client:
+        return (error or "Failed to create GitHub client", 0)
+
+    path = f"graph/baseline/{DECISION_INDEX_FILENAME}"
+    content = "".join(
+        json.dumps(r, separators=(",", ":"), ensure_ascii=False) + "\n" for r in records
+    )
+    try:
+        existing_sha: str | None = None
+        try:
+            existing_sha = client.get_file(path).sha
+        except GitHubNotFoundError:
+            existing_sha = None
+        client.put_file(
+            path=path,
+            content=content,
+            message="chore(decisions): rebuild decisions index",
+            sha=existing_sha,
+        )
+    except GitHubAPIError as e:
+        return (f"Failed to write decisions index: {e}", 0)
+
+    return (None, len(records))
+
+
 def load_all_entries_hosted(
     topics: list[str] | None = None,
     max_workers: int = 10,
@@ -3063,6 +3080,7 @@ def load_all_entries_hosted(
         Tuple of (error_message, {topic: [entries]}). On partial errors,
         failed topics are omitted from the dict (not treated as fatal).
     """
+    import contextvars
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # Discover topics if not provided
@@ -3076,11 +3094,19 @@ def load_all_entries_hosted(
         return (None, {})
 
     result: dict[str, list[dict]] = {}
+    errors: list[str] = []
     workers = min(max_workers, len(topics)) if topics else 1
 
+    # Propagate the caller's context into each worker. ContextVars set in this
+    # thread are NOT visible to ThreadPoolExecutor worker threads, and the worker
+    # (load_entries_hosted) resolves its GitHub client via get_effective_context().
+    # Without this, every worker fails with "No HTTP context available for hosted
+    # mode" — the real cause behind the masked hosted list_decisions total:0.
+    # copy_context() snapshots the caller's context (HTTP request or worker) per
+    # task so the worker resolves the same identity.
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(load_entries_hosted, topic): topic
+            executor.submit(contextvars.copy_context().run, load_entries_hosted, topic): topic
             for topic in topics
         }
         for future in as_completed(futures):
@@ -3090,9 +3116,26 @@ def load_all_entries_hosted(
                 if not err:
                     result[topic] = entries
                 else:
+                    errors.append(f"{topic}: {err}")
                     log_debug(f"load_all_entries_hosted: skipping {topic}: {err}")
             except Exception as e:
+                errors.append(f"{topic}: {e}")
                 log_debug(f"load_all_entries_hosted: exception for {topic}: {e}")
+
+    # Un-mask total failure. A 404 (no entries yet) returns ``(None, [])`` and
+    # DOES populate ``result``, so an empty ``result`` with errors means every
+    # requested topic hit a real load error (e.g. GitHub auth/rate-limit) — a
+    # systemic failure, not an empty repo. Returning success here would mask it
+    # as ``0 entries`` (the silent ``total:0`` bug in hosted list_decisions).
+    # Partial failures are still tolerated: any successful topic keeps the
+    # function in the success path with the topics it could load.
+    if topics and not result and errors:
+        sample = "; ".join(errors[:3])
+        more = f" (+{len(errors) - 3} more)" if len(errors) > 3 else ""
+        return (
+            f"all {len(topics)} hosted topic load(s) failed: {sample}{more}",
+            {},
+        )
 
     return (None, result)
 

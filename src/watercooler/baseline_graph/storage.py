@@ -453,6 +453,32 @@ def load_search_index(graph_dir: Path, topic: Optional[str] = None) -> Iterator[
                 yield deduped
 
 
+# ============================================================================
+# Decision Index Operations
+# ============================================================================
+
+# Repo-level decisions index, under graph/baseline/. A single small file (one
+# JSON record per Decision) read in one fetch by the hosted list_decisions path,
+# replacing the per-thread entries fan-out. See ``decision_index.py`` for the
+# record builder.
+DECISION_INDEX_FILENAME = "decisions-index.jsonl"
+
+
+def decision_index_path(graph_dir: Path) -> Path:
+    """Path to the repo-level decisions index (graph/baseline/decisions-index.jsonl)."""
+    return graph_dir / DECISION_INDEX_FILENAME
+
+
+def load_decision_index(graph_dir: Path) -> List[Dict[str, Any]]:
+    """Load the repo-level decisions index (empty list if absent/malformed)."""
+    return _load_jsonl_entries(decision_index_path(graph_dir))
+
+
+def write_decision_index(graph_dir: Path, records: List[Dict[str, Any]]) -> None:
+    """Atomically (re)write the repo-level decisions index."""
+    atomic_write_jsonl(decision_index_path(graph_dir), records)
+
+
 def upsert_search_index_entry(
     graph_dir: Path,
     entry_id: str,

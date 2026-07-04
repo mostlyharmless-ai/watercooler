@@ -73,6 +73,17 @@ class HostedWorktree:
         """True if the initial clone failed (fallback to hosted_data recommended)."""
         return self._failed
 
+    def update_token(self, github_token: str) -> None:
+        """Swap the auth token used for subsequent git operations.
+
+        Fleet-scheduler bridge identity (Design (hosted) v4 D3): the
+        most-recently-validated tenant token wins. ``_git_env`` reads the
+        attribute on every git call, so a swap takes effect on the next
+        fetch/push with no re-clone.
+        """
+        with self._lock:
+            self._github_token = github_token
+
     def _git_env(self) -> dict[str, str]:
         """Env dict with GIT_ASKPASS helper for token auth.
 

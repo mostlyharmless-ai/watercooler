@@ -29,6 +29,13 @@ def __getattr__(name: str):
     ``scripts/reset_decision_extractor.py`` — must be importable without
     ``fastmcp`` installed. ``watercooler_mcp.mcp`` and
     ``from watercooler_mcp import mcp`` still resolve, on first access.
+
+    Load-bearing for issue #810: a module-level ``from .server import mcp`` here
+    would make importing any submodule (e.g. ``watercooler_mcp.capabilities``,
+    imported by the ``mcp.capability_routes`` config validator) eagerly import
+    ``server.py``, whose import-time config load re-enters ``get_config()`` and
+    self-deadlocks. Keep server import lazy. Guarded by
+    ``tests/unit/test_config_loader.py::TestGetConfigReentrancy``.
     """
     if name == "mcp":
         from .server import mcp

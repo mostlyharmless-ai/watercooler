@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://watercoolerdev.com/schema/entry.v1.json",
+  "title": "Watercooler Entry Node",
+  "description": "Schema for a single entry node on the baseline graph (orphan branch). Authority-ladder provenance fields (Phase 1a, v0.10 §5.4.1 / §10.2.1 / §10.5 / §10.6) are optional, unenforced descriptive metadata — the server-side write check that formerly consumed them was removed. Parity-bound with src/watercooler/baseline_graph/writer.py:EntryData and (cross-repo) watercooler-site TypeScript bindings.",
+  "type": "object",
+  "required": [
+    "id",
+    "type",
+    "entry_id",
+    "thread_topic",
+    "index",
+    "agent",
+    "role",
+    "entry_type",
+    "title",
+    "timestamp",
+    "body",
+    "summary",
+    "file_refs",
+    "pr_refs",
+    "commit_refs"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^entry:[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Node ID; entry:<ULID>"
+    },
+    "type": {
+      "type": "string",
+      "const": "entry"
+    },
+    "entry_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Crockford base32 ULID"
+    },
+    "thread_topic": {
+      "type": "string",
+      "minLength": 1
+    },
+    "index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "agent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "role": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entry_type": {
+      "type": "string",
+      "enum": ["Note", "Plan", "Decision", "PR", "Closure"],
+      "description": "Per CLAUDE.md authoring rules; PascalCase"
+    },
+    "title": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp"
+    },
+    "body": {
+      "type": "string",
+      "description": "Markdown body. First line should be Spec: <spec>."
+    },
+    "summary": {
+      "type": "string"
+    },
+    "file_refs": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "pr_refs": {
+      "type": "array",
+      "items": {"type": "integer"}
+    },
+    "commit_refs": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "code_branch": {
+      "type": "string",
+      "description": "Optional. Branch tag on the entry; not a storage dimension."
+    },
+
+    "actor_class": {
+      "type": "string",
+      "enum": [
+        "human",
+        "agent",
+        "daemon",
+        "human_grandfathered"
+      ],
+      "description": "Phase 1a (v0.10 §10.6). human_grandfathered marks pre-Phase-1a entries."
+    },
+    "decision_origin": {
+      "type": "string",
+      "enum": [
+        "direct_human",
+        "human_promoted",
+        "daemon_extraction",
+        "agent_authored"
+      ],
+      "description": "Phase 1a (v0.10 §10.6). How the entry came to exist."
+    },
+    "authority_source": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Phase 1a (v0.10 §10.2.1). Optional, unenforced provenance metadata identifying the authorizing source for a Decision/Closure. The server-side write check that formerly required it was removed; the daemon no longer stamps it."
+    },
+    "authority_basis": {
+      "type": "string",
+      "enum": [
+        "human_direct",
+        "human_promoted",
+        "human_endorsed",
+        "none"
+      ],
+      "description": "Phase 1a (v0.10 §5.4.1). Evidence-light Decision lint requires this on Decision entries."
+    },
+    "source_entry_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Phase 1a. ULID of the source entry for promotions (the candidate Note) or daemon extractions (the entry the LLM extracted from)."
+    },
+    "human_authorized_by": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "Phase 1b (#879). Optional, unenforced. The accountable human or institution for a human-authorized or human-promoted Decision/Closure, as a namespace-qualified identifier (e.g. 'github:<login>' or 'wc:user:<handle>'); never a bare email. PRIVACY: this value is append-only, git-committed, and federation-visible — it cannot be redacted later, so prefer a stable handle or opaque account id over raw PII. Distinct from actor_class (which records the writer): an agent-executed write performed under human authorization records actor_class='agent' with the accountable human here. A single principal for now; multi-principal co-authorization is a future extension."
+    },
+    "confidence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5,
+      "description": "Phase 1a. LLM extraction confidence. 1-5 is the rubric used by the extractor's gates and persisted Decision entries with a meaningful score; 0 is a sentinel emitted on rejection shapes (llm_unavailable, llm_parse_failure) where no usable confidence was produced. Schema floor is 0 to round-trip both shapes; consumers that need a usable score should treat 0 as 'no signal' rather than as a valid rating."
+    },
+    "gate_results": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["passed"],
+        "properties": {
+          "passed": {"type": "boolean"},
+          "reason": {"type": "string"}
+        }
+      },
+      "description": "Phase 1a. 8-gate validation outcomes from LLM extraction."
+    },
+    "support_counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0},
+      "description": "#896 Leg 2 (§6 tether read-model, #881). Per-tether support counts (source/record_state/test/contract/user/interpretive/unknown), strongest-first, non-zero entries only. The primary support surface — never collapsed into a single confidence number or badge."
+    },
+    "dominant_tether": {
+      "type": "string",
+      "enum": ["source", "record_state", "test", "contract", "user", "interpretive", "unknown"],
+      "description": "#896 Leg 2. The strongest *present* tether — a salience hint for rendering order, NOT an authority badge. 'unknown' when there is no support."
+    },
+    "thin_support": {
+      "type": "boolean",
+      "description": "#896 Leg 2. True when no substantive (source/record_state/test/contract/user) support backs the surface."
+    },
+    "thin_support_reason": {
+      "type": "string",
+      "description": "#896 Leg 2. Deterministic one-line explanation when thin_support is true; absent otherwise."
+    },
+    "support_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["tether", "label"],
+        "properties": {
+          "tether": {"type": "string"},
+          "label": {"type": "string"},
+          "entry_id": {"type": "string"},
+          "quote_hash": {"type": "string"},
+          "detail": {"type": "string"}
+        }
+      },
+      "description": "#896 Leg 2. Per-support inspection pointers so a consumer can drill to the actual quote/record rather than trust a bare count (the §6 inspect-don't-trust substrate)."
+    },
+    "legacy_extraction_policy_status": {
+      "type": "string",
+      "enum": ["pre_policy"],
+      "description": "Historical metadata only. A one-time Phase 4h migration (#868) stamped the value `pre_policy` on a fixed set of legacy daemon-extracted Decision nodes that predate the Phase 1a provenance work. Not part of EntryData and not written by any current code — the backfill script and the server-side enforcement engine were removed in #872. Present on those pre-existing nodes by design (threads are append-only); optional, never required."
+    }
+  },
+  "additionalProperties": true
+}

@@ -200,16 +200,19 @@ def ensure_readable(
 
         elif parity == "dirty_derived_only":
             # Auto-clean derived caches, then retry
-            from watercooler.sync_repair import DERIVED_FILE_PATTERNS
+            from .primitives import should_discard_dirty_entry
             try:
                 status_out = repo.git.status("--porcelain")
                 for line in status_out.strip().split("\n"):
                     if not line.strip():
                         continue
                     filename = line[3:].split(" -> ")[-1].strip()
-                    # Guard: only delete files matching derived patterns
-                    # (race protection against concurrent writes)
-                    if Path(filename).name not in DERIVED_FILE_PATTERNS:
+                    # Guard: only delete derived files, and never an untracked
+                    # write-once projection whose sole copy isn't on origin yet
+                    # (checkout can't restore it — #924 review). Tracked-modified
+                    # churn — and an untracked projection origin already tracks —
+                    # is still cleaned/restored from the index.
+                    if not should_discard_dirty_entry(repo, line[:2], filename):
                         continue
                     filepath = threads_repo_path / filename
                     if filepath.exists():
@@ -220,9 +223,11 @@ def ensure_readable(
                     except Exception:
                         pass  # Untracked files will fail checkout — that's fine
                 actions.append("cleaned derived caches")
-                # Re-check parity after cleaning
+                # Re-check parity after cleaning. A remaining dirty_derived_only
+                # means only a preserved untracked projection is left, which never
+                # blocks a fast-forward — pull anyway to clear the behind state.
                 parity = get_parity_state(repo)
-                if parity == "behind_only":
+                if parity in ("behind_only", "dirty_derived_only"):
                     # Mirror the primary ``behind_only`` branch above —
                     # when the ff-only pull can't resolve the behind
                     # state, flag the caller so the stale-read banner
@@ -257,7 +262,7 @@ def ensure_readable(
                 from ..observability import log_action
 
                 # Step 1: Clean derived caches before stash/rebase
-                from watercooler.sync_repair import DERIVED_FILE_PATTERNS
+                from .primitives import should_discard_dirty_entry
                 if is_dirty(repo, untracked=True):
                     try:
                         status_out = repo.git.status("--porcelain")
@@ -265,7 +270,10 @@ def ensure_readable(
                             if not line.strip():
                                 continue
                             filename = line[3:].split(" -> ")[-1].strip()
-                            if Path(filename).name in DERIVED_FILE_PATTERNS:
+                            # Untracked write-once projections with no origin copy
+                            # are preserved here too; the stash below carries them
+                            # through the rebase (#924 review).
+                            if should_discard_dirty_entry(repo, line[:2], filename):
                                 filepath = threads_repo_path / filename
                                 if filepath.exists():
                                     filepath.unlink()

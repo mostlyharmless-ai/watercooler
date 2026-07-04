@@ -82,6 +82,23 @@ Restart Claude Code after running. For Codex, Cursor, or manual config, see
 > install step is needed. Claude Code launches the server automatically when it needs
 > watercooler tools.
 
+> **Recommended — pre-warm before first launch.** The *very first* launch
+> builds the server package and downloads the local models, which can take a
+> couple of minutes. If your MCP client has a short startup timeout, the
+> **first connection may be reported as a failure** — retrying (e.g. `/mcp`)
+> usually succeeds. To skip that, run the **same command once with `--warm`**
+> before (or right after) adding the server. It builds and caches the package,
+> pre-downloads the binary and models, then exits:
+>
+> ```bash
+> uvx --from 'git+https://github.com/mostlyharmless-ai/watercooler@main[local]' watercooler-mcp --warm
+> ```
+>
+> Use the **same `--from` value as your MCP config**. After it finishes, the
+> next client launch connects immediately. Re-run it after an upgrade, when
+> `uvx` rebuilds the package — see
+> [TROUBLESHOOTING](./TROUBLESHOOTING.md#mcp-first-launch-connect-fail).
+
 ---
 
 ## Step 3: Run the health check
@@ -92,6 +109,14 @@ After restarting Claude Code, ask your agent:
 
 The agent will call `watercooler_health(code_path=".")`, which reports the status of
 git auth, the MCP server, and your threads directory.
+
+> **Cautious? Check setup without changing anything first.** Ask your agent
+> to *check whether watercooler is set up in this repo* — it calls
+> `watercooler_health detail="setup"`, a strictly read-only report that
+> touches nothing. It tells you whether the repo is ready, whether roles are
+> customizable, and whether threads are synced — so your very first action
+> mutates nothing. When you're ready to actually set things up, that's the
+> next step.
 
 > **Health is a sanity check, not a gate.** `watercooler_health` is
 > optional — you can skip straight to Step 4 and post your first thread
@@ -157,6 +182,32 @@ See [CONFIGURATION.md](./CONFIGURATION.md) for all available options.
 
 ---
 
+## Step 3.8: Set up watercooler in this repo
+
+Ask your agent:
+
+> "Please set up watercooler in this repo."
+
+The agent calls `watercooler_init(code_path=".")`, which scaffolds an editable
+`.watercooler/roles.toml`, binds the threads storage, and reports back in one
+plain sentence — your **"you're all set"** moment, for example:
+
+> *You're set up — your notes persist in this repo. Ask me to push when you
+> want teammates to see them.*
+
+Setup is **local by default**: it does not publish anything until you ask. When
+you want teammates to see your threads, tell your agent to push (it re-runs
+`watercooler_init` with `push=true`) — see
+[Onboard your team](#onboard-your-team) below. You can re-run setup any time; it
+is idempotent.
+
+> Already posting threads without running this? That works too — the first
+> `say`/`init-thread` also binds storage automatically. `watercooler_init`
+> just makes setup explicit, scaffolds roles, and gives you a clear readiness
+> answer.
+
+---
+
 ## Step 4: Create your first thread
 
 Ask your agent:
@@ -194,15 +245,26 @@ See [TOOLS-REFERENCE.md](./TOOLS-REFERENCE.md) for the full tool list and
 > agent to run
 > `watercooler_sync_repair(code_path=".", diagnose_only=True)`.
 
-> **Optional: scaffold custom roles ahead of time**
+> **Customize roles for your project**
 >
-> Run `watercooler roles init` from your project root before your first
-> thread write to drop a copy of the bundled `roles.toml` (with all six
-> canonical roles and their annotations) into `.watercooler/roles.toml`.
-> This makes the role catalog visible and immediately editable — useful
-> if you want to add custom roles like `security-audit` or
-> `data-analyst` before contributors start posting. The command is
-> idempotent (use `--force` to overwrite an existing file).
+> `watercooler_init` (Step 3.8) already dropped an editable
+> `.watercooler/roles.toml` into your repo. It ships **fully commented**, so
+> as-is it just inherits the six bundled canonical roles — and keeps tracking
+> improvements when you upgrade. To tailor a role, open the file and
+> *uncomment a block*, for example:
+>
+> ```toml
+> [roles.critic]
+> instructions = """
+> In this repo, always check that new MCP tools are registered in
+> capabilities.py and have a matching authority-level entry.
+> """
+> ```
+>
+> **Commit `.watercooler/roles.toml`** so teammates and later agents inherit
+> your tailoring. Do **not** run `git add .watercooler/` as a whole —
+> `.watercooler/credentials.toml` holds secrets (API keys/tokens) and must
+> stay out of git (`watercooler_init` already gitignores it for you).
 > See [ROLES_CREATION.md](./ROLES_CREATION.md) for the full guide.
 
 ---
@@ -232,6 +294,31 @@ operation is reversible — see
 [SKILLS.md → Bootstrapping a repo](./SKILLS.md#bootstrapping-a-repo-setup-and-ongoing-maintenance)
 for the full lifecycle, including periodic maintenance with
 `/update-agent-context --phase2`.
+
+---
+
+## Onboard your team
+
+Watercooler threads are shared **because they live on the `watercooler/threads`
+orphan branch your team fetches and pushes against the same git remote.** So a
+teammate who clones the repo, adds the MCP server (Step 2), and connects just
+*sees* your threads — there is no separate database to provision. Each person
+still does their own per-machine setup (Steps 1–3.8), and sets a unique
+identity tag (Step 3.5) so entries stay attributable.
+
+To make your threads visible to the team the first time, ask your agent:
+
+> "Please push watercooler threads so my team can see them."
+
+The agent re-runs `watercooler_init` with `push=true`. Because the threads
+branch carries every entry body, the push is **opt-in and visibility-aware**:
+if the remote's privacy can't be confirmed, the agent asks you to confirm
+before publishing (so internal reasoning is never published to a public repo by
+accident). After the first push, normal thread writes sync automatically.
+
+Commit `.watercooler/roles.toml` too, so everyone inherits the same role
+tailoring. (Never commit `.watercooler/credentials.toml` — it holds secrets and
+is gitignored for you.)
 
 ---
 

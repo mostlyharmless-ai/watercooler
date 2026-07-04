@@ -72,6 +72,7 @@ Works with critic to stress-test proposals, with implementer to make plans
 executable, with tester to define validation expectations, and with pm to
 sequence the work.
 """
+project_salience = []
 
 [roles.critic]
 description      = """
@@ -117,6 +118,7 @@ Receives plans and code from planner and implementer. Returns fixes to
 implementer, dynamic follow-up to tester, and design-level objections or
 revisions to planner.
 """
+project_salience = []
 
 [roles.implementer]
 description      = """
@@ -161,6 +163,7 @@ Receives direction from planner and findings from critic. Hands completed
 work to tester and critic. Returns architectural uncertainty to planner and
 sequencing concerns to pm.
 """
+project_salience = []
 
 [roles.tester]
 description      = """
@@ -209,6 +212,7 @@ Receives implementations from implementer and validation expectations from
 planner. Returns failures to implementer, design-level concerns to planner
 or critic, and readiness status to pm.
 """
+project_salience = []
 
 [roles.pm]
 description      = """
@@ -254,6 +258,7 @@ Works across all roles. Routes design questions to planner, code work to
 implementer, review to critic, validation to tester, and durable wrap-up to
 scribe. Receives status from every role.
 """
+project_salience = []
 
 [roles.scribe]
 description      = """
@@ -300,3 +305,4 @@ Typically follows other roles. Often appears at decision capture, thread
 wrap-up, or summary points. May be written by a human, an agent, or a
 daemon acting in a record-preservation function.
 """
+project_salience = []

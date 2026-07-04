@@ -1,0 +1,9 @@
+{"type":"session_meta","timestamp":"2026-06-17T00:00:00Z","payload":{"cwd":"/repo","id":"019e44c8"}}
+{"type":"response_item","timestamp":"2026-06-17T00:00:01Z","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are a coding agent."}]}}
+{"type":"response_item","timestamp":"2026-06-17T00:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Add a recency filter to the daemon."}]}}
+{"type":"response_item","timestamp":"2026-06-17T00:00:03Z","payload":{"type":"reasoning","content":[{"type":"reasoning_text","text":"I should inspect the config first."}]}}
+{"type":"response_item","timestamp":"2026-06-17T00:00:04Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll read the config schema first."}]}}
+{"type":"response_item","timestamp":"2026-06-17T00:00:05Z","payload":{"type":"function_call","name":"shell","namespace":null,"call_id":"fc_1","arguments":"{\"command\":\"cat config_schema.py\"}"}}
+{"type":"response_item","timestamp":"2026-06-17T00:00:06Z","payload":{"type":"function_call_output","call_id":"fc_1","output":"<command output omitted>"}}
+{"type":"event_msg","timestamp":"2026-06-17T00:00:07Z","payload":{"type":"token_count"}}
+{"type":"response_item","timestamp":"2026-06-17T00:00:08Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The schema has a fuzzy_threshold field I can mirror."}]}}

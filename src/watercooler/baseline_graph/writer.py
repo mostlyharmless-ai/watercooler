@@ -44,9 +44,44 @@ class ThreadData:
     entry_count: int = 0
 
 
+# Phase 1a authority-ladder enum sets — single source of truth.
+# The JSON Schema (templates/entry_schema.json) is parity-bound against
+# these via tests/unit/test_schema_parity.py. The test was previously
+# asserting against a third hand-maintained copy, so a future comment
+# edit here without a schema update would pass CI — the constants close
+# that drift gap per the #860 review.
+ACTOR_CLASS_VALUES: frozenset[str] = frozenset(
+    {"human", "agent", "daemon", "human_grandfathered"}
+)
+DECISION_ORIGIN_VALUES: frozenset[str] = frozenset(
+    {"direct_human", "human_promoted", "daemon_extraction", "agent_authored"}
+)
+AUTHORITY_BASIS_VALUES: frozenset[str] = frozenset(
+    {"human_direct", "human_promoted", "human_endorsed", "none"}
+)
+ENTRY_TYPE_VALUES: frozenset[str] = frozenset(
+    {"Note", "Plan", "Decision", "PR", "Closure"}
+)
+
+
 @dataclass
 class EntryData:
-    """Data for creating/updating an entry node."""
+    """Data for creating/updating an entry node.
+
+    The ``actor_class`` / ``decision_origin`` / ``authority_source`` /
+    ``authority_basis`` / ``source_entry_id`` / ``human_authorized_by`` /
+    ``confidence`` / ``gate_results`` fields are authority-ladder provenance fields
+    (v0.10 §5.4.1, §10.2.1, §10.5, §10.6). They are optional, unenforced
+    descriptive metadata — legacy entries written before they existed do not
+    carry them, and the server-side write check that formerly consumed them
+    was removed. None values are omitted from the serialised entry node, so
+    adding fields to this dataclass is backward-compatible with the JSONL on
+    the orphan branch.
+
+    Valid values for the string enums live in module-level constants
+    (``ACTOR_CLASS_VALUES`` etc.) so schema parity is asserted against a
+    real source of truth.
+    """
 
     entry_id: str
     thread_topic: str
@@ -60,6 +95,26 @@ class EntryData:
     summary: str = ""
     embedding: Optional[List[float]] = None
     code_branch: Optional[str] = None
+    # Authority-ladder provenance (Phase 1a; written by the daemon, the
+    # promotion helper, and the canonical write path. None on legacy entries.
+    # Valid values: ACTOR_CLASS_VALUES / DECISION_ORIGIN_VALUES /
+    # AUTHORITY_BASIS_VALUES above.)
+    actor_class: Optional[str] = None
+    decision_origin: Optional[str] = None
+    authority_source: Optional[str] = None  # optional, unenforced provenance; "human" on promote-candidate path
+    authority_basis: Optional[str] = None
+    source_entry_id: Optional[str] = None  # ULID of source entry (promotions / extractions)
+    human_authorized_by: Optional[str] = None  # namespace-qualified accountable human (#879)
+    confidence: Optional[int] = None  # 1-5 for LLM extractions
+    gate_results: Optional[Dict[str, Any]] = None  # gate name -> {passed: bool, reason: str}
+    # §6 tether read-model (#896 Leg 2 / #881). Structured support metadata so the
+    # hosted UI renders support at point of consumption rather than re-parsing the
+    # body markers. None/empty values are omitted from the node (legacy-compatible).
+    support_counts: Optional[Dict[str, int]] = None  # per-tether counts, strongest-first
+    dominant_tether: Optional[str] = None  # strongest *present* tether (salience hint, not a badge)
+    thin_support: Optional[bool] = None  # True when no substantive support backs the surface
+    thin_support_reason: Optional[str] = None  # deterministic one-line reason when thin
+    support_evidence: Optional[List[Dict[str, Any]]] = None  # per-support inspection pointers
 
 
 # ============================================================================
@@ -168,6 +223,35 @@ def _build_entry_node(
     }
     if data.code_branch:
         node["code_branch"] = data.code_branch
+    # Authority-ladder provenance fields. None values are omitted so legacy
+    # entries (written before Phase 1a fields existed) and present-day entries
+    # without authority context produce identical node shapes.
+    for field_name in (
+        "actor_class",
+        "decision_origin",
+        "authority_source",
+        "authority_basis",
+        "source_entry_id",
+        "human_authorized_by",
+        "confidence",
+    ):
+        value = getattr(data, field_name)
+        if value is not None:
+            node[field_name] = value
+    if data.gate_results is not None:
+        node["gate_results"] = data.gate_results
+    # §6 tether read-model (#896 Leg 2). Emitted together when a warrant backs the
+    # entry; None-omitted so legacy entries keep an identical node shape.
+    for field_name in (
+        "support_counts",
+        "dominant_tether",
+        "thin_support",
+        "thin_support_reason",
+        "support_evidence",
+    ):
+        value = getattr(data, field_name)
+        if value is not None:
+            node[field_name] = value
     # NOTE: Embeddings are NOT stored in entry nodes anymore.
     # They are stored in FalkorDB (with fallback to search-index.jsonl).
     # See sync.py:upsert_embedding() for embedding storage.
@@ -434,6 +518,9 @@ def delete_entry_node(
 
         entry_node_id = f"entry:{entry_id}"
 
+        # Capture type before removal so we can prune the decisions index.
+        was_decision = entries.get(entry_node_id, {}).get("entry_type") == "Decision"
+
         # Remove entry node
         if entry_node_id in entries:
             del entries[entry_node_id]
@@ -474,6 +561,16 @@ def delete_entry_node(
 
         # Remove from file-based search index
         storage.remove_from_search_index(graph_dir, entry_id, topic=topic)
+
+        # Prune the repo-level decisions index if a Decision was deleted.
+        # Best-effort: never fail the delete on index maintenance.
+        if was_decision:
+            try:
+                from .decision_index import prune_decision_index_local
+
+                prune_decision_index_local(graph_dir, entry_id)
+            except Exception as idx_err:  # pragma: no cover - defensive
+                logger.debug(f"decisions-index prune skipped: {idx_err}")
 
         logger.debug(f"Deleted entry node: {topic}/{entry_id}")
         return True

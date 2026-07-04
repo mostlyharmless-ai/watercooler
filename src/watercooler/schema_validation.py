@@ -1,14 +1,15 @@
 """Schema validation utilities for Watercooler data structures.
 
 This module provides utilities for validating ThreadEntry and WatercoolerThread
-objects against the canonical JSON schemas defined in schemas/.
+objects against the canonical JSON schemas packaged under
+``src/watercooler/schemas/``.
 
 Note: Requires jsonschema package (install with 'pip install jsonschema')
 """
 
 import json
 from functools import lru_cache
-from pathlib import Path
+from importlib.resources import files
 from typing import Any
 
 try:
@@ -29,23 +30,26 @@ except ImportError:
         SchemaError = Exception  # type: ignore
 
 
-def _get_schema_path(schema_name: str) -> Path:
-    """Get path to a schema file.
+def _get_schema_resource(schema_name: str) -> Any:
+    """Get the packaged schema resource.
+
+    Schemas ship inside the ``watercooler`` package (``src/watercooler/schemas/``)
+    so they resolve from an installed wheel, not just a dev checkout. Uses
+    ``importlib.resources`` — the same pattern as ``role_loader`` and
+    ``commands.roles_init`` for bundled ``data/`` assets.
 
     Args:
         schema_name: Name of schema file (e.g., 'thread_entry.schema.json')
 
     Returns:
-        Path to schema file
+        A ``Traversable`` for the schema resource.
     """
-    # schemas/ is at repo root, one level up from src/watercooler
-    repo_root = Path(__file__).parent.parent.parent
-    return repo_root / "schemas" / schema_name
+    return files("watercooler") / "schemas" / schema_name
 
 
 @lru_cache(maxsize=8)
 def load_schema(schema_name: str) -> dict[str, Any]:
-    """Load a JSON schema from schemas/ directory.
+    """Load a packaged JSON schema by file name.
 
     Args:
         schema_name: Name of schema file (e.g., 'thread_entry.schema.json')
@@ -60,11 +64,11 @@ def load_schema(schema_name: str) -> dict[str, Any]:
     Note:
         Results are cached to avoid repeated file I/O.
     """
-    schema_path = _get_schema_path(schema_name)
-    if not schema_path.exists():
-        raise FileNotFoundError(f"Schema not found: {schema_path}")
+    resource = _get_schema_resource(schema_name)
+    if not resource.is_file():
+        raise FileNotFoundError(f"Schema not found: {schema_name}")
 
-    return json.loads(schema_path.read_text())
+    return json.loads(resource.read_text())
 
 
 @lru_cache(maxsize=1)

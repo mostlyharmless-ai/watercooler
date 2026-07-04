@@ -17,6 +17,7 @@ from typing import Dict, List, NamedTuple, Optional
 # Local application imports
 from watercooler import commands, fs
 from watercooler.config_facade import config
+from watercooler.refs import format_entry_ref
 from watercooler.thread_entries import ThreadEntry
 from watercooler.baseline_graph.reader import (
     is_graph_available,
@@ -183,8 +184,32 @@ def _resolve_format(
 # ============================================================================
 
 
-def _entry_header_payload(entry: ThreadEntry, summary: str = "") -> Dict[str, object]:
+_AUTHORITY_PAYLOAD_FIELDS = (
+    "actor_class",
+    "decision_origin",
+    "authority_basis",
+    "source_entry_id",
+    "human_authorized_by",
+)
+
+
+def _authority_payload(entry: ThreadEntry) -> Dict[str, object]:
+    """Non-None authority-provenance fields for a read payload (#879).
+
+    Omits absent fields so legacy / non-authority entries keep their existing
+    payload shape, mirroring the write-side None-omission contract.
+    """
     return {
+        name: getattr(entry, name)
+        for name in _AUTHORITY_PAYLOAD_FIELDS
+        if getattr(entry, name, None) is not None
+    }
+
+
+def _entry_header_payload(
+    entry: ThreadEntry, summary: str = "", topic: str | None = None
+) -> Dict[str, object]:
+    data: Dict[str, object] = {
         "index": entry.index,
         "entry_id": entry.entry_id,
         "agent": entry.agent,
@@ -193,20 +218,31 @@ def _entry_header_payload(entry: ThreadEntry, summary: str = "") -> Dict[str, ob
         "type": entry.entry_type,
         "title": entry.title,
         "summary": summary,
+        **_authority_payload(entry),
     }
+    # Canonical human-navigable citation (ThreadEntry carries no thread_topic,
+    # so the slug is threaded in from the caller). Omitted when topic is absent.
+    ref = format_entry_ref(topic, entry.index, entry.entry_id)
+    if ref:
+        data["ref"] = ref
+    return data
 
 
-def _entry_full_payload(entry: ThreadEntry, summary: str = "") -> Dict[str, object]:
+def _entry_full_payload(
+    entry: ThreadEntry, summary: str = "", topic: str | None = None
+) -> Dict[str, object]:
     """Convert ThreadEntry to full JSON payload including body content.
 
     Args:
         entry: ThreadEntry to convert
         summary: LLM-generated summary (1-2 sentences) from graph
+        topic: Thread slug, used to render the canonical ``ref`` citation.
+            Omitted from the payload when not supplied.
 
     Returns:
         Dictionary with entry metadata, summary, and body
     """
-    data = _entry_header_payload(entry, summary=summary)
+    data = _entry_header_payload(entry, summary=summary, topic=topic)
     data["body"] = entry.body
     return data
 
@@ -290,6 +326,11 @@ def _graph_entry_to_thread_entry(
         end_line=0,
         start_offset=0,
         end_offset=0,
+        actor_class=graph_entry.actor_class,
+        decision_origin=graph_entry.decision_origin,
+        authority_basis=graph_entry.authority_basis,
+        source_entry_id=graph_entry.source_entry_id,
+        human_authorized_by=graph_entry.human_authorized_by,
     )
 
 

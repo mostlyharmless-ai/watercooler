@@ -175,3 +175,186 @@ class TestFormatCandidateNoteBody:
             extraction=None,
         )
         assert format_candidate_note_body(result, {}) == ""
+
+    def test_hallucinated_quote_marks_evidence_unverified(self):
+        """conf=5 + hallucinated_quote → body marks quote evidence as unverified
+        and adds a Quote-Evidence-Status marker so reviewers see the caveat."""
+        ext = _make_extraction(confidence=5)  # all gates pass
+        result = _make_result(ext, rejection_reason="hallucinated_quote")
+        body = format_candidate_note_body(result, _make_entry())
+
+        assert "Quote-Evidence-Status: weak_unverified" in body
+        assert "Evidence (unverified)" in body
+        assert "did not validate against the source body" in body
+        assert "quote_validation" in body
+        # The candidate Decision and source pointer should still be present.
+        assert "Use FalkorDB" in body or "FalkorDB" in body
+        assert "01SRCENTRY0000001" in body
+
+    def test_summary_only_quote_evidence_marks_evidence_unverified(self):
+        """conf=5 + summary_only_quote_evidence → body explains the quote came
+        from the summary paraphrase, not the body."""
+        ext = _make_extraction(confidence=5)
+        result = _make_result(ext, rejection_reason="summary_only_quote_evidence")
+        body = format_candidate_note_body(result, _make_entry())
+
+        assert "Quote-Evidence-Status: weak_unverified" in body
+        assert "Evidence (unverified)" in body
+        assert "matched the entry summary but not the source body" in body
+
+    def test_soft_gate_path_marks_evidence_verified(self):
+        """The verified-evidence marker stays on the soft-gate path."""
+        ext = _make_extraction(
+            confidence=3,
+            gate_overrides={"g4_rationale": {"passed": False, "reason": "weak"}},
+        )
+        result = _make_result(ext, rejection_reason="soft_gate_failure")
+        body = format_candidate_note_body(result, _make_entry())
+
+        assert "Quote-Evidence-Status: verified" in body
+        # Confirm we didn't pick up the weak-quote section header.
+        assert "Evidence (unverified)" not in body
+
+    def test_weak_quote_each_quote_carries_inline_unverified_marker(self):
+        """Each unverified quote carries an inline ``[unverified]`` tag so
+        the warning survives RAG chunking. Without this, a downstream
+        chunk that picks up only blockquote lines surfaces LLM-fabricated
+        text as if it were source evidence — the exact failure the
+        verbatim-quote gate exists to prevent."""
+        import dataclasses
+
+        base = _make_extraction(confidence=5)
+        ext = dataclasses.replace(
+            base,
+            verbatim_quotes=["quote one", "quote two", "quote three"],
+        )
+        result = _make_result(ext, rejection_reason="hallucinated_quote")
+        body = format_candidate_note_body(result, _make_entry())
+
+        # All three quotes carry the inline tag.
+        assert body.count("> [unverified]") == 3
+        assert "> [unverified] quote one" in body
+        assert "> [unverified] quote two" in body
+        assert "> [unverified] quote three" in body
+
+    def test_verified_path_does_NOT_add_inline_unverified_marker(self):
+        """Regression: the soft-gate (verified) path keeps the plain
+        ``> quote`` shape — inline tag is weak-quote only."""
+        ext = _make_extraction(
+            confidence=3,
+            gate_overrides={"g4_rationale": {"passed": False, "reason": "weak"}},
+        )
+        result = _make_result(ext, rejection_reason="soft_gate_failure")
+        body = format_candidate_note_body(result, _make_entry())
+
+        assert "[unverified]" not in body
+        assert "> we decided to use FalkorDB" in body
+
+
+class TestCandidateWarrantReadModel:
+    """The candidate body surfaces the tether/warrant read model (#881)."""
+
+    def test_warrant_markers_and_section_present(self):
+        ext = _make_extraction(confidence=3)
+        result = _make_result(ext, rejection_reason="soft_gate_failure")
+        body = format_candidate_note_body(result, _make_entry())
+
+        assert "Tether-Support-Counts:" in body
+        assert "Dominant-Tether:" in body
+        assert "Thin-Support:" in body
+        assert "## Support tethers" in body
+
+    def test_verified_source_quote_is_not_thin(self):
+        # Soft-gate path keeps quotes verified → source-supported, not thin.
+        ext = _make_extraction(
+            confidence=3,
+            gate_overrides={"g4_rationale": {"passed": False, "reason": "weak"}},
+        )
+        result = _make_result(ext, rejection_reason="soft_gate_failure")
+        body = format_candidate_note_body(result, _make_entry())
+
+        assert "Thin-Support: false" in body
+        assert "source=" in body
+
+    def test_weak_quote_candidate_is_thin(self):
+        # Unverified quotes are interpretive, not source → thin support.
+        ext = _make_extraction(confidence=5)
+        result = _make_result(ext, rejection_reason="hallucinated_quote")
+        body = format_candidate_note_body(result, _make_entry())
+
+        assert "Thin-Support: true" in body
+        assert "Thin-Support-Reason:" in body
+
+    def test_record_state_source_type_carried_forward_to_promotion(self):
+        # A candidate extracted from a record-state entry (Decision/Closure/
+        # Supersession) earns record_state support; that must survive promotion
+        # via the Source-Entry-Type marker (regression for the carry-forward gap).
+        from watercooler.promotion import (
+            parse_candidate_body,
+            format_promotion_decision_body,
+        )
+
+        ext = _make_extraction(confidence=3)
+        result = _make_result(ext, rejection_reason="soft_gate_failure")
+        entry = _make_entry()
+        entry["entry_type"] = "Decision"
+        body = format_candidate_note_body(result, entry)
+
+        assert "Source-Entry-Type: Decision" in body
+        assert "record_state=" in body  # candidate earned record_state support
+
+        meta = parse_candidate_body(body, "01CANDIDATE000000001", "test-thread")
+        assert meta.source_entry_type == "Decision"
+        # #887: record_state at promotion is re-derived from the LIVE source —
+        # quotes re-validated (quote_verified=True) AND the live source type
+        # (source_entry_type) being a record-state type. The candidate's
+        # self-asserted Source-Entry-Type marker no longer grants record_state.
+        promoted = format_promotion_decision_body(
+            meta,
+            human_authorized_by="github:caleb",
+            quote_verified=True,
+            source_entry_type="Decision",
+        )
+        assert "record_state:" in promoted
+        # Without live re-derivation (pure defaults), record_state is withheld.
+        promoted_unverified = format_promotion_decision_body(
+            meta, human_authorized_by="github:caleb"
+        )
+        assert "record_state:" not in promoted_unverified
+
+    def test_weak_quote_from_decision_source_stays_thin(self):
+        # Codex P2 regression at the body surface: a hallucinated-quote candidate
+        # extracted from a Decision source must not render as record-backed.
+        ext = _make_extraction(confidence=5)
+        result = _make_result(ext, rejection_reason="hallucinated_quote")
+        entry = _make_entry()
+        entry["entry_type"] = "Decision"
+        body = format_candidate_note_body(result, entry)
+
+        assert "Thin-Support: true" in body
+        assert "record_state=" not in body
+        assert "record_state:" not in body
+
+    def test_note_source_type_does_not_emit_marker(self):
+        # The common Note case carries no Source-Entry-Type marker.
+        ext = _make_extraction(confidence=3)
+        result = _make_result(ext, rejection_reason="soft_gate_failure")
+        entry = _make_entry()
+        entry["entry_type"] = "Note"
+        body = format_candidate_note_body(result, entry)
+        assert "Source-Entry-Type:" not in body
+
+    def test_warrant_section_does_not_pollute_evidence_parsing(self):
+        # The promotion parser reads `## Evidence` blockquotes; the warrant
+        # section (which follows) must not leak into parsed evidence quotes.
+        from watercooler.promotion import parse_candidate_body
+
+        ext = _make_extraction(
+            confidence=3,
+            gate_overrides={"g4_rationale": {"passed": False, "reason": "weak"}},
+        )
+        result = _make_result(ext, rejection_reason="soft_gate_failure")
+        body = format_candidate_note_body(result, _make_entry())
+
+        meta = parse_candidate_body(body, "01CANDIDATE000000001", "test-thread")
+        assert meta.evidence_quotes == ["we decided to use FalkorDB"]

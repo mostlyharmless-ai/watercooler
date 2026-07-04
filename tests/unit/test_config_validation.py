@@ -57,15 +57,7 @@ class TestCommonConfig:
     def test_default_values(self):
         """Test default CommonConfig values."""
         config = CommonConfig()
-        assert config.threads_suffix == "-threads"
-        assert "{org}" in config.threads_pattern
-        assert "{repo}" in config.threads_pattern
         assert config.templates_dir == ""
-
-    def test_custom_threads_pattern(self):
-        """Test custom threads pattern."""
-        config = CommonConfig(threads_pattern="git@github.com:{org}/{repo}-wc.git")
-        assert "git@github.com" in config.threads_pattern
 
     def test_templates_dir_warning_nonexistent(self, tmp_path):
         """Test warning when templates_dir doesn't exist."""
@@ -281,7 +273,6 @@ class TestValidationConfig:
         assert config.on_write is True
         assert config.on_commit is True
         assert config.fail_on_violation is False
-        assert config.check_branch_pairing is True
 
     def test_nested_entry_config(self):
         """Test nested EntryValidationConfig."""
@@ -443,7 +434,7 @@ class TestWatercoolerConfig:
         """Test accessing nested config sections."""
         config = WatercoolerConfig()
         # Access nested config
-        assert config.common.threads_suffix == "-threads"
+        assert config.common.templates_dir == ""
 
 
 # ============================================================================
@@ -624,13 +615,13 @@ class TestEdgeCases:
         """Test creating config with empty dict."""
         config = WatercoolerConfig()
         # Should use all defaults
-        assert config.common.threads_suffix == "-threads"
+        assert config.common.templates_dir == ""
 
     def test_extra_fields_ignored(self):
         """Test that extra fields are ignored."""
         # By default Pydantic ignores extra fields
-        config = CommonConfig(threads_suffix="-threads", unknown_field="value")
-        assert config.threads_suffix == "-threads"
+        config = CommonConfig(templates_dir="", unknown_field="value")
+        assert config.templates_dir == ""
 
     def test_nested_validation_error(self):
         """Test validation error in nested config."""
@@ -723,31 +714,31 @@ class TestConfigPrecedence:
 
     def test_override_takes_precedence(self):
         """Test that override values take precedence in merge."""
-        base = {"common": {"threads_suffix": "-base"}}
-        override = {"common": {"threads_suffix": "-override"}}
+        base = {"common": {"templates_dir": "/base"}}
+        override = {"common": {"templates_dir": "/override"}}
 
         result = _deep_merge(base, override)
 
-        assert result["common"]["threads_suffix"] == "-override"
+        assert result["common"]["templates_dir"] == "/override"
 
     def test_partial_override(self):
         """Test that partial overrides preserve unspecified values."""
         base = {
             "common": {
-                "threads_suffix": "-threads",
                 "templates_dir": "/base/templates",
+                "default_agent": "base-agent",
             }
         }
         override = {
             "common": {
-                "threads_suffix": "-custom",
+                "templates_dir": "/custom/templates",
             }
         }
 
         result = _deep_merge(base, override)
 
-        assert result["common"]["threads_suffix"] == "-custom"
-        assert result["common"]["templates_dir"] == "/base/templates"
+        assert result["common"]["templates_dir"] == "/custom/templates"
+        assert result["common"]["default_agent"] == "base-agent"
 
     def test_new_section_added(self):
         """Test that new sections are added."""

@@ -221,6 +221,37 @@ class TestEntryFullPayload:
         assert "markdown" not in payload
 
 
+class TestEntryRef:
+    """Canonical ``ref`` citation: ``<thread_topic>:<index> (<entry_id>)``."""
+
+    def test_ref_rendered_when_topic_provided(self):
+        entry = _make_entry(index=12, entry_id="01KS0JTK0RT4EC0M92PMX19XRA")
+        payload = _entry_header_payload(
+            entry, topic="agent-authority-ladder-proposal-2026-05-13"
+        )
+        assert (
+            payload["ref"]
+            == "agent-authority-ladder-proposal-2026-05-13:12 (01KS0JTK0RT4EC0M92PMX19XRA)"
+        )
+
+    def test_ref_in_full_payload(self):
+        entry = _make_entry(index=3, entry_id="01TEST00000000000000000099")
+        payload = _entry_full_payload(entry, topic="error-handling")
+        assert payload["ref"] == "error-handling:3 (01TEST00000000000000000099)"
+
+    def test_ref_omitted_without_topic(self):
+        # Back-compat: callers that don't pass a topic get the legacy shape.
+        entry = _make_entry()
+        assert "ref" not in _entry_header_payload(entry)
+        assert "ref" not in _entry_full_payload(entry)
+
+    def test_ref_rendered_for_index_zero(self):
+        # index 0 is falsy but a valid first-entry position — must still render.
+        entry = _make_entry(index=0, entry_id="01TEST00000000000000000000")
+        payload = _entry_header_payload(entry, topic="first-thread")
+        assert payload["ref"] == "first-thread:0 (01TEST00000000000000000000)"
+
+
 # ============================================================================
 # Tool-level summary tests (summary_only mode)
 # ============================================================================
@@ -239,6 +270,11 @@ class TestReadThreadSummaryOnly:
         payload = json.loads(output)
         assert payload["summary_only"] is True
         assert payload["entry_count"] == 2
+        # Deterministic, non-LLM entry-type badge (fixture: 1 Plan + 1 Note).
+        assert payload["entry_type_counts"]["Plan"] == 1
+        assert payload["entry_type_counts"]["Note"] == 1
+        assert payload["entry_type_counts"]["Decision"] == 0
+        assert payload["entry_type_counts"]["Closure"] == 0
         # Entries should have summary but no body
         for entry in payload["entries"]:
             assert "summary" in entry
@@ -255,8 +291,21 @@ class TestReadThreadSummaryOnly:
         assert "summary-test" in output
         assert "[0]" in output
         assert "[1]" in output
+        # Deterministic entry-mix badge present in the condensed view.
+        assert "Entry mix:" in output
+        assert "0 Decision" in output
         # Should NOT contain full entry bodies
         assert "Spec: planner-architecture" not in output
+
+    def test_full_markdown_includes_entry_mix_badge(self, patched_context):
+        output = server.read_thread(
+            topic="summary-test",
+            code_path=".",
+            format="markdown",
+        )
+        # The default (full markdown) read carries the same deterministic badge.
+        assert "Entry mix:" in output
+        assert "0 Decision" in output
 
     def test_full_json_includes_summary_field(self, patched_context):
         output = server.read_thread(
@@ -267,6 +316,9 @@ class TestReadThreadSummaryOnly:
         payload = json.loads(output)
         # Meta should include summary key
         assert "summary" in payload["meta"]
+        # Full JSON also carries the deterministic entry-type badge.
+        assert payload["entry_type_counts"]["Plan"] == 1
+        assert payload["entry_type_counts"]["Note"] == 1
         # Entries should have both summary and body
         for entry in payload["entries"]:
             assert "summary" in entry

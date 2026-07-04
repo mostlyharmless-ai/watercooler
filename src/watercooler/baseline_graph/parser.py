@@ -19,6 +19,7 @@ from watercooler.fs import is_closed
 from .summarizer import (
     summarize_entry,
     summarize_thread,
+    SUMMARY_SCHEMA_VERSION,
     SummarizerConfig,
     create_summarizer_config,
 )
@@ -51,6 +52,9 @@ class ParsedThread:
     ball: str
     last_updated: str
     summary: str
+    # Schema version of `summary` (None when unknown/loaded from a pre-#878 record).
+    # Carried so the pipeline/export path does not re-stale a current summary on write.
+    summary_schema_version: Optional[int] = None
     entries: List[ParsedEntry] = field(default_factory=list)
 
     @property
@@ -127,12 +131,16 @@ def _thread_from_graph(
 
     # Thread summary
     thread_summary = thread_meta.get("summary", "")
+    # Carry the stored schema version; if we generate a fresh summary here it is current.
+    summary_version = thread_meta.get("summary_schema_version")
     if generate_summaries and not thread_summary and entry_dicts:
         thread_summary = summarize_thread(
             entry_dicts,
             thread_title=thread_meta.get("title", topic),
             config=config,
         )
+        if thread_summary:
+            summary_version = SUMMARY_SCHEMA_VERSION
 
     return ParsedThread(
         topic=topic,
@@ -141,6 +149,7 @@ def _thread_from_graph(
         ball=thread_meta.get("ball", ""),
         last_updated=thread_meta.get("last_updated", ""),
         summary=thread_summary,
+        summary_schema_version=summary_version,
         entries=parsed_entries,
     )
 
@@ -324,6 +333,8 @@ def parse_thread_file(
         thread_summary = summarize_thread(entry_dicts, thread_title=title, config=config)
     else:
         thread_summary = ""
+    # A summary produced here is current-schema; an empty one carries no version.
+    summary_version = SUMMARY_SCHEMA_VERSION if thread_summary else None
 
     return ParsedThread(
         topic=topic,
@@ -332,5 +343,6 @@ def parse_thread_file(
         ball=ball,
         last_updated=last_updated,
         summary=thread_summary,
+        summary_schema_version=summary_version,
         entries=parsed_entries,
     )

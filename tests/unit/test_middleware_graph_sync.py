@@ -57,6 +57,10 @@ def _make_graph_config(*, summaries: bool = False, embeddings: bool = False):
     graph = MagicMock()
     graph.generate_summaries = summaries
     graph.generate_embeddings = embeddings
+    # Pin the inline memory-sync path: Phase A only runs inline sync when async
+    # enrichment is off, so an unset MagicMock would make the guarantee depend on
+    # whether a global queue worker is running (cross-test flakiness).
+    graph.async_enrichment = False
     wc_config = MagicMock()
     wc_config.mcp.graph = graph
     return wc_config

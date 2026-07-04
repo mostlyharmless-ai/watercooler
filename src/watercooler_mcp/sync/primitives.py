@@ -556,6 +556,48 @@ def stash_changes(repo: Repo, prefix: str = "watercooler-auto") -> Optional[str]
         raise
 
 
+def should_discard_dirty_entry(
+    repo: Repo, status: str, rel_path: str, branch: Optional[str] = None
+) -> bool:
+    """Whether a dirty worktree entry may be deleted to unblock sync.
+
+    Derived files (:func:`~watercooler.sync_repair.is_derived_file`) are
+    discardable, with one guard: an *untracked* write-once projection
+    (:func:`~watercooler.sync_repair.is_untracked_write_once_projection`, e.g. an
+    un-pushed Slack ``slack-mappings`` file) is the sole copy of state not yet on
+    origin, so it is preserved — **unless** origin already tracks that exact path,
+    in which case origin holds the canonical copy and discarding the local
+    untracked file (to take origin's and let the worktree fast-forward) is safe.
+    Anything not derived is never discarded.
+
+    Args:
+        repo: Git repository (the threads worktree).
+        status: The two-char ``XY`` field from ``git status --porcelain``.
+        rel_path: Repo-relative path of the entry.
+        branch: Branch to resolve ``origin/<branch>`` against (active branch if None).
+    """
+    from watercooler.sync_repair import (
+        is_derived_file,
+        is_untracked_write_once_projection,
+    )
+
+    if not is_derived_file(rel_path):
+        return False
+    if not is_untracked_write_once_projection(status, rel_path):
+        return True
+    # Untracked write-once projection: discard only if origin already has this
+    # exact path committed (then the local file is not the sole copy).
+    if branch is None:
+        branch = get_branch_name(repo)
+    if not branch:
+        return False
+    try:
+        repo.git.cat_file("-e", f"origin/{branch}:{rel_path}")
+        return True
+    except Exception:
+        return False
+
+
 def get_parity_state(repo: Repo, branch: Optional[str] = None) -> str:
     """Determine the canonical sync parity state of a worktree.
 
@@ -574,7 +616,7 @@ def get_parity_state(repo: Repo, branch: Optional[str] = None) -> str:
         repo: Git repository
         branch: Branch name (uses active branch if None)
     """
-    from watercooler.sync_repair import DERIVED_FILE_PATTERNS
+    from watercooler.sync_repair import is_derived_file
 
     # Check stuck rebase/merge first
     if is_rebase_in_progress(repo):
@@ -604,8 +646,7 @@ def get_parity_state(repo: Repo, branch: Optional[str] = None) -> str:
                 if not line.strip():
                     continue
                 filename = line[3:].split(" -> ")[-1].strip()
-                basename = Path(filename).name if filename else ""
-                if basename not in DERIVED_FILE_PATTERNS:
+                if not is_derived_file(filename):
                     all_derived = False
                     break
             dirty_derived = all_derived

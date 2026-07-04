@@ -1,6 +1,6 @@
 # watercooler
 
-Git-native collaboration threads for human-AI coding teams.
+Git-native shared reasoning for human-AI coding teams — the decisions, critique, and rationale behind the code, preserved alongside it.
 
 Hosted version available at [watercoolerdev.com](https://watercoolerdev.com).
 
@@ -8,13 +8,13 @@ Hosted version available at [watercoolerdev.com](https://watercoolerdev.com).
 
 [Quick Start](#quick-start) • [Documentation](#documentation) • [Workflow Examples](docs/WORKFLOW_EXAMPLES.md) • [Tools Reference](docs/TOOLS-REFERENCE.md) • [Contributing](CONTRIBUTING.md)
 
-[![Watercooler Cloud](docs/images/hero-banner.png)](https://www.watercoolerdev.com)
+[![watercooler](docs/images/hero-banner.png)](https://www.watercoolerdev.com)
 
 ---
 
 ## What is Watercooler?
 
-Watercooler is an MCP server with a git-backed shared memory layer for agentic coding teams — durable records of decisions, reasoning, and critique alongside your code.
+Watercooler is an MCP server that gives agentic coding teams a git-backed place for the reasoning behind the code — durable records of decisions, critique, and rationale, versioned alongside it.
 
 > **Git stores what changed. Watercooler stores why it changed, what was
 > considered, what was decided, and what remains uncertain.**
@@ -31,7 +31,7 @@ durable: proposals, tradeoffs, critique, rationale, intent, and decisions.
 People decide what belongs at the watercooler. Agents usually do the writing.
 Each thread entry is a deliberate, human-gated externalization of context — not
 session noise. Once posted into the watercooler, that context becomes part of
-the team's shared memory: versioned, searchable, and reviewable alongside the
+the team's shared record: versioned, searchable, and reviewable alongside the
 code.
 
 **Example workflow:**
@@ -39,11 +39,18 @@ code.
   Jay w/ Codex: "Let's put the new team permissions model at the watercooler."
 +    Codex (jay, planner): posts proposal with tradeoffs -> ball passed
   Caleb w/ Claude: reads thread, critiques proposal, suggests revision -> ack
-+    Claude (caleb, critic): confirms design, posts Decision -> files GitHub issue
++    Claude (caleb, critic): confirms design, surfaces a Decision candidate
+  Caleb: approves the candidate -> Decision recorded -> files GitHub issue
 +  Git: proposal, critique, rationale, and decision are versioned with the code
 ```
 
 **You choose what to externalize. The agent writes it. Git keeps it durable.**
+
+**Agents propose. People decide.** Agents can search prior threads, attach
+context, and draft proposals — surfacing decision-shaped material as candidates.
+Turning a candidate into a committed decision is a human act. Every entry carries
+its author, role, and the commit it was written against, so agent inference stays
+inspectable rather than authoritative by default.
 
 Watercooler does not passively record every agent interaction. You decide what should be
 communicated, and the agent writes the appropriate structured thread action so context,
@@ -64,7 +71,7 @@ focused and intentional.
 
 ### Where watercooler fits
 
-Watercooler is the durable shared memory for reasoning, decisions, and critique alongside your software lifecycle artifacts.
+Watercooler is where the decisions, critique, and rationale behind your code live — durable in git, alongside your software lifecycle artifacts.
 
 <p align="center">
   <img src="docs/images/watercooler-diagram.png" alt="Watercooler Diagram" width="600">
@@ -74,15 +81,39 @@ Watercooler is the durable shared memory for reasoning, decisions, and critique 
 
 As AI accelerates code generation, the bottleneck shifts from writing code to
 understanding it — evaluating tradeoffs, making decisions, and maintaining
-enough shared context for the team to move well together. Faster output without
-a shared reasoning record leads to rework, repeated assumptions, and weaker
-critique loops.
+enough shared context for the team to move well together. The scarce resource
+becomes judgment, and the risk is that you spend it scheduling agents and
+reconstructing lost rationale instead of deciding what matters. Faster output
+without a shared reasoning record leads to rework, repeated assumptions, and
+weaker critique loops.
 
 Watercooler addresses this by making the thinking around code durable:
 ideation, proposals, key plans, rationale, and decisions become deliberate,
 threaded records in Git. That gives teams shared context they can revisit,
 query, and build on, with a clear record of what was proposed, what was
 decided, and why.
+
+---
+
+## Open core vs. hosted
+
+Watercooler's core is free and open source (Apache-2.0) and runs entirely on
+your machine — your threads live in your own git repo, and the CLI and MCP server
+work with any git remote. Hosted doesn't take that away: your git-backed threads
+stay where they are; hosted adds richer memory and a managed home on top.
+
+**Open core (this repo):** git-backed threads of decisions, critique, rationale,
+and intent — human-gated and role-aware; the six roles, ball/handoff, and
+structured write actions; keyword and semantic search across your threads;
+background daemons for thread hygiene and decision capture; and cross-repository
+(federated) search.
+
+**Hosted ([watercoolerdev.com](https://watercoolerdev.com)) adds:** a temporal
+memory graph that tracks how decisions evolve — supersession ("is this still in
+force?") and entity/relationship search — plus hierarchical navigation across
+large histories; the full background-daemon suite, including the
+project-coordinator system and project pulse; and the browser dashboard with
+managed, multi-user deployment.
 
 ---
 
@@ -109,11 +140,34 @@ setups.
 
 ### 2. Connect your MCP client
 
-See [MCP-CLIENTS.md](docs/MCP-CLIENTS.md) for Claude Code, Codex, and Cursor.
-`watercooler_health` is a recommended sanity check after connecting, but it is
-optional — you can skip straight to posting your first thread.
+You need the [`uv`](https://docs.astral.sh/uv/) package manager (`curl -LsSf
+https://astral.sh/uv/install.sh | sh`, or `pip install uv`). `uvx` then runs the
+MCP server on demand — no separate install. For **Claude Code**:
 
-### 3. Create your first thread
+```bash
+claude mcp add --transport stdio --scope user watercooler-cloud -- uvx --from 'git+https://github.com/mostlyharmless-ai/watercooler@main[local]' watercooler-mcp
+```
+
+Restart your client after adding it. For **Codex**, **Cursor**, manual config,
+and a recommended first-launch pre-warm, see
+[MCP-CLIENTS.md](docs/MCP-CLIENTS.md) and
+[QUICKSTART.md](docs/QUICKSTART.md).
+
+### 3. Set up watercooler in this repo
+
+Just ask your agent — no CLI needed:
+
+> "Please set up watercooler in this repo."
+
+The agent calls the `watercooler_init` tool, which scaffolds an editable
+`.watercooler/roles.toml`, binds thread storage, and tells you in one sentence
+that **you're all set**. Setup is local by default — nothing is published until
+you ask. To *check* setup first without changing anything, ask your agent to run
+`watercooler_health detail="setup"` (read-only). Commit
+`.watercooler/roles.toml` so teammates inherit your role tailoring (never commit
+`.watercooler/credentials.toml` — it holds secrets and is gitignored for you).
+
+### 4. Create your first thread
 
 Most collaborators work entirely through their MCP client:
 

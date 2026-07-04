@@ -388,15 +388,17 @@ class TestDescribeStorageMode:
         _make_repo(worktree)
         assert diagnostic._describe_storage_mode(worktree) == "orphan worktree"
 
-    def test_sibling_threads_mode(self, tmp_path):
+    def test_threads_suffix_dir_is_plain_custom(self, tmp_path):
         from watercooler_mcp.tools.diagnostic import _describe_storage_mode
 
         parent = tmp_path / "projects"
         parent.mkdir()
         sibling = parent / "myrepo-threads"
         _make_repo(sibling)
-        # sibling has a valid .git + github origin, but name ends in -threads
-        assert _describe_storage_mode(sibling) == "sibling-threads (legacy)"
+        # A ``-threads`` suffix is no longer special-cased: a GitHub-backed
+        # directory whose name ends in ``-threads`` is reported as an
+        # ordinary custom location, not a legacy sibling.
+        assert _describe_storage_mode(sibling) == "custom (myrepo-threads)"
 
     def test_non_github_remote_reported_as_local_only(self, tmp_path):
         """Regression guard for the post-PR #613 round-5 finding: the

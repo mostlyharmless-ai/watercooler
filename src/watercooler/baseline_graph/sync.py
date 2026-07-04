@@ -71,8 +71,10 @@ from watercooler.baseline_graph.summarizer import (
     SummarizerConfig,
     create_summarizer_config,
     is_llm_service_available,
+    stamp_summary_version,
     summarize_entry,
     summarize_thread,
+    summary_is_stale,
 )
 from watercooler.memory_config import AUTH_SKIP_SENTINELS
 from watercooler.path_resolver import derive_group_id
@@ -432,11 +434,9 @@ def _get_group_id_for_threads_dir(threads_dir: Path) -> str:
     """Derive group_id from threads directory path.
 
     Uses unified derive_group_id() from path_resolver for consistent
-    sanitization across all backends.
-
-    Handles two layouts:
-    1. Paired repos: /path/to/watercooler-site-threads → watercooler_site
-    2. Embedded dirs: /path/to/repo/threads/ → repo
+    sanitization across all backends. Under the orphan-branch model the
+    threads dir is the worktree ``~/.watercooler/worktrees/<repo>/``, so the
+    group_id is the repo name (e.g. ``watercooler-cloud`` → ``watercooler_cloud``).
 
     Sanitizes to be FalkorDB-compatible (underscores, lowercase, alphanumeric).
     """
@@ -1152,6 +1152,7 @@ def regenerate_thread_summary(
 
     if new_summary:
         meta["summary"] = new_summary
+        stamp_summary_version(meta)
         storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
         logger.info(f"Regenerated thread summary for {topic}")
         return True
@@ -1325,6 +1326,37 @@ def _atomic_write_json(path: Path, data: Any) -> None:
 # ============================================================================
 
 
+def clear_entry_summary(threads_dir: Path, topic: str, entry_id: str) -> bool:
+    """Clear a stored entry summary in the graph (set ``summary=""``) and stamp the
+    current summary schema version.
+
+    Retires pre-#902 poisoned summaries on structured entries that the enrichment
+    path skips (``enrich_structured=False``) and therefore never regenerates (#910).
+    Such an entry's body is self-describing, so an empty summary is the correct end
+    state. No-op (returns ``False``) if the entry is missing or already has no
+    summary, so it is safe to call unconditionally and is idempotent.
+
+    Returns:
+        True if a non-empty summary was cleared, else False.
+    """
+    from watercooler.fs import lock_path_for_topic
+    from watercooler.lock import AdvisoryLock
+
+    lp = lock_path_for_topic(topic, threads_dir)
+    with AdvisoryLock(lp, timeout=30, ttl=120, force_break=False):
+        graph_dir = storage.ensure_graph_dir(threads_dir)
+        entries = storage.load_thread_entries_dict(graph_dir, topic)
+        node = entries.get(f"entry:{entry_id}")
+        if node is None or not node.get("summary"):
+            return False
+        node["summary"] = ""
+        stamp_summary_version(node)
+        meta = storage.load_thread_meta(graph_dir, topic) or {}
+        edges = storage.load_thread_edges(graph_dir, topic)
+        storage.write_thread_graph(graph_dir, topic, meta, entries, edges)
+        return True
+
+
 def enrich_graph_entry(
     threads_dir: Path,
     topic: str,
@@ -1489,6 +1521,7 @@ def enrich_graph_entry(
                             )
                             if new_thread_summary:
                                 meta["summary"] = new_thread_summary
+                                stamp_summary_version(meta)
                                 thread_summary_updated = True
                                 logger.info(f"Updated thread summary for {topic} (arc change)")
 
@@ -1599,6 +1632,10 @@ def sync_thread_to_graph(
 
         # Build thread meta
         meta = thread_to_node(parsed)
+        # Stamp the summary schema version for summaries generated in this sync, so a
+        # later missing-mode enrich does not treat them as stale and regenerate them.
+        if generate_summaries and meta.get("summary"):
+            stamp_summary_version(meta)
 
         # Build all entry nodes with optional embeddings
         entries: Dict[str, Dict[str, Any]] = {}
@@ -2000,9 +2037,10 @@ def backfill_missing(
             entry_list = list(entries.values())
             result.entries_processed += len(entry_list)
 
-            # Backfill thread summary
+            # Backfill thread summary. A schema-stale summary (pre-#878, laundering-prone)
+            # is treated like a missing one so it is regenerated under the current schema.
             if backfill_summaries and llm_available:
-                if not meta.get("summary"):
+                if not meta.get("summary") or summary_is_stale(meta):
                     result.threads_missing_summary += 1
                     if entry_list:
                         # Format entries for summarization
@@ -2021,6 +2059,7 @@ def backfill_missing(
                         )
                         if summary:
                             meta["summary"] = summary
+                            stamp_summary_version(meta)
                             result.threads_summary_generated += 1
                             thread_updated = True
                             logger.debug(f"Generated summary for thread {topic}")
@@ -2340,7 +2379,9 @@ def enrich_graph(
             # thread_summaries=True enables explicit thread summary regeneration
             # summaries=True enables entry summaries but also generates thread summaries in "missing" mode
             if thread_summaries or summaries:
-                has_thread_summary = bool(meta.get("summary"))
+                # A schema-stale summary (pre-#878) is treated as absent so "missing" mode
+                # regenerates it under the current authority-aware schema.
+                has_thread_summary = bool(meta.get("summary")) and not summary_is_stale(meta)
 
                 # Determine if we should generate thread summary
                 # thread_summaries=True: explicit control, follows mode
@@ -2358,6 +2399,12 @@ def enrich_graph(
                 if should_do_thread_summary:
                     if dry_run:
                         result.thread_summaries_generated += 1
+                        # Count toward the limit so a stale-summary migration can be
+                        # drained in bounded batches (the schema-version bump marks
+                        # every pre-#878 summary stale at once).
+                        entries_actually_processed += 1
+                        if limit and entries_actually_processed >= limit:
+                            limit_reached = True
                     elif llm_available:
                         try:
                             thread_summary = summarize_thread(
@@ -2367,9 +2414,13 @@ def enrich_graph(
                             )
                             if thread_summary:
                                 meta["summary"] = thread_summary
+                                stamp_summary_version(meta)
                                 result.thread_summaries_generated += 1
                                 thread_updated = True
                                 logger.debug(f"Generated thread summary for {topic}")
+                                entries_actually_processed += 1
+                                if limit and entries_actually_processed >= limit:
+                                    limit_reached = True
                         except Exception as e:
                             result.errors.append(f"Thread {topic} summary: {e}")
 
@@ -2396,13 +2447,23 @@ def resolve_recovery_targets(
     threads_dir: Path,
     mode: str = "stale",
     topics: list[str] | None = None,
+    allow_markdown_only: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Resolve which topics need recovery without performing recovery.
+
+    The baseline graph is authoritative; markdown under threads/ is a derived,
+    non-authoritative projection. A topic that exists only in markdown (absent
+    from the graph) was either deliberately deleted or never synced — rebuilding
+    it from markdown can resurrect a deleted thread. By default such
+    markdown-only topics are refused; set ``allow_markdown_only=True`` for true
+    cold-start disaster recovery where markdown is the only surviving source.
 
     Args:
         threads_dir: Threads directory
         mode: Recovery mode - "stale", "selective", or "all"
         topics: Topics to recover (required for "selective" mode)
+        allow_markdown_only: Permit recovering topics that exist only in
+            markdown and not in the authoritative graph (default False).
 
     Returns:
         Tuple of (target_topics, errors).
@@ -2432,19 +2493,44 @@ def resolve_recovery_targets(
         from watercooler.fs import list_markdown_thread_topics
 
         md_topics = set(list_markdown_thread_topics(threads_dir))
-        known_topics = set(graph_topics) | md_topics
-        target_topics = [t for t in topics if t in known_topics]
+        graph_set = set(graph_topics)
+        known_topics = graph_set | md_topics
+        requested = [t for t in topics if t in known_topics]
+        # A requested topic present only in markdown (not in the authoritative
+        # graph) was deleted or never synced. Recovering it rebuilds the graph
+        # from a non-authoritative projection and can resurrect a deleted
+        # thread — refuse unless explicitly forced.
+        md_only = [t for t in requested if t not in graph_set]
+        if md_only and not allow_markdown_only:
+            errors.append(
+                "Refusing to recover markdown-only topics (absent from the "
+                f"authoritative graph): {', '.join(sorted(md_only))}. These were "
+                "deleted or never synced; markdown is not authoritative. Pass "
+                "allow_markdown_only=True (CLI: --allow-markdown-only) to override."
+            )
+            return [], errors
+        target_topics = requested
         if not target_topics:
             errors.append("No matching topics found in graph or on disk")
             return [], errors
     else:  # mode == "all"
-        # Cold-start recovery: when graph is empty, fall back to .md
-        # discovery so we can bootstrap the graph from existing threads.
+        # When the graph is present it is authoritative: never pull in topics
+        # that exist only as markdown (deleted / un-synced) during a rebuild.
         if graph_topics:
             target_topics = graph_topics
         else:
+            # Cold-start disaster recovery: the graph is entirely empty, so
+            # markdown is the only surviving source. This is the one sanctioned
+            # case for trusting markdown, and it is loud.
             from watercooler.fs import list_markdown_thread_topics
             target_topics = list_markdown_thread_topics(threads_dir)
+            if target_topics:
+                logger.warning(
+                    "recover_graph(mode='all'): graph is empty; reconstructing "
+                    "%d thread(s) from NON-AUTHORITATIVE markdown. Verify no "
+                    "deliberately-deleted threads are being resurrected: %s",
+                    len(target_topics), ", ".join(sorted(target_topics)),
+                )
             if not target_topics:
                 errors.append("No threads found in graph or on disk")
                 return [], errors
@@ -2459,6 +2545,7 @@ def recover_graph(
     generate_summaries: bool = True,
     generate_embeddings: bool = True,
     dry_run: bool = False,
+    allow_markdown_only: bool = False,
 ) -> RecoverResult:
     """Rebuild graph from markdown (emergency recovery).
 
@@ -2489,7 +2576,9 @@ def recover_graph(
     """
     result = RecoverResult(dry_run=dry_run)
 
-    target_topics, errors = resolve_recovery_targets(threads_dir, mode, topics)
+    target_topics, errors = resolve_recovery_targets(
+        threads_dir, mode, topics, allow_markdown_only=allow_markdown_only
+    )
     if errors:
         result.errors.extend(errors)
         return result

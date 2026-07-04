@@ -11,26 +11,30 @@ Date-based daily rate limit controls LLM cost.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from ulid import ULID
 
-from watercooler.baseline_graph.annotations import AnnotationEvent, append_annotation
-from watercooler.baseline_graph.storage import get_graph_dir, get_thread_graph_dir
+from watercooler.baseline_graph.annotations import AnnotationEvent
 from watercooler.baseline_graph.writer import (
     get_entries_for_thread,
     get_entry_node_from_graph,
     get_thread_from_graph,
 )
 from watercooler.config_schema import DecisionExtractorConfig
+from watercooler.promotion import scrub_authority_identifier
 from watercooler.decision_extraction import (
     DECISION_EXTRACTED_TAG,
     HAS_DECISIONS_TAG,
+    MORAL_DELEGATION_REJECTION_REASON,
+    candidate_warrant,
     classify_gate_outcome,
+    classify_moral_delegation,
     extract_decision,
     format_candidate_note_body,
 )
@@ -70,120 +74,137 @@ def _make_finding_id() -> str:
     return str(ULID())
 
 
-def _build_decision_annotation_hook(
+def _source_has_human_ownership(entry_dict: dict[str, Any]) -> bool:
+    """Whether the source entry already carries an accountable human owner.
+
+    A value-laden extraction may direct-write a Decision only when its source
+    entry itself records explicit structured human ownership (the Unit 2
+    ``human_authorized_by`` field). Otherwise the high-confidence Decision
+    would launder a value judgment into authority with no accountable human —
+    the exact path #880 closes — so it must route to a candidate Note instead.
+
+    Trust boundary: ``human_authorized_by`` is an agent-supplied, unverified
+    *claim* of accountability, not a cryptographically verified authorization.
+    Its assurance is auditability — the value is durable and federation-visible,
+    so a claimed owner can be disputed after the fact — not authenticity at
+    write time. This check therefore gates on the *presence* of a recorded
+    accountable human, consistent with the authority-ladder trust model.
+
+    Gates on the *scrubbed* value (not the raw string), matching exactly what the
+    direct-write path persists as the Decision's ``human_authorized_by``. A raw
+    value made only of scrub-removed chars (e.g. ``"<>"`` on a pre-clamp source
+    entry) scrubs to "" — treating it as "owned" here would direct-write a
+    value-laden Decision whose owner-copy then records nothing, leaving a false
+    "ownership recorded ()" claim in the body. Same predicate → no such gap.
+    """
+    owner = entry_dict.get("human_authorized_by")
+    return bool(scrub_authority_identifier(str(owner or "")))
+
+
+def _build_decision_annotation_events(
+    topic: str,
     source_entry_id: str,
     decision_entry_id: str,
-) -> Callable[[str, Path, str], None]:
-    """Build a post-write hook that annotates source entry and thread.
+) -> list[AnnotationEvent]:
+    """Annotation events linking source entry, decision entry, and thread.
 
-    Writes 4 annotation events:
+    Handed to ``daemon_write_entry(annotation_events=...)`` so they commit in
+    the same transaction as the Decision — never a bare ``append_annotation``,
+    which would leave an uncommitted worktree write (``bug-sync-worktree-poisoning``).
+
+    Four events:
     1. Tag source entry ``decision_extracted``
     2. Xref source entry -> decision entry
     3. Xref decision entry -> source entry
     4. Tag thread ``has_decisions``
     """
-
-    def _annotate(topic: str, threads_dir: Path, entry_id: str) -> None:
-        thread_dir = get_thread_graph_dir(get_graph_dir(threads_dir), topic)
-        now = datetime.now(timezone.utc).isoformat()
-        actor = "ExtractDecisionsDaemon"
-
-        events = [
-            AnnotationEvent(
-                id=str(ULID()),
-                target_id=source_entry_id,
-                target_type="entry",
-                kind="tag",
-                value=DECISION_EXTRACTED_TAG,
-                actor=actor,
-                timestamp=now,
-            ),
-            AnnotationEvent(
-                id=str(ULID()),
-                target_id=source_entry_id,
-                target_type="entry",
-                kind="xref",
-                value=decision_entry_id,
-                actor=actor,
-                timestamp=now,
-            ),
-            AnnotationEvent(
-                id=str(ULID()),
-                target_id=decision_entry_id,
-                target_type="entry",
-                kind="xref",
-                value=source_entry_id,
-                actor=actor,
-                timestamp=now,
-            ),
-            AnnotationEvent(
-                id=str(ULID()),
-                target_id=topic,
-                target_type="thread",
-                kind="tag",
-                value=HAS_DECISIONS_TAG,
-                actor=actor,
-                timestamp=now,
-            ),
-        ]
-
-        for event in events:
-            append_annotation(thread_dir, event)
-
-    return _annotate
+    now = datetime.now(timezone.utc).isoformat()
+    actor = "ExtractDecisionsDaemon"
+    return [
+        AnnotationEvent(
+            id=str(ULID()),
+            target_id=source_entry_id,
+            target_type="entry",
+            kind="tag",
+            value=DECISION_EXTRACTED_TAG,
+            actor=actor,
+            timestamp=now,
+        ),
+        AnnotationEvent(
+            id=str(ULID()),
+            target_id=source_entry_id,
+            target_type="entry",
+            kind="xref",
+            value=decision_entry_id,
+            actor=actor,
+            timestamp=now,
+        ),
+        AnnotationEvent(
+            id=str(ULID()),
+            target_id=decision_entry_id,
+            target_type="entry",
+            kind="xref",
+            value=source_entry_id,
+            actor=actor,
+            timestamp=now,
+        ),
+        AnnotationEvent(
+            id=str(ULID()),
+            target_id=topic,
+            target_type="thread",
+            kind="tag",
+            value=HAS_DECISIONS_TAG,
+            actor=actor,
+            timestamp=now,
+        ),
+    ]
 
 
-def _build_candidate_note_annotation_hook(
+def _build_candidate_note_annotation_events(
     source_entry_id: str,
     candidate_entry_id: str,
-) -> Callable[[str, Path, str], None]:
-    """Build a post-write hook that annotates source entry ↔ candidate Note.
+) -> list[AnnotationEvent]:
+    """Annotation events linking source entry ↔ candidate Note.
 
-    Writes 3 annotation events:
+    Handed to ``daemon_write_entry(annotation_events=...)`` so they commit in
+    the same transaction as the candidate Note (``bug-sync-worktree-poisoning``).
+
+    Three events:
     1. Tag candidate Note ``candidate_extraction``
     2. Xref source entry → candidate Note
     3. Xref candidate Note → source entry
     """
-
-    def _annotate(topic: str, threads_dir: Path, entry_id: str) -> None:
-        thread_dir = get_thread_graph_dir(get_graph_dir(threads_dir), topic)
-        now = datetime.now(timezone.utc).isoformat()
-        actor = "ExtractDecisionsDaemon"
-
-        events = [
-            AnnotationEvent(
-                id=str(ULID()),
-                target_id=candidate_entry_id,
-                target_type="entry",
-                kind="tag",
-                value=CANDIDATE_EXTRACTION_TAG,
-                actor=actor,
-                timestamp=now,
-            ),
-            AnnotationEvent(
-                id=str(ULID()),
-                target_id=source_entry_id,
-                target_type="entry",
-                kind="xref",
-                value=candidate_entry_id,
-                actor=actor,
-                timestamp=now,
-            ),
-            AnnotationEvent(
-                id=str(ULID()),
-                target_id=candidate_entry_id,
-                target_type="entry",
-                kind="xref",
-                value=source_entry_id,
-                actor=actor,
-                timestamp=now,
-            ),
-        ]
-
-        for event in events:
-            append_annotation(thread_dir, event)
-
-    return _annotate
+    now = datetime.now(timezone.utc).isoformat()
+    actor = "ExtractDecisionsDaemon"
+    return [
+        AnnotationEvent(
+            id=str(ULID()),
+            target_id=candidate_entry_id,
+            target_type="entry",
+            kind="tag",
+            value=CANDIDATE_EXTRACTION_TAG,
+            actor=actor,
+            timestamp=now,
+        ),
+        AnnotationEvent(
+            id=str(ULID()),
+            target_id=source_entry_id,
+            target_type="entry",
+            kind="xref",
+            value=candidate_entry_id,
+            actor=actor,
+            timestamp=now,
+        ),
+        AnnotationEvent(
+            id=str(ULID()),
+            target_id=candidate_entry_id,
+            target_type="entry",
+            kind="xref",
+            value=source_entry_id,
+            actor=actor,
+            timestamp=now,
+        ),
+    ]
 
 
 class ExtractDecisionsDaemon(BaseDaemon):
@@ -676,6 +697,50 @@ class ExtractDecisionsDaemon(BaseDaemon):
         return findings
 
     # ------------------------------------------------------------------
+    # Inert authority-ladder provenance field builder
+    # ------------------------------------------------------------------
+
+    def _build_authority_fields(
+        self,
+        source_entry_id: str,
+        extraction_result: "ExtractionResult",
+    ) -> dict:
+        """Build the Phase 1a authority-ladder provenance fields for a
+        daemon-emitted entry.
+
+        Returned dict populates the provenance EntryData fields on the
+        entry node (Phase 4a schema), kept as inert descriptive metadata
+        — the server-side authority gate was removed (see
+        ``dev_docs/plans/2026-06-01-refactor-cut-authority-ladder-phase-1a-build.md``):
+            - actor_class: always "daemon" — the daemon is the actor.
+            - decision_origin: "daemon_extraction" — v0.10's "extracted".
+            - source_entry_id: the entry the LLM extracted from.
+            - confidence: the LLM's 1-5 confidence score.
+            - gate_results: the 8-gate validation dict.
+
+        ``authority_basis`` is intentionally omitted for daemon writes —
+        it applies to human-authored Decisions.
+        """
+        fields: dict = {
+            "actor_class": "daemon",
+            "decision_origin": "daemon_extraction",
+            "source_entry_id": source_entry_id,
+        }
+        # Omit ``confidence`` when it's outside the valid 1-5 rubric range.
+        # Phase 4a's schema declares ``confidence: minimum=1``; stamping a
+        # 0 (which the rubric uses for "not a decision" rejections and the
+        # ``llm_unavailable`` / ``llm_parse_failure`` shapes — see #858
+        # audit) would produce a schema-invalid node once validation is
+        # enforced. Candidate Notes still benefit from a recorded
+        # confidence when one exists; an absent field is honest opacity.
+        conf = extraction_result.confidence
+        if isinstance(conf, int) and 1 <= conf <= 5:
+            fields["confidence"] = conf
+        if extraction_result.gate_results:
+            fields["gate_results"] = dict(extraction_result.gate_results)
+        return fields
+
+    # ------------------------------------------------------------------
     # Per-candidate processing
     # ------------------------------------------------------------------
 
@@ -769,12 +834,27 @@ class ExtractDecisionsDaemon(BaseDaemon):
             rr = extraction_result.rejection_reason or ""
             detector_score = finding.details.get("score", 0)
 
-            # Candidate-Note path: soft-gate failure or confidence-3 extraction
-            # with detector score >= threshold. Route to thread-visible Note.
+            # Candidate-Note path: route to thread-visible Note for any of
+            # three rejection shapes when detector score >= threshold:
+            #   (1) soft_gate_failure: g4/g5/g6/g8 failed but g1/g2/g3/g7 passed
+            #   (2) low_confidence_*: LLM confidence below promotion threshold
+            #       but at or above the floor (>=3)
+            #   (3) hallucinated_quote / summary_only_quote_evidence at conf>=3:
+            #       LLM was confident about the extraction but the quote evidence
+            #       did not validate. Routed to candidate Note so a human can
+            #       check whether the extraction is substantively correct;
+            #       the candidate body marks quotes as unverified. Without
+            #       this branch the empirical conf-5 quote-validation bucket
+            #       (the dominant rejection mode in production) is dropped
+            #       to private findings, defeating the candidate surface.
             is_candidate_eligible = (
-                rr in ("soft_gate_failure",)
+                rr == "soft_gate_failure"
                 or (
                     rr.startswith("low_confidence_")
+                    and extraction_result.confidence >= 3
+                )
+                or (
+                    rr in ("hallucinated_quote", "summary_only_quote_evidence")
                     and extraction_result.confidence >= 3
                 )
             ) and detector_score >= cfg.min_extraction_score
@@ -839,6 +919,40 @@ class ExtractDecisionsDaemon(BaseDaemon):
                 },
             )
 
+        # e0. Moral-delegation gate (#880). A gate-passing extraction whose
+        # decision statement carries a value/ethical judgment must NOT be
+        # direct-written as an authoritative Decision merely because confidence
+        # is high — that launders a value judgment into authority with no
+        # accountable human. Route it to a candidate Note instead, unless the
+        # source entry itself already records explicit human ownership. The
+        # check is procedural (ownership/process), not a judgment about whether
+        # the decision is morally right.
+        moral = classify_moral_delegation(
+            extraction_result.extraction.decision_statement
+        )
+        if moral.moral_delegation_warning and not _source_has_human_ownership(
+            entry_dict
+        ):
+            logger.debug(
+                "DAEMON[decision_extractor]: routing value-laden extraction "
+                "%s to candidate Note (tier=%s, no human owner on source)",
+                source_entry_id,
+                moral.tier,
+            )
+            return self._emit_candidate_note(
+                finding=finding,
+                entry_dict=entry_dict,
+                extraction_result=dataclasses.replace(
+                    extraction_result,
+                    passed=False,
+                    decision_body=None,
+                    rejection_reason=MORAL_DELEGATION_REJECTION_REASON,
+                ),
+                threads_dir=threads_dir,
+                code_root=code_root,
+                tick_date=tick_date,
+            )
+
         decision_title = (
             extraction_result.extraction.decision_statement or "Extracted Decision"
         )
@@ -847,20 +961,66 @@ class ExtractDecisionsDaemon(BaseDaemon):
 
         decision_entry_id = str(ULID())
 
+        # Attach inert authority-ladder provenance fields to the emitted
+        # Decision (actor_class, decision_origin, source_entry_id,
+        # confidence, gate_results). These are descriptive metadata only —
+        # the server-side authority gate was removed; nothing enforces
+        # them (see
+        # dev_docs/plans/2026-06-01-refactor-cut-authority-ladder-phase-1a-build.md).
+        decision_authority_fields = self._build_authority_fields(
+            source_entry_id, extraction_result
+        )
+        decision_body = extraction_result.decision_body
+
+        # If we reach here with a value-laden statement, the source entry carries
+        # explicit human ownership (otherwise e0 routed to a candidate Note). Record
+        # that ownership on the emitted Decision so an audit can distinguish this
+        # owned, value-laden extraction from an ordinary daemon extraction — both in
+        # queryable metadata and via the body-level Moral-Delegation-Warning marker.
+        # actor_class stays "daemon" (the writer); human_authorized_by names the
+        # accountable human who owns the source value judgment (actor != authority).
+        if moral.moral_delegation_warning:
+            owner = scrub_authority_identifier(
+                str(entry_dict.get("human_authorized_by") or "")
+            )
+            if owner:
+                decision_authority_fields["human_authorized_by"] = owner
+                decision_authority_fields["authority_basis"] = "human_endorsed"
+            decision_body = (
+                decision_body
+                + "\n\nMoral-Delegation-Warning: true\n"
+                + (
+                    f"[moral-delegation: value-laden — accountable human ownership "
+                    f"recorded on source entry ({owner}). Procedural ownership check, "
+                    f"not a moral-substance block.]"
+                )
+            )
+
         write_result = daemon_write_entry(
             topic,
             code_root=code_root,
             title=decision_title,
-            body=extraction_result.decision_body,
+            body=decision_body,
             agent="ExtractDecisionsDaemon",
             role="scribe",
             entry_type="Decision",
             entry_id=decision_entry_id,
             agent_spec="decision-extractor",
             user_tag="system",
-            post_write_hooks=[
-                _build_decision_annotation_hook(source_entry_id, decision_entry_id),
-            ],
+            annotation_events=_build_decision_annotation_events(
+                topic, source_entry_id, decision_entry_id
+            ),
+            authority_fields=decision_authority_fields,
+            # §6 tether read-model (#896 Leg 2). Auto-Decision bodies render no
+            # support section (format_decision_body is lean), so the structured
+            # field is the SOLE support surface here — honestly derived from the
+            # same candidate_warrant, never a false in_force. (Candidate Notes and
+            # promoted Decisions additionally carry the transitional body markers.)
+            support_fields=(
+                _w.to_entry_fields()
+                if (_w := candidate_warrant(extraction_result, entry_dict))
+                else None
+            ),
         )
 
         if write_result.written:
@@ -1017,6 +1177,10 @@ class ExtractDecisionsDaemon(BaseDaemon):
         )
         candidate_entry_id = str(ULID())
 
+        # Candidate Notes are written as ``Note`` entry_type. We still
+        # populate the same inert provenance fields so candidates can be
+        # correlated with their source entries by reading the entry node
+        # fields directly (not just the body markers).
         write_result = daemon_write_entry(
             topic,
             code_root=code_root,
@@ -1028,11 +1192,19 @@ class ExtractDecisionsDaemon(BaseDaemon):
             entry_id=candidate_entry_id,
             agent_spec="decision-extractor",
             user_tag="system",
-            post_write_hooks=[
-                _build_candidate_note_annotation_hook(
-                    source_entry_id, candidate_entry_id
-                ),
-            ],
+            annotation_events=_build_candidate_note_annotation_events(
+                source_entry_id, candidate_entry_id
+            ),
+            authority_fields=self._build_authority_fields(
+                source_entry_id, extraction_result
+            ),
+            # §6 tether read-model as structured metadata (#896 Leg 2) — same
+            # warrant the body markers render, surfaced for the dashboard.
+            support_fields=(
+                _cw.to_entry_fields()
+                if (_cw := candidate_warrant(extraction_result, entry_dict))
+                else None
+            ),
         )
 
         if write_result.written:

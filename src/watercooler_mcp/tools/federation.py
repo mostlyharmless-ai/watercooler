@@ -19,6 +19,7 @@ from fastmcp import Context, FastMCP
 
 from watercooler.baseline_graph.search import SearchQuery, search_graph
 from watercooler.config_facade import config
+from watercooler.refs import format_entry_ref
 
 from .. import validation
 from ..auth import is_hosted_mode
@@ -46,16 +47,28 @@ MAX_LIMIT = 100
 
 def _extract_entry_data(entry: Any) -> dict[str, Any]:
     """Extract display fields from a search result entry."""
-    return {
-        "topic": getattr(entry, "thread_topic", ""),
+    topic = getattr(entry, "thread_topic", "")
+    index = getattr(entry, "index", None)
+    entry_id = getattr(entry, "entry_id", "")
+    data = {
+        # `topic` is the frozen schema_version:1 contract key; `thread_topic` is
+        # added as an alias so the slug key matches every other tool's output.
+        "topic": topic,
+        "thread_topic": topic,
         "title": getattr(entry, "title", ""),
-        "entry_id": getattr(entry, "entry_id", ""),
+        "entry_id": entry_id,
+        "index": index,
         "role": getattr(entry, "role", ""),
         "agent": getattr(entry, "agent", ""),
         "entry_type": getattr(entry, "entry_type", ""),
         "summary": getattr(entry, "summary", ""),
         "timestamp": getattr(entry, "timestamp", ""),
     }
+    # Canonical citation, consistent with smart_query / search / get_thread_entry.
+    ref = format_entry_ref(topic, index, entry_id)
+    if ref:
+        data["ref"] = ref
+    return data
 
 
 async def _federated_search_impl(
@@ -80,7 +93,9 @@ async def _federated_search_impl(
 
     Returns:
         JSON response envelope with schema_version, results, and
-        per-namespace provenance metadata.
+        per-namespace provenance metadata. Each result carries ``topic`` (and
+        its ``thread_topic`` alias — the write-back handle), ``index``, and
+        ``ref`` (the canonical citation ``<thread_topic>:<index> (<entry_id>)``).
     """
     try:
         return await _federated_search_inner(ctx, query, code_path, namespaces, limit)

@@ -33,6 +33,15 @@ class TaskType(str, Enum):
     BULK = "bulk"
 
 
+# #941: throttle (rate-limit) retry policy. A 429 from the provider is the
+# provider's state, not the task's — so throttled failures reschedule on a
+# slow ramp instead of consuming the 3-attempt budget, and only dead-letter
+# once the task has been throttled for longer than THROTTLE_MAX_AGE.
+THROTTLE_BACKOFF_BASE = 900.0  # 15 min × consecutive throttle count
+THROTTLE_BACKOFF_CAP = 7200.0  # ramp cap: 2 h between retries
+THROTTLE_MAX_AGE = 7 * 24 * 3600.0  # give up (dead-letter) after 7 days
+
+
 def _generate_task_id() -> str:
     """Generate a ULID-like task identifier.
 
@@ -94,6 +103,9 @@ class MemoryTask:
     timestamp: str = ""
     source_description: str = ""
     code_path: str = ""
+    # Resolved worktree threads dir — used by the "enrichment" executor (Phase A,
+    # #903) which runs off the request thread and cannot re-resolve from context.
+    threads_dir: str = ""
 
     # Annotation signals (populated from T1 annotation state)
     xrefs: list[str] = field(default_factory=list)
@@ -106,6 +118,10 @@ class MemoryTask:
     max_attempts: int = 3
     next_retry_at: float = 0.0
     last_error: str = ""
+    # #941: count of rate-limit (429) failures. Throttled failures do not
+    # consume ``attempt`` budget — they reschedule with a long backoff —
+    # so a provider outage means delayed ingestion, never silent loss.
+    throttle_count: int = 0
 
     # Plan v20 Phase 4/5: execution-target + remote-handoff metadata for
     # hybrid submission. ``execution_target="local"`` means this task is
@@ -207,7 +223,12 @@ class MemoryTask:
         self.updated_at = time.time()
 
     def mark_failed(
-        self, error: str, *, backoff_base: float = 30.0, permanent: bool = False,
+        self,
+        error: str,
+        *,
+        backoff_base: float = 30.0,
+        permanent: bool = False,
+        throttled: bool = False,
     ) -> None:
         """Transition to FAILED or DEAD_LETTER depending on retry budget.
 
@@ -216,6 +237,16 @@ class MemoryTask:
 
         Args:
             permanent: If True, dead-letter immediately regardless of retry budget.
+            throttled: If True (#941), the failure was a provider rate limit
+                (429). The attempt is refunded (rate limits must not consume
+                retry budget — the incident showed 3 attempts in ~96 s turning
+                an exhausted-credits provider into 100 % permanent data loss),
+                and the task is rescheduled with a long ramp
+                (``THROTTLE_BACKOFF_BASE × throttle_count``, capped at
+                ``THROTTLE_BACKOFF_CAP``). Only after the task has been
+                throttle-retried for longer than ``THROTTLE_MAX_AGE`` since
+                creation does it dead-letter, so a permanently broken provider
+                still surfaces instead of retrying forever.
         """
         import random
 
@@ -223,6 +254,22 @@ class MemoryTask:
             logger.debug("MEMORY_QUEUE: truncating error from %d to 500 chars", len(error))
         self.last_error = error[:500] if len(error) > 500 else error
         self.updated_at = time.time()
+
+        if throttled and not permanent:
+            # Refund the attempt mark_running charged — throttles are the
+            # provider's state, not this task's fault.
+            self.attempt = max(0, self.attempt - 1)
+            self.throttle_count += 1
+            if time.time() - self.created_at > THROTTLE_MAX_AGE:
+                self.status = TaskStatus.DEAD_LETTER
+                return
+            self.status = TaskStatus.PENDING
+            delay = min(
+                THROTTLE_BACKOFF_BASE * self.throttle_count, THROTTLE_BACKOFF_CAP
+            )
+            jitter = delay * 0.1 * (2 * random.random() - 1)
+            self.next_retry_at = time.time() + delay + jitter
+            return
 
         if permanent or self.attempt >= self.max_attempts:
             self.status = TaskStatus.DEAD_LETTER

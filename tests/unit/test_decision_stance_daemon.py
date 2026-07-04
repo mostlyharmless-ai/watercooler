@@ -436,3 +436,96 @@ class TestBootstrapFromDisk:
         tick1 = d.tick()
         assert all(f.topic != "stance:planner" for f in tick1)
         assert d._last_stance_signatures["planner"] == ""
+
+
+class TestProjectSalience:
+    """project_salience decoration via .watercooler/roles.toml (Role Salience Compiler)."""
+
+    def test_salience_decorates_elevated_advisory(self, isolated_daemons_dir, tmp_path):
+        wc_dir = tmp_path / ".watercooler"
+        wc_dir.mkdir()
+        (wc_dir / "roles.toml").write_text(
+            '[roles.critic]\n'
+            'description = "Critic"\n'
+            'canonical_role = "critic"\n'
+            'project_salience = ["watch for hidden authority expansion"]\n'
+        )
+        _seed_detector("High", n=3)  # elevates critic to L1
+        d = _make_daemon()
+        d._code_root = tmp_path
+        d._resolved_threads_dir = isolated_daemons_dir
+        findings = d.tick()
+
+        critic = next(f for f in findings if f.topic == "stance:critic")
+        assert critic.details["advisory"]["project_salience"] == (
+            "watch for hidden authority expansion",
+        )
+        assert (
+            critic.details["advisory"]["authority_basis"]
+            == "human_promoted_lesson_projected"
+        )
+
+        planner = next(f for f in findings if f.topic == "stance:tester")
+        assert planner.details["advisory"]["project_salience"] == ()
+
+    def test_malformed_roles_toml_falls_back_with_deduped_diagnostic(
+        self, isolated_daemons_dir, tmp_path
+    ):
+        wc_dir = tmp_path / ".watercooler"
+        wc_dir.mkdir()
+        (wc_dir / "roles.toml").write_text("not valid toml [[[")
+
+        _seed_detector("High", n=3)
+        d = _make_daemon()
+        d._code_root = tmp_path
+        d._resolved_threads_dir = isolated_daemons_dir
+        findings = d.tick()
+
+        diagnostics = [f for f in findings if f.category == "role_salience_diagnostic"]
+        assert len(diagnostics) == 1
+        assert diagnostics[0].details["effect"] == "stance_salience_disabled"
+        assert diagnostics[0].repo == str(tmp_path)  # scoped, not repo-leaking
+
+        critic = next(f for f in findings if f.topic == "stance:critic")
+        assert critic.details["advisory"]["project_salience"] == ()
+
+        # Second tick with the same parse error must not re-emit the diagnostic.
+        _seed_detector("High", n=1)
+        findings2 = d.tick()
+        assert not [
+            f for f in findings2 if f.category == "role_salience_diagnostic"
+        ]
+
+    def test_salience_reloads_on_roles_toml_mtime_change(
+        self, isolated_daemons_dir, tmp_path
+    ):
+        wc_dir = tmp_path / ".watercooler"
+        wc_dir.mkdir()
+        roles_path = wc_dir / "roles.toml"
+        roles_path.write_text(
+            '[roles.critic]\n'
+            'description = "Critic"\n'
+            'canonical_role = "critic"\n'
+            'project_salience = ["first bullet"]\n'
+        )
+        _seed_detector("High", n=3)
+        d = _make_daemon()
+        d._code_root = tmp_path
+        d._resolved_threads_dir = isolated_daemons_dir
+        findings = d.tick()
+        critic = next(f for f in findings if f.topic == "stance:critic")
+        assert critic.details["advisory"]["project_salience"] == ("first bullet",)
+
+        # Edit the bullet and force a tick boundary (signature must change so
+        # the role re-emits, and the cache must pick up the new mtime).
+        time.sleep(0.01)
+        roles_path.write_text(
+            '[roles.critic]\n'
+            'description = "Critic"\n'
+            'canonical_role = "critic"\n'
+            'project_salience = ["second bullet"]\n'
+        )
+        _seed_detector("High", n=1)
+        findings2 = d.tick()
+        critic2 = next(f for f in findings2 if f.topic == "stance:critic")
+        assert critic2.details["advisory"]["project_salience"] == ("second bullet",)

@@ -31,6 +31,7 @@ from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
 
+from watercooler.refs import format_entry_ref
 from ..observability import log_action, log_error, log_warning
 from .. import validation  # Import module for runtime access (enables test patching)
 from ._boost import boost_decision_items, sanitize_boost
@@ -156,27 +157,16 @@ def _canonicalize_t2_group_id(caller_group_id: str) -> tuple[str, dict | None]:
         }
 
     try:
-        from watercooler.path_resolver import (
-            derive_t2_database_name,
-            get_threads_suffix,
-        )
+        from watercooler.path_resolver import derive_t2_database_name
 
-        # Strip any threads-repo suffix the X-Repo header may carry, same
-        # way _scope_group_id_to_http_ctx does for T1. Use the configured
-        # suffix from path_resolver (default "-threads") rather than a
-        # hardcoded literal so deployments overriding
-        # WATERCOOLER_THREADS_SUFFIX still produce canonical names.
         owner, repo = http_ctx.repo.split("/", 1)
-        threads_suffix = get_threads_suffix()
-        if threads_suffix and repo.endswith(threads_suffix):
-            repo = repo[: -len(threads_suffix)]
         if not owner or not repo:
             return "", {
                 "success": False,
                 "error": (
                     f"scope_resolution_failed: hosted X-Repo header "
-                    f"{http_ctx.repo!r} has empty owner or repo after "
-                    f"threads-suffix strip (owner={owner!r}, repo={repo!r}); "
+                    f"{http_ctx.repo!r} has empty owner or repo "
+                    f"(owner={owner!r}, repo={repo!r}); "
                     f"refusing to fall back to a non-canonical name."
                 ),
             }
@@ -198,6 +188,20 @@ def _canonicalize_t2_group_id(caller_group_id: str) -> tuple[str, dict | None]:
 
 # Runtime context (set by register_memory_tools)
 _runtime: "ToolRuntime | None" = None
+
+
+def _execution_scope() -> str:
+    """Return ``"hosted"`` or ``"local"`` for the executing server's surface.
+
+    #941: in hybrid, several memory tools (``watercooler_memory_task_status``,
+    ``watercooler_bulk_index``, …) are proxied to the hosted server, and their
+    responses carried no indication of where they executed — hosted queue
+    stats were repeatedly misread as local-queue stats during the T2
+    dead-letter incident. Responses now self-label.
+    """
+    surface = getattr(_runtime, "surface", "") or ""
+    return "hosted" if surface.startswith("hosted") else "local"
+
 
 def _cap_tiers_by_profile(config: Any) -> None:
     """Disable tiers that exceed the effective hosted profile.
@@ -367,6 +371,16 @@ async def _get_entity_edge_impl(
                     "get_entity_edge",
                     uuid=uuid
                 )
+
+            # #991: the enrichment daemon writes the successor link as an edge property;
+            # graphiti surfaces it under ``attributes`` (FalkorDB ``properties(e)`` →
+            # EntityEdge.attributes, included by _serialize_entity_edge — verified live).
+            # Lift it to the top level for one-hop agent ergonomics with no extra query.
+            # Afforded-vs-authored is signalled by the ratification xref, not read here.
+            attrs = edge.get("attributes") or {}
+            if attrs.get("superseded_by"):
+                edge["superseded_by"] = attrs["superseded_by"]
+                edge["superseded_at"] = attrs.get("superseded_at")
 
             # Format response
             response = {
@@ -1763,7 +1777,10 @@ async def _smart_query_impl(
         - primary_tier: The tier that provided best results
         - escalation_reason: Why escalation occurred (if applicable)
         - sufficient: Whether results met sufficiency criteria
-        - evidence: List of evidence items from all tiers
+        - evidence: List of evidence items from all tiers. Entry hits also carry
+          top-level ``thread_topic`` (the write-back handle — pass as ``topic``),
+          ``index``, and ``ref`` (``<thread_topic>:<index> (<entry_id>)``); these
+          are omitted for non-entry hits (T2 entities/facts, T3 synthesis).
         - message: Status message
 
     Note:
@@ -1792,10 +1809,13 @@ async def _smart_query_impl(
           "evidence": [
             {
               "tier": "T1",
-              "id": "01ABC...",
+              "id": "01ABC...",                  // opaque backend id (entry ULID / node UUID)
               "content": "Implemented try-catch patterns...",
               "score": 0.85,
-              "name": "Error Handling Discussion",
+              "name": "Error Handling Discussion",  // entry/entity name
+              "thread_topic": "error-handling",     // human-friendly thread slug — pass this as `topic` to write back (omitted when not applicable, e.g. T2 entity/fact hits)
+              "index": 3,                            // entry position within the thread (entry hits only)
+              "ref": "error-handling:3 (01ABC...)",  // canonical citation: <thread_topic>:<index> (<entry_id>) (entry hits only)
               "provenance": {...},
               "metadata": {...}
             },
@@ -1861,10 +1881,15 @@ async def _smart_query_impl(
                     }, indent=2)
                 )])
 
-        # Hosted mode: try Graphiti T2/T3 first (canonical <org>_<repo>_t2
-        # derived from the request's X-Repo header). Fall back to GitHub-API
-        # T1 keyword search only when the orchestrator can't service the
-        # request *and* the caller did not explicitly pin to T2/T3.
+        # Hosted mode: try Graphiti T2/T3 first. The T2 database is the
+        # canonical <org>_<repo>_t2, but that name is derived inside
+        # load_graphiti_config — which reads the request's X-Repo from the
+        # HTTP context and fails closed if it is absent — NOT here. The
+        # ``code_path`` passed to load_tier_config below does not select the
+        # hosted T2 database (the X-Repo context dominates it); group_ids is
+        # likewise a within-database filter, not the tenant scope. Fall back
+        # to GitHub-API T1 keyword search only when the orchestrator can't
+        # service the request *and* the caller did not explicitly pin to T2/T3.
         if threads_dir_resolved == validation.HOSTED_MODE_SENTINEL:
             from ..hosted_ops import search_entries_hosted
             log_action("memory.smart_query.hosted_mode", query=query)
@@ -1976,15 +2001,21 @@ async def _smart_query_impl(
             # Convert search results to smart_query evidence format
             evidence = []
             for item in result.get("results", []):
-                evidence.append({
+                # Mirror TierResult._evidence_to_dict: surface the human-friendly
+                # thread slug, entry index, and the canonical `ref` citation at
+                # the top level so the hosted T1 path matches the local one.
+                topic = item.get("thread_topic", "")
+                index = item.get("index")
+                entry_id = item.get("entry_id", "")
+                ev: dict[str, Any] = {
                     "tier": "T1",
-                    "id": item.get("entry_id", ""),
+                    "id": entry_id,
                     "content": item.get("summary", ""),
                     "score": 1.0,
                     "name": item.get("title", ""),
                     "provenance": {
-                        "thread_topic": item.get("thread_topic", ""),
-                        "entry_id": item.get("entry_id", ""),
+                        "thread_topic": topic,
+                        "entry_id": entry_id,
                     },
                     "metadata": {
                         "agent": item.get("agent", ""),
@@ -1992,7 +2023,15 @@ async def _smart_query_impl(
                         "entry_type": item.get("entry_type", ""),
                         "timestamp": item.get("timestamp", ""),
                     },
-                })
+                }
+                if topic:
+                    ev["thread_topic"] = topic
+                if index is not None:
+                    ev["index"] = index
+                ref = format_entry_ref(topic, index, entry_id)
+                if ref:
+                    ev["ref"] = ref
+                evidence.append(ev)
             safe_boost = sanitize_boost(decision_boost)
             boosted = False
             if prioritize_decisions:
@@ -2193,7 +2232,10 @@ async def _memory_task_status_impl(
             if task is not None:
                 return ToolResult([TextContent(
                     type="text",
-                    text=json.dumps(task.to_dict(), indent=2),
+                    text=json.dumps(
+                        {**task.to_dict(), "scope": _execution_scope()},
+                        indent=2,
+                    ),
                 )])
 
             # Plan v20 Phase 4: task not in active queue — check the receipt
@@ -2213,6 +2255,7 @@ async def _memory_task_status_impl(
                         "status": receipt.get("terminal_state"),
                         "terminal": True,
                         "source": "receipt",
+                        "scope": _execution_scope(),
                         "receipt": receipt,
                     }, indent=2),
                 )])
@@ -2230,6 +2273,10 @@ async def _memory_task_status_impl(
 
         # Queue summary
         summary = queue.status_summary()
+        # #941: self-label where this queue lives — in hybrid this tool is
+        # proxied to the hosted server, and unlabeled stats were misread as
+        # local during the T2 dead-letter incident.
+        summary["scope"] = _execution_scope()
 
         # Surface worker concurrency and observability info
         from ..memory_queue import get_worker
@@ -2251,6 +2298,65 @@ async def _memory_task_status_impl(
         )])
 
 
+async def _rebuild_provenance_index_only(
+    *,
+    code_path: str,
+    ts_map: dict[str, str],
+    topics_scanned: int,
+    entries_seen: int,
+    mode: str,
+    errors: list,
+) -> ToolResult:
+    """Rebuild the entry↔episode provenance index from the graph (no ingestion).
+
+    Acquires the Graphiti backend and calls
+    ``rebuild_entry_episode_index_from_graph`` with a corpus-wide
+    ``entry timestamp → entry_id`` hint map, so legacy baseline-sync episodes
+    (whose ``source_description`` carries no durable ``entry:<id>`` marker) are
+    recoverable alongside marker-bearing ones. Runs in a worker thread because
+    the rebuild uses ``asyncio.run`` internally.
+    """
+    from .. import memory as mem
+
+    graphiti_config = mem.load_graphiti_config(code_path=code_path or None)
+    backend_obj = (
+        mem.get_graphiti_backend(graphiti_config) if graphiti_config else None
+    )
+    if (
+        backend_obj is None
+        or isinstance(backend_obj, dict)
+        or not hasattr(backend_obj, "rebuild_entry_episode_index_from_graph")
+    ):
+        return ToolResult([TextContent(
+            type="text",
+            text=json.dumps({
+                "error": "graphiti_backend_unavailable",
+                "message": (
+                    "rebuild_index_only requires a configured Graphiti backend."
+                ),
+            }),
+        )])
+
+    recovered = await asyncio.to_thread(
+        backend_obj.rebuild_entry_episode_index_from_graph,
+        timestamp_to_entry_id=ts_map,
+    )
+    index = getattr(backend_obj, "entry_episode_index", None)
+    result = {
+        "action": "bulk_index",
+        "mode": mode,
+        "rebuild_index_only": True,
+        "topics_scanned": topics_scanned,
+        "entries_seen": entries_seen,
+        "timestamp_hints": len(ts_map),
+        "mappings_recovered": recovered,
+        "index_size_after": len(index) if index is not None else 0,
+        "entries_queued": 0,
+        "errors": errors,
+    }
+    return ToolResult([TextContent(type="text", text=json.dumps(result, indent=2))])
+
+
 async def _bulk_index_hosted_impl(
     *,
     ctx: Context,
@@ -2259,6 +2365,7 @@ async def _bulk_index_hosted_impl(
     threads: str,
     max_entries: int,
     queue: Any,
+    rebuild_index_only: bool = False,
 ) -> ToolResult:
     """Bulk index implementation for hosted mode — discovers entries via GitHub API."""
     from ..hosted_ops import list_threads_hosted, load_entries_hosted
@@ -2279,16 +2386,10 @@ async def _bulk_index_hosted_impl(
 
     # Plan v20 Phase 6: derive the canonical <org>_<repo> group_id via the
     # slug-aware helper instead of reusing the raw HTTP ``repo`` header
-    # (which may still carry a ``-threads`` suffix or arbitrary casing).
-    #
-    # PR #654 in-PR review round 7 (MEDIUM): normalise ``-threads`` suffix
-    # on the repo portion before derivation, matching the scoping in
-    # tools/graph.py::_resolve_hosted_t1_target and tools/semantic.py::
-    # _scope_group_id_to_http_ctx. Without this, X-Repo="org/repo-threads"
-    # would produce group_id="org_repo_threads", so bulk-indexed T2
-    # episodes would land under a different database than semantic
-    # search / find_similar look in — entries permanently invisible to
-    # semantic queries with no error signal.
+    # (which may carry arbitrary casing). Deriving via
+    # ``derive_t2_database_name`` keeps bulk-indexed T2 episodes under the
+    # same database that semantic search / find_similar read from, so an
+    # entry can't land in a phantom namespace invisible to queries.
     http_ctx = get_effective_context()
     # Round 15 (HIGH): refuse when there's no effective context at all.
     # Prior form left group_id="unknown" and enqueued into unknown_t2,
@@ -2337,14 +2438,8 @@ async def _bulk_index_hosted_impl(
         # directly as the FalkorDB database, so this MUST be the
         # canonical suffix-included form for hosted writes to land in
         # the canonical T2 graph.
-        from watercooler.path_resolver import (
-            derive_t2_database_name,
-            get_threads_suffix,
-        )
+        from watercooler.path_resolver import derive_t2_database_name
         _owner, _repo = raw_slug.split("/", 1)
-        _threads_suffix = get_threads_suffix()
-        if _threads_suffix and _repo.endswith(_threads_suffix):
-            _repo = _repo[: -len(_threads_suffix)]
         if not _owner or not _repo:
             return ToolResult([TextContent(
                 type="text",
@@ -2352,9 +2447,8 @@ async def _bulk_index_hosted_impl(
                     "error": "invalid_repo_scope",
                     "message": (
                         f"X-Repo header {raw_slug!r} has empty owner or "
-                        f"repo after threads-suffix strip "
-                        f"(owner={_owner!r}, repo={_repo!r}); refusing to "
-                        f"fall back to a non-canonical database name."
+                        f"repo (owner={_owner!r}, repo={_repo!r}); refusing "
+                        f"to fall back to a non-canonical database name."
                     ),
                 }),
             )])
@@ -2372,6 +2466,41 @@ async def _bulk_index_hosted_impl(
                 "message": f"Could not derive group_id from {raw_slug!r}: {_e}",
             }),
         )])
+
+    # Provenance-index rebuild mode: walk the corpus for timestamp hints and
+    # reconstruct the index from episodes already in the graph — no queueing.
+    if rebuild_index_only:
+        if backend != "graphiti":
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "rebuild_index_only supports backend='graphiti' only",
+                }),
+            )])
+        ts_map: dict[str, str] = {}
+        entries_seen = 0
+        rebuild_errors: list = []
+        for topic in all_topics:
+            err, entries = load_entries_hosted(topic)
+            if err:
+                rebuild_errors.append({"topic": topic, "error": err})
+                if len(rebuild_errors) >= 10:
+                    break
+                continue
+            for entry in entries:
+                eid = str(entry.get("entry_id") or "")
+                ts = str(entry.get("timestamp") or "")
+                if eid and ts:
+                    ts_map[ts] = eid
+                    entries_seen += 1
+        return await _rebuild_provenance_index_only(
+            code_path=code_path,
+            ts_map=ts_map,
+            topics_scanned=len(all_topics),
+            entries_seen=entries_seen,
+            mode="hosted",
+            errors=rebuild_errors,
+        )
 
     # Load entry-episode index for dedup (if graphiti backend)
     already_indexed = 0
@@ -2465,6 +2594,7 @@ async def _bulk_index_impl(
     max_entries: int = 0,
     preflight_only: bool = False,
     run_pipeline: bool = False,
+    rebuild_index_only: bool = False,
     group_id: str = "",
     dry_run: bool = False,
     incremental: bool = True,
@@ -2475,8 +2605,8 @@ async def _bulk_index_impl(
 
     Default behaviour discovers threads, builds a manifest of entries, and
     enqueues them as individual tasks for persistent background processing
-    with retry (paid tier onboarding). Two mode selectors fold in the former
-    standalone tools:
+    with retry (paid tier onboarding). Three mode selectors fold in / bound
+    related operations:
 
     - ``preflight_only=True`` — check migration prerequisites for ``backend``
       and return without queuing anything (capability ``memory_migration``,
@@ -2485,8 +2615,16 @@ async def _bulk_index_impl(
       indexed Graphiti episodes (capability ``memory_admin_cluster``). Folded-in
       ``watercooler_leanrag_run_pipeline``. ``group_id``/``start_date``/
       ``end_date``/``dry_run``/``incremental`` apply to this mode.
+    - ``rebuild_index_only=True`` — repopulate the entry↔episode provenance
+      index from episodes already in the graph, supplying a corpus-wide
+      ``entry timestamp → entry_id`` hint map so legacy baseline-sync episodes
+      (no durable ``entry:<id>`` marker) are recoverable. **No re-ingestion,
+      no LLM calls, nothing queued.** Use after a hosted redeploy wipes the
+      node-local index (ephemeral filesystem): restores provenance lookups
+      (``graph_trace``) and the ingest dedup ledger without duplicating
+      episodes.
 
-    ``preflight_only`` and ``run_pipeline`` are mutually exclusive.
+    The three mode selectors are mutually exclusive.
 
     Args:
         ctx: MCP context
@@ -2496,6 +2634,8 @@ async def _bulk_index_impl(
         max_entries: Max entries to queue (0 = unlimited, for testing).
         preflight_only: Run a migration-prerequisite check instead of queuing.
         run_pipeline: Run the LeanRAG clustering pipeline instead of queuing.
+        rebuild_index_only: Rebuild the entry↔episode provenance index from
+            episodes already in the graph (no queueing, no LLM calls).
         group_id: Graph group scope (run_pipeline mode; empty = derive).
         dry_run: Preview without executing (run_pipeline mode).
         incremental: Only process new episodes (run_pipeline mode).
@@ -2519,11 +2659,14 @@ async def _bulk_index_impl(
     # Mode dispatch (B1/B2 collapse) — preflight and pipeline are distinct
     # operations folded under bulk_index; each resolves its own capability
     # per-(tool, args) via capabilities._ARG_RESOLVERS.
-    if preflight_only and run_pipeline:
+    if sum(bool(m) for m in (preflight_only, run_pipeline, rebuild_index_only)) > 1:
         return ToolResult([TextContent(
             type="text",
             text=json.dumps({
-                "error": "preflight_only and run_pipeline are mutually exclusive",
+                "error": (
+                    "preflight_only, run_pipeline, and rebuild_index_only "
+                    "are mutually exclusive"
+                ),
             }),
         )])
     if preflight_only:
@@ -2572,7 +2715,9 @@ async def _bulk_index_impl(
             )])
 
         queue = get_queue()
-        if queue is None:
+        # rebuild_index_only queues nothing — it must work even when the
+        # memory queue is not initialised (e.g. right after a redeploy).
+        if queue is None and not rebuild_index_only:
             return ToolResult([TextContent(
                 type="text",
                 text=json.dumps({
@@ -2586,6 +2731,7 @@ async def _bulk_index_impl(
             return await _bulk_index_hosted_impl(
                 ctx=ctx, code_path=code_path, backend=backend,
                 threads=threads, max_entries=max_entries, queue=queue,
+                rebuild_index_only=rebuild_index_only,
             )
 
         # Discover entries via watercooler library
@@ -2610,6 +2756,41 @@ async def _bulk_index_impl(
         if threads:
             selected = [t.strip() for t in threads.split(",")]
             all_topics = [t for t in all_topics if t in selected]
+
+        # Provenance-index rebuild mode (local): mirror of the hosted branch.
+        if rebuild_index_only:
+            if backend != "graphiti":
+                return ToolResult([TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "rebuild_index_only supports backend='graphiti' only",
+                    }),
+                )])
+            ts_map: dict[str, str] = {}
+            entries_seen = 0
+            rebuild_errors: list = []
+            for topic in all_topics:
+                try:
+                    topic_entries = list_entries(topic, threads_dir)
+                except Exception as exc:
+                    rebuild_errors.append({"topic": topic, "error": str(exc)})
+                    if len(rebuild_errors) >= 10:
+                        break
+                    continue
+                for entry in topic_entries:
+                    eid = str(entry.get("entry_id") or "")
+                    ts = str(entry.get("timestamp") or "")
+                    if eid and ts:
+                        ts_map[ts] = eid
+                        entries_seen += 1
+            return await _rebuild_provenance_index_only(
+                code_path=code_path,
+                ts_map=ts_map,
+                topics_scanned=len(all_topics),
+                entries_seen=entries_seen,
+                mode="local",
+                errors=rebuild_errors,
+            )
 
         # Derive canonical T2 group_id (Plan v20 defect #34): for ``backend ==
         # "graphiti"`` the queue task's ``group_id`` IS the FalkorDB database

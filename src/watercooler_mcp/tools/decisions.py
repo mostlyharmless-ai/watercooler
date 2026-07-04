@@ -34,6 +34,13 @@ _MAX_LIMIT = 500
 _CONFIDENCE_RE = re.compile(r"^Confidence:\s*(\d+)\s*/\s*5", re.MULTILINE)
 _ENTRY_ID_PREFIX = "entry:"
 
+# Cap on edges returned by the single group-agnostic edges-by-episode query
+# (#894) that backs supersession for a whole decisions page. The query already
+# filters to edges derived from the page's episodes, so this bounds only a
+# pathological fan-out (an episode mentioned by an unusually large number of
+# facts), not a whole thread's edges.
+_SUPERSESSION_EDGE_LIMIT = 2000
+
 
 # Module-level reference (populated on registration)
 list_decisions = None
@@ -205,6 +212,12 @@ def _build_decision_record(
         "role": node.get("role"),
         "confidence": confidence,
         "extracted": extracted,
+        # Provenance scalar written onto the entry node at write/promotion time
+        # (e.g. "human_promoted" via build_promotion_authority_fields, "agent_authored"
+        # for hand-authored). None for legacy/unstamped Decisions — surfaced as-is so a
+        # decision_origin filter can scope to promoted Decisions without counting legacy
+        # records as promoted.
+        "decision_origin": node.get("decision_origin"),
         "source": source,
         "xrefs": [_bare_entry_id(x) for x in xrefs],
         "tags": tags,
@@ -220,10 +233,15 @@ def _decision_matches_filters(
     until_dt: datetime | None,
     source_entry_id: str | None,
     only_extracted: bool,
+    decision_origin: str | None = None,
 ) -> bool:
     if topic and decision["topic"] != topic:
         return False
     if only_extracted and not decision["extracted"]:
+        return False
+    if decision_origin and decision.get("decision_origin") != decision_origin:
+        # Legacy/unstamped Decisions carry decision_origin=None and are excluded by
+        # any non-empty filter — never counted as the requested origin.
         return False
     if confidence_min > 0:
         conf = decision.get("confidence")
@@ -233,6 +251,10 @@ def _decision_matches_filters(
     if since_dt or until_dt:
         dt = _parse_iso(ts or "")
         if dt is None:
+            # Unparseable-timestamp records are silently dropped under a window
+            # filter. The deferred early_supersession_hazard denominator contract
+            # (#897a producer phase) must account for this: such records vanish from
+            # promoted_total before coverage is computed.
             return False
         if since_dt and dt < since_dt:
             return False
@@ -249,6 +271,7 @@ def _finalize_payload(
     collected: list[dict[str, Any]],
     limit: int,
     skipped_topics: list[str] | None = None,
+    index_status: str | None = None,
 ) -> ToolResult:
     """Sort, truncate, and JSON-serialise the decision list.
 
@@ -256,6 +279,11 @@ def _finalize_payload(
     hosted repository but whose entries could not be loaded (missing or
     malformed ``meta.json``/``entries.jsonl``). Always present on hosted
     calls so callers can detect partial results; omitted on local calls.
+
+    ``index_status`` (hosted only) records how the read was served:
+    ``"used"`` (decisions index), ``"missing"`` (no index → full per-thread
+    scan fallback), or ``"error"`` (index load failed → fallback). Surfaced
+    under ``meta`` so existing top-level keys are untouched.
     """
     collected.sort(key=lambda d: d.get("timestamp") or "", reverse=True)
     total = len(collected)
@@ -269,8 +297,262 @@ def _finalize_payload(
     }
     if skipped_topics is not None:
         payload["skipped_topics"] = skipped_topics
+    if index_status is not None:
+        payload["meta"] = {"index_status": index_status}
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, indent=2))]
+    )
+
+
+def _unknown_supersession(reason: str) -> dict[str, Any]:
+    """A supersession summary for the cases where T2 cannot answer.
+
+    Distinct from ``in_force`` on purpose: a missing T2 signal must never read
+    as a positive "still in force" assertion (epistemic-custody §6.5).
+    """
+    return {
+        "state": "unknown",
+        "active_facts": 0,
+        "superseded_facts": 0,
+        "as_of": None,
+        "reason": reason,
+    }
+
+
+def _acquire_graphiti_backend(code_path: str):
+    """Best-effort acquire the T2 (Graphiti) backend for supersession lookups.
+
+    Returns ``None`` when T2 is not configured/enabled or the backend cannot be
+    initialized — the caller renders ``supersession: unknown`` rather than a
+    false ``in_force``.
+    """
+    try:
+        from .. import memory as mem
+
+        config = mem.load_graphiti_config(code_path=code_path or None)
+        if not config:
+            return None
+        backend = mem.get_graphiti_backend(config)
+        if backend is None or isinstance(backend, dict):
+            return None
+        return backend
+    except Exception as exc:  # backend acquisition is best-effort enrichment
+        log_debug(f"list_decisions: graphiti backend acquire failed: {exc}")
+        return None
+
+
+def _supersession_is_ratified(
+    topic: str, entry_id: str, successor_entry_id: str, code_path: str
+) -> bool:
+    """Authored iff an ``xref_supersedes`` annotation records ``entry_id`` → successor.
+
+    The durable, append-only authored record of a ratified supersession (earned-edge
+    RFC P3) — replacing the removed mutable T2 ``superseded_ratified`` flag. Degrades to
+    ``False`` (afforded) on any resolution failure — never a false ``authored`` (§6.5).
+    """
+    if not topic or not successor_entry_id:
+        return False
+    try:
+        error, context = validation._require_context(code_path)
+        if error or context is None:
+            return False
+
+        # Hosted: annotations live on GitHub (append_annotation_hosted), not a local
+        # filesystem graph — so read them back the same way, else a hosted ratification
+        # never flips the badge to authored (the local path always misses in hosted).
+        if is_hosted_context(context):
+            from ..hosted_ops import get_annotations_hosted
+
+            read_err, result = get_annotations_hosted(topic, entry_id)
+            if read_err or not isinstance(result, dict):
+                return False
+            state = result.get("annotation_state") or {}
+            return successor_entry_id in (state.get("xref_supersedes") or [])
+
+        # Local: filesystem-backed baseline graph.
+        from watercooler.baseline_graph.annotations import get_annotation_state
+        from watercooler.baseline_graph.storage import (
+            get_graph_dir,
+            get_thread_graph_dir,
+        )
+
+        if not context.threads_dir:
+            return False
+        thread_dir = get_thread_graph_dir(get_graph_dir(context.threads_dir), topic)
+        state = get_annotation_state(thread_dir, entry_id, read_only=True)
+        return successor_entry_id in (getattr(state, "xref_supersedes", None) or [])
+    except Exception as exc:
+        log_debug(f"list_decisions: xref_supersedes read failed for {entry_id}: {exc}")
+        return False
+
+
+def _apply_supersession(
+    collected: list[dict[str, Any]], backend, code_path: str = ""
+) -> None:
+    """Attach a T2-derived ``supersession`` summary to each decision in place.
+
+    ``backend`` is an acquired GraphitiBackend (or ``None``). The whole page
+    costs a single group-agnostic edges-by-episode query: episodes are ingested
+    under the repo/project group (not per-thread), so supersession must be keyed
+    on episode membership, not the thread topic (#894 P2#1). Any failure
+    degrades a decision to an honest ``unknown`` — never a false ``in_force``
+    (epistemic-custody §6.5).
+    """
+    from watercooler_memory.supersession import summarize_supersession
+
+    if backend is None:
+        for decision in collected:
+            decision["supersession"] = _unknown_supersession("t2_unavailable")
+        return
+
+    # Recover the entry→episode index when a node-local cache was wiped (a hosted
+    # ephemeral-filesystem redeploy empties it). Baseline-sync episodes carry no
+    # entry_id in their fields, but each episode's valid_at == the entry
+    # timestamp, so pass this page's {timestamp: entry_id} hints to rebuild the
+    # mapping from the surviving episodes — no LLM re-extraction.
+    #
+    # Trigger whenever ANY collected Decision is missing from the index — NOT
+    # only when the whole cache is empty. Timestamp matching is the only way
+    # baseline-sync episodes are recoverable, so a first topic-scoped/filtered
+    # page must not leave later Decisions stranded at no_episode_mapping once the
+    # index is non-empty (review #1012).
+    try:
+        idx = getattr(backend, "entry_episode_index", None)
+        if idx is not None:
+            ts_hints = {
+                d["timestamp"]: d["entry_id"]
+                for d in collected
+                if d.get("timestamp") and d.get("entry_id")
+            }
+            needs_recovery = bool(ts_hints) and any(
+                not idx.has_any_mapping(d["entry_id"])
+                for d in collected
+                if d.get("entry_id")
+            )
+            if needs_recovery:
+                backend.rebuild_entry_episode_index_from_graph(
+                    timestamp_to_entry_id=ts_hints
+                )
+    except Exception as exc:
+        log_debug(f"list_decisions: entry-episode index recovery skipped: {exc}")
+
+    # Resolve each decision's episode UUID(s) (best-effort; never raises) and
+    # collect the union so one query covers the page.
+    episodes_by_id: dict[str, list[str]] = {}
+    all_episodes: set[str] = set()
+    for decision in collected:
+        eps = backend.episode_uuids_for_entry(decision["entry_id"])
+        episodes_by_id[decision["entry_id"]] = eps
+        all_episodes.update(eps)
+
+    try:
+        edges = (
+            backend.get_edges_by_episodes(
+                sorted(all_episodes), limit=_SUPERSESSION_EDGE_LIMIT
+            )
+            if all_episodes
+            else []
+        )
+    except Exception as exc:
+        log_debug(f"list_decisions: supersession edge fetch failed: {exc}")
+        edges = None
+
+    for decision in collected:
+        if edges is None:
+            decision["supersession"] = _unknown_supersession("lookup_error")
+            continue
+        summary = summarize_supersession(edges, episodes_by_id[decision["entry_id"]])
+        # RFC §3b: surface the successor ENTRY so the dashboard can render a clickable
+        # "superseded by → jump to entry" badge. Direction = superseded_by (#991)
+        # resolved to an entry; best-effort — never downgrades the state summary.
+        if summary.get("state") in ("superseded", "partially_superseded"):
+            try:
+                succ = backend.get_superseding_entry(decision["entry_id"])
+                if succ:
+                    summary["superseded_by"] = succ["entry_id"]
+                    summary["superseded_by_thread"] = succ.get("thread")
+                    # Authored = an xref_supersedes annotation records this A→B link
+                    # (RFC P3); afforded otherwise. Replaces the removed T2 flag.
+                    summary["superseded_by_ratified"] = _supersession_is_ratified(
+                        decision.get("topic", ""), decision["entry_id"],
+                        succ["entry_id"], code_path,
+                    )
+            except Exception as exc:
+                log_debug(f"list_decisions: superseding-entry resolution failed: {exc}")
+        decision["supersession"] = summary
+
+
+def _list_decisions_from_index(
+    index_records: list[dict[str, Any]],
+    *,
+    topic_filter: str | None,
+    confidence_min: int,
+    since_dt: datetime | None,
+    until_dt: datetime | None,
+    source_filter: str | None,
+    only_extracted: bool,
+    limit: int,
+    include_supersession: bool = False,
+    decision_origin: str | None = None,
+) -> ToolResult:
+    """Build the list_decisions payload from the repo-level decisions index.
+
+    The index already carries each Decision's *resolved source* and
+    ``extracted`` flag, so cross-thread source resolution is O(1) and there is
+    no per-thread ``entries.jsonl`` fan-out (the rate-limit cause). Only the
+    Decision's own mutable ``tags``/``xrefs`` are fetched live, and only for the
+    decision-bearing topics that survive the topic filter.
+    """
+    from ..hosted_ops import get_annotations_hosted
+
+    annotation_cache: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def _ensure_annotations(topic: str) -> dict[str, dict[str, Any]]:
+        if topic in annotation_cache:
+            return annotation_cache[topic]
+        ann_err, ann_bundle = get_annotations_hosted(topic, target_id="")
+        if ann_err:
+            log_debug(
+                f"list_decisions_from_index: annotations load failed for "
+                f"{topic}: {ann_err}"
+            )
+            annotation_cache[topic] = {}
+        else:
+            annotation_cache[topic] = ann_bundle.get("annotation_states") or {}
+        return annotation_cache[topic]
+
+    collected: list[dict[str, Any]] = []
+    for rec in index_records:
+        topic = rec.get("topic") or ""
+        if topic_filter and topic != topic_filter:
+            continue
+        entry_id = rec.get("entry_id") or ""
+        state = _ensure_annotations(topic).get(entry_id) or {}
+        xrefs = [_bare_entry_id(x) for x in (state.get("xrefs") or [])]
+        tags = list(state.get("tags") or [])
+
+        # The index record IS the read payload minus the mutable annotation
+        # state (tags/xrefs); graft the live values back on. Source + extracted
+        # + confidence already come pre-resolved from the index.
+        decision = {**rec, "xrefs": xrefs, "tags": tags}
+
+        if _decision_matches_filters(
+            decision,
+            topic=topic_filter,
+            confidence_min=confidence_min,
+            since_dt=since_dt,
+            until_dt=until_dt,
+            source_entry_id=source_filter,
+            only_extracted=only_extracted,
+            decision_origin=decision_origin,
+        ):
+            collected.append(decision)
+
+    if include_supersession:
+        _apply_supersession(collected, _acquire_graphiti_backend(""))
+
+    return _finalize_payload(
+        collected, limit, skipped_topics=[], index_status="used"
     )
 
 
@@ -283,24 +565,53 @@ def _list_decisions_hosted(
     source_filter: str | None,
     only_extracted: bool,
     limit: int,
+    include_supersession: bool = False,
+    decision_origin: str | None = None,
 ) -> ToolResult:
     """Hosted (GitHub-backed) implementation of list_decisions.
 
-    Uses ``load_all_entries_hosted`` + ``get_annotations_hosted`` so the tool
-    works on hosted surfaces where the local baseline graph is not present.
+    Fast path: read the repo-level decisions index in one fetch
+    (``load_decision_index_hosted`` → ``_list_decisions_from_index``).
 
-    Discovery uses ``list_topic_dirs_hosted`` — the raw directory listing —
-    rather than ``list_threads_hosted``. This bypasses the ``meta.json`` read
-    that ``list_threads_hosted`` silently drops on failure, so a topic with a
-    missing/malformed ``meta.json`` but readable ``entries.jsonl`` is still
-    surfaced. Topics whose entries genuinely can't be loaded are reported to
-    the caller via ``skipped_topics`` on the payload.
+    Fallback (index absent on older/pre-backfill repos, or a load error): the
+    legacy full per-thread scan via ``load_all_entries_hosted`` +
+    ``get_annotations_hosted``. Discovery uses ``list_topic_dirs_hosted`` — the
+    raw directory listing — rather than ``list_threads_hosted``, so a topic with
+    a missing/malformed ``meta.json`` but readable ``entries.jsonl`` is still
+    surfaced. Topics whose entries genuinely can't be loaded are reported via
+    ``skipped_topics``. The fallback path is marked ``meta.index_status`` =
+    ``"missing"``/``"error"`` so the (slow, rate-limit-prone) path is observable.
     """
     from ..hosted_ops import (
         get_annotations_hosted,
         list_topic_dirs_hosted,
         load_all_entries_hosted,
+        load_decision_index_hosted,
     )
+
+    # Fast path: single-fetch decisions index. ``index_records is not None``
+    # means the index file exists (possibly empty); ``None`` means absent (404)
+    # or a load error — both fall back to the full scan below.
+    idx_err, index_records = load_decision_index_hosted()
+    if index_records is not None:
+        return _list_decisions_from_index(
+            index_records,
+            topic_filter=topic_filter,
+            confidence_min=confidence_min,
+            since_dt=since_dt,
+            until_dt=until_dt,
+            source_filter=source_filter,
+            only_extracted=only_extracted,
+            limit=limit,
+            include_supersession=include_supersession,
+            decision_origin=decision_origin,
+        )
+    fallback_status = "error" if idx_err else "missing"
+    if idx_err:
+        log_warning(
+            "list_decisions_hosted: decisions index load failed, falling back "
+            f"to full per-thread scan: {idx_err}"
+        )
 
     dirs_err, all_topic_dirs = list_topic_dirs_hosted()
     if dirs_err:
@@ -395,10 +706,25 @@ def _list_decisions_hosted(
             until_dt=until_dt,
             source_entry_id=source_filter,
             only_extracted=only_extracted,
+            decision_origin=decision_origin,
         ):
             collected.append(decision)
 
-    return _finalize_payload(collected, limit, skipped_topics=skipped_topics)
+    if include_supersession:
+        # The hosted server is co-located with its T2 (e.g. Railway runs FalkorDB
+        # alongside the MCP), so query it directly. ``is_hosted_context`` only means
+        # "list threads via the GitHub API" — it does NOT imply "no T2". Acquisition
+        # is best-effort: a genuinely T2-less hosted surface (no FalkorDB) yields an
+        # honest ``unknown`` via _apply_supersession, never a false in_force (§6.5).
+        # Pass no code_path on purpose: in hosted-request scope the per-tenant T2
+        # database derives from ``http_ctx.repo`` (the multi-tenant boundary), which
+        # must dominate any caller-supplied path — so a request can never steer
+        # supersession reads into another tenant's graph.
+        _apply_supersession(collected, _acquire_graphiti_backend(""))
+
+    return _finalize_payload(
+        collected, limit, skipped_topics=skipped_topics, index_status=fallback_status
+    )
 
 
 def _list_decisions_impl(
@@ -410,6 +736,8 @@ def _list_decisions_impl(
     source_entry_id: str = "",
     only_extracted: bool = False,
     limit: int = 50,
+    include_supersession: bool = False,
+    decision_origin: str = "",
     code_path: str = "",
 ) -> ToolResult:
     """List Decision entries across threads with xref resolution.
@@ -427,11 +755,30 @@ def _list_decisions_impl(
         source_entry_id: Only return decisions extracted from this source entry.
         only_extracted: If True, exclude hand-authored Decisions (requires
             the `decision_extracted` tag on the xref'd source).
+        decision_origin: If set, only return Decisions whose entry-node
+            `decision_origin` provenance scalar matches exactly (e.g.
+            `"human_promoted"` for candidate-promoted Decisions, `"agent_authored"`
+            for hand-authored). Legacy/unstamped Decisions carry no `decision_origin`
+            and are excluded by any non-empty filter — they are never counted as the
+            requested origin. Empty (default) disables the filter. A pure
+            `decision_origin` filter is a baseline read (it does not route to T2).
         limit: Max decisions to return (default 50, max 500).
+        include_supersession: If True, attach a ``supersession`` summary to each
+            decision from the T2 (Graphiti) temporal graph — so a consumer can
+            see whether a Decision's derived facts are still in force, never
+            mistaking a superseded record for a current one (the warrant ledger
+            travels with supersession status). Each summary is
+            ``{state, active_facts, superseded_facts, as_of, reason}`` where
+            ``state`` is ``in_force`` / ``partially_superseded`` / ``superseded``
+            / ``unknown``. ``unknown`` (T2 disabled, hosted, no episode mapping,
+            or lookup error — see ``reason``) is never a false ``in_force``.
+            Off by default: it issues T2 queries, so it adds cost.
         code_path: Path to the code repository containing threads.
 
     Returns:
-        JSON ToolResult with `{schema_version, total, decisions: [...]}`.
+        JSON ToolResult with `{schema_version, total, decisions: [...]}`. Each
+        decision carries a ``supersession`` field only when
+        ``include_supersession`` is True.
     """
     try:
         if limit < 1 or limit > _MAX_LIMIT:
@@ -457,6 +804,7 @@ def _list_decisions_impl(
         # (as it appears in entries.jsonl) or the bare form — both match against
         # source.entry_id, which is always bare after ``_bare_entry_id``.
         source_filter = _bare_entry_id(source_entry_id.strip()) or None
+        origin_filter = decision_origin.strip() or None
 
         # Hosted surfaces have no local baseline graph — delegate to the
         # GitHub-backed implementation.
@@ -473,6 +821,8 @@ def _list_decisions_impl(
                 source_filter=source_filter,
                 only_extracted=only_extracted,
                 limit=limit,
+                include_supersession=include_supersession,
+                decision_origin=origin_filter,
             )
 
         threads_dir = context.threads_dir
@@ -533,8 +883,12 @@ def _list_decisions_impl(
                     until_dt=until_dt,
                     source_entry_id=source_filter,
                     only_extracted=only_extracted,
+                    decision_origin=origin_filter,
                 ):
                     collected.append(decision)
+
+        if include_supersession:
+            _apply_supersession(collected, _acquire_graphiti_backend(code_path), code_path)
 
         return _finalize_payload(collected, limit)
 
@@ -545,7 +899,54 @@ def _list_decisions_impl(
         raise
 
 
-def register_decisions_tools(mcp) -> None:
+def _build_hybrid_list_decisions_wrapper(runtime):
+    """Build a hybrid wrapper for ``watercooler_list_decisions``.
+
+    Default list_decisions is a baseline read and stays local. When
+    include_supersession=True, the call needs T2/Graphiti and routes through
+    memory_query in hybrid instead of trying to acquire local Graphiti.
+    """
+    import functools
+    from ..capabilities import tool_capability
+
+    @functools.wraps(_list_decisions_impl)
+    async def _hybrid_list_decisions(ctx, **kwargs):
+        capability = tool_capability("watercooler_list_decisions", kwargs)
+        target = runtime.capability_profile.resolve_execution_target(
+            capability,
+            local_available=True,
+            remote_available=runtime.premium_client is not None,
+        )
+        if target == "remote":
+            if runtime.premium_client is None:
+                return ToolResult([TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "remote_unavailable",
+                        "capability": capability,
+                        "message": "Remote premium client is not configured.",
+                    }),
+                )])
+            remote_text = await runtime.premium_client.call_tool_text(
+                "watercooler_list_decisions", kwargs
+            )
+            return ToolResult([TextContent(type="text", text=remote_text)])
+        if target == "disabled":
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps(
+                    {"error": "capability_disabled", "capability": capability},
+                    indent=2,
+                ),
+            )])
+        return _list_decisions_impl(ctx, **kwargs)
+
+    return _hybrid_list_decisions
+
+
+def register_decisions_tools(mcp, *, runtime=None) -> None:
     """Register decision-listing tools with the MCP server."""
     global list_decisions
-    list_decisions = mcp.tool(name="watercooler_list_decisions")(_list_decisions_impl)
+    hybrid = runtime is not None and getattr(runtime, "surface", None) == "local_hybrid"
+    actual_impl = _build_hybrid_list_decisions_wrapper(runtime) if hybrid else _list_decisions_impl
+    list_decisions = mcp.tool(name="watercooler_list_decisions")(actual_impl)

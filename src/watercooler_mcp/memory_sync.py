@@ -216,8 +216,14 @@ async def _call_graphiti_add_episode(
         # Create episode title
         episode_title = title if title else content[:50] + ("..." if len(content) > 50 else "")
 
-        # Include thread topic and annotation signals in source_description
+        # Include thread topic and annotation signals in source_description.
+        # Embed the entry_id durably so the entry→episode mapping survives a loss
+        # of the node-local index (recoverable via GraphitiBackend
+        # .rebuild_entry_episode_index_from_graph) — matches the hybrid-handoff
+        # path's "entry:<id>" convention.
         source_parts = [f"thread:{topic}", "Sync from baseline graph"]
+        if entry_id:
+            source_parts.append(f"entry:{entry_id}")
         if xrefs:
             source_parts.append(f"xrefs:{','.join(xrefs)}")
         if tags:
@@ -492,11 +498,7 @@ def _submit_graphiti_to_hosted(
         )
         return False
 
-    threads_dir_str = str(threads_dir)
-    if threads_dir_str.endswith("-threads"):
-        code_path = threads_dir_str.removesuffix("-threads")
-    else:
-        code_path = threads_dir_str
+    code_path = str(threads_dir)
 
     # Plan v20 Phase 5 + Codex review: drive the canonical <org>_<repo>
     # identity off the git remote slug so Phase 6 migration targets and
@@ -735,18 +737,9 @@ def _graphiti_sync_callback(
                 f"({len(entry_summary)} chars vs {len(entry_body)} raw)"
             )
 
-        # Derive code_path from threads_dir
-        # threads_dir: /path/to/project-threads -> code_path: /path/to/project
-        threads_dir_str = str(threads_dir)
-        if threads_dir_str.endswith("-threads"):
-            code_path = threads_dir_str.removesuffix("-threads")
-        else:
-            # Warn about non-standard naming, use threads_dir as fallback
-            log.warning(
-                f"MEMORY: threads_dir '{threads_dir}' doesn't end with '-threads'. "
-                f"Using it directly for code_path derivation."
-            )
-            code_path = threads_dir_str
+        # The threads directory is the orphan-branch worktree of the code
+        # repo, so it stands in for code_path here.
+        code_path = str(threads_dir)
 
         # Check if chunking is enabled
         chunk_on_sync = get_graphiti_chunk_on_sync()
@@ -997,6 +990,96 @@ def init_memory_sync_callbacks() -> None:
         logger.exception(f"MEMORY: Error registering sync callbacks: {e}")
 
 
+async def _enrichment_executor_fn(task: "MemoryTask") -> dict[str, Any]:
+    """Enrich a queued entry (summary/embedding) + sync to the memory backend.
+
+    Phase A (#903): lifted from the former inline block in
+    ``middleware.run_with_sync`` so the LLM/embedding work no longer holds the
+    write lock. The entry is already durable in the graph; this backfills the
+    summary/embedding and indexes the entry to the memory backend asynchronously.
+    Resolves the worktree from ``task.threads_dir`` (set at enqueue time).
+    """
+    from pathlib import Path as _Path
+
+    from watercooler.baseline_graph.summarizer import summary_is_stale
+    from watercooler.baseline_graph.sync import (
+        clear_entry_summary,
+        enrich_graph_entry,
+        sync_to_memory_backend,
+    )
+    from watercooler.baseline_graph.writer import get_entry_node_from_graph
+    from watercooler_mcp.config import get_watercooler_config
+
+    if not task.threads_dir:
+        raise RuntimeError(
+            f"enrichment task missing threads_dir (entry={task.entry_id!r})"
+        )
+    threads_dir = _Path(task.threads_dir)
+    topic, entry_id = task.topic, task.entry_id
+    graph_cfg = get_watercooler_config().mcp.graph
+
+    result: dict[str, Any] = {"summary": False, "embedding": False, "memory_synced": False}
+
+    entry_node = get_entry_node_from_graph(threads_dir, entry_id, topic)
+    if entry_node is None:
+        raise RuntimeError(f"enrichment: entry not found in graph {topic}/{entry_id}")
+
+    # Respect enrich_structured (#902): skip the LLM summarizer for structured
+    # entries whose bodies are self-describing templates.
+    etype = str(entry_node.get("entry_type", ""))
+    is_structured = etype in {"Decision", "Plan", "PR", "Closure"} or topic.startswith(
+        ("onboarding-", "history-")
+    )
+    do_summaries = graph_cfg.generate_summaries and (
+        graph_cfg.enrich_structured or not is_structured
+    )
+    do_embeddings = graph_cfg.generate_embeddings
+
+    # Retire pre-#902 poison (#910): a structured entry skipped by the summarizer
+    # (enrich_structured=False) will never be re-summarized, so a stale stored
+    # summary — i.e. a pre-fix, possibly-fabricated one — would persist in the graph
+    # and re-sync to the backend. Clear it so neither surface carries the bleed; the
+    # structured body is self-describing.
+    # This retirement lives ONLY here (the async executor) by design: the inline
+    # enrichment fallback (middleware, async_enrichment=False) has no is_structured
+    # gate, so it re-summarizes structured entries under the #909 grounding guard —
+    # no stranded poison there to clear. Do not "fix" the inline path to skip.
+    if is_structured and not do_summaries and entry_node.get("summary") and summary_is_stale(
+        entry_node
+    ):
+        if clear_entry_summary(threads_dir, topic, entry_id):
+            entry_node["summary"] = ""
+            result["summary_cleared"] = True
+
+    if do_summaries or do_embeddings:
+        er = enrich_graph_entry(
+            threads_dir=threads_dir,
+            topic=topic,
+            entry_id=entry_id,
+            generate_summaries=do_summaries,
+            generate_embeddings=do_embeddings,
+        )
+        result["summary"] = bool(getattr(er, "summary_generated", False))
+        result["embedding"] = bool(getattr(er, "embedding_generated", False))
+        # Re-read so the memory backend carries the freshly-enriched summary.
+        entry_node = get_entry_node_from_graph(threads_dir, entry_id, topic) or entry_node
+
+    synced = sync_to_memory_backend(
+        threads_dir=threads_dir,
+        topic=topic,
+        entry_id=entry_id,
+        entry_body=entry_node.get("body", ""),
+        entry_title=entry_node.get("title"),
+        entry_summary=entry_node.get("summary", ""),
+        timestamp=entry_node.get("timestamp"),
+        agent=entry_node.get("agent"),
+        role=entry_node.get("role"),
+        entry_type=entry_node.get("entry_type"),
+    )
+    result["memory_synced"] = bool(synced)
+    return result
+
+
 def init_memory_queue_executors() -> None:
     """Register backend executors with the memory task queue worker.
 
@@ -1014,6 +1097,12 @@ def init_memory_queue_executors() -> None:
     if worker is None:
         logger.debug("MEMORY: queue worker not initialised, skipping executor registration")
         return
+
+    # Enrichment executor (Phase A, #903): always register — it has no heavy
+    # backend dependency (open-core safe) and is required wherever the write
+    # path defers summary/embedding + memory-sync off the lock.
+    worker.register_executor("enrichment", _enrichment_executor_fn)
+    logger.info("MEMORY: Registered enrichment executor with memory task queue")
 
     from .memory import _graphiti_importable
     if not _graphiti_importable():
@@ -1072,6 +1161,114 @@ def _canonicalize_group_id(group_id: str, *, task_id: str | None = None) -> str:
     return canonical
 
 
+def _is_hybrid_remote_runtime() -> bool:
+    """True when the active runtime routes T2 to the hosted premium endpoint.
+
+    Mirrors the predicate ``set_runtime`` uses to flip the hybrid-T2-handoff
+    flag (surface ``local_hybrid`` + a live ``premium_client``).
+    """
+    runtime = get_runtime()
+    return (
+        runtime is not None
+        and getattr(runtime, "surface", None) == "local_hybrid"
+        and getattr(runtime, "premium_client", None) is not None
+    )
+
+
+async def _graphiti_remote_handoff(task: "MemoryTask") -> Dict[str, Any]:
+    """Hand a queued Graphiti episode off to the hosted premium endpoint.
+
+    #939: in ``local_hybrid`` the worker cannot reach a FalkorDB backend
+    directly — the local backend is disabled and the hosted one is on a
+    Railway-internal address — so the direct-backend executor dead-letters
+    every queued task (the original 867/867 symptom). This routes queued
+    graphiti work (``bulk_index`` / re-index / backfill) through
+    ``watercooler_graphiti_add_episode`` on the premium client — the same
+    hosted hot-path the write-time handoff (``_submit_graphiti_to_hosted``)
+    uses — and writes a Stage-A handoff receipt.
+
+    The executor already runs on the worker's private event loop, so the RPC
+    is awaited directly (no ``run_coro_in_fresh_loop`` needed here).
+    """
+    from .handoff_receipts import append_handoff_receipt
+
+    runtime = get_runtime()
+    premium = getattr(runtime, "premium_client", None) if runtime else None
+    if premium is None:
+        # Registration is hybrid-gated at task time, so this should not
+        # happen — fail loud rather than silently dead-letter.
+        raise RuntimeError("hybrid graphiti handoff: premium_client unavailable")
+    if not task.group_id:
+        raise RuntimeError("Queued Graphiti task missing group_id")
+
+    group_id = _canonicalize_group_id(task.group_id, task_id=task.task_id)
+    content = task.content or ""
+    episode_title = (
+        task.title
+        if task.title
+        else content[:50] + ("..." if len(content) > 50 else "")
+    )
+    source_desc = (
+        task.source_description
+        or f"thread:{task.topic} | hybrid_handoff_queue | entry:{task.entry_id}"
+    )
+    arguments = {
+        "content": content,
+        "group_id": group_id,
+        "code_path": task.code_path or "",
+        "entry_id": task.entry_id,
+        "timestamp": task.timestamp or "",
+        "title": episode_title,
+        "source_description": source_desc,
+    }
+
+    try:
+        text = await premium.call_tool_text(
+            "watercooler_graphiti_add_episode", arguments
+        )
+    except Exception as e:
+        append_handoff_receipt(
+            backend="graphiti", stage="submit_failed",
+            entry_id=task.entry_id, topic=task.topic, group_id=group_id,
+            error=f"rpc_failed: {e}",
+        )
+        raise
+
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        append_handoff_receipt(
+            backend="graphiti", stage="submit_failed",
+            entry_id=task.entry_id, topic=task.topic, group_id=group_id,
+            error="non_json_response",
+        )
+        raise RuntimeError("Graphiti hybrid handoff returned non-JSON response")
+
+    if not payload.get("success", False):
+        err = str(payload.get("error", "rejected"))
+        append_handoff_receipt(
+            backend="graphiti", stage="submit_failed",
+            entry_id=task.entry_id, topic=task.topic, group_id=group_id,
+            error=err,
+        )
+        raise RuntimeError(f"Graphiti hybrid handoff rejected: {err}")
+
+    remote_task_id = str(
+        payload.get("remote_task_id") or payload.get("task_id") or ""
+    )
+    append_handoff_receipt(
+        backend="graphiti", stage="submitted",
+        entry_id=task.entry_id, topic=task.topic, group_id=group_id,
+        remote_task_id=remote_task_id,
+        submission_status=str(payload.get("status") or ""),
+    )
+    return {
+        "episode_uuid": payload.get("episode_uuid", "") or remote_task_id,
+        "entities_extracted": payload.get("entities_extracted", []),
+        "facts_extracted": payload.get("facts_extracted", 0),
+    }
+
+
 def _register_graphiti_executor(worker: "MemoryTaskWorker") -> None:
     """Register the graphiti executor with the given worker."""
     async def graphiti_executor(task: "MemoryTask") -> Dict[str, Any]:
@@ -1091,7 +1288,16 @@ def _register_graphiti_executor(worker: "MemoryTaskWorker") -> None:
         once (no post-call ``dataclasses.replace``) and the worker thread,
         which has no ``http_ctx``, can supply its scope via the ``database=``
         override.
+
+        #939: in ``local_hybrid`` there is no FalkorDB the worker can reach,
+        so route the queued episode to the hosted endpoint instead of the
+        direct-backend path below (which would dead-letter every task). The
+        decision is made per-task — not at registration — so it is robust to
+        whether ``set_runtime`` ran before executor registration.
         """
+        if _is_hybrid_remote_runtime():
+            return await _graphiti_remote_handoff(task)
+
         from watercooler_mcp import memory as mem
 
         if not task.group_id:

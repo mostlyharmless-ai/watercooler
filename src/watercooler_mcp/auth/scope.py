@@ -85,8 +85,8 @@ class ResolvedScope:
 
     Attributes:
         user_id: Authenticated user identifier (never caller-supplied).
-        repo: Canonical "<org>/<repo>" — case-folded, ``.git`` and
-            ``-threads`` suffixes stripped.
+        repo: Canonical "<org>/<repo>" — case-folded, ``.git`` suffix
+            stripped.
         scope_id: ``f"{user_id}:{repo}"`` — audit token.
         project_group_id: T1 derivative, e.g.
             ``mostlyharmless_ai_watercooler_cloud``.
@@ -166,20 +166,16 @@ class ResolvedScope:
             )
 
 
-_STRIP_SUFFIXES = (".git", "-threads")
+_STRIP_SUFFIXES = (".git",)
 
 
 def _strip_suffixes(s: str) -> str:
-    """Strip ``.git`` and ``-threads`` repeatedly until a fixed point.
+    """Strip a trailing ``.git`` repeatedly until a fixed point.
 
-    Iteration matters because the suffixes can appear in either
-    order: ``"-threads.git"`` strips ``.git`` first then ``-threads``;
-    ``".git-threads"`` strips ``-threads`` first then ``.git``. A
-    single-pass implementation that checks each suffix once leaves
-    the inner suffix dangling on the second shape, producing two
-    different canonical forms for inputs that mean the same thing.
-    The fixed-point iteration is bounded by the input length, so
-    termination is guaranteed.
+    ``.git`` is git's clone-URL spelling; ``org/repo.git`` and
+    ``org/repo`` denote the same repo, so the suffix is trimmed before
+    any identity or namespace derivation. The fixed-point loop is bounded
+    by the input length, so termination is guaranteed.
     """
     while True:
         original = s
@@ -193,30 +189,27 @@ def _strip_suffixes(s: str) -> str:
 def canonical_repo(raw: str) -> str:
     """Canonicalise a repo identifier.
 
-    - Lower-cases the input first so suffix matching is
-      case-insensitive (a header value like ``Org/Repo.GIT`` must
-      collapse to ``org/repo`` just like ``org/repo.git`` does).
-    - Strips ``.git`` and ``-threads`` suffixes iteratively until a
-      fixed point so either ordering of the two suffixes produces
-      the same canonical form.
+    - Lower-cases the input first so matching is case-insensitive (a
+      header value like ``Org/Repo.GIT`` must collapse to ``org/repo``
+      just like ``org/repo.git`` does).
+    - Strips a trailing ``.git`` (git's clone-URL spelling) so
+      ``org/repo.git`` and ``org/repo`` resolve to the same identity.
 
-    The suffix strips run on the name segment when a ``/`` separator
-    is present, and on the whole string for bare slugs. Bare-slug
-    inputs and fully-qualified inputs do NOT share the same canonical
-    form (``"myrepo-threads"`` → ``"myrepo"``;
-    ``"org/myrepo-threads"`` → ``"org/myrepo"``); both bare-slug
-    forms are subsequently rejected by ``_build_scope``'s
-    org-prefix guard, so the security invariant holds at the
-    auth boundary regardless.
+    The ``.git`` strip runs on the name segment when a ``/`` separator
+    is present, and on the whole string for bare slugs. Bare-slug inputs
+    are subsequently rejected by ``_build_scope``'s org-prefix guard, so
+    the security invariant holds at the auth boundary regardless.
+
+    A repo name is otherwise used verbatim — no companion-repo suffix is
+    recognised or stripped (e.g. ``org/repo-threads`` stays
+    ``org/repo-threads``).
 
     Examples::
 
         MostlyHarmless-AI/Watercooler-Cloud.git → mostlyharmless-ai/watercooler-cloud
         Org/Repo.GIT → org/repo
-        org/repo-threads → org/repo
-        org/repo-threads.git → org/repo
-        org/repo.git-threads → org/repo
-        myrepo-threads.git → myrepo
+        org/repo-threads → org/repo-threads
+        MyRepo.git → myrepo
     """
     s = raw.strip().lower()
     if "/" in s:
@@ -370,10 +363,9 @@ def _build_scope(user_id: str, repo: str, source: str) -> ResolvedScope:
     # empty-input fallback, which would route writes to the shared
     # default ``"watercooler"`` namespace:
     #
-    # 1. ``""`` — input was entirely strippable suffixes (``"-threads"``,
-    #    ``".git"``).
+    # 1. ``""`` — input was entirely a strippable suffix (``".git"``).
     # 2. ``"<owner>/"`` or ``"/<name>"`` — one segment stripped empty
-    #    (``"org/-threads"``, ``"org/.git"``).
+    #    (``"org/.git"``).
     # 3. ``"<bare>"`` (no ``/``) — header missing the org prefix
     #    (``"myrepo"``). Hosted X-Repo MUST be ``<org>/<repo>``;
     #    accepting a bare slug would route the request to the
@@ -439,9 +431,8 @@ def _build_scope(user_id: str, repo: str, source: str) -> ResolvedScope:
     except ValueError as e:
         # ``__post_init__`` may reject an input that survived the
         # earlier guards — most concretely, ``canonical_repo`` returns
-        # ``""`` for inputs that consist entirely of strippable suffixes
-        # (``"-threads"``, ``".git"``, ``"org/-threads"``,
-        # ``"org/.git"``), which then trips the ``repo`` non-empty
+        # ``""`` for inputs that consist entirely of a strippable suffix
+        # (``".git"``, ``"org/.git"``), which then trips the ``repo`` non-empty
         # check. Same shape if ``derive_project_group_id`` returns
         # an empty string. Without this conversion the ``ValueError``
         # would escape the auth boundary as a 500/crash, because tool

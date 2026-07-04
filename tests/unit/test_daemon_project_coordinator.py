@@ -2032,6 +2032,80 @@ class TestStanceAdvisoryEmission:
 
 
 # ---------------------------------------------------------------------------
+# Role Salience Compiler: project_salience decoration on stance advisories
+# ---------------------------------------------------------------------------
+
+
+class TestStanceProjectSalience:
+    """project_salience decoration via .watercooler/roles.toml."""
+
+    def _stance_findings(self, findings):
+        return [f for f in findings if f.category == "stance_advisory"]
+
+    def _write_three_stalled_threads(self, threads_dir):
+        for i in range(3):
+            _write_graph_thread(
+                threads_dir,
+                f"stalled-{i}",
+                entries=[
+                    _entry(entry_type="Plan", index=0, entry_id=f"E{i}0"),
+                    _entry(entry_type="Note", index=1, entry_id=f"E{i}1"),
+                    _entry(entry_type="Note", index=2, entry_id=f"E{i}2"),
+                ],
+            )
+
+    def test_salience_decorates_elevated_advisory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        wc_dir = tmp_path / ".watercooler"
+        wc_dir.mkdir()
+        (wc_dir / "roles.toml").write_text(
+            '[roles.planner]\n'
+            'description = "Planner"\n'
+            'canonical_role = "planner"\n'
+            'project_salience = ["watch for stalled loops"]\n'
+        )
+        threads_dir = tmp_path / "threads"
+        self._write_three_stalled_threads(threads_dir)
+        daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
+        daemon._code_root = tmp_path
+        findings = daemon.tick()
+
+        stance = self._stance_findings(findings)
+        planner = [f for f in stance if f.topic == "stance:planner"]
+        assert len(planner) >= 1
+        assert planner[0].details["advisory"]["project_salience"] == (
+            "watch for stalled loops",
+        )
+
+    def test_malformed_roles_toml_falls_back_with_diagnostic(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "watercooler_mcp.daemons.state._DEFAULT_DAEMONS_DIR", tmp_path / "daemons"
+        )
+        wc_dir = tmp_path / ".watercooler"
+        wc_dir.mkdir()
+        (wc_dir / "roles.toml").write_text("not valid toml [[[")
+        threads_dir = tmp_path / "threads"
+        self._write_three_stalled_threads(threads_dir)
+        daemon = _make_daemon(tmp_path, threads_dir=threads_dir)
+        daemon._code_root = tmp_path
+        findings = daemon.tick()
+
+        diagnostics = [f for f in findings if f.category == "role_salience_diagnostic"]
+        assert len(diagnostics) == 1
+        assert diagnostics[0].details["effect"] == "stance_salience_disabled"
+        assert diagnostics[0].repo == str(tmp_path)  # scoped, not repo-leaking
+
+        stance = self._stance_findings(findings)
+        planner = [f for f in stance if f.topic == "stance:planner"]
+        assert len(planner) >= 1
+        assert planner[0].details["advisory"]["project_salience"] == ()
+
+
+# ---------------------------------------------------------------------------
 # P2.1: corpus signal transport (coordinator → stance)
 # ---------------------------------------------------------------------------
 

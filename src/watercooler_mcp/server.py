@@ -224,10 +224,8 @@ def _run_proxy(transport_config: dict, *, boot_cwd: Path | None = None) -> None:
         )
         sys.exit(1)
 
-    from fastmcp.client import Client
-    from fastmcp.client.transports import StreamableHttpTransport
     from fastmcp.server import create_proxy
-    from .premium_client import build_premium_headers
+    from .premium_client import build_premium_client, build_premium_headers
 
     # Resolve repo/branch for X-Repo / X-Branch headers.
     # The hosted endpoint needs these to scope thread operations.
@@ -241,8 +239,10 @@ def _run_proxy(transport_config: dict, *, boot_cwd: Path | None = None) -> None:
     header_info = ", ".join(f"{k}={v}" for k, v in headers.items()) or "no context"
     print(f"Starting Watercooler MCP Proxy → {url} ({header_info})", file=sys.stderr)
 
-    transport = StreamableHttpTransport(url, headers=headers, auth=api_key)
-    client = Client(transport)
+    # Shared builder bounds both the connect handshake and per-call reads (the
+    # config defaults are None == infinite). This client is disconnected at
+    # create_proxy, so the proxy builds a fresh session per request.
+    client = build_premium_client(url, headers, api_key)
     proxy = create_proxy(client, name="Watercooler Cloud (Proxy)")
     proxy.run()
 

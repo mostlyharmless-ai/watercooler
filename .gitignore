@@ -228,6 +228,7 @@ __marimo__/
 # Local watercooler threads produced during docs/testing
 .watercooler/*
 !.watercooler/roles.toml
+!.watercooler/config.toml
 
 # Additional coverage artifacts
 coverage/

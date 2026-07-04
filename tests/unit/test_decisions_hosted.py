@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 from watercooler_mcp.tools import decisions as decisions_mod
 from watercooler_mcp.tools.decisions import _list_decisions_impl
@@ -105,6 +106,23 @@ def _explode(*args, **kwargs):
     raise AssertionError(
         "hosted list_decisions path must not call local filesystem storage"
     )
+
+
+@pytest.fixture(autouse=True)
+def _decision_index_absent():
+    """Default every hosted test to the full-scan FALLBACK (no decisions index).
+
+    Since PR2, ``_list_decisions_hosted`` tries the repo-level decisions index
+    first. The existing tests in this module assert the legacy full-scan
+    behaviour, which is now the fallback — so default the index to absent.
+    The index fast-path is exercised explicitly in ``TestListDecisionsFromIndex``
+    (which re-patches this target to return records).
+    """
+    with patch(
+        "watercooler_mcp.hosted_ops.load_decision_index_hosted",
+        return_value=(None, None),
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +914,113 @@ class TestPrefixedEntryIds:
         assert payload["decisions"][0]["source"]["entry_id"] == PREFIXED_SRC_ULID
 
 
+class _SupersessionBackend:
+    """Minimal GraphitiBackend surface the hosted supersession path depends on.
+
+    Mirrors the contract in test_decisions_supersession.py: ``episode_uuids_for_entry``
+    never raises; ``get_edges_by_episodes`` returns edges whose ``episodes`` list
+    intersects the requested UUIDs.
+    """
+
+    def __init__(self, episodes_by_entry, edges):
+        self._episodes = episodes_by_entry
+        self._edges = edges
+        self.edge_queries: list[list[str]] = []
+
+    def episode_uuids_for_entry(self, entry_id):
+        return list(self._episodes.get(entry_id, []))
+
+    def get_edges_by_episodes(self, episode_uuids, limit=2000):
+        self.edge_queries.append(list(episode_uuids))
+        wanted = set(episode_uuids)
+        return [e for e in self._edges if wanted & set(e["episodes"])]
+
+
+def _sedge(episodes, invalid_at=None):
+    return {"episodes": list(episodes), "invalid_at": invalid_at, "fact": "x"}
+
+
+class TestListDecisionsHostedSupersession:
+    """The hosted server is co-located with its T2 (Railway runs FalkorDB next to
+    the MCP). ``include_supersession=True`` must therefore consult that T2 — not
+    hardcode ``unknown``. ``is_hosted_context`` means "list threads via GitHub
+    API", not "no T2". Regression for the ``hosted_no_t2`` stub from #894.
+    """
+
+    def _run(self, *, backend, **kwargs):
+        ctx = MagicMock()
+        with (
+            patch.object(
+                decisions_mod.validation,
+                "_require_context",
+                return_value=(None, _hosted_context()),
+            ),
+            patch(
+                "watercooler_mcp.hosted_ops.list_topic_dirs_hosted",
+                side_effect=_fake_list_topic_dirs_hosted,
+            ),
+            patch(
+                "watercooler_mcp.hosted_ops.load_all_entries_hosted",
+                side_effect=_fake_load_all_entries_hosted,
+            ),
+            patch(
+                "watercooler_mcp.hosted_ops.get_annotations_hosted",
+                side_effect=_fake_get_annotations_hosted,
+            ),
+            patch.object(
+                decisions_mod, "_acquire_graphiti_backend", return_value=backend
+            ) as acquire,
+        ):
+            result = _list_decisions_impl(ctx=ctx, code_path="", **kwargs)
+        return json.loads(result.content[0].text), acquire
+
+    def test_resolves_real_state_when_t2_present(self):
+        # The decision's episode carries one superseded fact edge → "superseded",
+        # NOT the old hardcoded "hosted_no_t2" unknown.
+        backend = _SupersessionBackend(
+            episodes_by_entry={DECISION_ENTRY["id"]: ["epD"]},
+            edges=[_sedge(["epD"], invalid_at="2026-05-01T00:00:00Z")],
+        )
+        payload, acquire = self._run(backend=backend, include_supersession=True)
+
+        assert payload["total"] == 1
+        supersession = payload["decisions"][0]["supersession"]
+        assert supersession["state"] == "superseded"
+        assert supersession["as_of"] == "2026-05-01T00:00:00Z"
+        assert supersession["reason"] != "hosted_no_t2"
+        # Acquire with NO code_path so http_ctx.repo (the tenant boundary) dominates
+        # the T2 DB derivation — a request can't steer reads into another tenant.
+        acquire.assert_called_once_with("")
+        assert backend.edge_queries == [["epD"]]
+
+    def test_in_force_when_t2_has_only_active_edges(self):
+        backend = _SupersessionBackend(
+            episodes_by_entry={DECISION_ENTRY["id"]: ["epD"]},
+            edges=[_sedge(["epD"])],  # no invalid_at → active
+        )
+        payload, _ = self._run(backend=backend, include_supersession=True)
+        assert payload["decisions"][0]["supersession"]["state"] == "in_force"
+
+    def test_unknown_when_no_t2_backend(self):
+        # A genuinely T2-less hosted surface (no FalkorDB) degrades to an honest
+        # unknown — but with reason "t2_unavailable", never a false in_force and
+        # never the misleading "hosted_no_t2".
+        payload, acquire = self._run(backend=None, include_supersession=True)
+
+        supersession = payload["decisions"][0]["supersession"]
+        assert supersession["state"] == "unknown"
+        assert supersession["reason"] == "t2_unavailable"
+        assert supersession["reason"] != "hosted_no_t2"
+        acquire.assert_called_once()
+
+    def test_backend_not_acquired_when_flag_off(self):
+        # Default listing stays a pure baseline read — no T2 acquisition, no
+        # supersession field.
+        payload, acquire = self._run(backend=None)
+        assert "supersession" not in payload["decisions"][0]
+        acquire.assert_not_called()
+
+
 class TestBareEntryIdHelper:
     """Direct unit coverage for the prefix-stripping helper."""
 
@@ -919,3 +1044,143 @@ class TestBareEntryIdHelper:
 
         assert _bare_entry_id("") == ""
         assert _bare_entry_id(None) == ""
+
+
+# ---------------------------------------------------------------------------
+# PR2: hosted reader fast-path (decisions index) + fallback
+# ---------------------------------------------------------------------------
+
+
+def _index_rec(**overrides):
+    """A decisions-index record for DECISION_ENTRY (source = SOURCE_ENTRY)."""
+    rec = {
+        "entry_id": DECISION_ENTRY["id"],
+        "topic": "feat-option-b",
+        "title": DECISION_ENTRY["title"],
+        "timestamp": DECISION_ENTRY["timestamp"],
+        "agent": "Claude",
+        "role": "implementer",
+        "confidence": 4,
+        "extracted": True,
+        "decision_origin": None,
+        "source": {
+            "entry_id": SOURCE_ENTRY["id"],
+            "topic": "feat-option-b",
+            "title": SOURCE_ENTRY["title"],
+            "timestamp": SOURCE_ENTRY["timestamp"],
+        },
+    }
+    rec.update(overrides)
+    return rec
+
+
+class TestListDecisionsFromIndex:
+    def _run(self, index_records, *, full_scan_forbidden=True, **impl_kwargs):
+        """Run _list_decisions_impl with the index present; by default assert
+        the full per-thread scan is NOT touched."""
+        ctx = MagicMock()
+        load_all = MagicMock(
+            side_effect=AssertionError("full scan must not run when index present")
+            if full_scan_forbidden
+            else _fake_load_all_entries_hosted
+        )
+        dirs = MagicMock(
+            side_effect=AssertionError("dir listing must not run when index present")
+            if full_scan_forbidden
+            else _fake_list_topic_dirs_hosted
+        )
+        with (
+            patch.object(
+                decisions_mod.validation,
+                "_require_context",
+                return_value=(None, _hosted_context()),
+            ),
+            patch(
+                "watercooler_mcp.hosted_ops.load_decision_index_hosted",
+                return_value=(None, index_records),
+            ),
+            patch(
+                "watercooler_mcp.hosted_ops.get_annotations_hosted",
+                side_effect=_fake_get_annotations_hosted,
+            ),
+            patch("watercooler_mcp.hosted_ops.load_all_entries_hosted", load_all),
+            patch("watercooler_mcp.hosted_ops.list_topic_dirs_hosted", dirs),
+        ):
+            result = _list_decisions_impl(ctx=ctx, code_path="", **impl_kwargs)
+        return json.loads(result.content[0].text), load_all, dirs
+
+    def test_uses_index_and_skips_full_scan(self):
+        payload, load_all, dirs = self._run([_index_rec()])
+        assert payload["total"] == 1
+        assert payload["meta"]["index_status"] == "used"
+        d = payload["decisions"][0]
+        assert d["entry_id"] == DECISION_ENTRY["id"]
+        assert d["source"]["entry_id"] == SOURCE_ENTRY["id"]
+        assert d["confidence"] == 4
+        assert d["extracted"] is True
+        # tags/xrefs are NOT in the index — live-fetched from annotations
+        assert d["tags"] == ["reviewed"]
+        assert d["xrefs"] == [SOURCE_ENTRY["id"]]
+        load_all.assert_not_called()
+        dirs.assert_not_called()
+
+    def test_cross_thread_source_resolved_from_index(self):
+        rec = _index_rec(
+            source={
+                "entry_id": SOURCE_ENTRY["id"],
+                "topic": "some-other-thread",
+                "title": "cross-thread source",
+                "timestamp": "2026-01-01T00:00:00Z",
+            }
+        )
+        payload, load_all, _ = self._run([rec])
+        # resolved without any entries fan-out
+        assert payload["decisions"][0]["source"]["topic"] == "some-other-thread"
+        load_all.assert_not_called()
+
+    def test_topic_filter_scopes_index(self):
+        other = _index_rec(entry_id="DECX000000000000000000000", topic="other-topic")
+        payload, _, _ = self._run([_index_rec(), other], topic="feat-option-b")
+        assert payload["total"] == 1
+        assert payload["decisions"][0]["topic"] == "feat-option-b"
+
+    def test_source_entry_id_filter_uses_index_source(self):
+        payload, _, _ = self._run(
+            [_index_rec()], source_entry_id=SOURCE_ENTRY["id"]
+        )
+        assert payload["total"] == 1
+        payload2, _, _ = self._run([_index_rec()], source_entry_id="NOPE")
+        assert payload2["total"] == 0
+
+    def test_supersession_applied_on_index_path(self):
+        # No T2 backend in the test env → honest "unknown", never a crash.
+        payload, _, _ = self._run([_index_rec()], include_supersession=True)
+        assert payload["total"] == 1
+        assert "supersession" in payload["decisions"][0]
+
+    def test_fallback_marks_index_status_missing(self):
+        # autouse fixture already returns (None, None) → full-scan fallback.
+        ctx = MagicMock()
+        with (
+            patch.object(
+                decisions_mod.validation,
+                "_require_context",
+                return_value=(None, _hosted_context()),
+            ),
+            patch(
+                "watercooler_mcp.hosted_ops.list_topic_dirs_hosted",
+                side_effect=_fake_list_topic_dirs_hosted,
+            ),
+            patch(
+                "watercooler_mcp.hosted_ops.load_all_entries_hosted",
+                side_effect=_fake_load_all_entries_hosted,
+            ),
+            patch(
+                "watercooler_mcp.hosted_ops.get_annotations_hosted",
+                side_effect=_fake_get_annotations_hosted,
+            ),
+        ):
+            result = _list_decisions_impl(ctx=ctx, code_path="")
+        payload = json.loads(result.content[0].text)
+        assert payload["meta"]["index_status"] == "missing"
+        assert payload["total"] == 1  # fallback still returns the decision

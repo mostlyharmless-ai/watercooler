@@ -31,6 +31,7 @@ from watercooler.pulse_stance_lib import (
 )
 
 from .base import BaseDaemon
+from .role_salience import RoleSalienceCache
 from .state import Finding, build_finding_id, load_findings
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,9 @@ class DecisionStanceDaemon(BaseDaemon):
         self._config = config or DecisionStanceConfig()
         self._threads_dir_override = threads_dir
         self._resolved_threads_dir: Path | None = None
+        self._code_root: Path | None = None
         self._scope_id: str = ""
+        self._role_salience_cache = RoleSalienceCache()
 
         # Dedup: finding_id -> already on disk
         self._existing_keys: set[str] = set()
@@ -147,6 +150,7 @@ class DecisionStanceDaemon(BaseDaemon):
 
             ctx = resolve_thread_context(Path.cwd())
             self._resolved_threads_dir = ctx.threads_dir
+            self._code_root = ctx.code_root
             try:
                 from watercooler.pulse_snapshot_lib import derive_repo_key
 
@@ -324,11 +328,19 @@ class DecisionStanceDaemon(BaseDaemon):
             recent_decisions_count=recent_decisions,
         )
 
+        project_salience_by_role, salience_diagnostic = self._role_salience_cache.resolve(
+            self._code_root, daemon_name=self.name, scope_id=self._scope_id
+        )
+
         findings: list[Finding] = []
+        if salience_diagnostic is not None:
+            findings.append(salience_diagnostic)
         levels: dict[str, int] = {}
         truncated_by_role: dict[str, bool] = {}
         for role in STANCE_ROLES:
-            advisory = pulse_to_stance(role, signals)
+            advisory = pulse_to_stance(
+                role, signals, project_salience_by_role.get(role, ())
+            )
             ids, truncated = resolve_decision_source_ids(
                 triggered_signals=advisory.triggered_signals,
                 detector_findings=detector_findings,

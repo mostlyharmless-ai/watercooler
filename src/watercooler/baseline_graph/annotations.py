@@ -43,6 +43,8 @@ VALID_KINDS = frozenset(
         "flag_clear",
         "xref",
         "xref_remove",
+        "xref_supersedes",
+        "xref_supersedes_remove",
         "pin",
         "unpin",
     }
@@ -88,6 +90,9 @@ class AnnotationState:
         tags: Unique tag names
         flags: List of flag records with agent, reason, timestamp
         xrefs: Entry IDs of referenced entries
+        xref_supersedes: Entry IDs of successors that supersede this entry — the
+            durable, append-only authored record of a ratified supersession
+            (earned-edge RFC P3). Presence flips a supersession badge afforded→solid.
         pinned: Whether the target is pinned
         last_touched: ISO 8601 timestamp of last annotation activity.
             .. deprecated:: Use ``last_activity`` from meta.json instead.
@@ -100,6 +105,7 @@ class AnnotationState:
     tags: List[str] = field(default_factory=list)
     flags: List[Dict[str, str]] = field(default_factory=list)
     xrefs: List[str] = field(default_factory=list)
+    xref_supersedes: List[str] = field(default_factory=list)
     pinned: bool = False
     last_touched: Optional[str] = None  # deprecated — use last_activity in meta.json
     vote_score: int = 0
@@ -124,6 +130,7 @@ class AnnotationState:
             tags=data.get("tags") or [],
             flags=data.get("flags") or [],
             xrefs=data.get("xrefs") or [],
+            xref_supersedes=data.get("xref_supersedes") or [],
             pinned=bool(data.get("pinned", False)),
             last_touched=data.get("last_touched"),
             vote_score=0 if raw_vote is None else raw_vote,
@@ -186,7 +193,12 @@ def _sync_annotations_to_meta(thread_dir: Path) -> None:
         meta_file = thread_dir / "meta.json"
         if meta_file.exists():
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
-            meta["annotations"] = {tid: s.to_dict() for tid, s in states.items()}
+            # Deterministic key order: a no-op re-materialization then yields a
+            # byte-identical meta.json, removing the spurious annotation-reorder
+            # churn that bloated diffs (bug-sync-worktree-poisoning #14).
+            meta["annotations"] = {
+                tid: states[tid].to_dict() for tid in sorted(states)
+            }
             storage.atomic_write_json(meta_file, meta)
     except Exception as e:
         logger.warning(f"Failed to sync annotations to meta.json: {e}")
@@ -302,6 +314,14 @@ def materialize_state(
         elif ev.kind == "xref_remove":
             if ev.value in state.xrefs:
                 state.xrefs.remove(ev.value)
+
+        elif ev.kind == "xref_supersedes":
+            if ev.value not in state.xref_supersedes:
+                state.xref_supersedes.append(ev.value)
+
+        elif ev.kind == "xref_supersedes_remove":
+            if ev.value in state.xref_supersedes:
+                state.xref_supersedes.remove(ev.value)
 
         elif ev.kind == "pin":
             state.pinned = True

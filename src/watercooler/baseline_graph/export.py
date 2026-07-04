@@ -188,6 +188,10 @@ def thread_to_node(thread: ParsedThread) -> Dict[str, Any]:
         "summary": thread.summary,
         "entry_count": thread.entry_count,
     }
+    # Preserve the summary schema version so a pipeline/export write does not strip it
+    # and cause every enrich(mode="missing") pass to re-regenerate a current summary.
+    if getattr(thread, "summary_schema_version", None) is not None:
+        node["summary_schema_version"] = thread.summary_schema_version
     # Include embedding if present (added by pipeline runner)
     if hasattr(thread, "embedding") and thread.embedding:
         node["embedding"] = thread.embedding

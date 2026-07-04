@@ -20,7 +20,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from . import storage
 
@@ -70,6 +70,14 @@ class GraphEntry:
     commit_refs: List[str] = None
     access_count: int = 0
     code_branch: Optional[str] = None
+    # Authority-ladder provenance (read-side mirror of EntryData; None on legacy /
+    # non-authority entries). Surfaced so agents can query who authorized a
+    # Decision/Closure instead of re-parsing body prose (#879).
+    actor_class: Optional[str] = None
+    decision_origin: Optional[str] = None
+    authority_basis: Optional[str] = None
+    source_entry_id: Optional[str] = None
+    human_authorized_by: Optional[str] = None
     # Annotation fields (populated from annotation_state, not entries.jsonl)
     tags: List[str] = field(default_factory=list)
     reactions: Dict[str, List[str]] = field(default_factory=dict)
@@ -166,6 +174,12 @@ def _node_to_entry(node: Dict[str, Any]) -> GraphEntry:
         commit_refs=node.get("commit_refs", []),
         access_count=node.get("access_count", 0),
         code_branch=node.get("code_branch"),
+        # Authority-ladder provenance (None when absent — legacy node shape)
+        actor_class=node.get("actor_class"),
+        decision_origin=node.get("decision_origin"),
+        authority_basis=node.get("authority_basis"),
+        source_entry_id=node.get("source_entry_id"),
+        human_authorized_by=node.get("human_authorized_by"),
         # Annotation fields (populated later from annotation_state)
         tags=node.get("_ann_tags", []),
         reactions=node.get("_ann_reactions", {}),
@@ -354,6 +368,32 @@ def get_entry_from_graph(
             return _node_to_entry(node)
 
     return None
+
+
+def get_entries_by_ids(
+    threads_dir: Path, topic: str, entry_ids: Iterable[str]
+) -> Dict[str, GraphEntry]:
+    """Resolve several entry ids from one thread in a single pass.
+
+    Avoids the O(N*M) rescan of calling :func:`get_entry_from_graph` per id (each call
+    re-reads the whole ``entries.jsonl``). Streams the thread once, keying by
+    ``entry_id`` (the same field :func:`get_entry_from_graph` matches on — note
+    ``storage.load_thread_entries_dict`` keys by ``id`` instead, which is not the same).
+    Returns ``{entry_id: GraphEntry}`` for the requested ids that exist; missing ids are
+    simply absent from the result.
+    """
+    wanted = set(entry_ids)
+    if not wanted:
+        return {}
+    graph_dir = get_graph_dir(threads_dir)
+    result: Dict[str, GraphEntry] = {}
+    for node in storage.load_thread_entries(graph_dir, topic):
+        eid = node.get("entry_id")
+        if eid in wanted and eid not in result:
+            result[eid] = _node_to_entry(node)
+            if len(result) == len(wanted):
+                break
+    return result
 
 
 def get_entries_range_from_graph(

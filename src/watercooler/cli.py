@@ -308,7 +308,9 @@ def _commit_and_push(
             print("watercooler sync: rebase/merge in progress, skipping commit", file=sys.stderr)
             return
 
-        stage_paths = paths_to_stage_for_topic(threads_dir, topic, include_missing=True)
+        stage_paths = paths_to_stage_for_topic(
+            threads_dir, topic, include_missing=True, include_decision_index=True
+        )
         if not stage_paths:
             return
         add = subprocess.run(
@@ -421,8 +423,80 @@ def main(argv: list[str] | None = None) -> None:
     p_handoff.add_argument("--role", default="pm", help="Agent role (default: pm)")
     p_handoff.add_argument("--note", help="Optional custom handoff message")
 
+    p_promote = sub.add_parser(
+        "promote-candidate",
+        help="Promote a candidate Note to a Decision, or a learning candidate to a durable lesson",
+    )
+    p_promote.add_argument("candidate_entry_id", help="ULID of the candidate Note to promote")
+    p_promote.add_argument("--topic", required=True, help="Thread topic the candidate lives on")
+    p_promote.add_argument(
+        "--target-type",
+        default="Decision",
+        choices=["Decision", "Learning"],
+        help="Target: Decision (decision candidate) or Learning (learning candidate "
+        "→ durable ## Lesson Note)",
+    )
+    p_promote.add_argument(
+        "--human-authorized-by",
+        required=True,
+        help="Identifier of the authorizing human (required — promotion is Level 3)",
+    )
+    p_promote.add_argument(
+        "--edit-decision-statement",
+        help="Replace the candidate's decision statement in the promoted Decision",
+    )
+    p_promote.add_argument(
+        "--edit-rationale",
+        help="Add a ## Rationale section to the promoted Decision",
+    )
+    p_promote.add_argument(
+        "--edit-scope",
+        help="Add a ## Scope section to the promoted Decision",
+    )
+    p_promote.add_argument("--threads-dir")
+    p_promote.add_argument("--agent", help="Agent name (defaults to Team)")
+    p_promote.add_argument("--role", default="implementer", help="Agent role (default: implementer)")
+    p_promote.add_argument("--agents-file", help="Agent registry JSON file")
+    p_promote.add_argument("--no-sync", action="store_true", help="Skip git commit+push")
+
     p_handoff.add_argument("--agents-file", help="Agent registry JSON file")
     p_handoff.add_argument("--no-sync", action="store_true", help="Skip git commit+push after write")
+
+    p_metric = sub.add_parser(
+        "orchestration-metric",
+        help=(
+            "Compute the Phase 6 orchestration-turn metric (candidate Note "
+            "emission, promotion volume, agent-authored Decision ratio, "
+            "coordination-pattern entry count) over a window."
+        ),
+    )
+    p_metric.add_argument("--threads-dir")
+    p_metric.add_argument(
+        "--window-days",
+        type=int,
+        default=None,
+        help="Window size in days, ending at --window-end (default: no start)",
+    )
+    p_metric.add_argument(
+        "--window-end",
+        default=None,
+        help="ISO-8601 end timestamp (default: now)",
+    )
+    p_metric.add_argument(
+        "--baseline-window-days",
+        type=int,
+        default=None,
+        help=(
+            "Compute a second baseline window for comparison. The baseline "
+            "ends just before --window-end minus --window-days."
+        ),
+    )
+    p_metric.add_argument(
+        "--output",
+        choices=["json", "markdown"],
+        default="markdown",
+        help="Output format (default: markdown)",
+    )
 
     p_list = sub.add_parser("list", help="List threads")
     p_list.add_argument("--threads-dir")
@@ -443,30 +517,6 @@ def main(argv: list[str] | None = None) -> None:
     p_unlock.add_argument("topic")
     p_unlock.add_argument("--threads-dir")
     p_unlock.add_argument("--force", action="store_true", help="Remove lock even if active")
-
-    p_check_branches = sub.add_parser("check-branches", help="Comprehensive audit of branch pairing")
-    p_check_branches.add_argument("--code-root", help="Path to code repository (default: current directory)")
-    p_check_branches.add_argument("--include-merged", action="store_true", help="Include fully merged branches")
-
-    p_check_branch = sub.add_parser("check-branch", help="Validate branch pairing for specific branch")
-    p_check_branch.add_argument("branch", help="Branch name to check")
-    p_check_branch.add_argument("--code-root", help="Path to code repository (default: current directory)")
-
-    p_merge_branch = sub.add_parser("merge-branch", help="Merge threads branch to main")
-    p_merge_branch.add_argument("branch", help="Branch name to merge")
-    p_merge_branch.add_argument("--code-root", help="Path to code repository (default: current directory)")
-    p_merge_branch.add_argument("--force", action="store_true", help="Skip safety checks")
-
-    p_archive_branch = sub.add_parser("archive-branch", help="Close OPEN threads, merge to main, then delete branch")
-    p_archive_branch.add_argument("branch", help="Branch name to archive")
-    p_archive_branch.add_argument("--code-root", help="Path to code repository (default: current directory)")
-    p_archive_branch.add_argument("--abandon", action="store_true", help="Set OPEN threads to ABANDONED status")
-    p_archive_branch.add_argument("--force", action="store_true", help="Skip confirmation prompts")
-
-    p_install_hooks = sub.add_parser("install-hooks", help="Install git hooks for branch pairing validation")
-    p_install_hooks.add_argument("--code-root", help="Path to code repository (default: current directory)")
-    p_install_hooks.add_argument("--hooks-dir", help="Git hooks directory (default: .git/hooks)")
-    p_install_hooks.add_argument("--force", action="store_true", help="Overwrite existing hooks")
 
     sub.add_parser("setup-stop-hook", help="Wire watercooler-stop-hook as a Stop hook")
 
@@ -824,6 +874,234 @@ def main(argv: list[str] | None = None) -> None:
         print(str(out))
         sys.exit(0)
 
+    if args.cmd == "promote-candidate":
+        from ulid import ULID
+        from .baseline_graph.writer import (
+            get_entries_for_thread,
+            get_entry_node_from_graph,
+        )
+        from .commands_graph import say as cg_say
+        from .decision_extraction import reverify_quotes_against_source
+        from .path_resolver import resolve_threads_dir
+        from .promotion import (
+            PromotionError,
+            build_promotion_authority_fields,
+            format_candidate_disposition_body,
+            parse_candidate_body,
+            plan_promotion,
+        )
+        from .agents import _load_agents_registry
+
+        threads_dir = resolve_threads_dir(args.threads_dir)
+        candidate_entry = get_entry_node_from_graph(
+            threads_dir, args.candidate_entry_id, args.topic
+        )
+        if candidate_entry is None:
+            print(
+                f"❌ promote-candidate: candidate {args.candidate_entry_id} "
+                f"not found on thread {args.topic!r}.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        candidate_body = candidate_entry.get("body", "") or ""
+
+        # Append-only candidate Notes never transition their own
+        # Candidate-Status marker; the double-promotion guards instead scan the
+        # thread for an existing CandidateDisposition Note or a prior promoted
+        # entry (#886) referencing this candidate. Load thread entries so the
+        # planner can do those checks.
+        try:
+            existing_thread_entries = list(
+                get_entries_for_thread(threads_dir, args.topic)
+            )
+        except (OSError, KeyError, ValueError) as exc:
+            # Fail closed: the double-promotion guards (disposition +
+            # promoted entry, #886) depend on this list, and a flaky read is
+            # exactly when a prior write may have half-failed. Refuse rather than
+            # risk a duplicate promoted entry.
+            print(
+                f"❌ promote-candidate: could not load thread entries to verify "
+                f"candidate {args.candidate_entry_id} was not already promoted "
+                f"({exc}). Promotion refused to avoid a duplicate promoted entry; "
+                f"retry once the thread graph is readable.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        edits: dict[str, str] = {}
+        if args.edit_decision_statement:
+            edits["decision_statement"] = args.edit_decision_statement
+        if args.edit_rationale:
+            edits["rationale"] = args.edit_rationale
+        if args.edit_scope:
+            edits["scope"] = args.edit_scope
+
+        meta = parse_candidate_body(
+            candidate_body, args.candidate_entry_id, args.topic
+        )
+        # #887 quote re-validation builds the §6 source/record_state warrant — a
+        # Decision-promotion concern. A learning candidate carries no Source-Entry
+        # and its promoted lesson renders no warrant, so skip it for learnings.
+        quote_verified = None
+        quote_reverification_reason = None
+        source_entry_type = None
+        if args.target_type == "Decision":
+            source_node = None
+            if meta.source_entry_id:
+                try:
+                    source_node = get_entry_node_from_graph(
+                        threads_dir, meta.source_entry_id
+                    )
+                except (OSError, KeyError, ValueError):
+                    # Unlike the double-promotion guard (which fails CLOSED), an
+                    # unreadable source only means the quotes can't be confirmed —
+                    # withhold source/record_state support and let the human-
+                    # authorized promotion proceed (quote_verified stays False).
+                    source_node = None
+            quote_reverification = reverify_quotes_against_source(
+                meta.evidence_quotes,
+                source_node.get("body") if source_node else None,
+            )
+            quote_verified = quote_reverification.verified
+            quote_reverification_reason = quote_reverification.reason
+            # Live source entry type — record_state must reflect what the source
+            # actually is, not the candidate's self-asserted marker (#887).
+            source_entry_type = source_node.get("entry_type") if source_node else None
+
+        try:
+            plan = plan_promotion(
+                candidate_body=candidate_body,
+                candidate_entry_id=args.candidate_entry_id,
+                candidate_topic=args.topic,
+                target_type=args.target_type,
+                human_authorized_by=args.human_authorized_by,
+                edits=edits or None,
+                existing_thread_entries=existing_thread_entries,
+                quote_verified=quote_verified,
+                quote_reverification_reason=quote_reverification_reason,
+                source_entry_type=source_entry_type,
+            )
+        except PromotionError as exc:
+            print(f"❌ promote-candidate: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+        registry = (
+            _load_agents_registry(args.agents_file)
+            if getattr(args, "agents_file", None)
+            else None
+        )
+
+        decision_entry_id = str(ULID())
+        out_decision = _cli_write_with_sync(
+            threads_dir,
+            args.topic,
+            f"promote-candidate ({args.target_type}): {args.topic} — {args.candidate_entry_id}",
+            lambda: cg_say(
+                args.topic,
+                threads_dir=threads_dir,
+                agent=args.agent,
+                role=args.role,
+                title=plan.decision_title,
+                entry_type=plan.decision_entry_type,
+                body=plan.decision_body,
+                registry=registry,
+                entry_id=decision_entry_id,
+                # Same queryable authority metadata as the MCP promote path so
+                # CLI-promoted Decisions are not invisible to decision_origin /
+                # human_authorized_by queries. actor_class is left unset: the CLI
+                # cannot honestly tell whether a human or a script invoked it.
+                authority_fields=build_promotion_authority_fields(
+                    human_authorized_by=args.human_authorized_by,
+                    source_entry_id=args.candidate_entry_id,
+                    target_type=args.target_type,
+                ),
+            ),
+            no_sync=args.no_sync,
+        )
+
+        # Build disposition body with the real Decision ID (reusing the candidate
+        # meta parsed above for quote re-validation).
+        disposition_body = format_candidate_disposition_body(
+            meta,
+            promoted_entry_id=decision_entry_id,
+            human_authorized_by=args.human_authorized_by,
+            promoted_kind=args.target_type,
+        )
+        disposition_entry_id = str(ULID())
+        out_disposition = _cli_write_with_sync(
+            threads_dir,
+            args.topic,
+            f"promote-candidate (Disposition): {args.topic} — {args.candidate_entry_id}",
+            lambda: cg_say(
+                args.topic,
+                threads_dir=threads_dir,
+                agent=args.agent,
+                role=args.role,
+                title=plan.disposition_title,
+                entry_type="Note",
+                body=disposition_body,
+                registry=registry,
+                entry_id=disposition_entry_id,
+            ),
+            no_sync=args.no_sync,
+        )
+
+        print(
+            f"✅ Promoted candidate {args.candidate_entry_id} to {args.target_type} on "
+            f"thread {args.topic!r}.\n"
+            f"{args.target_type} Entry-ID: {decision_entry_id}\n"
+            f"CandidateDisposition Entry-ID: {disposition_entry_id}\n"
+            f"Authorized by: {args.human_authorized_by}\n"
+            f"\n{args.target_type} write:\n{out_decision}\n"
+            f"\nDisposition write:\n{out_disposition}"
+        )
+        sys.exit(0)
+
+    if args.cmd == "orchestration-metric":
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        from .path_resolver import resolve_threads_dir
+        from .metrics.orchestration import (
+            compute_from_baseline_graph,
+            format_markdown_report,
+        )
+
+        threads_dir = resolve_threads_dir(args.threads_dir)
+        window_end = _dt.now(_tz.utc)
+        if args.window_end:
+            we = args.window_end
+            if we.endswith("Z"):
+                we = we[:-1] + "+00:00"
+            window_end = _dt.fromisoformat(we)
+            if window_end.tzinfo is None:
+                window_end = window_end.replace(tzinfo=_tz.utc)
+
+        window_start = None
+        if args.window_days is not None:
+            window_start = window_end - _td(days=args.window_days)
+
+        current = compute_from_baseline_graph(
+            threads_dir, window_start=window_start, window_end=window_end
+        )
+
+        baseline = None
+        if args.baseline_window_days is not None and window_start is not None:
+            baseline_end = window_start
+            baseline_start = baseline_end - _td(days=args.baseline_window_days)
+            baseline = compute_from_baseline_graph(
+                threads_dir,
+                window_start=baseline_start,
+                window_end=baseline_end,
+            )
+
+        if args.output == "json":
+            payload = {"current": current.to_dict()}
+            if baseline is not None:
+                payload["baseline"] = baseline.to_dict()
+            print(_json.dumps(payload, indent=2))
+        else:
+            print(format_markdown_report(current, baseline=baseline))
+        sys.exit(0)
+
     if args.cmd == "handoff":
         from ulid import ULID
         from .commands_graph import handoff
@@ -842,52 +1120,6 @@ def main(argv: list[str] | None = None) -> None:
             no_sync=args.no_sync,
         )
         print(str(out))
-        sys.exit(0)
-
-    if args.cmd == "check-branches":
-        from pathlib import Path
-        from .commands import check_branches
-
-        code_root = Path(args.code_root).resolve() if args.code_root else None
-        result = check_branches(code_root=code_root, include_merged=args.include_merged)
-        print(result)
-        sys.exit(0)
-
-    if args.cmd == "check-branch":
-        from pathlib import Path
-        from .commands import check_branch
-
-        code_root = Path(args.code_root).resolve() if args.code_root else None
-        result = check_branch(args.branch, code_root=code_root)
-        print(result)
-        sys.exit(0)
-
-    if args.cmd == "merge-branch":
-        from pathlib import Path
-        from .commands import merge_branch
-
-        code_root = Path(args.code_root).resolve() if args.code_root else None
-        result = merge_branch(args.branch, code_root=code_root, force=args.force)
-        print(result)
-        sys.exit(0)
-
-    if args.cmd == "archive-branch":
-        from pathlib import Path
-        from .commands import archive_branch
-
-        code_root = Path(args.code_root).resolve() if args.code_root else None
-        result = archive_branch(args.branch, code_root=code_root, abandon=args.abandon, force=args.force)
-        print(result)
-        sys.exit(0)
-
-    if args.cmd == "install-hooks":
-        from pathlib import Path
-        from .commands import install_hooks
-
-        code_root = Path(args.code_root).resolve() if args.code_root else None
-        hooks_dir = Path(args.hooks_dir).resolve() if args.hooks_dir else None
-        result = install_hooks(code_root=code_root, hooks_dir=hooks_dir, force=args.force)
-        print(result)
         sys.exit(0)
 
     if args.cmd == "setup-stop-hook":

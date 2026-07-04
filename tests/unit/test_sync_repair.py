@@ -212,3 +212,79 @@ class TestRepairPreservesLocalCommits:
 
         assert diagnose(wt).ahead == 1
         assert any("SKIPPED" in a for a in actions), actions
+
+
+# ============================================================================
+# repair() fast-forwards a behind-only worktree
+#
+# Regression for bug-sync-worktree-poisoning: a silently-behind worktree must
+# be healed by the manual tool, not reported as "No issues found".
+# ============================================================================
+
+
+class TestDiagnosticBehind:
+    def test_needs_repair_true_when_behind(self):
+        assert DiagnosticReport(behind=3, tracking="origin/main").needs_repair is True
+
+    def test_parity_state_behind_only(self):
+        assert (
+            DiagnosticReport(behind=3, tracking="origin/main").parity_state
+            == "behind_only"
+        )
+
+    def test_clean_in_parity_does_not_need_repair(self):
+        assert DiagnosticReport(tracking="origin/main").needs_repair is False
+
+
+def _push_remote_ahead(remote: Path, tmp_path: Path, msg: str = "remote-side commit") -> None:
+    """Add a commit to the bare remote via a second clone, so a worktree
+    tracking it becomes behind."""
+    other = tmp_path / "other_clone"
+    subprocess.run(["git", "clone", str(remote), str(other)], capture_output=True, check=True)
+    _git(other, "config", "user.email", "o@example.com")
+    _git(other, "config", "user.name", "Other")
+    (other / "remote.txt").write_text("from remote\n")
+    _git(other, "add", "remote.txt")
+    _git(other, "commit", "-m", msg)
+    _git(other, "push", "origin", "main")
+
+
+class TestRepairFastForwardsBehind:
+    def test_behind_only_fast_forwarded(self, synced_pair, tmp_path):
+        """repair() fetches + fast-forwards a behind-only worktree (no pre-fetch
+        needed by the operator)."""
+        wt, remote = synced_pair
+        _push_remote_ahead(remote, tmp_path)
+
+        actions = repair(wt)
+
+        assert any("Fast-forward pull" in a for a in actions), actions
+        assert "No issues found" not in actions
+        assert diagnose(wt).behind == 0
+        assert "remote-side commit" in _git(wt, "log", "--format=%s")
+
+    def test_behind_only_dry_run_previews_not_no_issues(self, synced_pair, tmp_path):
+        wt, remote = synced_pair
+        _push_remote_ahead(remote, tmp_path)
+        _git(wt, "fetch", "origin")  # dry-run reflects current known state
+
+        actions = repair(wt, dry_run=True)
+
+        assert any("Fast-forward pull" in a and "DRY RUN" in a for a in actions), actions
+        assert "No issues found" not in actions
+        # dry-run must not mutate
+        assert diagnose(wt).behind == 1
+
+    def test_diverged_not_fast_forwarded(self, synced_pair, tmp_path):
+        """Ahead+behind (diverged) is handled by the ahead-recovery path, not the
+        ff-only block — which must not fire when ahead > 0."""
+        wt, remote = synced_pair
+        _push_remote_ahead(remote, tmp_path)
+        _make_local_only_commit(wt, "local.txt", "local entry")
+        _git(wt, "fetch", "origin")
+        rep = diagnose(wt)
+        assert rep.ahead == 1 and rep.behind == 1
+
+        actions = repair(wt)
+        # The ff-only line must not claim a fast-forward on a diverged tree.
+        assert not any("Fast-forward pull" in a for a in actions), actions

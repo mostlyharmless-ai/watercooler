@@ -190,54 +190,9 @@ def _extract_repo_path(remote: Optional[str]) -> Optional[str]:
     return remote or None
 
 
-def _split_namespace_repo(slug: str) -> tuple[Optional[str], str]:
-    """Split repository slug into namespace and repo name.
-
-    Examples:
-    - "repo" -> (None, "repo")
-    - "org/repo" -> ("org", "repo")
-    - "group/subgroup/repo" -> ("group/subgroup", "repo")
-
-    Args:
-        slug: Repository slug (e.g., "org/repo")
-
-    Returns:
-        Tuple of (namespace, repo_name)
-    """
-    parts = [p for p in slug.split("/") if p]
-    if not parts:
-        return None, slug
-    if len(parts) == 1:
-        return None, parts[0]
-    namespace = "/".join(parts[:-1])
-    return namespace, parts[-1]
-
-
 # =============================================================================
 # Unified Repo Name and group_id Derivation
 # =============================================================================
-
-
-def get_threads_suffix() -> str:
-    """Get configured threads suffix, with fallback to default.
-
-    Priority:
-    1. WATERCOOLER_THREADS_SUFFIX env var
-    2. config.common.threads_suffix from TOML
-    3. Default: "-threads"
-
-    Returns:
-        The threads suffix string (e.g., "-threads")
-    """
-    env_suffix = os.getenv("WATERCOOLER_THREADS_SUFFIX")
-    if env_suffix is not None:
-        return env_suffix
-
-    try:
-        from .config_facade import config
-        return config.full().common.threads_suffix
-    except Exception:
-        return "-threads"
 
 
 def derive_code_repo_name(
@@ -271,54 +226,6 @@ def derive_code_repo_name(
     return None
 
 
-def derive_threads_repo_name(
-    code_repo_name: str,
-    suffix: Optional[str] = None
-) -> str:
-    """Derive threads repository name from code repo name.
-
-    Applies configured suffix (default: "-threads").
-
-    Args:
-        code_repo_name: The code repository name (e.g., "watercooler-cloud")
-        suffix: Override suffix (uses get_threads_suffix() if None)
-
-    Returns:
-        Threads repository name (e.g., "watercooler-cloud-threads")
-    """
-    if suffix is None:
-        suffix = get_threads_suffix()
-
-    if code_repo_name.endswith(suffix):
-        return code_repo_name  # Already has suffix
-
-    return f"{code_repo_name}{suffix}"
-
-
-def derive_code_repo_from_threads(
-    threads_name: str,
-    suffix: Optional[str] = None
-) -> str:
-    """Reverse derivation: extract code repo name from threads repo name.
-
-    Strips configured suffix (default: "-threads").
-
-    Args:
-        threads_name: The threads repository name (e.g., "watercooler-cloud-threads")
-        suffix: Override suffix (uses get_threads_suffix() if None)
-
-    Returns:
-        Code repository name (e.g., "watercooler-cloud")
-    """
-    if suffix is None:
-        suffix = get_threads_suffix()
-
-    if threads_name.endswith(suffix):
-        return threads_name[:-len(suffix)]
-
-    return threads_name  # No suffix to strip
-
-
 def derive_group_id(
     code_repo_name: Optional[str] = None,
     code_path: Optional[Path] = None,
@@ -336,7 +243,7 @@ def derive_group_id(
     Source priority:
     1. code_repo_name (if provided directly)
     2. Derived from code_path (if provided)
-    3. Reverse-derived from threads_dir (strips threads suffix)
+    3. Derived from threads_dir basename
 
     Sanitization rules (preserves established behavior from Jan 30 fix):
     - Replace hyphens with underscores
@@ -348,7 +255,7 @@ def derive_group_id(
     Args:
         code_repo_name: Direct code repo name (highest priority)
         code_path: Path to code repository (derives name from path)
-        threads_dir: Path to threads directory (reverse-derives code repo name)
+        threads_dir: Path to threads directory (uses basename as code repo name)
 
     Returns:
         Sanitized group_id suitable for FalkorDB database name
@@ -362,8 +269,7 @@ def derive_group_id(
 
     if not name and threads_dir:
         threads_path = Path(threads_dir) if isinstance(threads_dir, str) else threads_dir
-        threads_name = threads_path.name
-        name = derive_code_repo_from_threads(threads_name)
+        name = threads_path.name
 
     if not name:
         return "watercooler"  # Default fallback
@@ -439,12 +345,10 @@ def derive_repo_slug(
     if code_path is not None:
         target = Path(code_path)
     elif threads_dir is not None:
-        td = Path(threads_dir)
-        stem = td.name
-        if stem.endswith("-threads"):
-            stem = stem.removesuffix("-threads")
-        candidate = td.parent / stem
-        target = candidate if candidate.exists() else td.parent
+        # The threads directory is the orphan-branch worktree, a linked
+        # worktree of the code repo, so its ``origin`` remote is the code
+        # repo's remote — read the slug from it directly.
+        target = Path(threads_dir)
     if target is None:
         return None
 
@@ -615,51 +519,6 @@ def derive_t2_database_name(
     return f"{project_group_id}_t2"
 
 
-def _compose_threads_slug(code_repo: Optional[str], repo_root: Optional[Path]) -> Optional[str]:
-    """Compose threads repository slug from code repository info.
-
-    Appends configured threads suffix (default: "-threads") to repository name
-    if not already present.
-
-    Args:
-        code_repo: Code repository path (e.g., "org/repo")
-        repo_root: Code repository root directory
-
-    Returns:
-        Threads repository slug (e.g., "org/repo-threads")
-    """
-    suffix = get_threads_suffix()
-
-    if code_repo:
-        namespace, repo = _split_namespace_repo(code_repo)
-        repo_name = derive_threads_repo_name(repo, suffix)
-        if namespace:
-            return f"{namespace}/{repo_name}"
-        return repo_name
-
-    if repo_root:
-        return derive_threads_repo_name(repo_root.name, suffix)
-
-    return None
-
-
-def _compose_local_threads_path(base: Path, slug: str) -> Path:
-    """Compose local path for threads directory from slug.
-
-    Args:
-        base: Base directory
-        slug: Repository slug (e.g., "org/repo-threads")
-
-    Returns:
-        Resolved path combining base and slug parts
-    """
-    parts = [p for p in slug.split("/") if p]
-    path = base
-    for part in parts:
-        path = path / part
-    return _resolve_path(path)
-
-
 def _discover_worktree(repo_name: str) -> Optional[Path]:
     """Check if an orphan branch worktree exists for the given repo.
 
@@ -683,7 +542,7 @@ def resolve_threads_dir(
     cli_value: Optional[str] = None,
     code_root: Optional[Path] = None
 ) -> Path:
-    """Resolve threads directory with precedence: CLI > env > worktree > sibling.
+    """Resolve threads directory with precedence: CLI > env > worktree > local.
 
     Consolidates logic from watercooler/config.py and watercooler_mcp/config.py.
 
@@ -691,9 +550,7 @@ def resolve_threads_dir(
     1. CLI argument (if provided)
     2. WATERCOOLER_DIR environment variable
     3. Orphan branch worktree (~/.watercooler/worktrees/<repo>/)
-    4. Sibling directory (<repo-parent>/<repo-name>-threads)
-    5. <base>/<org>/<repo>-threads (using remote URL)
-    6. <base>/_local (fallback)
+    4. <base>/_local (fallback)
 
     Args:
         cli_value: Explicit directory from CLI argument
@@ -724,7 +581,6 @@ def resolve_threads_dir(
 
     git_info = discover_git_info(code_root)
     repo_root = git_info.root
-    remote = git_info.remote
 
     # 3. Orphan branch worktree (created by MCP server)
     if repo_root is not None:
@@ -736,54 +592,17 @@ def resolve_threads_dir(
             print(
                 f"watercooler: no orphan branch worktree found at {expected}. "
                 f"The MCP server creates this on first write. "
-                f"Falling back to legacy or local directory.",
+                f"Falling back to local directory.",
                 file=sys.stderr,
             )
 
     base = _default_threads_base(repo_root)
-    repo_slug = _extract_repo_path(remote)
-    threads_slug = _compose_threads_slug(repo_slug, repo_root)
 
-    # 4. Sibling <repo-parent>/<repo-name>-threads
-    if repo_root is not None:
-        threads_name = derive_threads_repo_name(repo_root.name)
-        sibling = (repo_root.parent / threads_name).resolve()
-        print(
-            f"Warning: Using legacy threads directory {sibling}. "
-            "Run watercooler via MCP server first to initialize the "
-            "orphan branch worktree.",
-            file=sys.stderr,
-        )
-        return sibling
-
-    # Otherwise use base + slug
-    if threads_slug:
-        threads_dir = _compose_local_threads_path(base, threads_slug)
-
-        # Never write threads inside the code repository
-        try:
-            if repo_root and threads_dir.is_relative_to(repo_root):
-                return (base / "_local").resolve()
-        except AttributeError:
-            # Python <3.9: emulate is_relative_to using relative_to()
-            if repo_root:
-                try:
-                    threads_dir.resolve().relative_to(repo_root.resolve())
-                    # If relative_to() succeeds, threads_dir is inside repo_root
-                    return (base / "_local").resolve()
-                except ValueError:
-                    # Not inside repo_root, continue
-                    pass
-        except ValueError:
-            return (base / "_local").resolve()
-
-        return threads_dir
-
-    # Fallback
+    # Fallback: no orphan branch worktree found, store locally.
     fallback = (base / "_local").resolve()
     print(
-        f"watercooler: could not resolve threads directory via git, worktree, "
-        f"or sibling. Using fallback: {fallback}. "
+        f"watercooler: could not resolve threads directory via git or worktree. "
+        f"Using fallback: {fallback}. "
         f"To fix: run from a git repo, set WATERCOOLER_DIR, or start the MCP server first.",
         file=sys.stderr,
     )

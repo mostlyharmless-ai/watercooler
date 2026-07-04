@@ -144,16 +144,14 @@ def _env_to_config_key(env_var: str) -> tuple[list[str], str]:
     Returns tuple of (section_path, key_name).
 
     Examples:
-        WATERCOOLER_THREADS_PATTERN -> (["common"], "threads_pattern")
+        WATERCOOLER_TEMPLATES -> (["common"], "templates_dir")
         WATERCOOLER_GIT_SSH_KEY -> (["mcp", "git"], "ssh_key")
         WATERCOOLER_ASYNC_SYNC -> (["mcp", "sync"], "async")
     """
     # Environment variable mapping
     ENV_MAPPING: Dict[str, tuple[list[str], str]] = {
         # Common
-        "WATERCOOLER_THREADS_PATTERN": (["common"], "threads_pattern"),
         "WATERCOOLER_TEMPLATES": (["common"], "templates_dir"),
-        "WATERCOOLER_THREADS_SUFFIX": (["common"], "threads_suffix"),
         # MCP core
         "WATERCOOLER_DIR": (["mcp"], "threads_dir"),
         "WATERCOOLER_THREADS_BASE": (["mcp"], "threads_base"),
@@ -226,9 +224,7 @@ def _apply_env_overlay(config_dict: Dict[str, Any]) -> Dict[str, Any]:
 
     # Known env vars to check
     env_vars = [
-        "WATERCOOLER_THREADS_PATTERN",
         "WATERCOOLER_TEMPLATES",
-        "WATERCOOLER_THREADS_SUFFIX",
         "WATERCOOLER_DIR",
         "WATERCOOLER_THREADS_BASE",
         "WATERCOOLER_AGENT",
@@ -408,6 +404,12 @@ def ensure_config_dir(user: bool = True, project_path: Optional[Path] = None) ->
 _cached_config: Optional[WatercoolerConfig] = None
 _cached_project_path: Optional[Path] = None
 _config_lock = threading.Lock()
+# Per-thread "currently loading" flag. _config_lock is a non-reentrant
+# threading.Lock, so a same-thread re-entry of get_config() while a load is in
+# flight blocks forever (issue #810). We detect that re-entry *before* taking
+# the lock and fail loud instead of hanging. An RLock would not be a fix: it
+# would let the re-entrant call return a half-initialized config.
+_loading = threading.local()
 
 
 def get_config(project_path: Optional[Path] = None, force_reload: bool = False) -> WatercoolerConfig:
@@ -422,6 +424,13 @@ def get_config(project_path: Optional[Path] = None, force_reload: bool = False) 
 
     Returns:
         Cached or newly loaded WatercoolerConfig
+
+    Raises:
+        RuntimeError: If called re-entrantly on the same thread while a config
+            load is already in progress — typically an import-time config access
+            triggered as a side effect of config validation (e.g. a Pydantic
+            validator that imports a module which loads config at import time).
+            Break the import cycle; do not retry.
     """
     global _cached_config, _cached_project_path
 
@@ -431,14 +440,31 @@ def get_config(project_path: Optional[Path] = None, force_reload: bool = False) 
     else:
         normalized_path = None
 
+    # Re-entrancy check must precede lock acquisition: a re-entrant call on the
+    # same thread would otherwise deadlock on the non-reentrant _config_lock
+    # held by the in-flight load, before reaching any guard inside it.
+    if getattr(_loading, "active", False):
+        raise RuntimeError(
+            "get_config() was re-entered on the same thread while a config load "
+            "was already in progress (issue #810). This is almost always an "
+            "import-time config access triggered during config validation — for "
+            "example a Pydantic validator importing a module whose top level calls "
+            "get_config(). Defer that config access past import time / break the "
+            "import cycle rather than retrying."
+        )
+
     with _config_lock:
         if (
             force_reload
             or _cached_config is None
             or _cached_project_path != normalized_path
         ):
-            _cached_config = load_config(project_path)
-            _cached_project_path = normalized_path
+            _loading.active = True
+            try:
+                _cached_config = load_config(project_path)
+                _cached_project_path = normalized_path
+            finally:
+                _loading.active = False
 
         return _cached_config
 

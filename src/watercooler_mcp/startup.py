@@ -550,9 +550,11 @@ def check_first_run() -> None:
 
         if not has_config:
             _add_startup_warning(
-                "No config file found. Create one to customize settings:\n"
-                "  uvx watercooler config init --user\n"
-                "Using built-in defaults for now."
+                "No config file found — using built-in defaults (this is fine to "
+                "start).\n"
+                "To set up a repository, ask your agent to call the watercooler_init "
+                "tool with your repo path; to check setup without changing anything, "
+                "watercooler_health detail=setup."
             )
     except Exception:
         # Don't let config check errors break server startup

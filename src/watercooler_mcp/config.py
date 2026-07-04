@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -13,6 +14,7 @@ except ImportError:  # pragma: no cover - Python <3.8 fallback
     import importlib_metadata  # type: ignore
 
 from watercooler.agents import _canonical_agent, _load_agents_registry
+from watercooler.lock import AdvisoryLock
 
 from .observability import log_debug, log_warning
 
@@ -162,7 +164,7 @@ def _select_push_remote(code_root: Path) -> Optional[str]:
     return None
 
 
-def _create_orphan_branch(code_root: Path) -> bool:
+def _create_orphan_branch(code_root: Path, push: bool = True) -> bool:
     """Create the orphan branch and bind its worktree.
 
     Returns True only when the worktree is a valid git worktree on the
@@ -170,6 +172,13 @@ def _create_orphan_branch(code_root: Path) -> bool:
     scaffold is rolled back and False is returned — callers never observe
     a scaffold-only directory. A failed *push* is non-fatal (the worktree
     is valid locally and entries sync on a later push).
+
+    Args:
+        push: When False, bind the worktree locally but skip publishing the
+            orphan branch to a remote. ``watercooler_init`` passes ``push=False``
+            so a brand-new repo with a (possibly public) ``origin`` is never
+            published without explicit, gated opt-in. The default ``True``
+            preserves the auto-publish behavior of the first-write path.
     """
     log_debug(f"CONFIG: Creating orphan branch '{ORPHAN_BRANCH_NAME}' in {code_root}")
     wt_path = _worktree_path_for(code_root)
@@ -235,6 +244,12 @@ def _create_orphan_branch(code_root: Path) -> bool:
     # forked/migrated between hosts commonly have origin + upstream, and a
     # bare push is ambiguous. A failed push is non-fatal: the worktree is
     # valid locally and entries sync on a later push.
+    if not push:
+        log_debug(
+            f"CONFIG: orphan branch '{ORPHAN_BRANCH_NAME}' created local-only "
+            f"in {wt_path} — push suppressed (opt-in deferred to caller)"
+        )
+        return True
     remote = _select_push_remote(code_root)
     if remote is None:
         log_warning(
@@ -264,8 +279,8 @@ def _find_existing_worktree_on_branch(
     Parses ``git worktree list --porcelain`` to find checkouts of ``branch``.
     Returns the first matching worktree path that is NOT ``code_root`` itself.
 
-    Used by :func:`_ensure_worktree` to detect a legacy ``_local`` worktree
-    that needs to be migrated to the canonical location.
+    Used by :func:`_ensure_worktree` to detect an orphan-branch worktree
+    checked out at an unexpected (non-canonical) location.
     """
     out = _run_git(["worktree", "list", "--porcelain"], code_root)
     if not out:
@@ -288,86 +303,108 @@ def _find_existing_worktree_on_branch(
     return None
 
 
-def _migrate_legacy_local_worktree(
-    code_root: Path,
-    existing: Path,
-    canonical: Path,
-) -> bool:
-    """Migrate an existing legacy worktree at ``existing`` to ``canonical``.
+# Per-repo locks serializing orphan-worktree CREATION. One MCP server serves
+# many repos concurrently (daemons + tool calls run in threads); without this,
+# two concurrent first-writes to the SAME repo race in `git worktree add` /
+# orphan-branch bootstrap — one fails, and the resolver falls back to
+# `<repo>/_local` (the spurious local-only fallback operators hit in concurrent
+# multi-repo use). Keyed by the canonical worktree path, so different repos take
+# different locks and never contend.
+#
+# Two layers: an in-process threading.Lock (cheap, serializes this server's own
+# threads) plus a best-effort cross-process file lock (AdvisoryLock) so a write
+# from ANOTHER process — e.g. a `watercooler` CLI run alongside the server —
+# can't race first-creation of the same repo either.
+_WORKTREE_CREATE_LOCKS: Dict[str, threading.Lock] = {}
+_WORKTREE_CREATE_LOCKS_GUARD = threading.Lock()
 
-    Uses ``git worktree move`` so git's registry stays consistent. Returns
-    True on success, False on any failure (logged); on False the caller
-    should NOT assume the worktree is at the canonical path.
+# Creation is a few git ops; a crashed creator's stale lock clears via TTL.
+_WORKTREE_CREATE_LOCK_TTL_SECONDS = 120
+_WORKTREE_CREATE_LOCK_TIMEOUT_SECONDS = 30
 
-    Pre-conditions verified by the caller (only call when the branch is
-    confirmed to be ``ORPHAN_BRANCH_NAME`` and ``existing`` is a real
-    git worktree). Per bug report
-    ``bug-threads-resolver-cwd-fallback-cross-repo-contamination`` /
-    GH issue #837.
+
+def _worktree_create_lock(code_root: Path) -> threading.Lock:
+    """Return the in-process creation lock for ``code_root``'s worktree path."""
+    key = str(_worktree_path_for(code_root))
+    with _WORKTREE_CREATE_LOCKS_GUARD:
+        lock = _WORKTREE_CREATE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WORKTREE_CREATE_LOCKS[key] = lock
+        return lock
+
+
+def _acquire_create_filelock(wt_path: Path) -> Optional[AdvisoryLock]:
+    """Best-effort cross-process lock around worktree creation.
+
+    The lock file sits beside the worktree under ``WORKTREE_BASE`` (the worktree
+    dir itself doesn't exist yet during creation). Returns the held lock, or
+    ``None`` if it couldn't be acquired.
+
+    NEVER raises and never blocks resolution indefinitely: on timeout, stale
+    break failure, or any error it returns ``None`` and creation proceeds —
+    git's own atomicity and the in-lock existence double-check still guard the
+    common cases. Lock infrastructure must never turn a resolvable repo into a
+    ``_local`` fallback.
     """
-    canonical.parent.mkdir(parents=True, exist_ok=True)
-    # `git worktree move` refuses to write into an existing path (whether
-    # empty or not — it wants to create the dir itself). Handle each
-    # subcase deliberately:
-    #
-    #   - canonical is a real git worktree (has .git): something else
-    #     created it; refuse to overwrite (this is an unexpected state
-    #     that the operator should investigate, not auto-clean).
-    #   - canonical is a stale scaffold (exists but no .git): a prior
-    #     failed bootstrap left files behind. Clear it — matches the
-    #     same recovery pattern in `_create_orphan_branch` (lines
-    #     188-190). This is the case the PR #838 reviewer flagged as
-    #     blocking legacy users from migrating.
-    #   - canonical is an empty dir: rmdir.
-    if canonical.exists():
-        if (canonical / ".git").exists():
-            log_warning(
-                f"CONFIG: cannot migrate {existing} -> {canonical}: "
-                f"canonical target is already a git worktree. Investigate "
-                f"(unexpected state — _ensure_worktree should have taken "
-                f"the fast path before calling migrate)."
-            )
-            return False
-        # Stale scaffold or non-empty non-git dir — same recovery
-        # pattern as _create_orphan_branch.
+    try:
+        lock_path = wt_path.parent / f"{wt_path.name}.create.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock = AdvisoryLock(
+            lock_path,
+            ttl=_WORKTREE_CREATE_LOCK_TTL_SECONDS,
+            timeout=_WORKTREE_CREATE_LOCK_TIMEOUT_SECONDS,
+        )
+        if lock.acquire():
+            return lock
         log_debug(
-            f"CONFIG: clearing stale scaffold at {canonical} before " f"worktree move"
+            f"CONFIG: worktree-create file lock not acquired for {wt_path} "
+            f"(another process creating?); proceeding best-effort"
         )
-        shutil.rmtree(canonical, ignore_errors=True)
-        # rmtree on a real path leaves the parent intact; canonical is
-        # now gone.
-    result = _run_git(
-        ["worktree", "move", str(existing), str(canonical)],
-        code_root,
-    )
-    if result is None:
-        log_warning(
-            f"CONFIG: `git worktree move {existing} {canonical}` failed; "
-            f"the orphan-branch worktree remains at the legacy location"
+        return None
+    except Exception as e:  # never let lock infra block resolution
+        log_debug(
+            f"CONFIG: worktree-create file lock unavailable ({e}); "
+            f"proceeding best-effort"
         )
-        return False
-    log_debug(
-        f"CONFIG: migrated legacy worktree {existing} -> {canonical} "
-        f"(canonical orphan-branch location)"
-    )
-    return True
+        return None
 
 
-def _ensure_worktree(code_root: Path) -> Optional[Path]:
+def _ensure_worktree(code_root: Path, push: bool = True) -> Optional[Path]:
     """Ensure the orphan branch worktree exists, creating it if needed.
+
+    Args:
+        push: Forwarded to :func:`_create_orphan_branch` on first creation.
+            ``False`` binds the worktree locally without publishing to a
+            remote (used by ``watercooler_init``); the default ``True``
+            preserves the first-write auto-publish behavior.
 
     Returns:
         Path to the worktree directory, or None if creation failed.
 
-    Handles the legacy ``<code_root>/_local`` collision case (bug
-    ``bug-threads-resolver-cwd-fallback-cross-repo-contamination``,
-    GH #837): if the orphan branch is already checked out at
-    ``<code_root>/_local`` (pre-canonical-path setup), migrate it to
-    the canonical location via ``git worktree move`` rather than
-    silently failing.
+    Creation is serialized per repo so two concurrent first-writes to the same
+    repo can't race ``git worktree add`` into a failure that degrades to
+    ``<repo>/_local``: an in-process lock (``_worktree_create_lock``) serializes
+    this server's threads, and a best-effort cross-process file lock
+    (``_acquire_create_filelock``) serializes against other processes (e.g. a
+    CLI write). The double-check inside the lock returns the worktree a sibling
+    just created. The create locks are fully released before the write path
+    acquires its own worktree lock — no lock-ordering hazard.
     """
     wt_path = _worktree_path_for(code_root)
+    with _worktree_create_lock(code_root):
+        fs_lock = _acquire_create_filelock(wt_path)
+        try:
+            return _ensure_worktree_locked(code_root, wt_path, push=push)
+        finally:
+            if fs_lock is not None:
+                fs_lock.release()
 
+
+def _ensure_worktree_locked(
+    code_root: Path, wt_path: Path, push: bool = True
+) -> Optional[Path]:
+    """Worktree existence-check + creation, run under the per-repo lock."""
     # Check if worktree already exists and is valid
     if wt_path.exists() and (wt_path / ".git").exists():
         # Verify it's on the right branch
@@ -401,39 +438,25 @@ def _ensure_worktree(code_root: Path) -> Optional[Path]:
     #    refuse / use-as-is BEFORE attempting create-or-add.
     existing = _find_existing_worktree_on_branch(code_root, ORPHAN_BRANCH_NAME)
     if existing is not None:
-        legacy_local = (code_root / "_local").resolve()
-        try:
-            existing_resolved = existing.resolve()
-        except OSError:
-            existing_resolved = existing
-        if existing_resolved == legacy_local:
-            # Known migration case: move to canonical and continue.
-            if _migrate_legacy_local_worktree(code_root, existing, wt_path):
-                if wt_path.exists() and (wt_path / ".git").exists():
-                    return wt_path
-            # Migration failed — fall through to the same return-None
-            # path so the resolver's structural guard handles it (NEVER
-            # fall back to Path.cwd()).
-            return None
-        else:
-            # Unexpected location — operator-attention case. Don't
-            # silently fall back; the resolver's Bug-C structural guard
-            # produces a warning-loud in-repo fallback when this returns
-            # None.
-            log_warning(
-                f"CONFIG: orphan branch '{ORPHAN_BRANCH_NAME}' already "
-                f"checked out at {existing} (expected canonical "
-                f"{wt_path} or legacy {legacy_local}). Refusing to "
-                f"silently fall back; manually `git worktree move` "
-                f"or `git worktree remove` the unexpected checkout."
-            )
-            return None
+        # The orphan branch is checked out somewhere other than the
+        # canonical path (the canonical fast-path above already returned).
+        # Operator-attention case: don't silently fall back; the resolver's
+        # Bug-C structural guard produces a warning-loud in-repo fallback
+        # when this returns None.
+        log_warning(
+            f"CONFIG: orphan branch '{ORPHAN_BRANCH_NAME}' already "
+            f"checked out at {existing} (expected canonical "
+            f"{wt_path}). Refusing to silently fall back; manually "
+            f"`git worktree move` or `git worktree remove` the "
+            f"unexpected checkout."
+        )
+        return None
 
     # No existing worktree on the branch. Check if the branch itself
     # exists (as a born ref). If not, bootstrap it.
     if not _orphan_branch_exists(code_root):
         try:
-            _create_orphan_branch(code_root)
+            _create_orphan_branch(code_root, push=push)
         except Exception as e:
             log_debug(f"CONFIG: Failed to create orphan branch: {e}")
             return None
@@ -554,19 +577,39 @@ def resolve_thread_context(code_root: Optional[Path] = None) -> ThreadContext:
             # effective_root so writes stay inside the repo they were meant
             # for.
             fallback_local = _resolve_path(effective_root / "_local")
-            log_warning(
-                f"CONFIG: Orphan worktree creation failed for "
-                f"{effective_root}; threads will be stored at {fallback_local}. "
-                f"New writes will NOT be synced to the remote until the "
-                f"orphan branch is configured. Check git permissions and retry."
-            )
-            from .helpers import _add_startup_warning
+            if git_details.root is not None:
+                # effective_root IS a git repo whose orphan worktree could not be
+                # created (auth / permissions / lock). This is a genuine degraded
+                # write target — writes to THIS repo really won't sync — so warn
+                # loudly and surface a startup notice.
+                log_warning(
+                    f"CONFIG: Orphan worktree creation failed for "
+                    f"{effective_root}; threads will be stored at {fallback_local}. "
+                    f"New writes will NOT be synced to the remote until the "
+                    f"orphan branch is configured. Check git permissions and retry."
+                )
+                from .helpers import _add_startup_warning
 
-            _add_startup_warning(
-                f"Worktree creation failed for {effective_root} — threads "
-                f"will be stored at {fallback_local} (local-only). New writes "
-                f"will NOT be synced to the remote."
-            )
+                _add_startup_warning(
+                    f"Worktree creation failed for {effective_root} — threads "
+                    f"will be stored at {fallback_local} (local-only). New writes "
+                    f"will NOT be synced to the remote."
+                )
+            else:
+                # effective_root is NOT a git repository — e.g. a daemon resolving
+                # a default/"primary" threads dir from the server's launch CWD when
+                # that CWD is a parent directory holding several cloned repos. There
+                # is no repo to back threads at this path, but this is NOT a write
+                # target: every real write carries its own code_path and resolves to
+                # WORKTREE_BASE/<repo> correctly. The old "writes will NOT be synced"
+                # startup notice was therefore false and alarming here — downgrade to
+                # a debug log. No _local directory is created unless something
+                # actually writes through this context.
+                log_debug(
+                    f"CONFIG: {effective_root} is not a git repository — no default "
+                    f"threads context here; real writes resolve per code_path "
+                    f"(WORKTREE_BASE/<repo>). Not a sync failure."
+                )
             threads_dir = fallback_local
 
     # =========================================================================

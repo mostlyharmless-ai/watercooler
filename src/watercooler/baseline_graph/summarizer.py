@@ -10,9 +10,39 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from watercooler.constants import ENTRY_TYPES
 from watercooler.memory_config import is_anthropic_url, AUTH_SKIP_SENTINELS
 
 logger = logging.getLogger(__name__)
+
+# Thread-summary schema version. Bump when the summary-generation contract changes in a
+# way that should invalidate previously stored summaries. v2 (#878) adds the schema-aware
+# authority-language guard; v1 summaries are laundering-prone and are treated as stale so
+# enrichment/recovery paths regenerate them. v3 (#902/#788) replaces the OAuth2/JWT
+# few-shot example and adds the security-fabrication grounding guard; v2 summaries can
+# carry the fabricated-auth bleed and are treated as stale.
+SUMMARY_SCHEMA_VERSION = 3
+
+
+def summary_is_stale(meta: Dict[str, Any]) -> bool:
+    """True if a thread's stored summary predates the current summary schema.
+
+    Args:
+        meta: Thread meta dict, which may carry ``summary_schema_version``. A missing or
+            unparseable version is treated as v1 (pre-#878), hence stale.
+    """
+    raw = meta.get("summary_schema_version", 1)
+    # Accept only genuine ints (bool is an int subclass but never a valid version).
+    # Anything missing or malformed (str/float/bool/None) is treated as stale so the
+    # summary is regenerated rather than silently blessed as current.
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return True
+    return raw < SUMMARY_SCHEMA_VERSION
+
+
+def stamp_summary_version(meta: Dict[str, Any]) -> None:
+    """Record that ``meta['summary']`` was generated under the current summary schema."""
+    meta["summary_schema_version"] = SUMMARY_SCHEMA_VERSION
 
 
 def _get_default_api_base() -> str:
@@ -71,9 +101,12 @@ class SummarizerConfig:
     summary_prompt: str = field(default_factory=_get_default_summary_prompt)
     thread_summary_prompt: str = field(default_factory=_get_default_thread_summary_prompt)
 
-    # Few-shot example for format compliance
-    summary_example_input: str = "Implemented OAuth2 authentication with JWT tokens. Added refresh token rotation and secure cookie storage."
-    summary_example_output: str = "OAuth2 authentication implemented with JWT tokens, refresh rotation, and secure cookie storage.\ntags: #authentication #OAuth2 #JWT #security"
+    # Few-shot example for format compliance. Deliberately neutral (a refactor,
+    # not auth): the prior OAuth2/JWT example bled its subject matter into
+    # unrelated security-themed summaries on weak local models (#902/#788). Keep
+    # it domain-free so any residual contamination is harmless.
+    summary_example_input: str = "Refactored the date-parsing helper to accept ISO-8601 offsets and added unit tests for the boundary cases."
+    summary_example_output: str = "Refactored the date-parsing helper to accept ISO-8601 offsets, with new boundary-case unit tests.\ntags: #refactor #date-parsing #tests"
 
     # Extractive fallback settings
     extractive_max_chars: int = 200
@@ -489,6 +522,7 @@ def _build_summary_messages(
     entry_title: Optional[str],
     entry_type: Optional[str],
     config: SummarizerConfig,
+    grounding_guard: str = "",
 ) -> List[Dict[str, str]]:
     """Build chat messages for summarization with model-aware prompting.
 
@@ -545,6 +579,12 @@ def _build_summary_messages(
             f"\nExample input:\n\"{config.summary_example_input}\"\n\n"
             f"Example output:\n{config.summary_example_output}"
         )
+
+    # Grounding constraint (#902/#788): the example above is format-only; stay
+    # strictly within the entry text and invent no mechanisms not present.
+    user_prompt_parts.append(f"\n{_ENTRY_GROUNDING_CLAUSE}")
+    if grounding_guard:
+        user_prompt_parts.append(grounding_guard)
 
     # Add the actual entry to summarize
     if context:
@@ -608,7 +648,349 @@ def summarize_entry(
         )
         return ""
 
+    # Grounding guard (#902/#788): if the summary names an auth/credential mechanism
+    # absent from the entry (few-shot bleed / topic extrapolation), regenerate once
+    # with a hardened grounding instruction, then fall back to the deterministic
+    # extractive summary (which can only contain source text, so it cannot fabricate).
+    source = f"{entry_title or ''}\n{entry_body}"
+    if _fabricates_security(result, source):
+        logger.info(
+            "Entry summary named an ungrounded security mechanism; regenerating "
+            "with hardened grounding guard"
+        )
+        hardened = _build_summary_messages(
+            entry_body, entry_title, entry_type, config,
+            grounding_guard=_HARDENED_GROUNDING_GUARD,
+        )
+        retry = _call_llm(hardened, config)
+        if retry and not _fabricates_security(retry, source):
+            result = retry
+        else:
+            result = extractive_summary(
+                entry_body,
+                max_chars=config.extractive_max_chars,
+                include_headers=config.include_headers,
+                max_headers=config.max_headers,
+            )
+
     return result
+
+
+# Catch-all bucket for entries whose type cannot be resolved to a known type.
+UNKNOWN_ENTRY_TYPE = "Unknown"
+_ENTRY_TYPE_LOOKUP = {t.lower(): t for t in ENTRY_TYPES}
+# Types that grant decision/outcome language permission. These may only be assigned
+# from graph-sourced entry_type/type fields, never inferred from untrusted body prose.
+_AUTHORITY_ENTRY_TYPES = frozenset({"Decision", "Closure"})
+
+# Thread-level authority assertions. These target claims that *the thread reached*
+# a decision or outcome, not any mention of the tokens "decision"/"resolved" (a Note
+# may legitimately reference a prior decision). Only consulted when the summary window
+# contains zero Decision / zero Closure entries, and only to trigger a deterministic
+# regenerate-or-extractive fallback - never to rewrite prose in place.
+_DECISION_ASSERTION_RE = re.compile(
+    r"\b("
+    r"key decisions?"
+    r"|decisions?\s+(?:include|includes|are|were|made|reached|taken)"
+    r"|(?:we|the team|the group|participants?)\s+decided"
+    r"|decided\s+(?:to|that|on)"
+    # Singular/label/passive forms. "the decision is/was ...", "a decision was made",
+    # "a decision has been reached", "the decision has been made" are all assertions;
+    # "the prior decision to defer" (a reference) is deliberately not matched because
+    # "the decision to" requires neither is/was nor a passive made/reached verb.
+    r"|the\s+decision\s+(?:is|was)"
+    r"|(?:a|an|the)\s+decision\s+(?:was|were|is|has\s+been|have\s+been|had\s+been)"
+    r"\s+(?:made|reached|taken|agreed|approved|finalized)"
+    r"|decision:"
+    r")",
+    re.IGNORECASE,
+)
+_OUTCOME_ASSERTION_RE = re.compile(
+    r"\b("
+    r"the\s+outcome\s+(?:is|was|of)"
+    r"|outcome:"
+    r"|the\s+resolution\s+(?:is|was)"
+    r"|resolution:"
+    # Thread-level "resolved" only. A bare "X was resolved" matches ordinary factual
+    # Notes ("the merge conflict was resolved by rebasing"), so it is deliberately
+    # excluded; the subject must be the thread/discussion itself.
+    r"|the\s+(?:thread|discussion|debate)\s+(?:was|is|has\s+been)\s+resolved"
+    r"|reached\s+(?:a\s+)?(?:consensus|resolution|conclusion)"
+    r")",
+    re.IGNORECASE,
+)
+
+_HARDENED_AUTHORITY_GUARD = (
+    "IMPORTANT: the previous summary implied decisions or outcomes this thread does not "
+    "contain. Re-summarize strictly as discussion or analysis. Do not use the words "
+    '"decision", "decided", "outcome", "resolved", or "resolution" in any form.'
+)
+
+# Grounding (#902/#788): the few-shot example demonstrates FORMAT only. Weak local
+# models can echo its subject matter or extrapolate generic mechanisms (e.g. invent
+# "OAuth2/JWT auth" for a security-themed entry with no auth code), which is
+# especially dangerous for security topics. This clause is appended to every summary
+# prompt; the deterministic detector below is the backstop.
+_GROUNDING_CLAUSE = (
+    "Summarize ONLY what the source text explicitly states. Do not introduce "
+    "technologies, protocols, frameworks, or security mechanisms (authentication "
+    "schemes, tokens, etc.) that are not literally present in it."
+)
+# Entry prompts carry a few-shot example, so they also warn against echoing it.
+_ENTRY_GROUNDING_CLAUSE = (
+    "The example above illustrates output format only — ignore its subject matter. "
+    + _GROUNDING_CLAUSE
+)
+
+_HARDENED_GROUNDING_GUARD = (
+    "IMPORTANT: the previous summary named a technology or security mechanism that "
+    "does not appear in the entry text. Re-summarize using ONLY terms present in the "
+    "entry. Do not mention any authentication scheme, token, or protocol unless the "
+    "entry itself names it."
+)
+
+# Credential/auth-mechanism vocabulary whose *fabrication* (present in the summary but
+# absent from the source text) is the observed, dangerous failure mode (#902/#788).
+# A grounded summary whose source actually contains the term never trips this — the
+# detector fires only on terms missing from the source. The broad terms
+# (authentication/authorization) can over-fire on a legitimate permissions thread that
+# paraphrases (summary "authorization", source "permission") — that regenerates and, if
+# still ungrounded, falls back to grounded extractive prose, so it trades a little
+# summary polish for never asserting an auth control that isn't there.
+_SECURITY_FABRICATION_RE = re.compile(
+    r"\b("
+    r"oauth\s?2?|jwt|json\s+web\s+tokens?|saml|sso|oidc|openid(?:\s+connect)?"
+    r"|mfa|2fa|two[-\s]factor|multi[-\s]factor"
+    r"|refresh\s+tokens?|access\s+tokens?|bearer\s+tokens?|session\s+tokens?"
+    r"|secure\s+cookies?|authentication|authorization|authenticate"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+# Negation cue immediately preceding a term, so a source that says "no JWT" /
+# "without authentication" does NOT count as positively grounding that term — a
+# summary that then asserts it as present is still a fabrication (#788).
+_NEGATION_RE = re.compile(
+    r"\b(no|not|without|never|lacks?|lacking|absent|none|free\s+of|"
+    r"does\s+not\s+\w+|doesn't\s+\w+)\b[\w\s,'-]{0,24}$"
+)
+
+
+def _grounding_pattern(term: str) -> str:
+    """Word-boundary regex that decides whether ``term`` is grounded in the source.
+
+    Anchored on ``\\b`` so a security term is not "grounded" by an unrelated word
+    that merely contains it ("sso" in "assorted", "authentication" in
+    "reauthentication") — being loose here is a false-negative in the dangerous
+    direction (a real fabrication would be missed). The oauth/oauth2 family is
+    treated as one term (a bare ``\\b`` would split them on the digit).
+    """
+    if term.startswith("oauth"):
+        return r"\boauth\s?2?\b"
+    return rf"\b{re.escape(term)}\b"
+
+
+def _term_positively_grounded(term: str, source_l: str) -> bool:
+    """True if ``term`` appears in ``source_l`` in at least one non-negated context."""
+    for match in re.finditer(_grounding_pattern(term), source_l):
+        # Negation is leading-context only (a 32-char lookback ending at the term):
+        # this catches "no JWT" / "without authentication" (#788) but not trailing
+        # forms like "JWT-less"; a miss there degrades safely to regenerate ->
+        # extractive rather than to a fabricated claim.
+        preceding = source_l[max(0, match.start() - 32):match.start()]
+        if not _NEGATION_RE.search(preceding):
+            return True
+    return False
+
+
+def _fabricates_security(summary: str, source: str) -> bool:
+    """True if ``summary`` asserts a credential/auth mechanism not positively present
+    in ``source``.
+
+    The detector for the #902/#788 few-shot bleed: a weak model echoing the example
+    or extrapolating from a topic name produces auth/token claims the entry never
+    made. A term is "grounded" only if the source mentions it in a non-negated
+    context — so an entry that says "no JWT, no authentication" does not license a
+    summary that asserts JWT/auth as implemented.
+    """
+    if not summary:
+        return False
+    source_l = re.sub(r"\s+", " ", source.lower())
+    for match in _SECURITY_FABRICATION_RE.finditer(summary):
+        # Normalize internal whitespace so "JSON  Web Token" matches "json web token".
+        term = re.sub(r"\s+", " ", match.group(0).lower())
+        if not _term_positively_grounded(term, source_l):
+            return True
+    return False
+
+
+def _normalize_entry_type(entry: Dict[str, Any]) -> str:
+    """Resolve an entry dict to a canonical entry type or ``Unknown``.
+
+    Checks the canonical ``entry_type`` field, then the parser-produced ``type`` field
+    (which on raw graph nodes is the node *kind* ``"entry"`` and must be ignored), then a
+    ``Type:`` header line in the body. Any value outside :data:`ENTRY_TYPES` - including
+    missing values and the node-kind ``"entry"`` - resolves to ``Unknown`` and grants no
+    authority-language permission.
+
+    Args:
+        entry: Entry dict with some combination of ``entry_type``/``type``/``body`` keys.
+
+    Returns:
+        A value from :data:`ENTRY_TYPES` or :data:`UNKNOWN_ENTRY_TYPE`.
+    """
+    for key in ("entry_type", "type"):
+        value = entry.get(key)
+        if isinstance(value, str):
+            canonical = _ENTRY_TYPE_LOOKUP.get(value.strip().lower())
+            if canonical:
+                return canonical
+
+    # Fall back to a `Type:` header in the body, but NEVER trust body prose to assert
+    # an authority type: a `Type: Decision` line in untrusted, contributor-writable
+    # body text would otherwise grant decision/outcome permission and poison the badge.
+    # Body-derived authority types resolve to Unknown; only the canonical
+    # entry_type/type fields (graph-sourced) may classify an entry as Decision/Closure.
+    body = entry.get("body", "") or ""
+    match = re.search(r"(?im)^\s*Type:\s*([A-Za-z]+)\s*$", body)
+    if match:
+        canonical = _ENTRY_TYPE_LOOKUP.get(match.group(1).strip().lower())
+        if canonical and canonical not in _AUTHORITY_ENTRY_TYPES:
+            return canonical
+
+    return UNKNOWN_ENTRY_TYPE
+
+
+def entry_type_counts(entries: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Count entries by canonical entry type (deterministic, no LLM).
+
+    Returns a dict with a key for every type in :data:`ENTRY_TYPES` plus ``Unknown``,
+    suitable for a non-LLM entry-mix badge.
+
+    Args:
+        entries: Entry dicts to classify via :func:`_normalize_entry_type`.
+
+    Returns:
+        Mapping of entry type to count.
+    """
+    counts: Dict[str, int] = {t: 0 for t in ENTRY_TYPES}
+    counts[UNKNOWN_ENTRY_TYPE] = 0
+    for entry in entries:
+        counts[_normalize_entry_type(entry)] += 1
+    return counts
+
+
+def format_entry_mix(counts: Dict[str, int]) -> str:
+    """Render an entry-type count dict as a compact badge string.
+
+    Always shows the canonical types (including zeros) so the badge does not hide thread
+    shape; appends ``Unknown`` only when present. Example: ``"10 Note, 0 Plan, 0 Decision,
+    0 PR, 0 Closure"``.
+
+    Args:
+        counts: Mapping produced by :func:`entry_type_counts`.
+
+    Returns:
+        Human-readable entry-mix string.
+    """
+    parts = [f"{counts.get(t, 0)} {t}" for t in ENTRY_TYPES]
+    if counts.get(UNKNOWN_ENTRY_TYPE, 0):
+        parts.append(f"{counts[UNKNOWN_ENTRY_TYPE]} {UNKNOWN_ENTRY_TYPE}")
+    return ", ".join(parts)
+
+
+def _launders_authority(prose: str, allow_decision: bool, allow_outcome: bool) -> bool:
+    """True if ``prose`` asserts decision/outcome authority it is not permitted to.
+
+    Args:
+        prose: Generated thread summary prose.
+        allow_decision: Whether the summary window contained a ``Decision`` entry.
+        allow_outcome: Whether the summary window contained a ``Closure`` entry.
+    """
+    if not prose:
+        return False
+    if not allow_decision and _DECISION_ASSERTION_RE.search(prose):
+        return True
+    if not allow_outcome and _OUTCOME_ASSERTION_RE.search(prose):
+        return True
+    return False
+
+
+def _authority_language_guard(allow_decision: bool, allow_outcome: bool) -> str:
+    """Build the constraint clause appended to the prompt when authority is unsupported."""
+    clauses = []
+    if not allow_decision:
+        clauses.append(
+            "This thread contains NO Decision entries: do not use decision language "
+            '(no "key decisions", "we decided", "the decision is"). Describe it as '
+            "discussion or analysis."
+        )
+    if not allow_outcome:
+        clauses.append(
+            "This thread contains NO Closure entries: do not claim an outcome or "
+            'resolution (no "the outcome is", "resolved", "resolution"). Describe the '
+            "current state as ongoing or open."
+        )
+    if not clauses:
+        return ""
+    return "\n\nConstraints:\n- " + "\n- ".join(clauses)
+
+
+def _thread_messages(system_prompt: str, user_content: str) -> List[Dict[str, str]]:
+    """Assemble the chat message list for a thread summary call."""
+    messages: List[Dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_content})
+    return messages
+
+
+def _scrub_authority(prose: str, allow_decision: bool, allow_outcome: bool) -> str:
+    """Drop clauses from extractive prose that assert unsupported authority.
+
+    This operates only on deterministic *extractive* prose (concatenated entry
+    snippets), never on generative LLM output, so removing offending fragments is safe
+    here even though in-place rewriting of LLM prose is not. A Note whose own body
+    contains "we decided to ship" must not reappear as the thread's summary on a
+    Decision-free window.
+    """
+    units = re.split(r"(?<=[.!?])\s+|\s*\|\s*|\n+", prose)
+    kept = [
+        u for u in units
+        if u.strip() and not _launders_authority(u, allow_decision, allow_outcome)
+    ]
+    return " ".join(kept).strip()
+
+
+def _extractive_thread_prose(
+    combined: str,
+    config: SummarizerConfig,
+    allow_decision: bool = True,
+    allow_outcome: bool = True,
+) -> str:
+    """Deterministic extractive prose for a thread (the safe fallback).
+
+    When the summary window contains no Decision/Closure entry, the extracted prose is
+    re-checked and scrubbed: entry bodies can themselves contain authority phrasing, and
+    the #878 invariant is about the summary *surface*, not just LLM-fabricated text.
+    """
+    prose = extractive_summary(
+        combined,
+        max_chars=config.extractive_max_chars * 2,
+        include_headers=False,
+    )
+    if _launders_authority(prose, allow_decision, allow_outcome):
+        prose = _scrub_authority(prose, allow_decision, allow_outcome)
+    return prose
+
+
+def _finalize_thread_summary(prose: str, all_tags: "set[str]") -> str:
+    """Append deterministically aggregated tags to thread prose."""
+    if all_tags:
+        tag_line = "tags: " + " ".join(f"#{t}" for t in sorted(all_tags))
+        return f"{prose}\n{tag_line}"
+    return prose
 
 
 def summarize_thread(
@@ -636,14 +1018,25 @@ def summarize_thread(
     if not entries:
         return ""
 
+    # Deterministic entry-type accounting (no LLM). Authority-language permission is
+    # based on the summary *window* (the entries actually sent to the LLM after
+    # `max_thread_entries` truncation), not the full thread: otherwise the model could
+    # assert a Decision it never saw. The full-thread mix drives the badge metadata
+    # (see entry_type_counts / format_entry_mix used by the read/list surfaces).
+    window = entries[: config.max_thread_entries]
+    window_counts = entry_type_counts(window)
+    allow_decision_language = window_counts["Decision"] > 0
+    allow_outcome_language = window_counts["Closure"] > 0
+
     # Collect entry summaries and aggregate tags
     entry_summaries = []
     all_tags: set[str] = set()
 
-    for entry in entries[:config.max_thread_entries]:
+    for entry in window:
         body = entry.get("body", "")
         title = entry.get("title", "")
         entry_summary = entry.get("summary", "")
+        etype = _normalize_entry_type(entry)
 
         # Extract tags from entry summary if available
         if entry_summary:
@@ -656,25 +1049,24 @@ def summarize_thread(
         else:
             continue
 
+        # Prefix each entry with its type so the LLM can see thread shape.
+        prefix = f"[{etype}] "
         if title:
-            entry_summaries.append(f"- {title}: {short}")
+            entry_summaries.append(f"- {prefix}{title}: {short}")
         else:
-            entry_summaries.append(f"- {short}")
+            entry_summaries.append(f"- {prefix}{short}")
 
     combined = "\n".join(entry_summaries)
 
-    # Use extractive if forced
+    # Use extractive if forced. Extractive prose is built from entry content, which can
+    # itself contain authority phrasing, so it is scrubbed against the window's permission.
     if config.prefer_extractive:
-        prose = extractive_summary(
-            combined,
-            max_chars=config.extractive_max_chars * 2,
-            include_headers=False,
+        return _finalize_thread_summary(
+            _extractive_thread_prose(
+                combined, config, allow_decision_language, allow_outcome_language
+            ),
+            all_tags,
         )
-        # Append aggregated tags
-        if all_tags:
-            tag_line = "tags: " + " ".join(f"#{t}" for t in sorted(all_tags))
-            return f"{prose}\n{tag_line}"
-        return prose
 
     # Build LLM messages using model-aware prompting
     from watercooler.models import get_model_prompt_defaults
@@ -693,14 +1085,20 @@ def summarize_thread(
         "include relevant tags", ""
     ).strip()
     if not prose_prompt:
-        prose_prompt = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
+        prose_prompt = "Summarize this development thread in 2-3 sentences."
+
+    entry_mix = format_entry_mix(window_counts)
+    guard = _authority_language_guard(allow_decision_language, allow_outcome_language)
+    grounding = f"\n\n{_GROUNDING_CLAUSE}"
 
     if "{title}" in prose_prompt or "{entries}" in prose_prompt:
         user_content = prose_prompt.format(title=title, entries=combined)
+        user_content = f"{user_content}\n\nEntry mix: {entry_mix}{guard}{grounding}"
     else:
         user_content = f"""{prose_prompt}
 
 Thread: {title}
+Entry mix: {entry_mix}{guard}{grounding}
 
 Entries:
 {combined}
@@ -711,13 +1109,7 @@ Summary:"""
     if prompt_prefix:
         user_content = f"{prompt_prefix.rstrip()} {user_content}"
 
-    # Build messages
-    messages: List[Dict[str, str]] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": user_content})
-
-    result = _call_llm(messages, config)
+    result = _call_llm(_thread_messages(system_prompt, user_content), config)
 
     if result is None:
         logger.warning(
@@ -729,12 +1121,43 @@ Summary:"""
     # Strip any tags the LLM may have added (we aggregate our own)
     prose = _strip_tags_from_summary(result)
 
-    # Append deterministically aggregated tags
-    if all_tags:
-        tag_line = "tags: " + " ".join(f"#{t}" for t in sorted(all_tags))
-        return f"{prose}\n{tag_line}"
+    # Deterministic guards: a Decision/Closure-free window must never produce
+    # decision/outcome language (#878), and the summary must not name an auth/
+    # credential mechanism absent from the entries (#902/#788 grounding). Detect ->
+    # regenerate once with the matching hardened guard(s) -> fall back to extractive.
+    # We never rewrite prose in place (a keyword strip cannot tell laundering from a
+    # legitimate reference). Extractive prose is built from the entries themselves,
+    # so it can neither launder authority (it is scrubbed) nor fabricate a mechanism.
+    launders = _launders_authority(prose, allow_decision_language, allow_outcome_language)
+    fabricates = _fabricates_security(prose, combined)
+    if launders or fabricates:
+        logger.info(
+            "Thread summary failed a guard for %r (authority=%s, fabrication=%s); "
+            "regenerating with hardened guard",
+            title, launders, fabricates,
+        )
+        extra = []
+        if launders:
+            extra.append(_HARDENED_AUTHORITY_GUARD)
+        if fabricates:
+            extra.append(_HARDENED_GROUNDING_GUARD)
+        hardened = f"{user_content}\n\n" + "\n\n".join(extra)
+        retry = _call_llm(_thread_messages(system_prompt, hardened), config)
+        retry_prose = _strip_tags_from_summary(retry) if retry else ""
+        if (
+            retry_prose
+            and not _launders_authority(
+                retry_prose, allow_decision_language, allow_outcome_language
+            )
+            and not _fabricates_security(retry_prose, combined)
+        ):
+            prose = retry_prose
+        else:
+            prose = _extractive_thread_prose(
+                combined, config, allow_decision_language, allow_outcome_language
+            )
 
-    return prose
+    return _finalize_thread_summary(prose, all_tags)
 
 
 def get_baseline_graph_config() -> Dict[str, Any]:

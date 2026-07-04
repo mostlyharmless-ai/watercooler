@@ -99,11 +99,6 @@ def validate_safe_path(
 
 # Local application imports
 from watercooler.config_facade import config
-from watercooler.path_resolver import (
-    get_threads_suffix,
-    derive_threads_repo_name,
-    derive_code_repo_from_threads,
-)
 
 from .auth import is_hosted_mode
 from .config import (
@@ -153,7 +148,7 @@ def _require_context_hosted(
     if not http_ctx.repo:
         return (
             "Hosted mode requires X-Repo header with repository name "
-            "(e.g., 'org/repo-threads').",
+            "(e.g., 'org/repo').",
             None,
         )
 
@@ -168,16 +163,12 @@ def _require_context_hosted(
     repo = http_ctx.repo
     if "/" not in repo:
         return (
-            f"Invalid repository format: {repo}. Expected 'owner/repo-threads'.",
+            f"Invalid repository format: {repo}. Expected 'owner/repo'.",
             None,
         )
 
     owner, repo_name = repo.split("/", 1)
     branch = http_ctx.effective_branch
-
-    # Derive threads repo name from code repo name using config-aware function
-    # e.g., "watercooler-site" -> "watercooler-site-threads"
-    threads_repo_name = derive_threads_repo_name(repo_name)
 
     # Construct ThreadContext for hosted mode
     # - threads_dir uses a sentinel path to indicate hosted mode
@@ -284,22 +275,6 @@ def _require_context(code_path: str) -> tuple[str | None, ThreadContext | None]:
     if code_path_obj is None:
         return ("Invalid code_path: could not resolve path", None)
 
-    # Detect if a threads repo was passed instead of a code repo
-    threads_suffix = get_threads_suffix()
-    if code_path_obj.name.endswith(threads_suffix):
-        # Check if a matching code repo exists (same path without threads suffix)
-        code_repo_name = derive_code_repo_from_threads(code_path_obj.name, threads_suffix)
-        potential_code_repo = code_path_obj.parent / code_repo_name
-        if potential_code_repo.exists() and potential_code_repo.is_dir():
-            return (
-                f"Error: code_path appears to be a threads repo, not a code repo.\n"
-                f"You passed: {code_path}\n"
-                f"Did you mean: {potential_code_repo}\n\n"
-                f"The code_path parameter should point to your code repository,\n"
-                f"not the threads repository. The threads repo is managed automatically.",
-                None,
-            )
-
     if config.env.get_bool("WATERCOOLER_DEBUG_CODE_PATH", False):
         log_dir = config.env.get("WATERCOOLER_DEBUG_LOG_DIR", "")
         log_path = (
@@ -344,7 +319,6 @@ def _dynamic_context_missing(context: ThreadContext) -> bool:
         config.env.get(key, "")
         for key in (
             "WATERCOOLER_THREADS_BASE",
-            "WATERCOOLER_THREADS_PATTERN",
             "WATERCOOLER_GIT_REPO",
             "WATERCOOLER_CODE_REPO",
         )

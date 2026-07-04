@@ -13,9 +13,6 @@
 .PARAMETER Agent
     Agent identity advertised to Watercooler threads. Defaults to "Claude@Code".
 
-.PARAMETER ThreadsPattern
-    Git remote pattern for paired threads repositories.
-
 .PARAMETER AutoBranch
     Set to $false to disable automatic branch creation. Enabled by default.
 
@@ -29,7 +26,6 @@
 param(
     [string]$Python = "python",
     [string]$Agent = "Claude@Code",
-    [string]$ThreadsPattern = "https://github.com/{org}/{repo}-threads.git",
     [bool]$AutoBranch = $true,
     [ValidateSet("user", "project", "local")][string]$Scope = "user"
 )
@@ -88,8 +84,7 @@ try {
         "--transport", "stdio",
         "watercooler",
         "--scope", $Scope,
-        "-e", "WATERCOOLER_AGENT=$Agent",
-        "-e", "WATERCOOLER_THREADS_PATTERN=$ThreadsPattern"
+        "-e", "WATERCOOLER_AGENT=$Agent"
     )
 
     if ($AutoBranch) {

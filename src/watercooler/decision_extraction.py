@@ -30,6 +30,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Optional, TypedDict
 
+from . import authority_support
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -73,6 +75,14 @@ class ExtractionResult:
     llm_tokens_used: int = 0
 
 
+@dataclass(frozen=True)
+class QuoteReverificationResult:
+    """Promotion-time quote revalidation result."""
+
+    verified: bool
+    reason: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -113,6 +123,11 @@ _EXPECTED_GATES = frozenset(
     }
 )
 _MAX_FIELD_CHARS = 2000
+_MIN_REVERIFIED_QUOTE_CHARS = 20
+QUOTE_REVERIFY_REASON_MISSING_QUOTE = "missing_quote_evidence"
+QUOTE_REVERIFY_REASON_SOURCE_UNREADABLE = "source_unreadable"
+QUOTE_REVERIFY_REASON_HALLUCINATED = "hallucinated_quote"
+QUOTE_REVERIFY_REASON_SHORT_QUOTE = "quote_below_minimum_length"
 _FENCE_PATTERN = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL)
 _THREAD_CONTEXT_OPEN = "[[[THREAD_CONTEXT_START]]]"
 _THREAD_CONTEXT_CLOSE = "[[[THREAD_CONTEXT_END]]]"
@@ -393,10 +408,22 @@ def _normalize_whitespace(text: str) -> str:
     return " ".join(text.split())
 
 
-def _normalize_quote_text(text: str) -> str:
-    """Normalize punctuation variants while keeping case sensitivity."""
+def normalize_quote_text(text: str) -> str:
+    """Normalize punctuation variants while keeping case sensitivity.
+
+    Public wrapper over the extraction-time quote normalizer (NFKC + smart-quote/
+    dash folding + whitespace collapse). Exposed so higher-level modules can share
+    the *exact* normalization that ``reverify_quotes_against_source`` uses — e.g.
+    anchor normalization in the fact-edge substrate (#897b) — without importing a
+    private symbol.
+    """
     normalized = unicodedata.normalize("NFKC", text).translate(_QUOTE_TRANSLATION)
     return _normalize_whitespace(normalized)
+
+
+def _normalize_quote_text(text: str) -> str:
+    """Backward-compatible private alias for :func:`normalize_quote_text`."""
+    return normalize_quote_text(text)
 
 
 def _validate_quotes(quotes: list[str], source_body: str) -> Optional[str]:
@@ -417,6 +444,70 @@ def _validate_quotes(quotes: list[str], source_body: str) -> Optional[str]:
         if normalized_quote not in normalized_body:
             return "hallucinated_quote"
     return None
+
+
+def reverify_quotes_against_source(
+    quotes: list[str], source_body: Optional[str]
+) -> QuoteReverificationResult:
+    """Re-validate candidate quotes against a live source body.
+
+    Promotion-time source support has a minimum quote-length floor so short,
+    easy-to-place substrings cannot launder record/source support. A matching
+    quote below the floor is a distinct failure from an unmatched quote: the
+    quote did confirm against the source, but it is too short to count as a
+    durable source tether.
+    """
+    if not quotes:
+        return QuoteReverificationResult(
+            verified=False, reason=QUOTE_REVERIFY_REASON_MISSING_QUOTE
+        )
+    if not source_body:
+        return QuoteReverificationResult(
+            verified=False, reason=QUOTE_REVERIFY_REASON_SOURCE_UNREADABLE
+        )
+
+    rejection = _validate_quotes(quotes, source_body)
+    if rejection is not None:
+        return QuoteReverificationResult(verified=False, reason=rejection)
+
+    normalized_quotes = []
+    for quote in quotes:
+        normalized_quote = _normalize_quote_text(quote)
+        if normalized_quote:
+            normalized_quotes.append(normalized_quote)
+    if any(len(quote) < _MIN_REVERIFIED_QUOTE_CHARS for quote in normalized_quotes):
+        return QuoteReverificationResult(
+            verified=False, reason=QUOTE_REVERIFY_REASON_SHORT_QUOTE
+        )
+
+    return QuoteReverificationResult(verified=True, reason=None)
+
+
+def quotes_reverified_against_source(
+    quotes: list[str], source_body: Optional[str]
+) -> bool:
+    """Re-validate candidate quotes against a source body (verbatim, normalized).
+
+    Public wrapper over the extraction-time quote check, used by the promotion
+    path to re-confirm a candidate's evidence quotes against the *live* source
+    entry before granting ``source``/``record_state`` warrant support (#887).
+    Self-asserted ``Quote-Evidence-Status`` markers on a candidate body are not
+    trusted — a hand-forged candidate could claim verified provenance.
+
+    Args:
+        quotes: The candidate's evidence quotes.
+        source_body: The current body of the cited source entry, or ``None`` when
+            the source could not be read (deleted / lookup failure).
+
+    Returns:
+        ``True`` only when there is at least one quote, every quote matches the
+        source body, and every matching quote meets the promotion-time minimum
+        length floor. ``False`` for empty quotes, missing source body, unmatched
+        quotes, or matching quotes that are too short to count as durable source
+        support. Call ``reverify_quotes_against_source`` when the rejection
+        reason is needed for audit prose.
+    """
+    return reverify_quotes_against_source(quotes, source_body).verified
 
 
 def _validate_gate_consistency(
@@ -735,6 +826,204 @@ def classify_gate_outcome(
     return "pass"
 
 
+_WEAK_QUOTE_REJECTION_REASONS = frozenset(
+    {"hallucinated_quote", "summary_only_quote_evidence"}
+)
+
+# Rejection reason used by the daemon when it routes a gate-passing but
+# value-laden extraction to a candidate Note instead of direct-writing a
+# Decision (see ExtractDecisionsDaemon._process_candidate / Unit 3 / #880).
+MORAL_DELEGATION_REJECTION_REASON = "moral_delegation_warning"
+
+
+# ---------------------------------------------------------------------------
+# Moral-delegation classifier (Unit 3 / #880)
+# ---------------------------------------------------------------------------
+#
+# Procedural gate: flags value-laden / ethical Decision statements so an
+# accountable human — not an agent or daemon — owns the value judgment. It
+# verifies *ownership and process*, never moral correctness.
+#
+# Bare value nouns over-fire badly in a software corpus ("harm" to throughput,
+# "fairness" of a scheduler, "accountability" of an audit log, "safety-critical"
+# code path), so the classifier triggers on normative *constructions*, in two
+# tiers:
+#   - Tier 1: explicit ethical vocabulary ("ethical", "morally", "the right
+#     thing to do", "moral duty"). These effectively never appear in non-moral
+#     technical text, so they always flag.
+#   - Tier 2: a value noun or transgression verb bound to a human / social
+#     object ("user consent", "privacy of patients", "deceive customers",
+#     "harm to people"). The binding is what discriminates "preserve user
+#     consent" (flags) from "this harms throughput" / "fairness of the
+#     scheduler" (do not flag).
+# Conservatism is a correctness requirement, not politeness: over-firing trains
+# reviewers to dismiss the warning, which re-enables the moral-delegation
+# laundering the gate exists to prevent.
+
+
+@dataclass
+class MoralDelegationAssessment:
+    """Structured result of the moral-delegation classifier.
+
+    Deterministic in execution, heuristic in meaning — the label is
+    interpretive support for a human reviewer, not a world-tethered truth gate.
+    """
+
+    moral_delegation_warning: bool
+    human_moral_ownership_required: bool
+    moral_delegation_reason: str
+    tier: Optional[int] = None  # which tier fired (1 or 2), for observability
+
+
+_MORAL_TIER1_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Explicit ethical vocabulary — unambiguous in a software corpus.
+    re.compile(r"\b(?:un)?ethical(?:ly)?\b", re.IGNORECASE),
+    re.compile(r"\b(?:im|a)?moral(?:ly|ity)?\b", re.IGNORECASE),
+    re.compile(r"\bthe (?:right|wrong) thing to do\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:moral|ethical)\s+"
+        r"(?:duty|obligation|responsibility|imperative)\b",
+        re.IGNORECASE,
+    ),
+)
+
+# Human / social objects a value judgment can land on. The presence of one of
+# these next to a value noun (or after a transgression verb) is what makes a
+# value term *moral* rather than technical.
+_HUMAN_OBJECT = (
+    r"users?|humans?|people|persons?|customers?|clients?|employees?|workers?|"
+    r"applicants?|candidates?|patients?|citizens?|individuals?|minors?|"
+    r"children|the public|someone|anybody|anyone|everyone"
+)
+# Value nouns that denote a moral interest of people, not a technical property.
+_VALUE_NOUN = (
+    r"consent|privacy|dignity|autonomy|rights|well-?being|welfare|"
+    r"fairness|equity|equality"
+)
+# Verbs that are inherently about wronging people (kept distinct from generic
+# verbs like "protect" / "preserve", which are technical far more often than
+# moral and would over-fire badly: "protect the cache", "preserve the index").
+_TRANSGRESSION_VERB = (
+    r"deceiv\w*|mislead\w*|exploit\w*|manipulat\w+|discriminat\w+|"
+    r"coerc\w+|depriv\w+|harm\w*|surveil\w*"
+)
+
+_MORAL_TIER2_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # human object then value noun: "user consent", "patients' privacy",
+    # "their dignity", "people's autonomy".
+    re.compile(
+        rf"\b(?:{_HUMAN_OBJECT})(?:['’]s?)?\s+(?:\w+\s+){{0,2}}?"
+        rf"(?:{_VALUE_NOUN})\b",
+        re.IGNORECASE,
+    ),
+    # value noun then human object: "privacy of users", "fairness to job
+    # applicants" (one modifier word tolerated before the object).
+    re.compile(
+        rf"\b(?:{_VALUE_NOUN})\b\s+(?:of|to|for|across|among)\s+"
+        rf"(?:the\s+)?(?:\w+\s+){{0,1}}?(?:{_HUMAN_OBJECT})\b",
+        re.IGNORECASE,
+    ),
+    # transgression verb then human object: "deceive users", "harm to people",
+    # "harm vulnerable people", "discriminate against applicants".
+    re.compile(
+        rf"\b(?:{_TRANSGRESSION_VERB})\b\s+(?:to\s+|against\s+|of\s+)?"
+        rf"(?:the\s+)?(?:\w+\s+){{0,1}}?(?:{_HUMAN_OBJECT})\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def classify_moral_delegation(
+    decision_statement: Optional[str],
+) -> MoralDelegationAssessment:
+    """Classify whether a Decision statement carries a value / ethical judgment.
+
+    Operates on the **Decision statement only** — never the rationale or
+    surrounding technical context — so a value term used technically in nearby
+    prose does not trigger the warning.
+
+    Args:
+        decision_statement: The candidate's decision statement text.
+
+    Returns:
+        A :class:`MoralDelegationAssessment`. When nothing fires, the
+        assessment is non-warning with an empty reason.
+    """
+    text = (decision_statement or "").strip()
+    if not text:
+        return MoralDelegationAssessment(
+            moral_delegation_warning=False,
+            human_moral_ownership_required=False,
+            moral_delegation_reason="",
+        )
+
+    for pattern in _MORAL_TIER1_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            span = m.group(0).strip()
+            return MoralDelegationAssessment(
+                moral_delegation_warning=True,
+                human_moral_ownership_required=True,
+                moral_delegation_reason=(
+                    f"Decision statement uses ethical language ({span!r}). A "
+                    "value judgment of this kind must be owned by an accountable "
+                    "human, not inferred by an agent or daemon. This warning is "
+                    "procedural: it checks ownership, not moral correctness."
+                ),
+                tier=1,
+            )
+
+    for pattern in _MORAL_TIER2_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            span = m.group(0).strip()
+            return MoralDelegationAssessment(
+                moral_delegation_warning=True,
+                human_moral_ownership_required=True,
+                moral_delegation_reason=(
+                    f"Decision statement makes a value judgment affecting people "
+                    f"({span!r}). An accountable human must own this, not an agent "
+                    "or daemon. This warning is procedural: it checks ownership, "
+                    "not moral correctness."
+                ),
+                tier=2,
+            )
+
+    return MoralDelegationAssessment(
+        moral_delegation_warning=False,
+        human_moral_ownership_required=False,
+        moral_delegation_reason="",
+    )
+
+
+def candidate_warrant(
+    result: ExtractionResult,
+    entry: dict[str, Any],
+) -> Optional["authority_support.WarrantReadModel"]:
+    """The §6 warrant read-model backing a candidate extraction (#896 Leg 2).
+
+    Single source of truth for both the candidate body's support markers and the
+    structured tether entry-fields, so the two cannot drift. Returns ``None`` when
+    there is no extraction to support. A candidate has no human owner until
+    promotion, so ``human_authorized_by`` is ``None`` (user support is conferred at
+    the promotion surface).
+    """
+    ext = result.extraction
+    if ext is None:
+        return None
+    weak_quote = (result.rejection_reason or "") in _WEAK_QUOTE_REJECTION_REASONS
+    moral = classify_moral_delegation(ext.decision_statement)
+    return authority_support.derive_candidate_support(
+        source_entry_id=entry.get("entry_id"),
+        verbatim_quotes=ext.verbatim_quotes,
+        quote_verified=not weak_quote,
+        human_authorized_by=None,
+        source_entry_type=entry.get("entry_type"),
+        extractor_warning=ext.warning,
+        moral_delegation_warning=moral.moral_delegation_warning,
+    )
+
+
 def format_candidate_note_body(
     result: ExtractionResult,
     entry: dict[str, Any],
@@ -742,7 +1031,10 @@ def format_candidate_note_body(
     """Format an ambiguous extraction as a candidate Note body.
 
     Used when extraction reaches the candidate-fallback path:
-    soft-gate failures or confidence-3 with all hard gates passing.
+    soft-gate failures, confidence-3 with all hard gates passing, or
+    high-confidence extractions whose quote evidence did not validate
+    against the source body (``hallucinated_quote`` /
+    ``summary_only_quote_evidence``).
     """
     ext = result.extraction
     if ext is None:
@@ -766,12 +1058,56 @@ def format_candidate_note_body(
         if g in result.gate_results
     )
 
-    if not gate_reasons:
+    rr = result.rejection_reason or ""
+    weak_quote = rr in _WEAK_QUOTE_REJECTION_REASONS
+
+    # Moral-delegation classification runs on the decision statement only.
+    moral = classify_moral_delegation(ext.decision_statement)
+
+    if rr == MORAL_DELEGATION_REJECTION_REASON:
+        # The extraction passed the gates but the daemon routed it here because
+        # the statement is value-laden and the source entry carries no accountable
+        # human owner. Surface that procedurally — the human confers ownership at
+        # promotion (which requires human_authorized_by).
+        gate_reasons = (
+            "moral_delegation: the decision statement makes a value/ethical "
+            "judgment, so it must not become an authoritative Decision without "
+            "an accountable human owner. Promote with `human_authorized_by` to "
+            "confer ownership. This is a procedural ownership check, not a "
+            "judgment about whether the decision is morally right."
+        )
+    elif weak_quote:
+        # Weak-quote path: LLM produced a confident extraction but the verbatim
+        # quotes did not validate against the source body. Surface for human
+        # review with the evidence explicitly marked unverified.
+        if rr == "hallucinated_quote":
+            gate_reasons = (
+                "quote_validation: LLM-supplied quotes did not match source "
+                "body verbatim. The extraction may still be substantively "
+                "correct, but the supporting quotes need human verification "
+                "before promotion."
+            )
+        else:  # summary_only_quote_evidence
+            gate_reasons = (
+                "quote_validation: LLM-supplied quotes matched the entry "
+                "summary but not the source body. The summary is a "
+                "paraphrase, so the quotes do not constitute direct evidence. "
+                "Human verification against the full body is needed."
+            )
+    elif not gate_reasons:
         # Low-confidence path: all gates passed but confidence <= 3
         warning_text = result.extraction.warning if result.extraction else None
         gate_reasons = f"low_confidence_3 (confidence {result.confidence}/5 below promotion threshold)"
         if warning_text:
             gate_reasons += f"; extractor warning: {warning_text}"
+
+    quote_status = "weak_unverified" if weak_quote else "verified"
+
+    # Warrant read model — the single source for BOTH these body markers and the
+    # structured entry fields (#896 Leg 2). See candidate_warrant(). Non-None here
+    # because ext was checked above.
+    warrant = candidate_warrant(result, entry)
+    assert warrant is not None  # ext is not None at this point
 
     lines = [
         "Spec: decision-extractor",
@@ -783,14 +1119,59 @@ def format_candidate_note_body(
         "Authority: none",
         f"Confidence: {result.confidence}/5",
         f"Failed-Gates: {', '.join(failed_gates) if failed_gates else 'none'}",
+        f"Quote-Evidence-Status: {quote_status}",
         f"Source-Entry: {entry.get('entry_id', 'unknown')}",
-        "",
-        "## Candidate Decision",
-        ext.decision_statement or "(no statement extracted)",
-        "",
-        "## Why this is a candidate, not a Decision",
-        gate_reasons,
     ]
+
+    # Carry the source entry type forward when it is itself a record-state entry
+    # (Decision/Closure/Supersession) so promotion can re-derive the same
+    # record_state support. Emitted only for those types — keeps the marker bound
+    # to a fixed enum and absent on the common Note case.
+    _src_type = entry.get("entry_type")
+    if _src_type in authority_support.RECORD_STATE_ENTRY_TYPES:
+        lines.append(f"Source-Entry-Type: {_src_type}")
+
+    # Structured moral-delegation markers. Both are parsed back on promotion
+    # (promotion._MARKER_PATTERNS) and carried into the promoted Decision body.
+    # Emitted only when the classifier fires, so non-moral candidates stay
+    # unchanged. Human-readable ownership-required framing lives in the
+    # "## Moral-delegation warning" section below, not in a redundant marker.
+    if moral.moral_delegation_warning:
+        lines.extend(
+            [
+                "Moral-Delegation-Warning: true",
+                f"Moral-Delegation-Reason: {moral.moral_delegation_reason}",
+            ]
+        )
+
+    # Warrant markers: per-tether support counts, dominant tether, thin-support
+    # flag (+ reason when thin). Counts stay the primary surface — no collapsed
+    # confidence number.
+    lines.extend(authority_support.render_support_markers(warrant))
+
+    lines.extend(
+        [
+            "",
+            "## Candidate Decision",
+            ext.decision_statement or "(no statement extracted)",
+            "",
+            "## Why this is a candidate, not a Decision",
+            gate_reasons,
+        ]
+    )
+
+    if moral.moral_delegation_warning:
+        lines.extend(
+            [
+                "",
+                "## Moral-delegation warning",
+                moral.moral_delegation_reason,
+                "",
+                "Promotion requires an accountable human (`human_authorized_by`) "
+                "to take ownership of this value judgment. The warning verifies "
+                "ownership and process, not moral correctness.",
+            ]
+        )
 
     if "g8_self_contained" in failed_gates:
         lines.append("")
@@ -798,14 +1179,36 @@ def format_candidate_note_body(
             "Not self-contained. Requires human-supplied context before promotion."
         )
 
-    lines.extend(
-        [
-            "",
-            "## Evidence",
-        ]
-    )
-    for quote in ext.verbatim_quotes:
-        lines.append(f"> {quote}")
+    if weak_quote:
+        lines.extend(
+            [
+                "",
+                "## Evidence (unverified)",
+                "_The following quotes were produced by the LLM but did not "
+                "validate against the source body. Treat as suggestions for "
+                "where to look, not as direct evidence._",
+            ]
+        )
+        # Per-line ``[unverified]`` prefix on each quote so the marker
+        # survives RAG chunking — if a downstream chunk picks up only the
+        # blockquote lines (because the chunk boundary fell after the
+        # section header), the inline tag still warns the reader that the
+        # quote is LLM-fabricated. Without this, the section-level caption
+        # is invisible to retrieval that lands on a quote-only chunk.
+        for quote in ext.verbatim_quotes:
+            lines.append(f"> [unverified] {quote}")
+    else:
+        lines.extend(
+            [
+                "",
+                "## Evidence",
+            ]
+        )
+        for quote in ext.verbatim_quotes:
+            lines.append(f"> {quote}")
+
+    lines.append("")
+    lines.extend(authority_support.render_support_section(warrant))
 
     lines.extend(
         [

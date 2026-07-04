@@ -104,8 +104,6 @@ watercooler config validate --strict
 | Key | Default | Description |
 |---|---|---|
 | `templates_dir` | (bundled) | Custom templates directory |
-| `threads_suffix` | `"-threads"` | **Deprecated.** Legacy separate-threads-repo suffix from the pre-orphan-branch model. Ignored under the default orphan-branch layout. |
-| `threads_pattern` | (derived) | **Deprecated.** Legacy full URL pattern for a separate threads repo. Ignored unless migrating from the old model. |
 
 ### `[mcp]` — server and identity
 
@@ -114,7 +112,7 @@ watercooler config validate --strict
 | `default_agent` | `"Agent"` | Agent name shown in thread entries |
 | `agent_tag` | `""` | Short lowercase tag appended to agent name |
 | `threads_dir` | `""` (auto) | Explicit threads directory; leave empty for auto-discovery |
-| `threads_base` | `""` (auto) | Base directory used by the legacy sibling-threads-repo fallback. Resolves to the parent of the code repo (or parent of cwd) when not set. Note: the orphan-branch worktree at `~/.watercooler/worktrees/<repo>/` is controlled by a hardcoded `WORKTREE_BASE` constant — it does NOT come from this key. |
+| `threads_base` | `""` (auto) | Base directory for the local `_local` fallback. Resolves to the parent of the code repo (or parent of cwd) when not set. Note: the orphan-branch worktree at `~/.watercooler/worktrees/<repo>/` is controlled by a hardcoded `WORKTREE_BASE` constant — it does NOT come from this key. |
 | `transport` | `"stdio"` | **Execution-routing mode for the local MCP process.** The name is a historical artefact — it does *not* control the agent↔mcp pipe (always stdio). `stdio` = run every tool call locally (default). `http` = the server itself serves HTTP (used by the hosted Railway deployment). `proxy` / `hybrid` = local process forwards some or all tool calls to a remote hosted endpoint. See [MCP-CLIENTS.md — Hosted mode](./MCP-CLIENTS.md#hosted-mode) for the full table and the naming-overlap caveat. |
 | `url` | `""` | Remote hosted endpoint URL for `proxy` or `hybrid`. Empty when `transport = "stdio"`. |
 | `proxy_repo` | `""` | Repo name (`org/repo`) sent in proxy/hybrid headers when local git discovery can't find one. |
@@ -201,7 +199,7 @@ Controls the async commit/push pipeline.
 
 | Key | Default | Description |
 |---|---|---|
-| `async_sync` | `true` | Enable async (non-blocking) git operations. Env: `WATERCOOLER_ASYNC_SYNC`. |
+| `async_sync` | `true` | Enable async (non-blocking) git operations. When `true`, a single-writer committer daemon owns commit+push (batched) and ordinary writes return under the `default_confirm` contract below. Env: `WATERCOOLER_ASYNC_SYNC`. |
 | `batch_window` | `5.0` | Seconds to batch commits before pushing. Env: `WATERCOOLER_BATCH_WINDOW`. |
 | `max_delay` | `30.0` | Maximum seconds before forcing a push even if the batch isn't full. |
 | `max_batch_size` | `50` | Maximum entries per batch commit. |
@@ -209,6 +207,31 @@ Controls the async commit/push pipeline.
 | `max_backoff` | `300.0` | Maximum backoff between retries in seconds. Env: `WATERCOOLER_SYNC_MAX_BACKOFF`. |
 | `interval` | `30.0` | Background sync interval in seconds. Env: `WATERCOOLER_SYNC_INTERVAL`. |
 | `stale_threshold` | `60.0` | Seconds before considering sync stale. |
+| `default_confirm` | `"accepted"` | Default confirmation level for ordinary writes — see the write contract below. One of `accepted`, `committed`, `pushed`. |
+| `commit_queue_max_depth` | `2000` | Max pending tasks in the commit queue before backpressure (yellow advisory at ≥60%, red `QueueFullError`→inline-commit fallback at 100%). |
+
+#### Write contract (`default_confirm`)
+
+When `async_sync` is on, a write is **accepted durably and synchronously** — the
+entry is written to the append-only graph (and the persisted commit queue) before
+the tool returns — then **committed and pushed to origin asynchronously** by the
+single-writer committer daemon, within an observable, backpressured window.
+
+- **`accepted`** (default): return as soon as the entry is durable in the graph +
+  the commit is queued. The return does **not** mean "visible on origin" — origin
+  visibility is eventual (typically bounded by `batch_window` + one push). This is
+  the write-behind default that keeps writer latency ~constant under fan-out. No
+  data is lost on crash: the queue is persisted and re-drained on restart.
+- **`committed`** / **`pushed`**: block until the committer confirms the
+  commit+push receipt (the pre-async "returned == on origin" contract), bounded by
+  a ~45s receipt-wait. Use when a caller must observe the write on origin before
+  proceeding.
+
+`Decision`/`Closure` entries are **always forced to `pushed`** regardless of this
+default, so authority writes keep the confirmed contract. A confirmed write whose
+receipt times out raises rather than silently reporting success (the entry remains
+durable + queued). Enrichment (summaries/embeddings/memory-sync) is always
+eventual + best-effort and never blocks accept or commit.
 
 ### `[mcp.logging]` — server logging
 
@@ -295,7 +318,6 @@ violations are errors; otherwise warnings.
 | `on_write` | `true` | Validate when writing an entry. Env: `WATERCOOLER_VALIDATE_ON_WRITE`. |
 | `on_commit` | `true` | Validate before committing. |
 | `fail_on_violation` | `false` | Treat violations as errors (true) or warnings (false). Env: `WATERCOOLER_FAIL_ON_VIOLATION`. |
-| `check_branch_pairing` | `true` | Verify code-branch / thread-entry pairing. |
 | `check_commit_footers` | `true` | Require the canonical commit-footer fields. |
 | `check_entry_format` | `true` | Verify entry format against `[validation.entry]` rules. |
 | `check_status_values` | `true` | Verify `Status:` header values against the allowed set. |
@@ -372,8 +394,7 @@ Environment variables override TOML settings.
 | `WATERCOOLER_AGENT` | `mcp.default_agent` | `"Agent"` | Agent name in thread entries |
 | `WATERCOOLER_AGENT_TAG` | `mcp.agent_tag` | `""` | Tag appended to agent name |
 | `WATERCOOLER_DIR` | `mcp.threads_dir` | (auto) | Explicit threads directory path |
-| `WATERCOOLER_THREADS_BASE` | `mcp.threads_base` | (auto) | Base directory for threads repos |
-| `WATERCOOLER_THREADS_PATTERN` | `common.threads_pattern` | (derived) | Full URL pattern for a legacy threads repo |
+| `WATERCOOLER_THREADS_BASE` | `mcp.threads_base` | (auto) | Base directory for the local `_local` fallback |
 | `WATERCOOLER_AUTO_BRANCH` | `mcp.auto_branch` | `true` | Auto-create threads branches |
 | `WATERCOOLER_AUTO_PROVISION` | `mcp.auto_provision` | `true` | Auto-create threads repos |
 | `WATERCOOLER_MCP_TRANSPORT` | `mcp.transport` | `"stdio"` | MCP transport: `stdio`, `http`, `proxy`, or `hybrid` |
@@ -420,7 +441,7 @@ They are disabled by default unless you enable them in config.
 
 > Additional daemons (content scout, content refiner, project coordinator,
 > pulse snapshot, analysis snapshot, trend snapshot, pulse report,
-> compound, t2 indexer) are closed-source and not present in the
+> t2 indexer) are closed-source and not present in the
 > open-core build. Their config schemas still parse, but no daemon
 > registers to consume them — adding those sections is a no-op here.
 

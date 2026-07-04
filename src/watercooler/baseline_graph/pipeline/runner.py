@@ -353,33 +353,44 @@ class BaselineGraphRunner:
             return
 
         if self.config.extractive_only:
-            from ..summarizer import extractive_summary
+            from ..summarizer import (
+                summarize_thread,
+                SummarizerConfig,
+                SUMMARY_SCHEMA_VERSION,
+            )
 
             self._log(f"Generating extractive thread summaries for {total_to_process} threads...")
+
+            # Route through summarize_thread (prefer_extractive) so the authority guard
+            # applies: a Note body saying "we decided to ship" is scrubbed rather than
+            # persisted as a v2 summary that enrich(mode="missing") would treat as fresh.
+            extractive_config = SummarizerConfig(prefer_extractive=True)
 
             for i, thread in enumerate(threads_needing_summary, 1):
                 if i % 10 == 0 or i == total_to_process:
                     self._log_verbose(f"Summarizing thread {i}/{total_to_process}")
 
-                # Concatenate entry summaries or titles for extractive summary
-                entry_texts = []
-                for entry in thread.entries[:10]:  # Limit to first 10 entries
-                    if hasattr(entry, 'summary') and entry.summary:
-                        entry_texts.append(f"- {entry.title}: {entry.summary[:100]}")
-                    else:
-                        entry_texts.append(f"- {entry.title}: {entry.body[:100]}")
-
-                if entry_texts:
-                    combined = "\n".join(entry_texts)
-                    thread.summary = extractive_summary(
-                        combined,
-                        max_chars=300,
-                        include_headers=False,
-                    )
+                entry_dicts = [
+                    {
+                        "body": e.body,
+                        "title": e.title,
+                        "type": e.entry_type,
+                        "summary": getattr(e, "summary", "") or "",
+                    }
+                    for e in thread.entries
+                ]
+                thread.summary = summarize_thread(
+                    entry_dicts,
+                    thread_title=thread.title,
+                    config=extractive_config,
+                )
+                # Only stamp a non-empty, authority-scrubbed summary as current schema.
+                if thread.summary:
+                    thread.summary_schema_version = SUMMARY_SCHEMA_VERSION
             return
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from ..summarizer import summarize_thread, SummarizerConfig
+        from ..summarizer import summarize_thread, SummarizerConfig, SUMMARY_SCHEMA_VERSION
 
         summarizer_config = SummarizerConfig(
             api_base=self.config.llm.api_base,
@@ -413,6 +424,8 @@ class BaselineGraphRunner:
                     self._log_verbose(f"Summarizing thread {processed}/{total_to_process}")
                 thread, summary = future.result()
                 thread.summary = summary
+                if summary:
+                    thread.summary_schema_version = SUMMARY_SCHEMA_VERSION
 
     def _generate_embeddings(self, threads: List[Any]) -> int:
         """Generate embeddings for entries.
@@ -610,6 +623,19 @@ class BaselineGraphRunner:
             "topics": {t.topic: datetime.now(timezone.utc).isoformat() for t in threads},
         }
         storage.atomic_write_json(graph_dir / "manifest.json", manifest)
+
+        # Build the repo-level decisions index so the hosted list_decisions path
+        # reads one file instead of fanning out over every thread. Best-effort —
+        # a build failure must not fail the whole export.
+        try:
+            from watercooler.baseline_graph.decision_index import (
+                rebuild_decision_index,
+            )
+
+            dec_count = rebuild_decision_index(graph_dir)
+            self._log(f"  Wrote decisions index ({dec_count} decisions)")
+        except Exception as e:  # pragma: no cover - defensive
+            self._log(f"  Warning: decisions index build failed: {e}")
 
         return node_count, total_edges
 

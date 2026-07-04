@@ -1,10 +1,7 @@
 """Tests for the threads-resolver fallback path — GH issue #837.
 
-Locks the three behaviors that comprise the fix:
+Locks the behaviors that comprise the fix:
 
-- Bug A: `_ensure_worktree` migrates a legacy `<repo>/_local` orphan-branch
-  worktree to the canonical `WORKTREE_BASE/<repo>` location, instead of
-  silently failing on `git worktree add`.
 - Bug B: when worktree creation fails, the fallback `_local` lives under
   `effective_root`, NEVER under `Path.cwd()` (which would be the MCP
   server's CWD, leaking writes across repos).
@@ -14,8 +11,8 @@ Locks the three behaviors that comprise the fix:
   silently leaking across repos.
 
 Plus an operator-attention case: branch already checked out at an
-unexpected (non-`_local`, non-canonical) path → resolver refuses to
-silently fall back; surfaces a warning.
+unexpected (non-canonical) path → resolver refuses to silently fall
+back; surfaces a warning.
 
 Real git repos in tmpdirs (matches `tests/unit/test_config_orphan_bootstrap.py`
 pattern — mocking git would miss the real semantics that produced the bug).
@@ -156,11 +153,11 @@ def isolated_worktree_base(tmp_path, monkeypatch) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Bug A: legacy _local migration
+# Orphan-branch worktree discovery
 # ---------------------------------------------------------------------------
 
 
-class TestLegacyLocalMigration:
+class TestWorktreeDiscovery:
     def test_finds_existing_worktree_on_branch(self, code_repo):
         """_find_existing_worktree_on_branch parses `git worktree list`
         correctly and returns the path."""
@@ -176,29 +173,6 @@ class TestLegacyLocalMigration:
         # Branch doesn't exist yet — list returns no matches
         found = _find_existing_worktree_on_branch(code_repo, ORPHAN_BRANCH_NAME)
         assert found is None
-
-    def test_ensure_worktree_migrates_legacy_local(
-        self,
-        code_repo,
-        isolated_worktree_base,
-    ):
-        """The bug: branch already at <repo>/_local; canonical doesn't exist.
-        Expected: _ensure_worktree moves it to canonical and returns canonical."""
-        # Pre-set the legacy state
-        legacy = code_repo / "_local"
-        _add_orphan_worktree(code_repo, legacy)
-        canonical = isolated_worktree_base / code_repo.name
-        assert not canonical.exists()
-        assert legacy.exists()
-
-        result = _ensure_worktree(code_repo)
-
-        # Migration succeeded → canonical exists, legacy is gone
-        assert result is not None
-        assert result.resolve() == canonical.resolve()
-        assert canonical.exists()
-        assert (canonical / ".git").exists()
-        assert not legacy.exists()
 
     def test_ensure_worktree_refuses_branch_at_unexpected_path(
         self,
@@ -221,77 +195,6 @@ class TestLegacyLocalMigration:
         assert result is None
         warnings = " ".join(r.message for r in caplog.records)
         assert ".threads-tmp" in warnings or "unexpected" in warnings.lower()
-
-    def test_ensure_worktree_migrates_when_canonical_target_is_stale_scaffold(
-        self,
-        code_repo,
-        isolated_worktree_base,
-    ):
-        """Per PR #838 medium finding: a prior failed bootstrap can leave
-        non-git files under WORKTREE_BASE/<repo>. Migration must clear
-        that stale scaffold (matching `_create_orphan_branch`'s recovery
-        pattern) rather than refusing the move."""
-        # Pre-set the legacy state
-        legacy = code_repo / "_local"
-        _add_orphan_worktree(code_repo, legacy)
-        # Pre-set a stale scaffold at the canonical target
-        canonical = isolated_worktree_base / code_repo.name
-        canonical.mkdir(parents=True)
-        (canonical / "leftover-from-prior-bootstrap").write_text("x")
-        assert canonical.exists()
-        assert not (canonical / ".git").exists()  # stale, no git binding
-
-        result = _ensure_worktree(code_repo)
-
-        assert result is not None
-        assert result.resolve() == canonical.resolve()
-        assert (canonical / ".git").exists()  # now a real worktree
-        assert not (canonical / "leftover-from-prior-bootstrap").exists()
-        assert not legacy.exists()
-
-    def test_ensure_worktree_refuses_when_canonical_is_real_worktree(
-        self,
-        code_repo,
-        isolated_worktree_base,
-        caplog,
-    ):
-        """If something has already placed a real git worktree at the
-        canonical path, the fast path in `_ensure_worktree` should have
-        returned it before we reach migration. If we get here, the
-        migration helper refuses (operator-attention signal)."""
-        # Real worktree at canonical
-        canonical = isolated_worktree_base / code_repo.name
-        _add_orphan_worktree(code_repo, canonical)
-        # Direct-call the migration helper as if a caller bypassed the
-        # fast-path — simulates an unexpected state
-        from watercooler_mcp.config import _migrate_legacy_local_worktree
-
-        legacy = code_repo / "_local"
-        legacy.mkdir()
-        (legacy / "f.txt").write_text("x")
-        with caplog.at_level("WARNING", logger="watercooler_mcp"):
-            ok = _migrate_legacy_local_worktree(code_repo, legacy, canonical)
-        assert ok is False
-        warnings = " ".join(r.message for r in caplog.records)
-        assert "already a git worktree" in warnings or "unexpected" in warnings.lower()
-
-    def test_migration_is_idempotent(
-        self,
-        code_repo,
-        isolated_worktree_base,
-    ):
-        """After migration, subsequent calls take the fast path
-        (canonical-exists check) and don't re-migrate."""
-        legacy = code_repo / "_local"
-        _add_orphan_worktree(code_repo, legacy)
-
-        first = _ensure_worktree(code_repo)
-        second = _ensure_worktree(code_repo)
-
-        canonical = isolated_worktree_base / code_repo.name
-        assert first == second == canonical
-        # Legacy still gone (not recreated)
-        assert not legacy.exists()
 
 
 # ---------------------------------------------------------------------------

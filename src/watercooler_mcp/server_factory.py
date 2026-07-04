@@ -405,17 +405,48 @@ def build_mcp_server(runtime: ToolRuntime) -> FastMCP:
         from .tools.thread_write import register_thread_write_tools
         from .tools.decisions import register_decisions_tools
         from .tools.annotations_xref import register_annotations_xref_tools
+        from .tools.promotion import register_promotion_tools
 
         register_thread_query_tools(mcp)
         register_thread_write_tools(mcp)
-        register_decisions_tools(mcp)
+        register_decisions_tools(mcp, runtime=runtime)
         register_annotations_xref_tools(mcp)
+        register_promotion_tools(mcp)
+    else:
+        # hosted_premium is the T2/memory surface the local_hybrid remote leg
+        # targets. watercooler_list_decisions is a MIXED tool: with
+        # include_supersession=True its capability resolves to memory_query
+        # (remote), and the hybrid wrapper forwards the call here by name. The
+        # rest of the thread-tool bundle stays excluded, but this one tool must
+        # be mounted or the forward fails "Unknown tool: 'watercooler_list_decisions'".
+        # Its hosted impl (_list_decisions_hosted) consults the co-located T2 for
+        # supersession (#896/#930). See thread
+        # list-decisions-supersession-hosted-premium-unmounted.
+        from .tools.decisions import register_decisions_tools
+
+        register_decisions_tools(mcp, runtime=runtime)
 
     # Sync tools (local surfaces only — reindex must not leak to hosted)
     if surface in ("local_full", "local_hybrid"):
         from .tools.sync import register_sync_tools
 
         register_sync_tools(mcp)
+
+    # Setup tool (local surfaces only — watercooler_init binds a local worktree;
+    # checkout-less hosted/proxy deployments have no local repo to initialize).
+    # INVARIANT: this registration set must stay a superset of the surfaces where
+    # setup_report.deployment_context() reports local_init_applies=True (any
+    # non-hosted, non-proxy transport — stdio/hybrid/http). watercooler_health
+    # detail="setup" is registered on every surface and can emit a watercooler_init
+    # next_action; if a surface ever had local_init_applies=True without init
+    # registered here, that next_action would name an uncallable tool. Self-hosted
+    # HTTP resolves to local_full (registered here) and is local_init_applies=True,
+    # so it can initialize. Hosted HTTP resolves to hosted_full/hosted_premium
+    # (not registered) and is_hosted_mode()=True → local_init_applies=False.
+    if surface in ("local_full", "local_hybrid"):
+        from .tools.setup import register_setup_tools
+
+        register_setup_tools(mcp)
 
     # Federation tools (all surfaces except hosted_premium)
     if surface != "hosted_premium":

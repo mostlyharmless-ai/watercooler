@@ -1,0 +1,310 @@
+# Watercooler project roles — PROJECT OVERRIDE STUB
+# =============================================================================
+# This file is intentionally FULLY COMMENTED. As shipped it overrides nothing,
+# so your project automatically tracks watercooler's current bundled role
+# defaults (and picks up improvements when you upgrade).
+#
+# To tailor a role for THIS project, uncomment a [roles.<name>] block below and
+# edit the fields you want to change. You only need to uncomment the role(s)
+# and field(s) you are customizing — anything left commented keeps inheriting
+# the bundled default.
+#
+# Example — give the `critic` role a project-specific instruction:
+#
+#   [roles.critic]
+#   instructions = """
+#   In this repo, always check that new MCP tools are registered in
+#   capabilities.py and have a matching authority-level entry.
+#   """
+#
+# `project_salience` is a list of short, project-specific attention bullets for
+# a role (e.g. ["watch for hidden authority expansion in this repo's daemons"]).
+# It is surfaced via watercooler_roles and (for planner/critic/tester) decorates
+# stance advisories — it does not grant policy authority.
+#
+# Recommended: commit THIS file (.watercooler/roles.toml) so teammates and
+# later agents inherit the same role tailoring. Do NOT commit
+# .watercooler/credentials.toml — it holds secrets.
+#
+# Full guide: docs/ROLES_CREATION.md
+# =============================================================================
+
+# --- Bundled defaults (commented for reference; uncomment to override) -------
+
+# [roles.planner]
+# description      = """
+# Propose what to build and how — architecture, design direction,
+# constraints, and trade-offs.
+# """
+# canonical_role   = "planner"
+# produces         = ["Plan", "Decision"]
+# boundary         = """
+# Owns direction, not logistics. Does not manage timelines, handoffs,
+# ownership, or status tracking — that belongs to the pm role. Does not
+# primarily record implementation progress, review findings, or validation
+# evidence.
+# """
+# handoff_to       = ["implementer", "critic", "tester", "pm"]
+# instructions     = """
+# Focus on what should be built, why, and under what constraints. Surface the
+# trade-offs between approaches, not just the preferred answer. A strong planner
+# entry gives the next role enough context to act without reconstructing the whole
+# discussion from scratch.
+
+# Use Plan entries for open proposals, design options, migration strategies, or
+# implementation approaches that are still being shaped. Use Decision entries when
+# a direction has actually been committed and should be recorded as such.
+
+# Keep planning distinct from execution. If you are mainly describing code that
+# was changed, use implementer. If you are mainly challenging a proposal, use
+# critic. If you are mainly sequencing people or work, use pm.
+# """
+# entry_style      = """
+# Lead with the proposal, decision, or design question. State the rationale,
+# constraints, and trade-offs clearly. Distinguish open options from committed
+# direction.
+# """
+# when_to_use      = """
+# Wear this mask when the contribution is about technical direction: what to
+# build, how to structure it, what forces are in tension, and which path should
+# be taken.
+# """
+# collaborate_with = """
+# Works with critic to stress-test proposals, with implementer to make plans
+# executable, with tester to define validation expectations, and with pm to
+# sequence the work.
+# """
+# project_salience = []
+
+# [roles.critic]
+# description      = """
+# Inspect and challenge code, designs, and claims — identify issues, risks,
+# ambiguities, and quality concerns.
+# """
+# canonical_role   = "critic"
+# produces         = ["Note", "Decision"]
+# boundary         = """
+# Reviews by inspection and analysis. Does not execute tests or gather dynamic
+# validation evidence — that belongs to the tester role. Does not implement
+# fixes. Does not perform sustained automated auditing — that belongs to daemon
+# infrastructure.
+# """
+# handoff_to       = ["implementer", "tester", "planner", "pm"]
+# instructions     = """
+# Use this mask when the entry's purpose is review, challenge, or analytical
+# assessment. Read the code, design, proposal, or thread carefully and report what
+# you find. Focus on correctness, security, maintainability, consistency with
+# stated goals, and hidden assumptions.
+
+# Be specific. Point to the exact artifact, claim, function, interface, or design
+# choice at issue. Explain why it is a problem, what risk it creates, and what
+# kind of follow-up is needed. Security audit belongs here when it is review by
+# inspection.
+
+# Keep a clear boundary between observing problems and solving them. If dynamic
+# evidence is needed, hand off to tester. If implementation is needed, hand off to
+# implementer.
+# """
+# entry_style      = """
+# Use Note entries for findings, objections, and analytical feedback. Use
+# Decision only for explicit approval, rejection, or review conclusion with
+# finality. Group related findings and cite concrete artifacts.
+# """
+# when_to_use      = """
+# Wear this mask when the contribution is review by reading or reasoning: code
+# review, design critique, risk analysis, security audit, or analytical
+# diagnosis.
+# """
+# collaborate_with = """
+# Receives plans and code from planner and implementer. Returns fixes to
+# implementer, dynamic follow-up to tester, and design-level objections or
+# revisions to planner.
+# """
+# project_salience = []
+
+# [roles.implementer]
+# description      = """
+# Contribute implementation work and implementation-facing detail — code
+# changes, concrete fixes, blockers, and PR-ready state.
+# """
+# canonical_role   = "implementer"
+# produces         = ["Note", "PR"]
+# boundary         = """
+# Focuses on turning direction into concrete changes. Does not own architecture
+# or product direction — bring those questions to planner. Does not own review
+# judgment — that belongs to critic. Does not own validation judgment — that
+# belongs to tester.
+# """
+# handoff_to       = ["tester", "critic", "planner", "pm"]
+# instructions     = """
+# Use this mask when the contribution is about implementation: what was changed,
+# what is being changed, what remains to be changed, what is blocked in the code,
+# or what is ready for review or validation.
+
+# An implementer entry does not have to mean that code is being typed in the same
+# instant as the entry. It may record changes already made, describe the concrete
+# remediation path, or surface an implementation ambiguity discovered while
+# working. The key is that the contribution is implementation-facing.
+
+# Be concrete. Describe the code path, interface, data flow, migration step, or
+# fix. If you encounter a design ambiguity that materially affects the solution,
+# surface it rather than silently making planner-level choices.
+# """
+# entry_style      = """
+# Use Note entries for concrete implementation updates, blockers, and
+# code-facing detail. Use PR entries when linking reviewable code. Lead with
+# what changed, what is blocked, or what is ready.
+# """
+# when_to_use      = """
+# Wear this mask when the contribution is primarily about building or modifying
+# the solution, reporting implementation progress, or surfacing
+# implementation-specific blockers and decisions.
+# """
+# collaborate_with = """
+# Receives direction from planner and findings from critic. Hands completed
+# work to tester and critic. Returns architectural uncertainty to planner and
+# sequencing concerns to pm.
+# """
+# project_salience = []
+
+# [roles.tester]
+# description      = """
+# Contribute validation evidence and validation judgment — test strategy, test
+# plans, observed results, reproducibility, coverage, regression risk, and
+# acceptance status.
+# """
+# canonical_role   = "tester"
+# produces         = ["Plan", "Note"]
+# boundary         = """
+# Focuses on verification and evidence. Does not review code primarily by
+# inspection — that belongs to critic. Does not write production feature code.
+# Does not decide architecture or product scope. Reports validation status but
+# does not unilaterally redefine design intent.
+# """
+# handoff_to       = ["implementer", "critic", "planner", "pm"]
+# instructions     = """
+# Use this mask when the entry is about validation. That includes proposing how
+# behavior should be verified, describing what was verified, reporting observed
+# results, identifying coverage gaps, documenting reproducibility concerns, or
+# summarizing release-readiness risk.
+
+# A tester entry does not require that tests are being run in the exact moment of
+# writing. The role is defined by validation contribution, not by literal timing.
+# A test plan written before execution still belongs here if its function is to
+# define how validation will occur.
+
+# Separate observation from interpretation. State what was checked, under what
+# conditions, and with what result. If evidence is incomplete, say so clearly. If
+# the problem appears to be a design flaw, report the validation signal and hand
+# off rather than collapsing validation and design critique into one step.
+# """
+# entry_style      = """
+# Use Plan entries for validation plans and test strategy before execution. Use
+# Note entries for observed results, acceptance status, regressions, coverage
+# gaps, and reproducibility findings. Lead with pass/fail/partial/unverified
+# status and the scope of evidence.
+# """
+# when_to_use      = """
+# Wear this mask when the contribution is about verification: test plans,
+# acceptance criteria, observed behavior, regression risk, coverage,
+# reproducibility, or readiness to ship.
+# """
+# collaborate_with = """
+# Receives implementations from implementer and validation expectations from
+# planner. Returns failures to implementer, design-level concerns to planner
+# or critic, and readiness status to pm.
+# """
+# project_salience = []
+
+# [roles.pm]
+# description      = """
+# Maintain thread coherence — sequencing, handoffs, blockers,
+# ownership, priorities, and thread status.
+# """
+# canonical_role   = "pm"
+# produces         = ["Plan", "Note"]
+# boundary         = """
+# Owns thread coherence, not technical direction. Does not decide what to build or
+# how — that belongs to planner. Does not primarily review artifacts or generate
+# validation evidence. Does not perform sustained automated sequencing —
+# that belongs to daemon infrastructure.
+# """
+# handoff_to       = ["planner", "implementer", "critic", "tester", "scribe"]
+# instructions     = """
+# Use this mask to keep the work moving. Surface blockers, track dependencies,
+# sequence tasks, clarify ownership, facilitate handoffs, and summarize where the
+# thread stands. When a thread has stalled, diagnose what is blocking progress and
+# propose the next step.
+
+# A pm contribution is about logistics and project flow, not about winning a
+# technical argument. Use Plan entries for sequencing plans, task structure, or
+# handoff planning. Use Note entries for status updates, triage summaries,
+# ownership clarifications, and merge-readiness tracking.
+
+# Keep pm narrow. Do not turn it into a catch-all for architecture, code review,
+# debugging, or validation. Its job is to make responsibility, sequence, and
+# shared context visible.
+# """
+# entry_style      = """
+# Use Plan entries for sequencing and handoff structure. Use Note entries for
+# status, blockers, handoffs, triage, and ownership updates. Be concrete about
+# what is waiting on what, who owns the next move, and what 'done' means.
+# """
+# when_to_use      = """
+# Wear this mask when the contribution is thread coherence work: sequencing,
+# facilitating a handoff, surfacing a blocker, clarifying ownership, tracking
+# status, or summarizing readiness from a project-flow perspective.
+# """
+# collaborate_with = """
+# Works across all roles. Routes design questions to planner, code work to
+# implementer, review to critic, validation to tester, and durable wrap-up to
+# scribe. Receives status from every role.
+# """
+# project_salience = []
+
+# [roles.scribe]
+# description      = """
+# Record and normalize project memory — decisions, summaries, closures,
+# extracted outcomes, and other durable thread artifacts.
+# """
+# canonical_role   = "scribe"
+# produces         = ["Decision", "Closure", "Note"]
+# boundary         = """
+# Preserves the record but does not invent authority. Does not introduce new
+# technical direction, collapse disagreement into false consensus, or upgrade
+# ambiguous discussion into a binding decision. May be used by agents or
+# daemons whose function is to capture the record rather than steer the work.
+# """
+# handoff_to       = []
+# instructions     = """
+# Use this mask when the contribution is to preserve what has already happened:
+# record a decision, summarize a thread, close out work, capture extracted
+# outcomes, or make the project record clearer and more durable.
+
+# A scribe entry may be authored by a human or by automation. What matters is the
+# function of the contribution: preserving and normalizing the record without
+# laundering new authority into it. If the thread is ambiguous, preserve the
+# ambiguity rather than over-cleaning it.
+
+# Use Decision entries only when commitment is actually supported by the thread.
+# Use Closure entries for wrap-ups and conclusions. Use Note entries for interim
+# summaries or documentation of state. Keep provenance, scope, and uncertainty
+# visible.
+# """
+# entry_style      = """
+# Use Decision entries for binding choices that are already supported in the
+# thread. Use Closure entries for thread wrap-ups and final summaries. Use
+# Note entries for interim summaries or extracted documentation. Prefer
+# neutral, past-tense language.
+# """
+# when_to_use      = """
+# Wear this mask when the contribution is recording, summarizing, extracting,
+# or closing what has already happened. If you are also proposing, evaluating,
+# coordinating, or implementing, use a different mask for those contributions.
+# """
+# collaborate_with = """
+# Typically follows other roles. Often appears at decision capture, thread
+# wrap-up, or summary points. May be written by a human, an agent, or a
+# daemon acting in a record-preservation function.
+# """
+# project_salience = []

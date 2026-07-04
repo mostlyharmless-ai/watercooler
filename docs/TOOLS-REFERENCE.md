@@ -48,20 +48,6 @@ Reference for public CLI commands and MCP tools in open-source Watercooler.
 | `sync-repair` | Diagnose and repair orphan-branch sync issues | `--diagnose`, `--dry-run`, `--regenerate-cache`, `--migrate`, `--json` |
 | `sync` | Inspect or flush the async git sync queue | `--code-path`, `--threads-dir` |
 
-### Group 3 — Branch lifecycle
-
-Manage the interaction between code branches and the `watercooler/threads`
-orphan branch. These are infrequent operations, usually run once per
-feature-branch lifecycle.
-
-| Command | Synopsis | Key flags |
-|---|---|---|
-| `check-branch <branch>` | Validate branch pairing for a specific code branch | `--code-root` |
-| `check-branches` | Comprehensive audit of all branch pairings | `--code-root`, `--include-merged` |
-| `merge-branch <branch>` | Merge the paired threads branch to `main` | `--code-root`, `--force` |
-| `archive-branch <branch>` | Close OPEN threads on the branch, merge to `main`, then delete the threads branch | `--code-root`, `--abandon` (sets OPEN → `ABANDONED` instead of `CLOSED`), `--force` (skip confirmation prompts) |
-| `install-hooks` | Install git hooks that validate branch pairing on commit/push | `--code-root`, `--hooks-dir`, `--force` |
-
 ### Group 4 — Slack integration
 
 Configure the Slack webhook integration defined in `[mcp.slack]` of
@@ -140,7 +126,8 @@ Canonical roles: `planner`, `critic`, `implementer`, `tester`, `pm`, `scribe`.
 | `watercooler_list_thread_entries` | read-only |
 | `watercooler_get_thread_entry` | read-only |
 | `watercooler_roles` | read-only |
-| `watercooler_health` | read-only |
+| `watercooler_health` | read-only (incl. `detail="setup"`) |
+| `watercooler_init` | mutating (scaffolds, binds worktree; pushes only with `push=true`) |
 | `watercooler_baseline_graph` | read-only |
 | `watercooler_access_stats` | read-only |
 | `watercooler_search` | read-only |
@@ -197,6 +184,19 @@ Read a thread's full content or a condensed summary.
 ```python
 watercooler_read_thread(topic="feature-auth", code_path=".", summary_only=True)
 ```
+
+**Entry-type badge.** `read_thread` (and `list_threads` with `scan=true`) include a
+deterministic `entry_type_counts` field in JSON output — and an `Entry mix:` line in the
+`summary_only` markdown view — computed directly from the thread's entries, e.g.
+`{"Note": 10, "Plan": 0, "Decision": 0, "PR": 0, "Closure": 0}`. This badge is never
+derived from the generated summary prose, so a discussion thread always reports
+`0 Decisions / 0 Closures` regardless of summary wording.
+
+**Conditional summary language.** Generated thread summaries use decision/outcome
+language only when the thread actually contains `Decision`/`Closure` entries in the
+summary window; a Note-only thread is summarized as discussion, never as decisions. The
+badge is the authoritative, non-LLM view of thread shape. (Local mode only — hosted reads
+do not generate baseline-graph summaries.)
 
 ### `watercooler_list_thread_entries`
 
@@ -348,21 +348,55 @@ watercooler_set_status(
 
 ## Utility tools
 
+### `watercooler_init`
+
+Set up watercooler in a repository (MCP-native — no CLI needed). Idempotent and
+**mutating** (scaffolds `.watercooler/roles.toml`, binds the threads worktree,
+and — only with `push=true` and the public-remote gate satisfied — publishes
+the threads branch). Returns a JSON readiness report whose `summary` field is
+one plain-language sentence to relay to the user. Never auto-invoked — call it
+only when the user asks to set up / initialize watercooler.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `code_path` | string | yes | Repo root (not inferred from the server's cwd) |
+| `push` | bool | no | Opt-in publish of the threads branch (default `false` = local only) |
+| `remote` | string | no | Explicit remote name/URL to target (does not bypass the consent gate) |
+| `confirm_public` | bool | no | Required to publish — affirms the remote is one your team should see |
+| `allow_local_only` | bool | no | Solo use — silence the "unsynced" notice in the summary |
+| `force` | bool | no | Re-scaffold `roles.toml` even if present (backs the old file up) |
+
+Key report fields: `summary`, `usable_now`, `roles_customizable`,
+`sync_status` (`synced`/`local_only`/`no_remote`/`auth_failed`/`unknown`),
+`push_attempt`, `next_actions`, `details`.
+
+**Example:**
+```python
+watercooler_init(code_path=".")                       # set up locally (no push)
+watercooler_init(code_path=".", push=True,            # publish for teammates
+                 confirm_public=True)
+watercooler_init(code_path=".", force=True)           # re-scaffold roles (backs up)
+```
+
 ### `watercooler_health`
 
 Check server health, git auth, and setup status. With `detail="identity"`,
 returns the resolved agent identity and a write-readiness assessment instead
-(folded-in `watercooler_whoami`).
+(folded-in `watercooler_whoami`). With `detail="setup"`, returns a **strictly
+read-only** setup-readiness report — the same contract as `watercooler_init`
+but mutating nothing (no worktree bind, no push, no auto-heal). Requires an
+explicit `code_path`; an absent path returns a `needs_code_path` report.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `code_path` | string | no | Repo path for context-aware checks |
-| `detail` | string | no | `"identity"` → resolved agent identity + write-readiness |
+| `code_path` | string | no | Repo path for context-aware checks (required for `detail="setup"`) |
+| `detail` | string | no | `"identity"` → identity + write-readiness; `"setup"` → read-only setup readiness |
 
 **Example:**
 ```python
-watercooler_health()                      # full health check
-watercooler_health(detail="identity")      # who am I + write-readiness
+watercooler_health()                          # full health check
+watercooler_health(detail="identity")          # who am I + write-readiness
+watercooler_health(code_path=".", detail="setup")   # read-only "is it set up?"
 ```
 
 ### `watercooler_roles`

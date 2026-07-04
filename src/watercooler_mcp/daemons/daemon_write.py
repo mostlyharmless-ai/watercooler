@@ -17,12 +17,41 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from watercooler.baseline_graph.annotations import AnnotationEvent
 
 logger = logging.getLogger(__name__)
 
 # Allowed entry types for daemon writes — matches the Watercooler taxonomy.
 _ALLOWED_ENTRY_TYPES = frozenset({"Note", "Decision", "Plan", "PR", "Closure"})
+
+
+def _apply_annotation_events(
+    threads_dir: Path, topic: str, events: "Sequence[AnnotationEvent]"
+) -> None:
+    """Append L1 annotation events to a thread's ``annotations.jsonl``.
+
+    This is the SOLE sanctioned place daemon code persists annotations. It is
+    only ever reached from inside a ``run_with_sync`` operation — via
+    ``daemon_write_entry``'s ``annotation_events`` or ``daemon_annotate`` — so
+    the writes are committed + pushed in the same transaction.
+
+    Daemons must NOT call ``append_annotation`` directly: an uncommitted
+    projection write silently poisons the served worktree and wedges sync
+    (``bug-sync-worktree-poisoning``). The invariant is enforced by
+    ``tests/unit/test_daemon_annotation_write_invariant.py``.
+    """
+    from watercooler.baseline_graph.annotations import append_annotation
+    from watercooler.baseline_graph.storage import (
+        get_graph_dir,
+        get_thread_graph_dir,
+    )
+
+    thread_dir = get_thread_graph_dir(get_graph_dir(threads_dir), topic)
+    for event in events:
+        append_annotation(thread_dir, event)
 
 
 @dataclass(frozen=True)
@@ -47,6 +76,8 @@ def daemon_write_entry(
     topic: str,
     *,
     code_root: Path,
+    threads_dir: Optional[Path] = None,
+    code_repo: Optional[str] = None,
     title: str,
     body: str,
     agent: str = "Daemon",
@@ -59,6 +90,9 @@ def daemon_write_entry(
     status: Optional[str] = None,
     user_tag: str = "system",
     post_write_hooks: list[Callable[[str, Path, str], None]] | None = None,
+    annotation_events: "Optional[Sequence[AnnotationEvent]]" = None,
+    authority_fields: Optional[dict] = None,
+    support_fields: Optional[dict] = None,
 ) -> DaemonWriteResult:
     """Write a thread entry from daemon context.
 
@@ -88,6 +122,11 @@ def daemon_write_entry(
             ``graph_ack()`` but before commit/push.  Each receives
             ``(topic, threads_dir, entry_id)``.  Failures are logged
             but do not affect the write result.
+        annotation_events: Optional L1 annotation events applied after
+            ``graph_ack()`` and committed in the same transaction. Preferred
+            over ``post_write_hooks`` for annotation writes — daemons hand
+            event lists here rather than calling ``append_annotation``
+            directly (which, outside this transaction, poisons the worktree).
 
     Returns:
         A :class:`DaemonWriteResult` — never raises.
@@ -156,6 +195,24 @@ def daemon_write_entry(
             pushed=False,
             error=f"ThreadContext resolution failed: {e}",
         )
+
+    # Scope-aware write (Phase 3 hosted daemons): when the caller passes the
+    # coordinator-installed tenant worktree, adopt the FULL tenant identity from the scope,
+    # not just the location — otherwise the entry lands on the right threads branch but is
+    # tagged with the server checkout's code_branch/repo, and branch-filtered tenant reads
+    # can't see the ratification candidate. Override threads_dir (write+push target, via
+    # ctx.threads_dir which both graph_ack and run_with_sync follow) AND code_repo/
+    # code_branch (the entry's code_branch tag drives read visibility; both feed the commit
+    # footers). ``effective_branch`` below then resolves to the tenant branch too.
+    if threads_dir is not None:
+        from dataclasses import replace
+
+        overrides: dict = {"threads_dir": threads_dir}
+        if code_repo is not None:
+            overrides["code_repo"] = code_repo
+        if code_branch is not None:
+            overrides["code_branch"] = code_branch
+        ctx = replace(ctx, **overrides)
 
     if not ctx.threads_dir or not ctx.threads_dir.exists():
         logger.warning(
@@ -297,6 +354,8 @@ def daemon_write_entry(
                 user_tag=user_tag,
                 entry_id=entry_id,
                 code_branch=effective_branch,
+                authority_fields=authority_fields,
+                support_fields=support_fields,
             )
             if post_write_hooks:
                 for hook in post_write_hooks:
@@ -307,6 +366,27 @@ def daemon_write_entry(
                             "[DAEMON_WRITE] Post-write hook failed (non-fatal): %s",
                             hook_err,
                         )
+            if annotation_events:
+                _apply_annotation_events(ctx.threads_dir, topic, annotation_events)
+            # Re-upsert the decisions index AFTER annotation events so the
+            # Decision's source xref + decision_extracted tag are reflected
+            # (append_entry already wrote a pre-annotation record). Best-effort.
+            if entry_type == "Decision":
+                try:
+                    from watercooler.baseline_graph.decision_index import (
+                        upsert_decision_index_local,
+                    )
+                    from watercooler.baseline_graph.storage import get_graph_dir
+
+                    upsert_decision_index_local(
+                        get_graph_dir(ctx.threads_dir), topic, entry_id
+                    )
+                except Exception as idx_err:
+                    logger.warning(
+                        "[DAEMON_WRITE] decisions-index upsert failed "
+                        "(non-fatal): %s",
+                        idx_err,
+                    )
             return result
 
         run_with_sync(
@@ -341,4 +421,93 @@ def daemon_write_entry(
             str(e),
             operation_completed=bool(sync_status.get("operation_completed")),
             committed=bool(sync_status.get("committed")),
+        )
+
+
+def daemon_annotate(
+    topic: str,
+    *,
+    code_root: Path,
+    events: "Sequence[AnnotationEvent]",
+    agent: str = "Daemon",
+    agent_spec: Optional[str] = None,
+) -> DaemonWriteResult:
+    """Apply L1 annotation events to a thread inside the synced write transaction.
+
+    The committing counterpart to ``append_annotation`` for daemons that emit
+    annotations on a tick with no accompanying entry (e.g. tagging a thread
+    ``has_learning``). Runs ``run_with_sync`` so the annotations are committed +
+    pushed atomically, never left as an uncommitted worktree projection that
+    wedges sync (``bug-sync-worktree-poisoning``).
+
+    Follows the **never-raise** contract — returns a :class:`DaemonWriteResult`.
+    Its ``entry_id`` is empty because annotations are not entries; branch on
+    ``written`` / ``pushed``.
+    """
+    if not topic or not isinstance(topic, str):
+        return DaemonWriteResult(
+            entry_id="", written=False, pushed=False,
+            error="topic must be a non-empty string",
+        )
+    if not events:
+        return DaemonWriteResult(
+            entry_id="", written=False, pushed=False,
+            error="events must be a non-empty sequence",
+        )
+
+    try:
+        from watercooler_mcp.config import resolve_thread_context
+
+        ctx = resolve_thread_context(code_root)
+    except Exception as e:
+        logger.warning("[DAEMON_WRITE] Failed to resolve ThreadContext: %s", e)
+        return DaemonWriteResult(
+            entry_id="", written=False, pushed=False,
+            error=f"ThreadContext resolution failed: {e}",
+        )
+
+    if not ctx.threads_dir or not ctx.threads_dir.exists():
+        return DaemonWriteResult(
+            entry_id="", written=False, pushed=False,
+            error=f"threads_dir does not exist: {ctx.threads_dir}",
+        )
+    if not ctx.code_root:
+        return DaemonWriteResult(
+            entry_id="", written=False, pushed=False,
+            error="code_root not resolved — write-capable daemon requires code_root",
+        )
+
+    sync_status: dict[str, object] = {}
+    try:
+        from watercooler_mcp.middleware import run_with_sync
+
+        def _do_annotate():
+            _apply_annotation_events(ctx.threads_dir, topic, events)
+            return None
+
+        run_with_sync(
+            ctx,
+            f"daemon-annotate: {agent_spec or agent} — {topic[:60]}",
+            _do_annotate,
+            topic=topic,
+            agent_spec=agent_spec,
+            sync_status=sync_status,
+        )
+
+        if sync_status.get("pushed") is True:
+            return DaemonWriteResult(entry_id="", written=True, pushed=True)
+
+        error_msg = str(
+            sync_status.get("error")
+            or "Annotations written locally but commit/push status is incomplete"
+        )
+        return DaemonWriteResult(
+            entry_id="",
+            written=bool(sync_status.get("committed")),
+            pushed=False,
+            error=error_msg,
+        )
+    except Exception as e:
+        return DaemonWriteResult(
+            entry_id="", written=False, pushed=False, error=str(e)
         )

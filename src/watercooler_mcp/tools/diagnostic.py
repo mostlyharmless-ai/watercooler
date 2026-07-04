@@ -332,6 +332,70 @@ def _append_memory_sync_block(status_lines: list[str], context: Any) -> None:
         pass
     status_lines.append(handoff_line)
 
+    # --- Hosted ingestion queue (#941) ----------------------------------
+    # The exhausted-credits incident was invisible locally: handoff receipts
+    # read "submitted" (true but non-terminal) while the hosted queue
+    # dead-lettered 100% of episodes. Surface the hosted queue's terminal
+    # counters here, best-effort, so submitted-but-never-completed
+    # divergence is visible from local health.
+    if (
+        getattr(_runtime, "surface", None) == "local_hybrid"
+        and getattr(_runtime, "premium_client", None) is not None
+    ):
+        hosted_line = "  Hosted ingestion queue: (unreachable)"
+        try:
+            import asyncio as _asyncio
+            import json as _json
+
+            from .._async_utils import run_coro_in_fresh_loop as _fresh_loop
+
+            text = _fresh_loop(
+                _asyncio.wait_for(
+                    _runtime.premium_client.call_tool_text(
+                        "watercooler_memory_task_status", {}
+                    ),
+                    timeout=5.0,
+                )
+            )
+            d = _json.loads(text)
+            stats = d.get("stats", {})
+            completed = stats.get("total_completed", 0)
+            dead = stats.get("total_dead_lettered", 0)
+            throttle_events = stats.get("total_throttled", 0)
+            hosted_line = (
+                f"  Hosted ingestion queue: depth={d.get('queue_depth', 0)}"
+                f", completed={completed}"
+                f", dead_lettered={dead}"
+                f", throttle_events={throttle_events}"
+                f" (lifetime since last hosted restart)"
+            )
+            # PR #942 review finding 1: the counters are lifetime, so a
+            # 100%-failure recurrence AFTER a healthy period shows
+            # completed=M>0 — warn on sustained divergence, not only on
+            # the cold-start (completed==0) shape. And under the new
+            # throttle policy a rate-limited provider manifests as a
+            # climbing throttle_events count rather than dead letters —
+            # that is the recurrence signature of this incident, so it
+            # gets its own warning.
+            if dead and dead >= completed:
+                hosted_line += (
+                    "\n  ⚠️  Hosted ingestion is failing: episodes are "
+                    "accepted (submitted) but dead-letter server-side at "
+                    "or above the completion rate — inspect "
+                    "watercooler_memory_task_status(task_id=<remote_task_id>) "
+                    "for the terminal error"
+                )
+            elif throttle_events >= 3:
+                hosted_line += (
+                    "\n  ⚠️  Hosted ingestion is being rate-limited by its "
+                    "LLM provider (throttle ramp active) — episodes are "
+                    "delayed, not lost; if persistent, check the provider "
+                    "account's quota/billing"
+                )
+        except Exception:
+            pass
+        status_lines.append(hosted_line)
+
     # --- Footer pointers to hosted-authority tools ---------------------
     status_lines.extend([
         f"  Hosted memory/backend authority: watercooler_diagnose_memory",
@@ -354,7 +418,6 @@ def _describe_storage_mode(threads_dir: Path) -> str:
       display stays 1:1 with the write guard.
     - Under ``~/.watercooler/worktrees/<repo>/`` with a valid
       ``.git`` entry → ``"orphan worktree"``.
-    - Sibling ``<parent>/<repo>-threads`` directory → ``"sibling-threads (legacy)"``.
     - Anything else → ``"custom (<basename>)"``.
 
     Stdlib-only; reuses the write_guard module's lightweight git
@@ -424,9 +487,6 @@ def _describe_storage_mode(threads_dir: Path) -> str:
 
     if is_under_worktrees:
         return "orphan worktree"
-
-    if name.endswith("-threads") and threads_dir.parent.exists():
-        return "sibling-threads (legacy)"
 
     return f"custom ({name})"
 
@@ -971,6 +1031,47 @@ def _health_identity_impl(ctx: Context, code_path: str = "") -> str:
     return "\n".join(lines)
 
 
+def _health_setup_impl(ctx: Context, code_path: str = "") -> str:
+    """Read-only setup-readiness check (``watercooler_health detail="setup"``).
+
+    The honest "is watercooler set up here?" verb: it mutates **nothing** (no
+    worktree create/bind, no push, no auto-heal) and returns the same readiness
+    contract ``watercooler_init`` does, computed from non-mutating probes only.
+    Relay the ``summary`` to the user verbatim.
+
+    Requires an explicit ``code_path`` — a uvx-launched server's working
+    directory is an ephemeral env dir, not the user's repo, so it is never
+    assumed; an absent path returns a ``needs_code_path`` report.
+    """
+    from ..setup_report import (
+        ambiguous_report,
+        build_setup_report,
+        deployment_context,
+        hosted_na_report,
+        needs_code_path_report,
+        non_git_report,
+        resolve_repo,
+    )
+
+    resolution = resolve_repo(code_path)
+    if resolution.needs_code_path:
+        return json.dumps(
+            needs_code_path_report("watercooler_health detail=setup"), indent=2
+        )
+    transport, mode, local_applies = deployment_context()
+    if not local_applies:
+        return json.dumps(hosted_na_report(transport, mode), indent=2)
+    # Same prerequisite guards as watercooler_init, so the read-only check and
+    # the mutating tool give the same next step (git init / confirm the repo)
+    # rather than a misleading "uninitialized — call watercooler_init".
+    if not resolution.is_git:
+        return json.dumps(non_git_report(resolution), indent=2)
+    if resolution.ambiguous:
+        return json.dumps(ambiguous_report(resolution), indent=2)
+    # actions=None → strictly read-only report (no mutation).
+    return json.dumps(build_setup_report(resolution), indent=2)
+
+
 def _health_impl(ctx: Context, code_path: str = "", detail: str = "") -> str:
     """Check server health and configuration including branch parity status.
 
@@ -980,7 +1081,9 @@ def _health_impl(ctx: Context, code_path: str = "", detail: str = "") -> str:
     Args:
         code_path: Optional path to code repository for parity checks.
         detail: Pass ``"identity"`` for the resolved agent identity and a
-            write-readiness assessment (folded-in watercooler_whoami).
+            write-readiness assessment (folded-in watercooler_whoami), or
+            ``"setup"`` for a read-only setup-readiness report (the same
+            contract as ``watercooler_init``, but mutating nothing).
 
     Example output:
         Watercooler MCP Server v0.1.0
@@ -992,6 +1095,9 @@ def _health_impl(ctx: Context, code_path: str = "", detail: str = "") -> str:
     """
     if str(detail).strip().lower() == "identity":
         return _health_identity_impl(ctx, code_path)
+
+    if str(detail).strip().lower() == "setup":
+        return _health_setup_impl(ctx, code_path)
 
     # Hosted mode guard — additive early return
     from ..auth import is_hosted_mode
@@ -1458,13 +1564,44 @@ def _health_impl(ctx: Context, code_path: str = "", detail: str = "") -> str:
         return _format_warnings_for_response(f"Watercooler MCP Server\nStatus: Error\nError: {str(e)}")
 
 
+async def _health_probe_impl(
+    ctx: Context,
+    code_path: str = "",
+    timeout_s: float = 8.0,
+    alert: bool = False,
+) -> str:
+    """Actively probe the remote T2 (Graphiti) channel and classify health.
+
+    Unlike ``watercooler_health`` (which reports configured/queue state), this
+    runs a bounded ``facts`` query through the live ``premium_client`` and — in
+    hybrid mode — through a *fresh* client too, so it distinguishes a wedged
+    long-lived client (``client_wedged``) from a Railway-side outage
+    (``backend_unavailable``). Read-only.
+
+    Args:
+        code_path: Repo root for the probe query context.
+        timeout_s: Per-canary timeout (kept under the ~50s middleware ceiling).
+        alert: If True, post a Slack alert when the verdict is amber/red.
+
+    Returns:
+        JSON: ``{verdict, channel_diagnosis, checks, thresholds, surface}``.
+    """
+    from ..health_probe import maybe_alert, probe_t2_channel
+
+    result = await probe_t2_channel(_runtime, code_path=code_path, timeout_s=timeout_s)
+    if alert:
+        result["alert_sent"] = maybe_alert(result, code_path=code_path)
+    return json.dumps(result, indent=2)
+
+
 def register_diagnostic_tools(mcp):
     """Register diagnostic tools with the MCP server.
 
     Args:
         mcp: The FastMCP server instance
     """
-    global health
+    global health, health_probe
 
     # Register tools and store references for testing
     health = mcp.tool(name="watercooler_health")(_health_impl)
+    health_probe = mcp.tool(name="watercooler_health_probe")(_health_probe_impl)

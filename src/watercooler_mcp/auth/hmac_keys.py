@@ -622,11 +622,11 @@ def check_repo_authorisation(
 
     # Late import: `auth/__init__.py` imports this module at startup
     # via `load_default_registry`, so a top-level import would create
-    # a cycle. Both branches use the same strict canonicaliser the
-    # bearer path uses.
-    from . import _canonical_repo_for_claim
+    # a cycle. Both branches use the same canonicaliser the bearer
+    # path uses.
+    from . import canonical_repo
 
-    normalised = _canonical_repo_for_claim(x_repo)
+    normalised = canonical_repo(x_repo)
     if not normalised:
         return RepoAuthError(
             f"HMAC repo authorisation: X-Repo {x_repo!r} not canonicalisable",
@@ -645,7 +645,7 @@ def check_repo_authorisation(
         # PR #703 round 7+5+1 MED: canonicalise the claim entries
         # at the membership test (defense-in-depth). The bearer
         # parse path in ``auth/__init__.py`` already runs entries
-        # through ``_normalise_repos_claim`` / ``_canonical_repo_for_claim``,
+        # through ``_normalise_repos_claim`` / ``canonical_repo``,
         # but a future caller populating ``per_user_repo_claim``
         # from a different source (e.g. a custom token resolver, a
         # WebSocket transport) might not pre-canonicalise. Without
@@ -660,7 +660,7 @@ def check_repo_authorisation(
         normalised_claim = frozenset(
             c
             for c in (
-                _canonical_repo_for_claim(r) for r in per_user_repo_claim
+                canonical_repo(r) for r in per_user_repo_claim
             )
             if c
         )
@@ -789,7 +789,7 @@ def _load_service_keys_from_env(env: dict[str, str]) -> list[KeyInfo]:
         repos_raw = env.get(f"{prefix}{key_id}_REPOS", "").strip()
         # PR #703 round 7+1 MED: normalise allow-list entries through
         # the same canonicaliser the request path uses
-        # (``_canonical_repo_for_claim`` → lower-case, ``.git``-strip).
+        # (``canonical_repo`` → lower-case, ``.git``-strip).
         # Without this, an env var like ``REPOS=Org/Repo`` stores the
         # raw mixed-case form, but ``check_repo_authorisation``
         # lowercases the request's X-Repo before the membership test —
@@ -798,11 +798,11 @@ def _load_service_keys_from_env(env: dict[str, str]) -> list[KeyInfo]:
         # in warn mode. Late import to avoid a startup cycle
         # (auth/__init__ imports this module).
         if repos_raw:
-            from . import _canonical_repo_for_claim
+            from . import canonical_repo
 
             normalised: set[str] = set()
             for raw_repo in _split_csv(repos_raw):
-                canonical = _canonical_repo_for_claim(raw_repo)
+                canonical = canonical_repo(raw_repo)
                 if canonical:
                     normalised.add(canonical)
                 else:

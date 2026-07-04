@@ -54,6 +54,7 @@ from watercooler.pulse_stance_lib import (
 
 from .base import BaseDaemon
 from .hosted_data import is_daemon_hosted_mode
+from .role_salience import RoleSalienceCache
 from .state import Finding, build_finding_id, load_findings
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,9 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         self._config = config or ProjectCoordinatorConfig()
         self._threads_dir_override = threads_dir
         self._resolved_threads_dir: Path | None = None
+        self._code_root: Path | None = None
         self._scope_id: str = ""
+        self._role_salience_cache = RoleSalienceCache()
         # Dedup cache: finding_id str → already reported
         self._existing_keys: set[str] = set()
         self._ticks_since_resync: int = 0
@@ -170,6 +173,7 @@ class ProjectCoordinatorDaemon(BaseDaemon):
 
             ctx = resolve_thread_context(Path.cwd())
             self._resolved_threads_dir = ctx.threads_dir
+            self._code_root = ctx.code_root
             # Derive scope_id for deterministic finding IDs
             try:
                 from watercooler.pulse_snapshot_lib import derive_repo_key
@@ -382,29 +386,7 @@ class ProjectCoordinatorDaemon(BaseDaemon):
         # corpus-level branch below, consumed by _emit_stance_advisories().
         self._extras.corpus_signal_inputs.clear()
 
-        # Bootstrap or periodically re-sync dedup set from disk
-        self._ticks_since_resync += 1
-        if (
-            not self._existing_keys
-            or self._ticks_since_resync >= _DEDUP_RESYNC_INTERVAL
-        ):
-            existing = load_findings(
-                self.name,
-                limit=_DEDUP_LIMIT,
-                unacknowledged_only=True,
-                namespace=self.state_namespace,
-            )
-            if len(existing) >= _DEDUP_LIMIT:
-                logger.warning(
-                    "DAEMON[project_coordinator]: dedup cache truncated at %d findings; "
-                    "duplicates may occur",
-                    _DEDUP_LIMIT,
-                )
-            self._existing_keys = {f.finding_id for f in existing}
-            # Filter out stance fids explicitly cleared by tombstone emission —
-            # prevents disk-based resync from re-blocking re-escalation (todo 282)
-            self._existing_keys -= self._extras.cleared_stance_fids
-            self._ticks_since_resync = 0
+        self._resync_dedup_keys_if_due()
 
         cfg = self._config
         suppression_tags = set(cfg.suppression_tags)
@@ -1098,10 +1080,17 @@ class ProjectCoordinatorDaemon(BaseDaemon):
             trend_signals.supersession_rate if trend_signals is not None else None
         )
 
+        project_salience_by_role, salience_diagnostic = self._role_salience_cache.resolve(
+            self._code_root, daemon_name=self.name, scope_id=self._scope_id
+        )
+        if salience_diagnostic is not None:
+            findings.append(salience_diagnostic)
+
         advisories = build_stance_advisories(
             snapshot,
             coordinator_findings=coordinator_signal_inputs,
             trend_supersession_rate=trend_rate,
+            project_salience_by_role=project_salience_by_role,
         )
 
         # Phase 3c-2: compute source_lead_ids per advisory from active leads.
@@ -1547,10 +1536,95 @@ class ProjectCoordinatorDaemon(BaseDaemon):
 
         return None
 
+    def _resync_dedup_keys_if_due(self) -> None:
+        """Bootstrap or periodically re-sync the dedup set from disk.
+
+        Shared by the local scan tick and the hosted stance tick so both
+        respect persisted finding IDs (and tombstone-cleared stance fids)
+        across restarts.
+        """
+        self._ticks_since_resync += 1
+        if (
+            not self._existing_keys
+            or self._ticks_since_resync >= _DEDUP_RESYNC_INTERVAL
+        ):
+            existing = load_findings(
+                self.name,
+                limit=_DEDUP_LIMIT,
+                unacknowledged_only=True,
+                namespace=self.state_namespace,
+            )
+            if len(existing) >= _DEDUP_LIMIT:
+                logger.warning(
+                    "DAEMON[project_coordinator]: dedup cache truncated at %d findings; "
+                    "duplicates may occur",
+                    _DEDUP_LIMIT,
+                )
+            self._existing_keys = {f.finding_id for f in existing}
+            # Filter out stance fids explicitly cleared by tombstone emission —
+            # prevents disk-based resync from re-blocking re-escalation (todo 282)
+            self._existing_keys -= self._extras.cleared_stance_fids
+            self._ticks_since_resync = 0
+
     def _tick_hosted(self) -> list[Finding]:
-        """Hosted mode — explicit no-op in v1A."""
-        self._update_tick_metrics(0, 0, 0, 0)
-        return []
+        """Hosted mode — the stance-signal slice (v1B scope (a)).
+
+        Decision 01KWJZQ6C05S6SWBJ8V00432AM (ratifying :19): hosted PCD
+        produces the pulse-rich stance *signal* only — no coordination scan
+        and no ``coordinator_lead`` detection (that opens as its own
+        follow-on decision). Salience stays empty and turn-end delivery
+        stays agent-side/local, both by ratified constraint; the agent-side
+        pull-and-join consumes these findings via
+        ``watercooler_daemon_findings(category="stance_advisory")``.
+
+        Reuses ``_emit_stance_advisories`` wholesale so hosted advisories get
+        the identical dedup/tombstone/source-lead machinery as local, with
+        hosted-shaped inputs: ``active_signals``/corpus counts empty (no scan
+        ran) and the pulse/trend snapshots read from the fleet-namespaced
+        checkpoints the sibling snapshot daemons write.
+        """
+        # Hosted scope-key backfill (snapshot-join fix, observed live
+        # 2026-07-03): __init__'s cwd-based resolution finds no repo in the
+        # container, leaving ``_scope_id`` empty — which scopes extras under
+        # "_unscoped" and, critically, misses the pulse-snapshot lookup:
+        # PulseSnapshotDaemon derives its ``repo_key`` from ``Path.cwd()``
+        # via the same ``derive_repo_key`` when running under a fleet
+        # worktree override. Backfill with the identical recipe so the
+        # stance ← pulse join keys align (verified mismatch: PCD "" vs
+        # pulse "0c35eebf403c" → permanent "degraded").
+        if not self._scope_id:
+            try:
+                from watercooler.pulse_snapshot_lib import derive_repo_key
+
+                self._scope_id = derive_repo_key(self._code_root or Path.cwd())
+            except Exception:  # noqa: BLE001 — degraded stance beats a dead tick
+                pass
+
+        # Same rolling-state preamble as the local tick, minus the scan.
+        self._load_extras()
+        self._extras.corpus_signal_inputs.clear()
+        # Scope-(a) boundary, made structural (PR #1053 review): no
+        # coordination scan runs hosted, so scan-derived state must not
+        # influence stance inputs. ``active_signals`` feeds BOTH the
+        # coordinator signal inputs and the persisted-lead provenance index
+        # in ``_emit_stance_advisories``; a checkpoint carrying stale scan
+        # artifacts (legacy data, future migrations) would otherwise leak
+        # them into hosted advisories. Dedup signatures and cleared-fid
+        # state are deliberately preserved — they are stance state, not
+        # scan state.
+        self._extras.active_signals.clear()
+        self._resync_dedup_keys_if_due()
+
+        findings: list[Finding] = []
+        if self._config.stance_enabled:
+            self._emit_stance_advisories(findings, time.time())
+        else:
+            self._last_stance_outcome = "disabled"
+            self._last_stance_levels = {}
+
+        self._save_extras()
+        self._update_tick_metrics(0, len(findings), 0)
+        return findings
 
     def _update_tick_metrics(
         self,

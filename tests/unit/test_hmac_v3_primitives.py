@@ -550,7 +550,7 @@ class TestRepoAuthorisation:
         self,
     ) -> None:
         # PR #703 round 7+5+1 MED: ``check_repo_authorisation``
-        # canonicalises ``x_repo`` via ``_canonical_repo_for_claim``
+        # canonicalises ``x_repo`` via ``canonical_repo``
         # but previously accepted ``per_user_repo_claim`` verbatim.
         # The bearer parse path in ``auth/__init__.py`` already
         # canonicalises, but a future caller (custom token resolver,
@@ -881,7 +881,7 @@ class TestLoadDefaultRegistry:
 
     def test_repos_canonicalised_at_load_time(self) -> None:
         # PR #703 round 7+1 MED: the request path normalises X-Repo
-        # via ``_canonical_repo_for_claim`` (lower-case, .git-strip)
+        # via ``canonical_repo`` (lower-case, .git-strip)
         # before the membership test against ``key.repo_allow_list``.
         # If the env var stores the raw mixed-case string, the entry
         # silently never matches. Verify entries are canonicalised

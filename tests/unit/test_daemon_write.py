@@ -726,3 +726,42 @@ class TestDaemonWriteHooks:
 
         assert result.written is True
         assert result.pushed is True
+
+
+@patch(_PATCH_RESOLVE)
+def test_scope_override_adopts_full_tenant_identity(mock_resolve, tmp_path):
+    """Hosted scope adoption (review #1041): threads_dir + code_repo + code_branch overrides
+    replace the server-resolved identity so the entry lands, pushes, tags, and footers under
+    the tenant scope — not just a relocated threads_dir with the server's branch/repo."""
+    server_threads = tmp_path / "server"
+    server_threads.mkdir()
+    tenant = tmp_path / "tenant"
+    tenant.mkdir()
+    mock_resolve.return_value = _mock_thread_context(server_threads, code_root=tmp_path / "srv")
+    with patch(_PATCH_RUN_SYNC, side_effect=_mark_sync_success) as mock_sync:
+        daemon_write_entry(
+            "t",
+            code_root=tmp_path / "srv",
+            threads_dir=tenant,
+            code_repo="org/tenant",
+            code_branch="feature-x",
+            title="x",
+            body="b",
+            agent="D",
+        )
+    ctx = mock_sync.call_args.args[0]
+    assert ctx.threads_dir == tenant
+    assert ctx.code_repo == "org/tenant"  # not the server's "test/repo"
+    assert ctx.code_branch == "feature-x"  # not the server's "main"
+
+
+@patch(_PATCH_RESOLVE)
+def test_no_override_keeps_resolved_identity(mock_resolve, tmp_path):
+    server_threads = tmp_path / "server"
+    server_threads.mkdir()
+    mock_resolve.return_value = _mock_thread_context(server_threads)
+    with patch(_PATCH_RUN_SYNC, side_effect=_mark_sync_success) as mock_sync:
+        daemon_write_entry("t", code_root=tmp_path, title="x", body="b", agent="D")
+    ctx = mock_sync.call_args.args[0]
+    assert ctx.threads_dir == server_threads
+    assert ctx.code_repo == "test/repo" and ctx.code_branch == "main"

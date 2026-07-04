@@ -45,6 +45,7 @@ class RoleDefinition:
     entry_style: str = ""
     when_to_use: str = ""
     collaborate_with: str = ""
+    project_salience: list[str] = field(default_factory=list)
 
 
 def _load_toml_bytes(data: bytes) -> dict:
@@ -54,6 +55,38 @@ def _load_toml_bytes(data: bytes) -> dict:
             "Install with: pip install tomli"
         )
     return tomllib.loads(data.decode())
+
+
+def _validate_project_salience(name: str, value: object) -> list[str]:
+    """Type-guard ``project_salience``: list[str] of non-empty trimmed strings.
+
+    Raises ValueError on malformed input (fail-loud catalog contract, PR #685).
+    Length/count caps are enforced by the compiler, not here.
+
+    Also rejects entries containing C0/C1 control or escape bytes: a bullet
+    persists into the committed ``roles.toml`` and is later echoed to the
+    terminal via the Stop hook, so a control byte would become a
+    version-controlled terminal-escape-injection payload. This is a *safety*
+    check (fail-loud at the boundary), not a policy cap — it stays here even
+    though length/count caps deliberately live in the compiler.
+    """
+    if not isinstance(value, list):
+        raise ValueError(
+            f"Invalid project_salience for role {name!r}: expected a list of strings, "
+            f"got {type(value).__name__}."
+        )
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(
+                f"Invalid project_salience for role {name!r}: every entry must be a "
+                f"non-empty string, got {item!r}."
+            )
+        if any((ord(c) < 0x20 and c != "\t") or 0x7F <= ord(c) <= 0x9F for c in item):
+            raise ValueError(
+                f"Invalid project_salience for role {name!r}: entry contains control "
+                f"or escape characters, got {item!r}."
+            )
+    return [item.strip() for item in value]
 
 
 def _parse_roles(data: dict) -> dict[str, RoleDefinition]:
@@ -71,6 +104,9 @@ def _parse_roles(data: dict) -> dict[str, RoleDefinition]:
             entry_style=spec.get("entry_style", ""),
             when_to_use=spec.get("when_to_use", ""),
             collaborate_with=spec.get("collaborate_with", ""),
+            project_salience=_validate_project_salience(
+                name, spec.get("project_salience", [])
+            ),
         )
     return roles
 

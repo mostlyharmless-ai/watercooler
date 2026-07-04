@@ -139,18 +139,7 @@ class TestCommonConfig:
     def test_defaults(self):
         """CommonConfig has sensible defaults."""
         config = CommonConfig()
-        # Default pattern uses HTTPS (works without SSH agent - Codex compatibility)
-        assert config.threads_pattern == "https://github.com/{org}/{repo}-threads.git"
-        assert config.threads_suffix == "-threads"
         assert config.templates_dir == ""
-
-    def test_pattern_overrides_suffix(self):
-        """threads_pattern can override default suffix behavior."""
-        config = CommonConfig(
-            threads_pattern="git@github.com:{org}/{repo}-watercooler.git"
-        )
-        assert config.threads_pattern is not None
-        assert "-watercooler" in config.threads_pattern
 
 
 class TestValidationConfig:

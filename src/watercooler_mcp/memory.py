@@ -247,10 +247,9 @@ def load_graphiti_config(
         # refuse to fall back to a process-wide env var / code_path here
         # — a silent fallback under hosted multi-tenancy would let one
         # tenant's reads target another tenant's graph (or a shared default).
-        # Malformed headers (no ``/``, empty owner, or empty repo after
-        # the threads-suffix strip) are rejected so callers see a
-        # structured "graphiti unavailable" rather than silently
-        # writing/reading from the wrong place.
+        # Malformed headers (no ``/``, empty owner, or empty repo) are
+        # rejected so callers see a structured "graphiti unavailable"
+        # rather than silently writing/reading from the wrong place.
         raw = http_ctx.repo
         if "/" not in raw:
             log_error(
@@ -260,19 +259,12 @@ def load_graphiti_config(
             )
             return None
         owner, repo_part = raw.split("/", 1)
-        # Use ``get_threads_suffix()`` rather than a hardcoded ``"-threads"``
-        # so deployments that override ``WATERCOOLER_THREADS_SUFFIX`` derive
-        # the same canonical name as the writer-side helper.
-        from watercooler.path_resolver import get_threads_suffix
-        threads_suffix = get_threads_suffix()
-        if threads_suffix and repo_part.endswith(threads_suffix):
-            repo_part = repo_part[: -len(threads_suffix)]
         if not owner or not repo_part:
             log_error(
                 f"MEMORY: hosted http_ctx.repo={raw!r} has empty owner or "
-                f"repo after threads-suffix strip (owner={owner!r}, "
-                f"repo={repo_part!r}); refusing to fall back to a "
-                f"non-canonical database name. Graphiti config unavailable."
+                f"repo (owner={owner!r}, repo={repo_part!r}); refusing to "
+                f"fall back to a non-canonical database name. Graphiti "
+                f"config unavailable."
             )
             return None
         try:

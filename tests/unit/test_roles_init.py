@@ -31,14 +31,14 @@ def test_creates_dotwatercooler_when_missing(tmp_path, capsys):
     assert str(target) in out
 
 
-def test_writes_bundled_content_byte_identical(tmp_path):
-    """Scaffolded file must be byte-identical to bundled src/watercooler/data/roles.toml."""
+def test_writes_commented_stub_byte_identical(tmp_path):
+    """Scaffolded file must be byte-identical to the bundled commented stub."""
     rc = roles_init(project_path=tmp_path)
     assert rc == 0
 
-    bundled = (files("watercooler") / "data" / "roles.toml").read_bytes()
+    stub = (files("watercooler") / "templates" / "roles.project-stub.toml").read_bytes()
     written = (tmp_path / ".watercooler" / "roles.toml").read_bytes()
-    assert written == bundled
+    assert written == stub
 
 
 def test_creates_parent_dir_when_dotwatercooler_does_not_exist(tmp_path):
@@ -74,18 +74,28 @@ def test_idempotent_when_file_exists(tmp_path, capsys):
     assert "--force" in out
 
 
-def test_force_overwrites_existing(tmp_path):
-    """Pre-existing roles.toml + force=True → overwritten with bundled defaults."""
+def test_force_overwrites_existing_and_backs_up(tmp_path, capsys):
+    """force=True → re-scaffold from the stub and back the old file up first."""
     target_dir = tmp_path / ".watercooler"
     target_dir.mkdir()
     target = target_dir / "roles.toml"
-    target.write_bytes(b"# user's custom roles file\n")
+    custom = b"# user's custom roles file\n"
+    target.write_bytes(custom)
 
     rc = roles_init(project_path=tmp_path, force=True)
     assert rc == 0
 
-    bundled = (files("watercooler") / "data" / "roles.toml").read_bytes()
-    assert target.read_bytes() == bundled
+    stub = (files("watercooler") / "templates" / "roles.project-stub.toml").read_bytes()
+    assert target.read_bytes() == stub
+
+    # The prior contents were preserved in a timestamped backup.
+    backups = [
+        p
+        for p in target_dir.glob("roles.toml.bak-*")
+        if p.read_bytes() == custom
+    ]
+    assert backups, "expected a backup of the overwritten roles.toml"
+    assert "Backed up previous roles" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +121,7 @@ def test_atomic_write_failure_cleans_up_tempfile(tmp_path, capsys):
 
     err = capsys.readouterr().err
     assert "❌" in err
-    assert "Failed to write" in err
+    assert "Failed to initialize roles" in err
 
 
 def test_mkdir_failure_when_dotwatercooler_is_a_regular_file(tmp_path, capsys):
@@ -130,7 +140,7 @@ def test_mkdir_failure_when_dotwatercooler_is_a_regular_file(tmp_path, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "❌" in err
-    assert "Failed to write" in err
+    assert "Failed to initialize roles" in err
     # The blocker file is untouched.
     assert blocker.read_bytes() == b"not a directory"
 
@@ -147,15 +157,15 @@ def test_mkdir_permission_failure_returns_error(tmp_path, capsys):
     assert not (tmp_path / ".watercooler" / "roles.toml").exists()
     err = capsys.readouterr().err
     assert "❌" in err
-    assert "Failed to write" in err
+    assert "Failed to initialize roles" in err
 
 
 def test_bundled_read_failure_returns_error(tmp_path, capsys):
-    """If reading bundled roles.toml fails, return 1 with stderr message."""
-    # roles_init imports `files` from importlib.resources locally, so patch
-    # at the source module.
+    """If reading the bundled stub fails, return 1 with stderr message."""
+    # The shared scaffolder binds ``files`` at import time, so patch the name
+    # in that module (not importlib.resources).
     with patch(
-        "importlib.resources.files",
+        "watercooler.roles_scaffold.files",
         side_effect=RuntimeError("simulated package-data failure"),
     ):
         rc = roles_init(project_path=tmp_path)
@@ -163,7 +173,7 @@ def test_bundled_read_failure_returns_error(tmp_path, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "❌" in err
-    assert "Failed to read bundled roles.toml" in err
+    assert "Failed to initialize roles" in err
 
 
 # ---------------------------------------------------------------------------

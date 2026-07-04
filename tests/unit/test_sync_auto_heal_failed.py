@@ -191,3 +191,77 @@ class TestEnsureReadableAutoHealFailed:
         assert ok is True
         assert parity == "behind_only"
         assert auto_heal_failed is True
+
+
+_PROJECTION_REL = ".watercooler/slack-mappings/new-topic.json"
+
+
+def _fake_projection_repo(*, origin_has_path: bool) -> MagicMock:
+    """Mock Repo: one untracked slack-mapping dirty; branch + origin lookup wired."""
+    repo = MagicMock()
+    repo.git.status.return_value = f"?? {_PROJECTION_REL}"
+    repo.head.is_detached = False
+    repo.active_branch.name = "watercooler/threads"
+    if origin_has_path:
+        repo.git.cat_file.return_value = ""  # origin tracks the path
+    else:
+        repo.git.cat_file.side_effect = Exception("missing in origin")
+    return repo
+
+
+class TestEnsureReadableUntrackedProjection:
+    """ensure_readable's dirty_derived_only heal exercises the real
+    should_discard_dirty_entry: preserve an un-pushed sole-copy slack-mapping
+    while still fast-forwarding, but discard one origin already tracks (#924)."""
+
+    @patch("watercooler_mcp.sync.pull_ff_only", return_value=True)
+    @patch(
+        "watercooler_mcp.sync.get_parity_state",
+        side_effect=["dirty_derived_only", "dirty_derived_only"],
+    )
+    @patch("watercooler_mcp.sync.fetch_with_timeout", return_value=True)
+    def test_untracked_projection_absent_on_origin_preserved_and_pulls(
+        self, _fetch, _parity, _pull, tmp_path
+    ):
+        (tmp_path / ".git").mkdir()
+        mapping = tmp_path / _PROJECTION_REL
+        mapping.parent.mkdir(parents=True)
+        mapping.write_text('{"slackThreadTs": "1700000000.000100"}')
+        fake_repo = _fake_projection_repo(origin_has_path=False)
+
+        with patch("git.Repo") as MockRepo:
+            MockRepo.return_value = fake_repo
+            ok, _actions, parity, auto_heal_failed = ensure_readable(tmp_path)
+
+        assert mapping.exists()  # sole copy preserved, never unlinked
+        fake_repo.git.cat_file.assert_called_once()  # origin consulted
+        fake_repo.git.checkout.assert_not_called()  # preserved → skipped
+        _pull.assert_called_once()  # behind state still cleared via ff-pull
+        assert ok is True
+        assert parity == "clean"
+        assert auto_heal_failed is False
+
+    @patch("watercooler_mcp.sync.pull_ff_only", return_value=True)
+    @patch(
+        "watercooler_mcp.sync.get_parity_state",
+        side_effect=["dirty_derived_only", "behind_only"],
+    )
+    @patch("watercooler_mcp.sync.fetch_with_timeout", return_value=True)
+    def test_untracked_projection_present_on_origin_discarded(
+        self, _fetch, _parity, _pull, tmp_path
+    ):
+        (tmp_path / ".git").mkdir()
+        mapping = tmp_path / _PROJECTION_REL
+        mapping.parent.mkdir(parents=True)
+        mapping.write_text('{"slackThreadTs": "local-divergent"}')
+        fake_repo = _fake_projection_repo(origin_has_path=True)
+
+        with patch("git.Repo") as MockRepo:
+            MockRepo.return_value = fake_repo
+            ok, _actions, parity, auto_heal_failed = ensure_readable(tmp_path)
+
+        assert not mapping.exists()  # discarded — origin holds the canonical copy
+        fake_repo.git.cat_file.assert_called_once()
+        _pull.assert_called_once()
+        assert ok is True
+        assert parity == "clean"

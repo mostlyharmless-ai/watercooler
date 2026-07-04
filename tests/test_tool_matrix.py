@@ -161,6 +161,63 @@ class TestAuthorityResolution:
 
 
 # ---------------------------------------------------------------------------
+# Hybrid remote-leg ↔ premium-mount coherence
+# ---------------------------------------------------------------------------
+
+
+class TestHybridRemoteLegMountCoherence:
+    """Every tool the local_hybrid surface can route to its premium remote leg
+    must actually be mounted on hosted_premium. Otherwise the forward fails at
+    runtime with ``Unknown tool: '<name>'`` even though the matrix is internally
+    consistent (the tool registers on some *other* surface).
+
+    Regression guard for the list_decisions+supersession gap: the tool routed
+    memory_query→remote, the wrapper forwarded ``watercooler_list_decisions`` to
+    hosted_premium, but it was only registered on hosted_full. See thread
+    ``list-decisions-supersession-hosted-premium-unmounted``.
+    """
+
+    def test_mixed_tools_mounted_on_premium(self):
+        """MIXED tools route some arg-modes to the remote leg via a local
+        wrapper that forwards by tool *name*; that name must exist on
+        hosted_premium."""
+        from watercooler_mcp.capabilities import MIXED_TOOL_NAMES
+
+        premium = _surface_tool_names("hosted_premium")
+        missing = set(MIXED_TOOL_NAMES) - premium
+        assert not missing, (
+            "MIXED tools route remote via name-forwarding but are not mounted "
+            f"on hosted_premium (remote leg → 'Unknown tool'): {sorted(missing)}"
+        )
+
+    def test_proxy_mounted_remote_tools_exist_on_premium(self):
+        """Tools the hybrid surface mounts from the premium proxy must exist on
+        hosted_premium (the proxy's backing surface)."""
+        from watercooler_mcp.capabilities import (
+            CapabilityProfile,
+            HYBRID_DEFAULT_ROUTES,
+        )
+        from watercooler_mcp.server_factory import (
+            mountable_remote_tools_for_hybrid,
+        )
+        from watercooler_mcp.tool_runtime import ToolRuntime
+
+        premium = _surface_tool_names("hosted_premium")
+        premium_client = MagicMock()
+        premium_client.proxy_server.return_value = MagicMock()
+        rt = ToolRuntime(
+            surface="local_hybrid",
+            capability_profile=CapabilityProfile(routes=HYBRID_DEFAULT_ROUTES),
+            premium_client=premium_client,
+        )
+        missing = mountable_remote_tools_for_hybrid(rt) - premium
+        assert not missing, (
+            "hybrid proxy-mounts tools absent from hosted_premium "
+            f"(remote leg → 'Unknown tool'): {sorted(missing)}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Alias registry agreement
 # ---------------------------------------------------------------------------
 

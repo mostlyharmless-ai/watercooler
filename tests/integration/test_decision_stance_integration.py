@@ -184,7 +184,7 @@ def test_advisory_payload_shape(isolated_daemons_dir):
         "source_lead_ids",
     ):
         assert key in advisory, key
-    assert advisory["schema_version"] == 1
+    assert advisory["schema_version"] == 2
     assert advisory["role"] == "critic"
 
 

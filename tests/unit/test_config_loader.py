@@ -60,9 +60,9 @@ class TestEnvToConfigKey:
 
     def test_common_pattern(self):
         """Common section env vars."""
-        path, key = _env_to_config_key("WATERCOOLER_THREADS_PATTERN")
+        path, key = _env_to_config_key("WATERCOOLER_TEMPLATES")
         assert path == ["common"]
-        assert key == "threads_pattern"
+        assert key == "templates_dir"
 
     def test_mcp_core(self):
         """MCP core env vars."""
@@ -354,6 +354,111 @@ class TestGetConfig:
         # Both should work without errors
         assert isinstance(config1, WatercoolerConfig)
         assert isinstance(config2, WatercoolerConfig)
+
+
+class TestGetConfigReentrancy:
+    """Regression tests for issue #810.
+
+    get_config() guards its load with a non-reentrant threading.Lock. A
+    same-thread re-entry while a load is in flight previously self-deadlocked
+    forever; it must now fail loud instead. The historical trigger was an
+    import-time config access reached via the ``mcp.capability_routes``
+    validator importing ``watercooler_mcp.capabilities`` (which, before #818,
+    eagerly imported ``watercooler_mcp.server`` and its import-time config load).
+    """
+
+    def test_reentrant_load_raises_instead_of_deadlocking(self, tmp_path, monkeypatch):
+        """A same-thread re-entry during load raises RuntimeError, never hangs."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        clear_config_cache()
+
+        import watercooler.config_loader as cl
+
+        real_load = cl.load_config
+        captured: Dict[str, Any] = {"exc": None}
+
+        def reentrant_load(*args, **kwargs):
+            # Simulate an import-time get_config() reached during validation,
+            # on the same thread that already holds _config_lock.
+            try:
+                cl.get_config(project_path=tmp_path)
+            except RuntimeError as exc:
+                captured["exc"] = exc
+            return real_load(*args, **kwargs)
+
+        monkeypatch.setattr(cl, "load_config", reentrant_load)
+
+        # The outer call must complete (no deadlock); the inner re-entry raised.
+        config = cl.get_config(project_path=tmp_path, force_reload=True)
+        assert isinstance(config, WatercoolerConfig)
+        assert isinstance(captured["exc"], RuntimeError)
+        assert "#810" in str(captured["exc"])
+
+    def test_loading_flag_reset_after_load(self, tmp_path, monkeypatch):
+        """The per-thread loading flag clears so later calls are not mis-flagged."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        clear_config_cache()
+
+        get_config(project_path=tmp_path, force_reload=True)
+        # A subsequent (sequential, non-reentrant) call must not raise.
+        config = get_config(project_path=tmp_path, force_reload=True)
+        assert isinstance(config, WatercoolerConfig)
+
+    def test_capability_routes_validation_does_not_import_server(self, tmp_path):
+        """Validating mcp.capability_routes must not import watercooler_mcp.server.
+
+        Run in a clean subprocess: the in-process test runner imports ``server``
+        during collection, which is precisely what masked the #810 deadlock in
+        the full suite. A hang here surfaces as a subprocess timeout (failure).
+        """
+        import subprocess
+        import sys
+        import textwrap
+
+        clean_home = tmp_path / "home"
+        clean_home.mkdir()
+        wc = tmp_path / ".watercooler"
+        wc.mkdir()
+        (wc / "config.toml").write_text(
+            '[mcp.capability_routes]\nmemory_ingest = "local"\n'
+        )
+
+        script = textwrap.dedent(
+            f"""
+            import sys
+            from pathlib import Path
+
+            assert "watercooler_mcp.server" not in sys.modules, "precondition: server unimported"
+
+            from watercooler.config_loader import get_config
+
+            cfg = get_config(project_path=Path(r"{tmp_path}"), force_reload=True)
+            assert cfg.mcp.capability_routes == {{"memory_ingest": "local"}}, cfg.mcp.capability_routes
+            # The validator must have run (imported capabilities) ...
+            assert "watercooler_mcp.capabilities" in sys.modules, "validator did not run"
+            # ... but must NOT have dragged in the server (the #810 deadlock chain).
+            assert "watercooler_mcp.server" not in sys.modules, "server imported during validation (#810)"
+            print("OK-810")
+            """
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            # Inherit the parent env (editable install / PYTHONPATH resolution)
+            # but redirect HOME so the real ~/.watercooler/config.toml is ignored.
+            env={**os.environ, "HOME": str(clean_home)},
+        )
+        assert result.returncode == 0, (
+            f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+        )
+        assert "OK-810" in result.stdout
 
 
 class TestGetConfigPaths:

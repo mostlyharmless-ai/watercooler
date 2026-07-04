@@ -215,17 +215,32 @@ class MemoryTaskQueue:
         *,
         backoff_base: float = 30.0,
         permanent: bool = False,
+        throttled: bool = False,
     ) -> None:
-        """Record a failure.  Task is retried or dead-lettered."""
+        """Record a failure.  Task is retried or dead-lettered.
+
+        ``throttled=True`` (#941) marks a provider rate-limit failure: the
+        task reschedules on the slow throttle ramp without consuming retry
+        budget (see :meth:`MemoryTask.mark_failed`).
+        """
         with self._lock:
             task = self._get_or_raise(task_id)
-            task.mark_failed(error, backoff_base=backoff_base, permanent=permanent)
+            task.mark_failed(
+                error,
+                backoff_base=backoff_base,
+                permanent=permanent,
+                throttled=throttled,
+            )
 
             if task.status == TaskStatus.DEAD_LETTER:
                 self._stats["total_dead_lettered"] += 1
                 self._append_dead_letter(task)
                 self._append_receipt(task, terminal_state="dead_letter")
                 del self._tasks[task_id]
+            elif throttled:
+                self._stats["total_throttled"] = (
+                    self._stats.get("total_throttled", 0) + 1
+                )
             else:
                 self._stats["total_retries"] += 1
 

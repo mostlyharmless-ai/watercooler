@@ -22,6 +22,8 @@ from watercooler.decision_extraction import (
     _THREAD_CONTEXT_OPEN,
     _validate_gate_consistency,
     _validate_quotes,
+    quotes_reverified_against_source,
+    reverify_quotes_against_source,
     SYSTEM_PROMPT,
 )
 
@@ -464,6 +466,46 @@ class TestValidateQuotes:
         ) is None
 
 
+class TestQuotesReverifiedAgainstSource:
+    """#887: public wrapper used by the promotion path to re-confirm a
+    candidate's quotes against the live source before granting warrant support."""
+
+    def test_matching_quotes_reverify_true(self):
+        assert quotes_reverified_against_source(
+            ["We decided to use PostgreSQL"],
+            "We decided to use PostgreSQL for storage.",
+        ) is True
+
+    def test_unmatched_quote_reverify_false(self):
+        assert quotes_reverified_against_source(
+            ["We decided to use MySQL"],
+            "We decided to use PostgreSQL.",
+        ) is False
+
+    def test_missing_source_body_is_false(self):
+        # Source entry unreadable/deleted → cannot confirm → withhold.
+        assert quotes_reverified_against_source(["anything"], None) is False
+        assert quotes_reverified_against_source(["anything"], "") is False
+
+    def test_no_quotes_is_false(self):
+        assert quotes_reverified_against_source([], "any body") is False
+
+    def test_short_matching_quote_is_false_with_length_reason(self):
+        result = reverify_quotes_against_source(
+            ["We agree."],
+            "Meeting notes: ok. We agree. Misc trailing text.",
+        )
+        assert result.verified is False
+        assert result.reason == "quote_below_minimum_length"
+        assert (
+            quotes_reverified_against_source(
+                ["We agree."],
+                "Meeting notes: ok. We agree. Misc trailing text.",
+            )
+            is False
+        )
+
+
 class TestValidateGateConsistency:
     def test_all_pass(self):
         gates = {
@@ -844,3 +886,211 @@ class TestPromptDelimiterStripping:
         assert _CANDIDATE_ENTRY_CLOSE in prompt
         assert "<thread_context>" not in prompt
         assert "<candidate_entry>" not in prompt
+
+
+class TestMoralDelegationClassifier:
+    """Unit 3 (#880) — procedural moral-delegation classifier."""
+
+    # Statements that MUST flag (value/ethical judgment about people).
+    FIRE = [
+        "We should preserve user consent before logging",
+        "This is the right thing to do for our users",
+        "It would be unethical to deploy without review",
+        "We must not deceive users about data collection",
+        "Ensure fairness to job applicants in the ranking",
+        "Morally we should not retain this data",
+        "Protect the privacy of patients",
+        "This will harm vulnerable people",
+        "We have a moral duty to disclose the breach",
+    ]
+
+    # Non-moral engineering statements that MUST stay quiet. This is the
+    # false-positive battery referenced in the #882 plan — measured, not
+    # asserted by hand-waving. Bare value nouns used technically must not fire.
+    QUIET = [
+        "This change harms throughput under load",
+        "Improve fairness of the scheduler queue",
+        "Add accountability logging to the audit trail",
+        "Mark this code path as safety-critical",
+        "This is a high-stakes migration",
+        "Protect the cache from eviction",
+        "Preserve the index during rebuild",
+        "The right approach is to refactor the parser",
+        "Use the FalkorDB backend for T2",
+        "Reduce harm to the request latency budget",
+        "Honor the retry budget for the queue",
+        "Respect the rate limit on the API",
+    ]
+
+    def test_flagged_statements_fire(self):
+        from watercooler.decision_extraction import classify_moral_delegation
+
+        for statement in self.FIRE:
+            a = classify_moral_delegation(statement)
+            assert a.moral_delegation_warning, f"expected flag: {statement!r}"
+            assert a.human_moral_ownership_required
+            assert a.moral_delegation_reason
+            assert a.tier in (1, 2)
+
+    def test_non_moral_engineering_statements_quiet(self):
+        from watercooler.decision_extraction import classify_moral_delegation
+
+        false_positives = [
+            s for s in self.QUIET if classify_moral_delegation(s).moral_delegation_warning
+        ]
+        # Conservatism is a correctness requirement: over-firing trains
+        # reviewers to dismiss the warning. Target false-positive rate is 0 on
+        # this battery.
+        assert false_positives == [], f"false positives: {false_positives}"
+
+    def test_empty_statement_is_quiet(self):
+        from watercooler.decision_extraction import classify_moral_delegation
+
+        for value in (None, "", "   "):
+            a = classify_moral_delegation(value)
+            assert not a.moral_delegation_warning
+            assert a.moral_delegation_reason == ""
+            assert a.tier is None
+
+    def test_reason_is_procedural_not_substantive(self):
+        from watercooler.decision_extraction import classify_moral_delegation
+
+        a = classify_moral_delegation("It would be unethical to ship this")
+        # The wording must verify ownership/process, not adjudicate morality.
+        assert "correctness" in a.moral_delegation_reason.lower()
+        assert "accountable human" in a.moral_delegation_reason.lower()
+
+
+class TestCandidateNoteMoralWarning:
+    """Unit 3 — warning emission in candidate Note bodies."""
+
+    def _value_laden_result(self, rejection_reason: str):
+        from watercooler.decision_extraction import ExtractionResult, LLMExtraction
+
+        gates = {
+            g: {"passed": True, "reason": "ok"}
+            for g in (
+                "g1_commitment",
+                "g2_not_superseded",
+                "g3_quotable",
+                "g4_rationale",
+                "g5_scope",
+                "g6_temporal",
+                "g7_authority",
+                "g8_self_contained",
+            )
+        }
+        ext = LLMExtraction(
+            gates=gates,
+            confidence=4,
+            decision_statement="We should preserve user consent before logging",
+            rationale="Respect for users",
+            scope="watercooler-cloud",
+            alternatives_considered=None,
+            verbatim_quotes=["we should preserve user consent before logging"],
+            warning=None,
+        )
+        return ExtractionResult(
+            entry_id="01SRCENTRY0000001",
+            topic="test-thread",
+            passed=False,
+            confidence=4,
+            gate_results=gates,
+            decision_body=None,
+            rejection_reason=rejection_reason,
+            extraction=ext,
+        )
+
+    def _entry(self):
+        return {
+            "entry_id": "01SRCENTRY0000001",
+            "title": "Logging policy",
+            "body": "we should preserve user consent before logging",
+            "agent": "claude",
+            "role": "planner",
+            "timestamp": "2026-06-04T00:00:00Z",
+            "thread_topic": "test-thread",
+            "index": 3,
+        }
+
+    def test_value_laden_candidate_includes_warning_markers(self):
+        from watercooler.decision_extraction import (
+            MORAL_DELEGATION_REJECTION_REASON,
+            format_candidate_note_body,
+        )
+
+        body = format_candidate_note_body(
+            self._value_laden_result(MORAL_DELEGATION_REJECTION_REASON), self._entry()
+        )
+        assert "Moral-Delegation-Warning: true" in body
+        assert "Moral-Delegation-Reason:" in body
+        # The ownership-required framing lives in the section, not a redundant
+        # always-true marker line.
+        assert "Human-Moral-Ownership-Required" not in body
+        assert "## Moral-delegation warning" in body
+        assert "human_authorized_by" in body
+
+    def test_warning_present_even_on_soft_gate_route(self):
+        # The markers track the statement's content, not the routing reason:
+        # a value-laden statement that arrives via a soft-gate failure still
+        # carries the warning.
+        from watercooler.decision_extraction import format_candidate_note_body
+
+        body = format_candidate_note_body(
+            self._value_laden_result("soft_gate_failure"), self._entry()
+        )
+        assert "Moral-Delegation-Warning: true" in body
+
+    def test_factual_candidate_has_no_warning(self):
+        from watercooler.decision_extraction import (
+            ExtractionResult,
+            LLMExtraction,
+            format_candidate_note_body,
+        )
+
+        gates = {
+            g: {"passed": True, "reason": "ok"}
+            for g in (
+                "g1_commitment",
+                "g2_not_superseded",
+                "g3_quotable",
+                "g4_rationale",
+                "g5_scope",
+                "g6_temporal",
+                "g7_authority",
+                "g8_self_contained",
+            )
+        }
+        ext = LLMExtraction(
+            gates=gates,
+            confidence=3,
+            decision_statement="Use FalkorDB for the T2 graph backend",
+            rationale="Performance",
+            scope="watercooler-cloud",
+            alternatives_considered=None,
+            verbatim_quotes=["use FalkorDB for the T2 graph backend"],
+            warning=None,
+        )
+        result = ExtractionResult(
+            entry_id="01SRCENTRY0000002",
+            topic="test-thread",
+            passed=False,
+            confidence=3,
+            gate_results=gates,
+            decision_body=None,
+            rejection_reason="low_confidence_3",
+            extraction=ext,
+        )
+        entry = {
+            "entry_id": "01SRCENTRY0000002",
+            "title": "Backend choice",
+            "body": "use FalkorDB for the T2 graph backend",
+            "agent": "claude",
+            "role": "planner",
+            "timestamp": "2026-06-04T00:00:00Z",
+            "thread_topic": "test-thread",
+            "index": 4,
+        }
+        body = format_candidate_note_body(result, entry)
+        assert "Moral-Delegation-Warning" not in body
+        assert "## Moral-delegation warning" not in body

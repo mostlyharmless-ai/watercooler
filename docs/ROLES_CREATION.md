@@ -147,15 +147,28 @@ You need a custom role when a recurring contribution type doesn't map cleanly to
 
 ### Step 1: Create `.watercooler/roles.toml`
 
-The fastest way is to scaffold the bundled defaults into your project so you can edit them in place:
+If you ran `watercooler_init` (see [QUICKSTART](./QUICKSTART.md)), this file
+already exists — `watercooler_init` scaffolds it for you. Otherwise just ask
+your agent:
 
-```bash
-watercooler roles init
-```
+> "Please set up watercooler in this repo."
 
-This drops `.watercooler/roles.toml` (a copy of the bundled six-role file, with all annotations) into your project's repository root. Re-running the command is safe — it refuses to overwrite an existing file unless you pass `--force`. Use `--project-path /path/to/repo` to scaffold somewhere other than the current directory.
+The agent calls `watercooler_init`, which drops `.watercooler/roles.toml` into
+your repository root. (If you do have the CLI on your PATH, `watercooler roles
+init` does the same thing; re-running either is safe — an existing file is left
+untouched unless you force a re-scaffold, which backs the old one up first.)
 
-If you'd rather author the file by hand, just create `.watercooler/roles.toml` directly. Either way, the project file is **merged with the bundled defaults at the role level**: new role names you add become available alongside the six canonical roles. Any role name that appears in your file **replaces** its bundled counterpart in its entirety — field-level merging is not supported.
+The scaffolded file is a **fully-commented stub**: as written it overrides
+nothing, so your project keeps inheriting the six bundled canonical roles (and
+picks up improvements when you upgrade). To customize, *uncomment a
+`[roles.<name>]` block* and edit it — see Step 2.
+
+If you'd rather author the file by hand, just create `.watercooler/roles.toml`
+directly. Either way, the project file is **merged with the bundled defaults at
+the role level**: new role names you add become available alongside the six
+canonical roles. Any role name that appears (uncommented) in your file
+**replaces** its bundled counterpart in its entirety — field-level merging is
+not supported.
 
 > **Important:** If you include a `[roles.planner]` section in your project file, it replaces the bundled `planner` definition completely. Any field you omit will be empty, not inherited from the bundled version. When overriding a canonical role, include every field you want to preserve.
 
@@ -284,6 +297,7 @@ Structure: Context → Options → Decision → Consequences.
 | `entry_style` | Optional | string | Markdown and structure recommendations for entry bodies |
 | `when_to_use` | Optional | string | Decision criteria for when to choose this role over an adjacent one |
 | `collaborate_with` | Optional | string | Roles this role works alongside — contextual framing, not operational rules |
+| `project_salience` | Optional | list of strings | Project-specific attention bullets (see [Project salience](#project-salience-attention-not-policy) below); defaults to `[]` if omitted |
 
 **Enforced vs advisory:**
 
@@ -295,6 +309,55 @@ Structure: Context → Options → Decision → Consequences.
 | `produces` | No | Advisory only — any role can create any entry type |
 | `handoff_to` | No | Advisory only — no validation that referenced roles exist |
 | `boundary`, `instructions`, `entry_style`, `when_to_use`, `collaborate_with` | No | Guidance text only |
+| `project_salience` | **Type-checked** — at load time | Must be a list of non-empty strings or the project's `roles.toml` fails to load (fail-loud); length/content caps are enforced by the compiler, not the loader |
+
+---
+
+## Project salience (attention, not policy)
+
+`project_salience` is a short, ordered list of project-specific attention
+bullets for a role — what this project has learned that this role should
+notice, distinct from `instructions` (general behavioral guidance) and from a
+policy or authority claim (which `project_salience` must never assert; see
+the lint rule below).
+
+```toml
+[roles.critic]
+project_salience = [
+  "watch for hidden authority expansion in daemon registration gates",
+  "verify mutex logic checks every relevant enabled flag, not just route",
+]
+```
+
+- **Surfaced via `watercooler_roles`** for every role, always.
+- **Automatically decorates stance advisories** for `planner`, `critic`, and
+  `tester` only — the same three roles that produce `stance_advisory`
+  findings (see [DAEMONS.md](DAEMONS.md#decision-stance-decision_stance)).
+  Custom roles can carry `project_salience` but get visibility through
+  `watercooler_roles` only; they do not enter the stance channel.
+- **Delivered at end-of-turn in Claude Code** via the Stop hook, alongside
+  the elevated advisory it decorates — labeled `advisory_only`, never a
+  policy directive.
+- **Compiled, not hand-typed, in the common case.** The `update-roles-context`
+  skill (`.claude/skills/update-roles-context/SKILL.md`) turns human-promoted
+  Watercooler Lessons into `project_salience` patches, with a lint that
+  rejects policy-shaped wording (`authorized`, `canonical`, `policy`,
+  `enforce`, `forbid`, `ban`, ...) and flags directive wording (`must`,
+  `never`, `require`, ...) for human rewrite into an attention/question
+  shape. You can also hand-edit the field directly — the loader does not
+  care which path wrote it.
+- **Capped** at 5 bullets by default (hard ceiling 7) and 160 characters per
+  bullet, enforced by the compiler (not the loader, so hand-edits are not
+  blocked, just unreviewed).
+- **Provenance lives outside the TOML file** — a projection ledger
+  (`~/.watercooler/role_salience_ledger.jsonl`) records which promoted
+  Lesson each compiled bullet came from. Nothing is written inline as a
+  TOML comment.
+- **No bullet is permanent.** The `update-roles-context` skill proposes
+  retirement — subject to the same human L2 review as any new bullet — via
+  three mechanisms: an explicit `review_after` date on the ledger record
+  has passed, the source Lesson has been superseded by a newer one, or a
+  human simply chooses to remove a bullet during review.
 
 The only hard enforcement is that a role name passed to `watercooler_say` must exist in the active role set. All field content is advisory — it guides agents and documents team conventions, but the system does not validate or enforce it.
 

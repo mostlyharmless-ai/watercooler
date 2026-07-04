@@ -23,6 +23,12 @@ from watercooler.role_loader import validate_role
 from watercooler import fs
 from watercooler.baseline_graph.writer import get_thread_from_graph
 from watercooler import commands_graph
+from watercooler.anthropomorphism_lint import (
+    lint_interiority,
+    render_advisory_marker,
+)
+from watercooler.decision_extraction import classify_moral_delegation
+from watercooler.promotion import scrub_authority_identifier
 
 from ..config import get_agent_name, is_slack_enabled, is_slack_bot_enabled
 from ..errors import (
@@ -145,6 +151,8 @@ def _say_impl(
     create_if_missing: bool = False,
     code_path: str = "",
     agent_func: str = "",
+    authority_fields: dict | None = None,
+    support_fields: dict | None = None,
 ) -> str:
     """Add your response to a thread and flip the ball to your counterpart.
 
@@ -270,6 +278,8 @@ def _say_impl(
             entry_id=entry_id,
             code_branch=context.code_branch,
             code_root=Path(code_path) if code_path else None,
+            authority_fields=authority_fields,
+            support_fields=support_fields,
         )
 
     push_warning = _run_with_sync_report_push(
@@ -280,6 +290,9 @@ def _say_impl(
         entry_id=entry_id,
         agent_spec=agent_spec,
         priority_flush=True,
+        # Phase C: authority entries keep the confirmed-write contract (block on
+        # push); ordinary entries use the config default (write-behind/accepted).
+        confirm="pushed" if entry_type in ("Decision", "Closure") else None,
     )
 
     # Update last_touched for entry and thread annotations
@@ -1000,6 +1013,7 @@ def _write_impl(
     next_actor: str = "auto",
     authority_mode: str = "ordinary",
     authorization_text: str | None = None,
+    human_authorized_by: str | None = None,
     downgrade_to_note: bool = False,
     code_path: str = "",
     title: str | None = None,
@@ -1022,7 +1036,14 @@ def _write_impl(
             ``authorization_text``; without it the call writes nothing and returns
             an error unless ``downgrade_to_note=True``.
         authorization_text: Explicit authorization statement required for
-            ``authority_mode="decision"`` or ``"closure"``.
+            ``authority_mode="decision"`` or ``"closure"``. This is audit *prose*,
+            not an identity — it is not parsed for the accountable human.
+        human_authorized_by: Optional namespace-qualified identifier of the
+            accountable human/institution (e.g. ``github:<login>`` /
+            ``wc:user:<handle>``; never a bare email). For decision/closure writes
+            it is persisted as queryable graph metadata so human ownership is not
+            buried in body prose. PRIVACY: durable, git-committed, federation-visible
+            — it cannot be redacted later. Never inferred from ``authorization_text``.
         downgrade_to_note: When True and ``authority_mode`` is decision/closure
             but ``authorization_text`` is absent, write a Note with a loud
             warning instead of returning an error.
@@ -1123,8 +1144,85 @@ def _write_impl(
         )
         body = f"{spec_line}\n\n{banner}\n\n{rest.lstrip()}" if rest else f"{spec_line}\n\n{banner}"
 
+    # Classify the Decision CONTENT for moral delegation BEFORE appending the
+    # authorization prose below. Classifying after the append would let ethical
+    # language in authorization_text (e.g. "this is the right thing to do") raise
+    # a false Moral-Delegation-Warning on an otherwise factual Decision, polluting
+    # the structured audit marker. Only decision/closure entries are classified.
+    moral = (
+        classify_moral_delegation(body)
+        if authority_mode in ("decision", "closure")
+        else None
+    )
+
+    # Anti-anthropomorphism lint (#895): flag first-person interiority in the
+    # agent-authored content. Computed here, BEFORE authorization_text is
+    # appended, so human-authored authorization prose ("I'm confident this is
+    # right") never trips the lint — the same isolation the moral classifier
+    # relies on. Applies to every entry type (interiority can appear in any
+    # body), unlike the decision/closure-only moral gate.
+    anthro = lint_interiority(body)
+
+    # Scrub the accountable-human identifier for the durable record. Never derived
+    # from authorization_text; only meaningful for decision/closure entries.
+    authorizer = scrub_authority_identifier(human_authorized_by)
     if authorization_text:
-        body = body + f"\n\n[watercooler_write: authorized — {authorization_text}]"
+        if authorizer:
+            body = body + f"\n\n[watercooler_write: authorized by {authorizer} — {authorization_text}]"
+        else:
+            body = body + f"\n\n[watercooler_write: authorized — {authorization_text}]"
+
+    # Structured authority metadata for agent-mediated Decision/Closure writes, so
+    # accountable human ownership is queryable in graph metadata, not only body prose.
+    # actor_class reflects the *writer* (an agent executing this MCP call), never the
+    # authorization source; authority_basis is "human_endorsed" only when an accountable
+    # human is recorded.
+    authority_fields: dict[str, str] | None = None
+    if authority_mode in ("decision", "closure"):
+        authority_fields = {
+            "actor_class": "agent",
+            "decision_origin": "agent_authored",
+            "authority_basis": "human_endorsed" if authorizer else "none",
+        }
+        if authorizer:
+            authority_fields["human_authorized_by"] = authorizer
+
+    # Moral-delegation surface (#880): when a Decision/Closure carries a
+    # value/ethical judgment, append a procedural ownership note so the
+    # warning is visible. Agent writes are NOT blocked — the agent acts under
+    # human instruction — but value-laden content must not *silently* become
+    # authority. The note records ownership/process, never moral correctness.
+    # `moral` was computed above on the content, before authorization prose.
+    if moral is not None:
+        if moral.moral_delegation_warning:
+            # Structured marker first, then a human-readable note. The marker
+            # makes a single body-level query (filter="Moral-Delegation-Warning")
+            # find BOTH daemon-routed candidate Notes and agent-authored
+            # value-laden Decisions — otherwise an audit ("show every value-laden
+            # Decision") silently misses this producer.
+            marker = "Moral-Delegation-Warning: true"
+            if authorizer:
+                note = (
+                    f"[moral-delegation: value-laden Decision — accountable human "
+                    f"ownership recorded ({authorizer}). Procedural ownership "
+                    f"check, not a moral-substance block.]"
+                )
+            else:
+                note = (
+                    "[moral-delegation: value-laden Decision with no recorded "
+                    "accountable human — set human_authorized_by to confer "
+                    "ownership. Procedural ownership check, not a moral-substance "
+                    "block.]"
+                )
+            body = body + f"\n\n{marker}\n{note}"
+
+    # Anti-anthropomorphism surface (#895): when the body uses first-person
+    # interiority, append a visible advisory marker so the rhetorical-register
+    # nudge is on the record and queryable (filter="Anthropomorphism-Advisory").
+    # Like the moral surface, the agent is NOT blocked — this is a lint, not a
+    # gate. Computed above on the pre-authorization content.
+    if anthro.advisory:
+        body = body + f"\n\n{render_advisory_marker(anthro)}"
 
     resolved_title, title_warning = _derive_title(body, title)
 
@@ -1160,11 +1258,50 @@ def _write_impl(
             create_if_missing=False,
             code_path=code_path,
             agent_func=agent_func,
+            authority_fields=authority_fields,
         )
 
     if title_warning:
         result = f"{result}\n{title_warning}"
     return result
+
+
+def _say_tool(
+    topic: str,
+    title: str,
+    body: str,
+    ctx: Context,
+    role: str = "implementer",
+    entry_type: str = "Note",
+    create_if_missing: bool = False,
+    code_path: str = "",
+    agent_func: str = "",
+) -> str:
+    # Public watercooler_say surface. Deliberately omits _say_impl's internal
+    # authority_fields pass-through: that parameter sets provenance (actor_class /
+    # decision_origin / authority_basis / human_authorized_by) and must only be
+    # populated by the wrappers that own the authority semantics (watercooler_write
+    # for decision/closure, watercooler_promote_candidate). Exposing it directly on
+    # watercooler_say would let any caller forge an accountable human or a
+    # human-authored actor class on an arbitrary entry. The user-facing tool
+    # description is inherited from _say_impl (see __doc__ assignment below).
+    return _say_impl(
+        topic=topic,
+        title=title,
+        body=body,
+        ctx=ctx,
+        role=role,
+        entry_type=entry_type,
+        create_if_missing=create_if_missing,
+        code_path=code_path,
+        agent_func=agent_func,
+    )
+
+
+# Surface _say_impl's rich usage docstring as the watercooler_say tool description
+# (FastMCP derives the tool description from __doc__). _say_impl has no
+# authority_fields entry in its Args, so nothing internal leaks into the schema.
+_say_tool.__doc__ = _say_impl.__doc__
 
 
 def register_thread_write_tools(mcp):
@@ -1175,8 +1312,10 @@ def register_thread_write_tools(mcp):
     """
     global say, ack, handoff, set_status
 
-    # Register tools and store references for testing
-    say = mcp.tool(name="watercooler_say")(_say_impl)
+    # Register tools and store references for testing. watercooler_say is registered
+    # via _say_tool (not _say_impl) so the internal authority_fields pass-through is
+    # not exposed as a caller-settable argument — see _say_tool.
+    say = mcp.tool(name="watercooler_say")(_say_tool)
     ack = mcp.tool(name="watercooler_ack")(_ack_impl)
     handoff = mcp.tool(name="watercooler_handoff")(_handoff_impl)
     set_status = mcp.tool(name="watercooler_set_status")(_set_status_impl)

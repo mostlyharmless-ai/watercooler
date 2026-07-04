@@ -189,7 +189,7 @@ class TestPulseToStance:
         advisories = build_stance_advisories(_minimal_snapshot())
         for a in advisories:
             assert a.level == 0
-            assert a.schema_version == 1
+            assert a.schema_version == 2
 
     def test_minimal_returns_three_roles(self):
         advisories = build_stance_advisories(_minimal_snapshot())
@@ -418,7 +418,7 @@ class TestAdvisoryProperties:
         a = pulse_to_stance("planner", signals)
         d = asdict(a)
         # Verify key fields survive serialization
-        assert d["schema_version"] == 1
+        assert d["schema_version"] == 2
         assert d["role"] == "planner"
         assert d["level"] == a.level
         assert isinstance(d["stance"]["retrieval_pressure"], float)
@@ -519,6 +519,71 @@ class TestAdvisorySignature:
         assert (
             a3.advisory_signature == a4.advisory_signature
         ), "Critic signature must not change when planner-only volatility_ratio crosses threshold"
+
+
+class TestProjectSalience:
+    """project_salience decoration + per-role signature folding."""
+
+    def test_empty_salience_defaults(self):
+        signals = StanceSignals(pulse_available=True, volatility_ratio=0.6)
+        a = pulse_to_stance("planner", signals)
+        assert a.project_salience == ()
+        assert a.authority_basis == ""
+        assert a.advisory_only is True
+
+    def test_salience_decorates_advisory(self):
+        signals = StanceSignals(pulse_available=True, volatility_ratio=0.6)
+        a = pulse_to_stance(
+            "planner", signals, project_salience=("watch for X",)
+        )
+        assert a.project_salience == ("watch for X",)
+        assert a.authority_basis == "human_promoted_lesson_projected"
+
+    def test_salience_change_re_emits_only_that_role(self):
+        """A roles-only salience edit changes the affected role's signature
+        but leaves other roles' signatures untouched (no cross-role
+        contamination, mirroring the existing triggered-signal isolation)."""
+        signals = StanceSignals(pulse_available=True, volatility_ratio=0.6)
+        a1 = pulse_to_stance("planner", signals)
+        a2 = pulse_to_stance(
+            "planner", signals, project_salience=("watch for X",)
+        )
+        assert a1.advisory_signature != a2.advisory_signature
+
+        critic1 = pulse_to_stance("critic", signals)
+        critic2 = pulse_to_stance("critic", signals)  # no salience for critic
+        assert critic1.advisory_signature == critic2.advisory_signature
+
+    def test_salience_text_change_re_emits(self):
+        signals = StanceSignals(pulse_available=True, volatility_ratio=0.6)
+        a1 = pulse_to_stance("planner", signals, project_salience=("watch for X",))
+        a2 = pulse_to_stance("planner", signals, project_salience=("watch for Y",))
+        assert a1.advisory_signature != a2.advisory_signature
+
+    def test_salience_unchanged_signature_stable(self):
+        signals = StanceSignals(pulse_available=True, volatility_ratio=0.6)
+        a1 = pulse_to_stance("planner", signals, project_salience=("watch for X",))
+        a2 = pulse_to_stance("planner", signals, project_salience=("watch for X",))
+        assert a1.advisory_signature == a2.advisory_signature
+
+    def test_salience_normalization_does_not_change_signature(self):
+        """Whitespace-only differences must not re-emit (same normalized bullet)."""
+        signals = StanceSignals(pulse_available=True, volatility_ratio=0.6)
+        a1 = pulse_to_stance("planner", signals, project_salience=("watch for X",))
+        a2 = pulse_to_stance(
+            "planner", signals, project_salience=("  watch   for   X  ",)
+        )
+        assert a1.advisory_signature == a2.advisory_signature
+
+    def test_build_stance_advisories_wires_per_role_salience(self):
+        advisories = build_stance_advisories(
+            _minimal_snapshot(),
+            project_salience_by_role={"critic": ("watch for hidden authority",)},
+        )
+        by_role = {a.role: a for a in advisories}
+        assert by_role["critic"].project_salience == ("watch for hidden authority",)
+        assert by_role["planner"].project_salience == ()
+        assert by_role["tester"].project_salience == ()
 
 
 # ---------------------------------------------------------------------------

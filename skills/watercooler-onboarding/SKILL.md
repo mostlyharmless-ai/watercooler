@@ -7,7 +7,10 @@ allowed-tools:
   - Grep
   - Read
   - Skill
+  - Task
   - ToolSearch
+  - WebFetch
+  - WebSearch
   - mcp__watercooler__watercooler_health
   - mcp__watercooler__watercooler_roles
   - mcp__watercooler__watercooler_list_threads
@@ -41,6 +44,17 @@ Watercooler entries. Read-only output exists only as a dry run:
   freshly-seeded threads. Existing files are backed up first (see Step 5.6).
   No-op in dry-run mode and when Step 5.5 has unresolved tag failures. Without
   the flag, Step 6 prints the equivalent command as a recommendation instead.
+- research pre-pass (**default-on**): before deep-history and the seeds, run the **Step 2.3
+  research pre-pass** — harvest the subject repo's external references (papers, source links)
+  from the README + docs into an `onboarding-biblio` thread, and when a principal source paper
+  exists, fetch + parse its bibliography and pull the salient secondary references in too.
+  Auto-skips the network steps under `no-biblio` / `no-github` / `local-only` / `offline` and in
+  dry-run (prints planned entries, writes nothing); the offline harvest of explicit README links
+  still runs. Detail in `references/research-prepass.md`.
+- `deep-history` (opt-in): after the research pre-pass, run the **Step 2.4 deep-history /
+  PR-reasoning layer** — mine PR history for abandoned/superseded approaches and write the
+  `history-*` threads. Off by default (forge/PR mining is expensive); honors dry-run (prints
+  planned findings, writes nothing). Detail in `references/deep-history.md`.
 - role hints (`implementer`, `planner`, `critic`, `tester`, `pm`, `scribe`) shift the
   recommended entry path and risk emphasis
 - any other text is extra prioritization context
@@ -218,6 +232,112 @@ After Step 2.0 (mandatory reads) and Step 2.1 (discovery recipes), enrich the lo
 **Soft-gate posture:** when running, treat each `gh` query as independently failable. Per-query failures (missing auth, network, rate limit, repo-private-without-permission) are caught, recorded, and reported in Step 6. The run continues with whatever succeeded. If all queries fail or all categories return empty results across all resolved sources, do not write `recent-activity`; report the absence in Step 6 as either "GitHub layer unavailable" or "GitHub reachable but no recent activity surfaced" depending on which case applied.
 
 **Detail location:** the source-repo resolver (the ordered list of GitHub source repos to consult), the PR / release / closed-issue fetch algorithms, the discovery-then-body capping rule, the portable-date computation for closed-issue queries, the per-category source fallback rules, and the `recent-activity` body template all live in `references/github-layer.md`. Load that reference at the start of this step.
+
+---
+
+## Step 2.3: Research pre-pass — external references → `onboarding-biblio` (default-on)
+
+Runs by default, **before** deep-history (Step 2.4) and the analytical seeds (Step 4/5), so the
+discerned intent and history threads can be framed against the repo's external scholarship. Many
+repos implement or extend a founding paper / method / prior art that never surfaces from code and
+git alone.
+
+**What it does (detail in `references/research-prepass.md`):**
+1. **Harvest (always, offline-safe):** scan `README*`, `CITATION*`, `docs/`, `REFERENCES.md`,
+   `*.bib`, positioning artifacts for external references (arXiv/DOI/PDF-URL/`Author (Year)`
+   patterns — reuse the `fetch-papers` Phase-2 patterns), classified resolvable vs paywalled.
+2. **Identify the principal source paper(s)** — heuristic, recorded as `Inferred` with confidence
+   (named in CITATION/README "based on", or the most prominently/repeatedly cited foundational
+   source). May be zero.
+3. **Deep parse (network-gated):** for each principal paper, fetch the PDF to a **persistent reuse
+   cache** (`~/.watercooler/cache/biblio/<repo>/`, off the subject repo and threads branch; re-runs
+   skip already-fetched/parsed papers so the deep-parse cost is paid once per repo) with
+   `fetch-papers` curl safety, extract to markdown via the `pdf-to-md` per-PDF Task subagent
+   (which writes the entry itself, or returns the markdown to the parent if it lacks MCP write
+   tools — never drops it), isolate its References via `whitepaper_parser`, and rank → take the top
+   **~8–12** salient secondary references (`+N more folded`, no silent caps).
+
+**Skip the network steps (§0)** under `no-biblio` / `no-github` / `local-only` / `offline`, with no
+network/fetch tool, or in dry-run (print planned entries; the offline link-harvest still runs).
+Soft-gate posture: each fetch/parse is independently failable, recorded, never aborts onboarding.
+
+**Outputs** (`onboarding-biblio` thread; titles prefixed `Onboarding: `; tags `onboarding` +
+`biblio`; honors dry-run): an **index entry** (full harvested catalogue + principal-paper
+identification + resolvable/paywalled split + parsed-entry index), **one entry per principal
+paper** (the pdf-to-md markdown, written by the per-paper subagent), and **one entry per
+high-relevance secondary** (full markdown when open-access, else a reference stub). Add
+`onboarding-biblio` to the `onboarding-overview` sibling index. Biblio entries are `Note`s, never
+`Decision`s — context, not authority.
+
+---
+
+## Step 2.4: Deep-history / decision-history reconstruction (opt-in, `deep-history`)
+
+Runs only when the skill arguments include `deep-history`. Off by default — history mining is
+expensive. Layers on Step 2.2: reuses the source-repo resolver, so for a **fork** it mines the
+**parent**, not the empty fork `origin`.
+
+**Goal.** Forensically reconstruct, per code **segment**, the repo's **decision and supersession
+history** from PR/commit history — growing threads that read like the decision log Watercooler
+*would* have captured live. **Honest value: a faithful, cited reconstruction + recall/synthesis
+of the team's own (reconstructed) record** — NOT an agent-capability gap, never "the repo is
+broken." A landed successor is the *most* valuable signal (it explains the current code), so
+there is **no `forge-only` / `no-successor` keep-drop gate** here.
+
+**Two phases — split on fact vs inference (do not collapse them):**
+1. **Phase 1 — atomic change ledger (deterministic, FULL coverage, no LLM).** Per segment, the
+   ordered factual record: PR/issue/SHA, files, symbols added/removed/renamed (`git log -S`,
+   `--find-renames`), co-change, and a deterministic symbol/file **supersession graph**
+   (introduced@A → rewritten@B → removed@C). Rank nodes by significance. Facts only.
+2. **Phase 2 — decision-evolution narrative (bounded LLM over the ranked + supersession nodes).**
+   Read intent (title/body/**linked design issue**/review/diff), classify the moment, append a
+   segment-thread entry. **Every inferred-intent claim must cite a specific Phase-1 fact or a
+   quoted rationale**, or be marked `pure sequence-inference`.
+
+**Load-bearing honesty rules** (this method infers intent — without these it launders
+speculation as decision):
+- **Reconstruction voice, never the maintainer's first-person words** ("Reconstructed: at PR #N
+  X→Y", not "we chose X because…").
+- **Recorded rationale is quoted-or-declared-absent; inferred intent is always labeled +
+  evidence-cited + confidence-scored.** Never fabricate a "why." When ≥2 intent-readings fit the
+  diffs equally, preserve both.
+- **Time-aware segments:** follow renames; record segment birth/split/merge as first-class
+  moments.
+- **Self-checks:** every inferred claim resolves to ≥1 ledger fact; claimed supersessions match
+  the deterministic supersession graph; run one **calibration probe** (reconstruct a segment
+  whose rationale *was* recorded, without reading it, then compare).
+
+**Outputs** (Step 5 machinery + Step 5.5 tag-verify; topics prefixed `history-`, tags
+`onboarding` + `history`; honors dry-run). The full output spec is deep-history.md §E. The thread
+set is **a function of the segment count from §1.2**, not a fixed list — typically **8–15
+`history-seg-*` threads** for a real repo (one per co-change cluster, including stable and
+historical subsystems), plus one `history-overview` and one `history-synthesis` arc entry per
+segment. **Producing a single `history-seg` thread means §1.2 was skipped and segments were
+guessed** — see the §C segment-count self-check. Each `history-seg` entry is one PER MOMENT
+(never consolidate a segment into a summary).
+
+**Execution (one invocation writes everything — no hand-authoring):** Phase 1 builds the shared
+deterministic ledger once; Phase 2 computes per-segment moments in parallel and **fans out one
+worker per segment, writing concurrently** — the single-writer group-commit committer (#906/#908)
+now owns the shared worktree, so writers only append + enqueue and the daemon serializes every
+commit, making the concurrent-clobber race (#904) and the synchronous-summarizer timeout/stale-lock
+failure (#903) structurally impossible. **Do NOT re-introduce per-worker `watercooler_sync_repair`
+self-flush** — workers breaking each other's worktree locks was the original #904 root cause and
+would reintroduce the data loss despite the committer fix. Each worker persists its own per-moment
+entries via `watercooler_say`; **Phase 3** then generates the readable per-segment arc from the
+committed moments; `history-overview` is generated from the real write results. **Post-run verify:**
+writes are accepted durably but committed/pushed *eventually* by the committer — audit **origin**
+`entries.jsonl` counts per thread to confirm the queue drained; on a stuck backlog →
+`watercooler_sync_repair` + a flush write. Detail in `references/deep-history.md`.
+
+**You cannot run this step from this summary.** The segment-derivation algorithm (§1.2) — the
+part that decides how many `history-seg-*` threads exist — is **not** reproduced here, on
+purpose. Do not derive segments from intuition or from "what the repo is currently working on."
+Before doing anything else in Step 2.4, open `references/deep-history.md` and run §1.2. If you
+have not read that file, stop — any segmentation you produce without it is invalid. (The file
+also holds: the Phase-1 ledger recipes + supersession graph, significance ranking, Phase-2
+intent-read + moment taxonomy, entry template, self-checks + calibration probe,
+native-supersession reuse, format discipline, and verified datasette fixtures.)
 
 ---
 
@@ -399,6 +519,11 @@ Optional/conditional topics (Step 4) follow the same prefix:
 `onboarding-developer-experience`, `onboarding-release-process`,
 `onboarding-security`, `onboarding-recent-activity`.
 
+`onboarding-biblio` is also a core thread, but it is written **earlier** by the Step 2.3 research
+pre-pass (not in Step 5) — `scribe` role, `Note` entries (index + one per parsed paper). It still
+takes the `Onboarding: ` title prefix and the `onboarding` thread tag, and the `overview` sibling
+index must include it. Detail: `references/research-prepass.md`.
+
 In `Related:` body sections and elsewhere in prose, reference siblings by
 their full prefixed topic slug (e.g. ``Related: `onboarding-architecture` ``).
 
@@ -411,7 +536,7 @@ Each new canonical topic carries a stricter body contract than the engineering s
 The `overview` entry is the bootstrap's front door. Its body MUST contain, in order:
 
 1. **Plain-language framing** (one paragraph, in `Purpose:` or the first bullet of `Observed:`). Distill the product framing from the highest-trust positioning sources discoverable in the repo: `*THESIS*` / `dev_docs/THE_*` / `docs/PHILOSOPHY*` / `README` / `package.json` description fields. Use everyday vocabulary; do not assume the reader is an engineer. If positioning sources are absent or thin, say so explicitly with low confidence.
-2. **Sibling index** (a list under `Observed:`). Enumerate every other seed topic written in this bootstrap with a one-line purpose. Format: `` - `<topic>` — <one-line purpose> (entry_id `<ULID>`) ``. If a sibling has not been written yet, mark it `(entry_id: pending)`.
+2. **Sibling index** (a list under `Observed:`). Enumerate every other seed topic written in this bootstrap with a one-line purpose. Format: `` - `<topic>` — <one-line purpose> (entry_id `<ULID>`) ``. If a sibling has not been written yet, mark it `(entry_id: pending)`. When the Step 2.3 research pre-pass wrote `onboarding-biblio`, include it here as the scholarly-context sibling (and in the reading order below) so readers reach the source material first.
 3. **"Five questions this seed answers"** (under `Observed:`). Map five concrete reader questions to the sibling that answers each — for example: "What does this product do? → `product-charter`. Who is responsible for which path? → `team-map`. What runs in CI? → `test-surface`."
 4. **Reading order for first-time readers** (under `Inferred:`). Recommend an explicit order — typically `product-charter` → `team-map` → `architecture` → `working-map` → `entry-path`, then risk/test/docs as needed. Note when the recommended order differs by reader role (e.g., a security reviewer starts at `risk-register`).
 5. **`Related:`** lists every sibling the overview indexes (this is the only entry whose `Related:` is exhaustive across siblings).
@@ -576,10 +701,13 @@ silent partial failures.
    ```
    watercooler_list_threads(tags="onboarding", code_path=".", format="json")
    ```
-   Confirm every seed topic written this run appears in the result. Any
-   missing topic means the `watercooler_annotations` write silently failed
-   (likely a write-path race or transient lock contention). For each missing
-   topic, re-issue the tag-write call and re-run this batch query.
+   Confirm every seed topic written this run appears in the result —
+   **including `onboarding-biblio` if the Step 2.3 research pre-pass wrote it**
+   (it is written earlier than the Step 5 loop but is still a this-run seed and
+   carries the `onboarding` tag). Any missing topic means the
+   `watercooler_annotations` write silently failed (likely a write-path race or
+   transient lock contention). For each missing topic, re-issue the tag-write
+   call and re-run this batch query.
 
 2. **Per-thread tag fallback (only if Step 1 still misses anything after
    one re-attempt).** For each topic still absent from the tag-filter

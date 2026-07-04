@@ -34,7 +34,7 @@ sleeps.
 
 ## Open-core daemons
 
-The following five daemons ship in the open-source build:
+The following six daemons ship in the open-source build:
 
 | Daemon | Key | Default interval | Writes to threads? | Requires LLM? |
 |---|---|---|---|---|
@@ -43,6 +43,7 @@ The following five daemons ship in the open-source build:
 | Decision Detector | `decision_detector` | 5 min | No | No |
 | Decision Extractor | `decision_extractor` | 30 min | Yes | **Yes** |
 | Decision Stance | `decision_stance` | 10 min | No | No |
+| Learnings | `learnings` | 30 min | No | Optional |
 
 Additional daemons (content scouting, project pulse, cross-thread
 analysis, T2 indexing) ship only in premium and hosted deployments.
@@ -324,6 +325,11 @@ that were not made. A `Decision` entry that makes it through the gates
 is a claim the system is willing to stand behind, because it can be
 traced back to recognisable words from a real author at a real moment.
 
+For the full enumeration — each of the eight gates, the deterministic
+pipeline gates that wrap the LLM call, the three routing outcomes
+(Decision / candidate Note / private rejection), and a rejection-reason
+lookup table — see [Decision gates](DECISION_GATES.md).
+
 ### Requires
 
 - Decision Detector must be enabled — the extractor reads its findings
@@ -506,6 +512,112 @@ roadmap.
 
 ---
 
+## Learnings (`learnings`)
+
+Scans **closed** threads for reusable learnings — the extract/propose tier of
+the Commons loop, a sibling to the Decision family. For each closed thread it
+decides whether the work *captured a learning* (a solution write-up matched by
+PR number, or an in-thread lesson section) or left a **capture gap** (referenced
+a merged PR with neither signal).
+
+**This daemon does not write to threads.** In its current phase it runs
+watch-only: it emits reversible L1 graph annotations (`has_learning` /
+`solution-doc:<path>` tags, lesson cross-references) plus daemon findings — never
+a thread entry. Thread-visible emission is gated separately and is off (see
+[Authority posture](#authority-posture-the-emission-gate)).
+
+### Requires
+
+- **No LLM for the deterministic layer** (capture-gap detection + solution-doc
+  indexing).
+- An LLM endpoint (`[mcp.daemons.llm]` or `[mcp.daemons.learnings.llm]`) **only**
+  when `synthesize_notes` is on — the optional pass that drafts the missing
+  learning for a capture-gap thread. Without one, the daemon degrades cleanly to
+  the deterministic signals.
+
+### Authority posture (the emission gate)
+
+The daemon honours the agent-authority ladder (guardrail
+`01KS0JTK0RT4EC0M92PMX19XRA`): it never writes Decision / Closure / supersession
+/ status. The `emit_mode` dial graduates thread-visible behaviour:
+
+- `monitor` (default) — reversible annotations + findings only; no thread
+  entries. This is the only validated mode.
+- `warn` / `enforce` — reserved for a later increment that emits thread-visible
+  learning Notes / promotion candidates.
+
+Advancing past `monitor` with `emit_learning_notes` is a **human go/no-go**:
+before enabling thread-visible emission, a human reviews real shadow-mode
+drafts (`synthesize_notes` on, `monitor` mode) and records an explicit
+go-decision. There is no automated precision threshold — the gate is a logged
+human look.
+
+### Solution write-ups and the `capture_gap` guard
+
+The daemon joins closed threads to solution write-ups by PR number.
+`solutions_dirs` lists the code-repo-relative directories scanned for
+`pr:`-tagged write-ups (open-core default `docs/solutions`, Compound
+Engineering's convention; override per project). Directories are scanned in
+order, first-dir-wins on a duplicate `pr:`; missing directories are skipped.
+
+A merged PR with a matching write-up is **not** a capture gap. A merged PR with
+neither a write-up nor an in-thread lesson **is** — but only when the project
+demonstrably writes solution docs at all. If the configured `solutions_dirs`
+yield an empty index, `capture_gap` is suppressed (and logged at debug level):
+an empty index can't distinguish "no write-up" from "looked in the wrong place",
+so flagging gaps would false-fire on well-documented work.
+
+### Configuration
+
+```toml
+[mcp.daemons.learnings]
+enabled = true
+interval = 1800.0                     # seconds between scans (minimum 60)
+solutions_dirs = ["docs/solutions"]   # override per project (this repo: dev_docs/solutions)
+synthesize_notes = false              # LLM draft of the missing learning (off; costs LLM calls)
+min_confidence = 3                    # confidence floor (0–5) for a synthesized draft to pass
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enable this daemon. |
+| `emit_mode` | string | `"monitor"` | Graduation dial: `monitor` (annotations + findings only), `warn`, `enforce`. Past `monitor` is gated on a human go-decision. |
+| `interval` | float | `1800.0` | Seconds between scans (min 60). |
+| `index_solutions_docs` | bool | `true` | Join `pr:`-tagged solution write-ups to dedup already-captured work. |
+| `solutions_dirs` | list | `["docs/solutions"]` | Code-repo-relative dirs scanned for write-ups; in-order, first-dir-wins; missing dirs skipped. |
+| `synthesize_notes` | bool | `false` | Run the LLM pass that drafts the missing learning for a capture-gap (records a `shadow_learning_note` finding under `monitor`). Requires an LLM. |
+| `min_confidence` | int | `3` | Minimum draft confidence (0–5) for a synthesized learning to pass. |
+| `max_syntheses_per_tick` | int | `5` | Hard cap on LLM synthesis calls per tick (min 1) — bounds the burst when `synthesize_notes` is first enabled on a backlog. |
+| `max_tick_duration` | float | `120.0` | Soft per-tick wall-clock budget in seconds (min 1). Checked between topics; not a hard ceiling. |
+| `emit_learning_notes` | bool | `false` | *(Reserved)* Emit thread-visible learning Notes. Gated behind the human go-decision; inactive in `monitor`. |
+| `emit_promotion_candidates` | bool | `false` | *(Reserved / no runtime effect today)* Future L2 promotion-candidate emission. |
+| `recurrence_threshold` | int | `3` | *(Reserved / no runtime effect today)* Future recurrence threshold for promotion-candidate emission (2–20). |
+
+### Finding categories
+
+| Category | Severity | Meaning |
+|---|---|---|
+| `learning_extracted` | info | A closed thread captured a learning (a matched solution write-up or an in-thread lesson section). |
+| `capture_gap` | warning | A closed thread referenced a merged PR but has no write-up and no in-thread lesson — a candidate missing learning. |
+| `shadow_learning_note` | info | A "would-have-written" LLM draft of the missing learning for a capture-gap thread (only with `synthesize_notes` on; a finding, never a thread Note). |
+
+### Annotations
+
+In `monitor` mode the daemon writes reversible L1 graph annotations (tags),
+never thread entries:
+
+| Tag | Target | Meaning |
+|---|---|---|
+| `has_learning` | thread | The thread captured a learning. |
+| `solution-doc:<path>` | thread | Code-repo-relative path of the matched write-up. |
+| `learning_extracted` | entry | The entry carrying the in-thread lesson section. |
+
+For the deeper model — the five-stage pipeline, the criteria-as-data seam, the
+PR join, and the shadow-synthesis cost controls — see
+[Learnings daemon](LEARNINGS_DAEMON.md).
+
+---
+
 ## Acknowledging findings
 
 Findings accumulate until acknowledged. Use
@@ -597,6 +709,9 @@ the config (not as a plain `"local"` string for authenticated endpoints).
 
 ## Related documentation
 
+- [Decision gates](DECISION_GATES.md) — the full 8-gate checklist, deterministic pipeline gates, routing outcomes, and rejection-reason reference for the Decision Extractor
+- [Learnings daemon](LEARNINGS_DAEMON.md) — the capture model, PR join, `capture_gap` guard, the five-stage pipeline, and the shadow-synthesis cost controls for the Learnings daemon
+- [Candidate Notes and Promotion](CANDIDATE_NOTES.md) — what soft-gate failures produce and how to promote them
 - [Configuration](CONFIGURATION.md) — full config reference
 - [Tools reference](TOOLS-REFERENCE.md) — `watercooler_daemon_status`, `watercooler_daemon_findings`
 - [Troubleshooting](TROUBLESHOOTING.md) — general MCP and sync issues

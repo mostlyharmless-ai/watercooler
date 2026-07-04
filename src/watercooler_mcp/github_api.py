@@ -12,7 +12,7 @@ Usage:
 
     client = GitHubClient(
         token="ghp_...",
-        repo="org/repo-threads",
+        repo="org/repo",
         branch="main",
     )
 
@@ -136,7 +136,7 @@ class GitHubClient:
 
         Args:
             token: GitHub OAuth token for authentication.
-            repo: Repository full name (e.g., "org/repo-threads").
+            repo: Repository full name (e.g., "org/repo").
             branch: Branch name (default: "main").
             base_url: GitHub API base URL (default: api.github.com).
         """

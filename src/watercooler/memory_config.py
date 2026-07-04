@@ -100,10 +100,16 @@ class ResolvedLLMConfig:
     system_prompt: str = ""
     prompt_prefix: str = ""
     summary_prompt: str = "Summarize this thread entry in 1-2 sentences. Be concise and factual."
-    thread_summary_prompt: str = "Summarize this development thread in 2-3 sentences. Include the main topic, key decisions, and outcome if any."
-    # Few-shot example
-    summary_example_input: str = "Implemented OAuth2 authentication with JWT tokens. Added refresh token rotation and secure cookie storage."
-    summary_example_output: str = "OAuth2 authentication implemented with JWT tokens, refresh rotation, and secure cookie storage.\ntags: #authentication #OAuth2 #JWT #security"
+    thread_summary_prompt: str = "Summarize this development thread in 2-3 sentences. Describe the main topic and the state of the discussion. Mention a decision only if the thread contains a Decision entry, and an outcome only if it contains a Closure entry."
+    # Few-shot example. Deliberately neutral (a refactor, not a security/auth
+    # feature): a weak local model can echo the example's *subject matter* into an
+    # unrelated entry's summary (few-shot contamination). The prior OAuth2/JWT
+    # example caused exactly that — fabricated "OAuth2/JWT" auth claims on
+    # security-themed entries with no auth code (#902/#788). Keep this example
+    # domain-free so any residual bleed is harmless; the grounding guard in
+    # baseline_graph/summarizer.py is the deterministic backstop.
+    summary_example_input: str = "Refactored the date-parsing helper to accept ISO-8601 offsets and added unit tests for the boundary cases."
+    summary_example_output: str = "Refactored the date-parsing helper to accept ISO-8601 offsets, with new boundary-case unit tests.\ntags: #refactor #date-parsing #tests"
 
     def __repr__(self) -> str:
         """Return string representation with redacted API key."""
@@ -364,35 +370,6 @@ def is_anthropic_url(url: str | None) -> bool:
         return hostname_lower == "anthropic.com" or hostname_lower.endswith(".anthropic.com")
     except Exception:
         return False
-
-
-def _validate_api_url(url: str | None) -> str | None:
-    """Validate that a string is a valid HTTP(S) URL.
-
-    Args:
-        url: URL string to validate
-
-    Returns:
-        The URL if valid, None if invalid or empty
-
-    Logs a warning for invalid URLs (helps users catch typos).
-    """
-    if not url:
-        return None
-
-    try:
-        parsed = urlparse(url)
-        # Must have scheme and netloc (hostname)
-        if parsed.scheme not in ("http", "https"):
-            logger.warning(f"Invalid URL scheme '{parsed.scheme}' in: {url}")
-            return None
-        if not parsed.netloc:
-            logger.warning(f"Missing hostname in URL: {url}")
-            return None
-        return url
-    except Exception as e:
-        logger.warning(f"Failed to parse URL '{url}': {e}")
-        return None
 
 
 def is_localhost_url(url: str) -> bool:

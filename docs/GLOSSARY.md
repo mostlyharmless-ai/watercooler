@@ -134,8 +134,7 @@ Keeps the audit trail self-describing when rendered outside MCP tools.
 
 A thread's lifecycle state, set via `watercooler_set_status`. Common
 values: `OPEN` (default), `IN_REVIEW`, `BLOCKED`, `CLOSED`. Custom
-values are accepted; `ABANDONED` is used internally by
-`archive-branch --abandon` to distinguish abandoned from cleanly
+values are accepted; `ABANDONED` distinguishes abandoned from cleanly
 closed threads. Not to be confused with the [ball](#ball), which is
 who-acts-next rather than lifecycle.
 

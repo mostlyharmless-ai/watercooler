@@ -18,9 +18,16 @@ Public API
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
+
+# Bumped 1->2 when project_salience/authority_basis/advisory_only were added.
+# Persisted v1 findings predate these fields; readers must tolerate both
+# versions (default project_salience to empty for v1) rather than asserting
+# schema_version == 2.
+STANCE_ADVISORY_SCHEMA_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Read-only tool allowlist — advisory actions must never suggest writes
@@ -195,6 +202,13 @@ class StanceAdvisory:
     stance: StanceVector
     actions: list[AdvisoryAction]
     source_lead_ids: tuple[str, ...] = ()
+    # Project-conditioned attention bullets from .watercooler/roles.toml
+    # (Role Salience Compiler). Empty for v1 findings and for roles/projects
+    # with no project_salience configured. Read-only for authority, active
+    # for attention — see dev_docs/plans/2026-06-30-feat-role-salience-compiler-plan.md.
+    project_salience: tuple[str, ...] = ()
+    authority_basis: str = ""
+    advisory_only: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -607,7 +621,9 @@ def _decision_rejection_ratio(signals: StanceSignals) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _planner_stance(signals: StanceSignals) -> StanceAdvisory:
+def _planner_stance(
+    signals: StanceSignals, project_salience: tuple[str, ...] = ()
+) -> StanceAdvisory:
     """Compute planner advisory from signals."""
     v = signals.volatility_ratio
     sol = signals.coordinator_stalled_open_loop_count
@@ -806,10 +822,11 @@ def _planner_stance(signals: StanceSignals) -> StanceAdvisory:
         level=level,
         signals=signals,
         triggered=triggered,
+        project_salience=project_salience,
     )
 
     return StanceAdvisory(
-        schema_version=1,
+        schema_version=STANCE_ADVISORY_SCHEMA_VERSION,
         role="planner",
         level=level,
         summary=summary,
@@ -820,10 +837,16 @@ def _planner_stance(signals: StanceSignals) -> StanceAdvisory:
         signal_values=signals,
         stance=stance,
         actions=actions,
+        project_salience=project_salience,
+        authority_basis=(
+            "human_promoted_lesson_projected" if project_salience else ""
+        ),
     )
 
 
-def _critic_stance(signals: StanceSignals) -> StanceAdvisory:
+def _critic_stance(
+    signals: StanceSignals, project_salience: tuple[str, ...] = ()
+) -> StanceAdvisory:
     """Compute critic advisory from signals."""
     rt = signals.risk_tag_count
     cd = signals.coordinator_dropout_count
@@ -973,10 +996,11 @@ def _critic_stance(signals: StanceSignals) -> StanceAdvisory:
         level=level,
         signals=signals,
         triggered=triggered,
+        project_salience=project_salience,
     )
 
     return StanceAdvisory(
-        schema_version=1,
+        schema_version=STANCE_ADVISORY_SCHEMA_VERSION,
         role="critic",
         level=level,
         summary=summary,
@@ -987,10 +1011,16 @@ def _critic_stance(signals: StanceSignals) -> StanceAdvisory:
         signal_values=signals,
         stance=stance,
         actions=actions,
+        project_salience=project_salience,
+        authority_basis=(
+            "human_promoted_lesson_projected" if project_salience else ""
+        ),
     )
 
 
-def _tester_stance(signals: StanceSignals) -> StanceAdvisory:
+def _tester_stance(
+    signals: StanceSignals, project_salience: tuple[str, ...] = ()
+) -> StanceAdvisory:
     """Compute tester advisory from signals."""
     st = signals.stalled_thread_count
     analysis_stale = signals.analysis_report_available and not signals.analysis_is_fresh
@@ -1129,10 +1159,11 @@ def _tester_stance(signals: StanceSignals) -> StanceAdvisory:
         level=level,
         signals=signals,
         triggered=triggered,
+        project_salience=project_salience,
     )
 
     return StanceAdvisory(
-        schema_version=1,
+        schema_version=STANCE_ADVISORY_SCHEMA_VERSION,
         role="tester",
         level=level,
         summary=summary,
@@ -1143,6 +1174,10 @@ def _tester_stance(signals: StanceSignals) -> StanceAdvisory:
         signal_values=signals,
         stance=stance,
         actions=actions,
+        project_salience=project_salience,
+        authority_basis=(
+            "human_promoted_lesson_projected" if project_salience else ""
+        ),
     )
 
 
@@ -1164,12 +1199,20 @@ _ROLE_FNS = {
 }
 
 
-def pulse_to_stance(role: str, signals: StanceSignals) -> StanceAdvisory:
+def pulse_to_stance(
+    role: str,
+    signals: StanceSignals,
+    project_salience: tuple[str, ...] = (),
+) -> StanceAdvisory:
     """Compute advisory for a single role.
 
     Args:
         role: One of "planner", "critic", "tester".
         signals: Unified input signals.
+        project_salience: Project-conditioned attention bullets for this role
+            from .watercooler/roles.toml (Role Salience Compiler). Callers
+            resolve and pass this in — this module stays stdlib-only and does
+            not read roles.toml itself.
 
     Returns:
         StanceAdvisory for the given role.
@@ -1180,7 +1223,7 @@ def pulse_to_stance(role: str, signals: StanceSignals) -> StanceAdvisory:
     fn = _ROLE_FNS.get(role)
     if fn is None:
         raise ValueError(f"Unknown stance role: {role!r}")
-    return fn(signals)
+    return fn(signals, project_salience)
 
 
 def build_stance_advisories(
@@ -1188,6 +1231,7 @@ def build_stance_advisories(
     *,
     coordinator_findings: list[dict[str, Any]] | None = None,
     trend_supersession_rate: float | None = None,
+    project_salience_by_role: dict[str, tuple[str, ...]] | None = None,
 ) -> list[StanceAdvisory]:
     """Compute advisories for all Phase 1 roles.
 
@@ -1196,6 +1240,9 @@ def build_stance_advisories(
         coordinator_findings: List of coordinator finding dicts with
             ``category`` keys.
         trend_supersession_rate: Phase 2 input (unused in Phase 1).
+        project_salience_by_role: Optional per-role project_salience bullets
+            resolved by the caller from .watercooler/roles.toml. Roles absent
+            from the dict get no salience decoration.
 
     Returns:
         List of three StanceAdvisory objects (planner, critic, tester).
@@ -1205,7 +1252,11 @@ def build_stance_advisories(
         coordinator_findings=coordinator_findings,
         trend_supersession_rate=trend_supersession_rate,
     )
-    return [pulse_to_stance(role, signals) for role in ("planner", "critic", "tester")]
+    salience_by_role = project_salience_by_role or {}
+    return [
+        pulse_to_stance(role, signals, salience_by_role.get(role, ()))
+        for role in ("planner", "critic", "tester")
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1232,12 +1283,43 @@ def _missing_inputs(signals: StanceSignals) -> list[str]:
     return list(_PULSE_SIGNAL_NAMES)
 
 
+def normalize_salience_bullet(text: str) -> str:
+    """Canonical normalization for a project_salience bullet.
+
+    Shared with the role-salience compiler's projection ledger so hashes
+    computed at compile time and at stance-emission time are reproducible
+    against the same bullet text.
+    """
+    return " ".join(text.strip().split())
+
+
+def _project_salience_hash(role: str, project_salience: tuple[str, ...]) -> str:
+    """Per-role hash of project_salience, folded into the advisory signature.
+
+    Per-role scoping prevents cross-role signal contamination (a salience
+    edit to tester must not change critic's signature). Empty salience
+    hashes to "" so it never perturbs the signature when unused.
+    """
+    if not project_salience:
+        return ""
+    payload = json.dumps(
+        {
+            "role": role,
+            "salience": [normalize_salience_bullet(b) for b in project_salience],
+            "schema_version": STANCE_ADVISORY_SCHEMA_VERSION,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 def _compute_signature(
     *,
     role: str,
     level: int,
     signals: StanceSignals,
     triggered: set[str],
+    project_salience: tuple[str, ...] = (),
 ) -> str:
     """Compute deterministic advisory signature for replace-on-change dedup.
 
@@ -1246,10 +1328,13 @@ def _compute_signature(
     - pulse_available (bool)
     - sorted triggered_signals
     - coarsened threshold_crossings (bucket names, not raw values)
+    - per-role project_salience hash (empty when no salience configured)
 
     Only signals in `triggered` contribute buckets. This prevents cross-role
     signal contamination: a critic signal crossing its threshold must not change
-    the planner signature when planner logic is unaffected.
+    the planner signature when planner logic is unaffected. The salience hash
+    is computed per-role for the same reason — see
+    dev_docs/solutions/logic-errors/daemon-stance-advisory-dedup-isolation-bugs.md.
     """
     buckets = _coarsen_crossings(signals, signal_filter=triggered)
     parts = [
@@ -1258,6 +1343,7 @@ def _compute_signature(
         str(signals.pulse_available),
         "|".join(sorted(triggered)),
         "|".join(sorted(buckets)),
+        _project_salience_hash(role, project_salience),
     ]
     raw = "::".join(parts).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]

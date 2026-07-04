@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastmcp import FastMCP
@@ -185,6 +185,68 @@ class TestBulkIndexHybridWrapper:
         assert _json.loads(result.content[0].text) == {"action": "bulk_index"}
 
 
+class TestListDecisionsHybridWrapper:
+    """include_supersession=True routes list_decisions as memory_query in hybrid."""
+
+    def _runtime(self, premium_client=True):
+        client = MagicMock() if premium_client else None
+        if client is not None:
+            client.call_tool_text = AsyncMock(
+                return_value='{"decisions": [], "source": "remote"}'
+            )
+        return ToolRuntime(
+            surface="local_hybrid",
+            capability_profile=CapabilityProfile(routes=HYBRID_DEFAULT_ROUTES),
+            premium_client=client,
+        )
+
+    def test_default_listing_stays_local(self):
+        import json as _json
+        from mcp.types import TextContent
+        from fastmcp.tools.tool import ToolResult
+        from watercooler_mcp.tools.decisions import _build_hybrid_list_decisions_wrapper
+
+        wrapper = _build_hybrid_list_decisions_wrapper(self._runtime())
+        with patch(
+            "watercooler_mcp.tools.decisions._list_decisions_impl",
+            return_value=ToolResult([
+                TextContent(type="text", text='{"source": "local"}')
+            ]),
+        ) as local_impl:
+            result = asyncio.run(wrapper(MagicMock(), include_supersession=False))
+
+        local_impl.assert_called_once()
+        assert _json.loads(result.content[0].text) == {"source": "local"}
+
+    def test_supersession_listing_routes_remote(self):
+        import json as _json
+        from watercooler_mcp.tools.decisions import _build_hybrid_list_decisions_wrapper
+
+        rt = self._runtime()
+        wrapper = _build_hybrid_list_decisions_wrapper(rt)
+        result = asyncio.run(wrapper(MagicMock(), include_supersession=True))
+
+        rt.premium_client.call_tool_text.assert_awaited_once_with(
+            "watercooler_list_decisions", {"include_supersession": True}
+        )
+        assert _json.loads(result.content[0].text) == {
+            "decisions": [],
+            "source": "remote",
+        }
+
+    def test_supersession_without_remote_client_reports_disabled(self):
+        import json as _json
+        from watercooler_mcp.tools.decisions import _build_hybrid_list_decisions_wrapper
+
+        wrapper = _build_hybrid_list_decisions_wrapper(
+            self._runtime(premium_client=False)
+        )
+        result = asyncio.run(wrapper(MagicMock(), include_supersession=True))
+        data = _json.loads(result.content[0].text)
+        assert data["error"] == "capability_disabled"
+        assert data["capability"] == "memory_query"
+
+
 # ---------------------------------------------------------------------------
 # build_mcp_server
 # ---------------------------------------------------------------------------
@@ -249,6 +311,7 @@ class TestBuildMcpServer:
         # Mixed tools should be present (locally registered with wrappers)
         assert "watercooler_search" in names
         assert "watercooler_bulk_index" in names
+        assert "watercooler_list_decisions" in names
         # Disabled tools should NOT be present
         for tool in HYBRID_DISABLED_TOOL_NAMES:
             assert tool not in names, f"{tool} should be disabled in hybrid"

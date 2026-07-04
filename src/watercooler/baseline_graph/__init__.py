@@ -13,6 +13,11 @@ from .summarizer import (
     summarize_entry,
     summarize_thread,
     extractive_summary,
+    entry_type_counts,
+    format_entry_mix,
+    summary_is_stale,
+    stamp_summary_version,
+    SUMMARY_SCHEMA_VERSION,
     SummarizerConfig,
     create_summarizer_config,
 )
@@ -114,6 +119,11 @@ __all__ = [
     "summarize_entry",
     "summarize_thread",
     "extractive_summary",
+    "entry_type_counts",
+    "format_entry_mix",
+    "summary_is_stale",
+    "stamp_summary_version",
+    "SUMMARY_SCHEMA_VERSION",
     "SummarizerConfig",
     "create_summarizer_config",
     # Parser

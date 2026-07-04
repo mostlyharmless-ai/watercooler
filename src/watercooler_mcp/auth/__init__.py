@@ -260,8 +260,8 @@ def _normalise_repos_claim(raw: Any) -> Optional[frozenset[str]]:
             simply hasn't populated the field yet.
         ``frozenset({...})`` — populated claim, each entry canonicalised
             via ``auth.scope.canonical_repo`` (case-folded, ``.git``
-            and ``-threads`` stripped). ``frozenset`` is the load-
-            bearing choice: ``check_repo_claim`` does an O(1)
+            stripped; the repo name is otherwise verbatim). ``frozenset``
+            is the load-bearing choice: ``check_repo_claim`` does an O(1)
             membership test and constructs no per-call set.
 
     Telemetry: ``security.consolidation.m2.repo_claim_malformed``
@@ -307,11 +307,11 @@ def _normalise_repos_claim(raw: Any) -> Optional[frozenset[str]]:
     for item in raw:
         if not isinstance(item, str):
             continue
-        canon = _canonical_repo_for_claim(item)
+        canon = canonical_repo(item)
         # Reject malformed shapes that can't be a real ``<org>/<repo>``:
         # empty string, no separator, leading/trailing slash. The
         # earlier ``"/" not in canon`` check passed inputs like
-        # ``"org/-threads"`` (canon → ``"org/"`` after suffix strip) —
+        # ``"org/.git"`` (canon → ``"org/"`` after suffix strip) —
         # the slash is present but the name segment is empty, which
         # would create a same-canonical match for any other empty-
         # name claim entry. Reject the whole class up-front.
@@ -321,47 +321,6 @@ def _normalise_repos_claim(raw: Any) -> Optional[frozenset[str]]:
             continue
         canonised.append(canon)
     return frozenset(canonised)
-
-
-def _canonical_repo_for_claim(raw: str) -> str:
-    """Strict canonical form for ``repos``-claim and X-Repo enforcement.
-
-    Distinct from ``auth.scope.canonical_repo`` because the latter
-    strips a trailing ``-threads`` suffix for backward compatibility
-    with legacy hosted X-Repo headers that pointed at the now-
-    obsolete ``<repo>-threads`` orphan-storage path. Watercooler no
-    longer uses separate ``-threads`` repos (threads live on the
-    ``watercooler/threads`` orphan branch of the same repo), so the
-    legacy strip is a downstream-compat accommodation in scope-
-    derivation only — NOT a security primitive.
-
-    For the ``repos`` claim, the strip is incorrect: a token
-    authorised for ``["org/repo-threads"]`` (a real GitHub repo
-    whose name happens to end in ``-threads``) would canonicalise
-    to ``"org/repo"`` and falsely match X-Repo ``org/repo`` (a
-    different repo). Conversely, a token authorised for
-    ``["org/repo"]`` would falsely match an X-Repo of
-    ``org/repo-threads``. Both directions invert the issuer's
-    intent.
-
-    This function therefore only:
-    - lower-cases (case-insensitive matching across header casings),
-    - strips a trailing ``.git`` suffix.
-
-    The repo-name segment is preserved verbatim. If a future feature
-    needs the legacy ``-threads`` accommodation, it should opt into
-    ``auth.scope.canonical_repo`` explicitly rather than reach the
-    claim path.
-    """
-    s = raw.strip().lower()
-    if "/" in s:
-        owner, name = s.split("/", 1)
-        if name.endswith(".git"):
-            name = name.removesuffix(".git")
-        return f"{owner}/{name}"
-    if s.endswith(".git"):
-        s = s.removesuffix(".git")
-    return s
 
 
 def repo_claim_mode() -> str:
@@ -508,11 +467,12 @@ def check_repo_claim(
             "X-Repo so the auth boundary can verify membership against "
             "the claim."
         )
-    # Use the strict claim-canonical (no ``-threads`` strip) so the
-    # X-Repo and the claim entries are compared on the same surface.
-    # ``auth.scope.canonical_repo`` is intentionally avoided here —
-    # see ``_canonical_repo_for_claim`` docstring for why.
-    canon_request = _canonical_repo_for_claim(x_repo)
+    # Canonicalise X-Repo the same way the claim entries were
+    # (``_normalise_repos_claim`` → ``canonical_repo``) so both are
+    # compared on the same surface: case-folded, ``.git`` stripped, repo
+    # name otherwise verbatim. A repo name ending in ``-threads`` is an
+    # ordinary repo and is matched literally.
+    canon_request = canonical_repo(x_repo)
     if canon_request in token_info.repos:
         return None
 

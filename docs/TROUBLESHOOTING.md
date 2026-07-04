@@ -56,6 +56,48 @@ Run `watercooler_health` from your MCP client to jump straight to step G.
 
 ---
 
+### MCP server reports a connection failure on first launch (retry works) {#mcp-first-launch-connect-fail}
+
+**Symptom:** When you first add or start the watercooler MCP server, your
+client (Claude Code, Codex, Cursor) reports it as **failed / disconnected**.
+Running `/mcp` (or restarting the client) once or twice eventually connects —
+typically by the second or third try.
+
+**Cause:** The server runs via `uvx`, which **builds the package from source
+the first time it resolves a given version**. With the heavier extras (e.g.
+`[graphiti]`) this can take a couple of minutes — longer than some clients'
+MCP startup timeout — so the first handshake times out and the client marks
+the server failed. The retry hits `uvx`'s now-warm build cache and connects.
+The local LLM / embedding services are **not** the cause: they start in
+background threads and the server begins serving without waiting for them.
+This is purely the one-time package build, and it recurs whenever the pinned
+ref (`@main`) advances, because `uvx` then rebuilds the new version.
+
+**Fix — pre-build before first launch (recommended).** Run the *same* command
+once with `--warm`. It builds and caches the package, pre-downloads the
+`llama-server` binary and local models, then exits — so the next client launch
+connects immediately and the first health check has nothing left to fetch:
+
+```bash
+uvx --from '<same --from value as your MCP config>' watercooler-mcp --warm
+```
+
+Re-run it after an upgrade (or whenever `@main` advances), since `uvx` rebuilds
+the package for the new version.
+
+**Other options:**
+
+- **Just retry** (`/mcp` or restart the client) until it connects — the build
+  is cached after the first attempt.
+- **Raise the client's MCP startup timeout** so the first build fits inside it,
+  e.g. `MCP_TIMEOUT=200000` (a 200-second window) in the client's environment.
+- **Avoid per-launch builds entirely** with a persistent install:
+  `uv tool install '<package spec>'` and point the server `command` at the
+  installed `watercooler-mcp`; or pin `--from` to a release tag / commit
+  instead of `@main`.
+
+---
+
 ### First-run model download stalled {#first-run-download-stalled}
 
 **Symptom:** `watercooler_health` hangs for a long time on first launch,

@@ -119,6 +119,7 @@ class HostedDaemonCoordinator:
         self,
         idle_ttl: float = _DEFAULT_IDLE_TTL,
         reaper_interval: float = _DEFAULT_REAPER_INTERVAL,
+        fleet_mode: bool | None = None,
     ) -> None:
         self._scopes: dict[str, _ScopeEntry] = {}
         self._lock = threading.Lock()
@@ -126,6 +127,21 @@ class HostedDaemonCoordinator:
         self._reaper_interval = reaper_interval
         self._stop_event = threading.Event()
         self._reaper_thread: threading.Thread | None = None
+
+        # Design (hosted) v4: process-level fleet scheduler. When enabled,
+        # background work is owned by one RepoFleet per (org, repo) driven
+        # by a bounded pool; scopes become identity/visibility boundaries
+        # that own no threads. ``fleet_mode=None`` reads the env flag.
+        from .hosted_fleet import HostedFleetScheduler, fleet_scheduler_enabled
+
+        if fleet_mode is None:
+            fleet_mode = fleet_scheduler_enabled()
+        self._fleet_scheduler: HostedFleetScheduler | None = None
+        if fleet_mode:
+            self._fleet_scheduler = HostedFleetScheduler(
+                register_fn=self._register_daemons_for_fleet
+            )
+            self._fleet_scheduler.start()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -142,22 +158,27 @@ class HostedDaemonCoordinator:
         self._reaper_thread.start()
 
     def stop(self, timeout: float = 10.0) -> None:
-        """Stop the reaper and tear down all scopes."""
+        """Stop the reaper and tear down all scopes (and fleets, if any)."""
         self._stop_event.set()
         if self._reaper_thread:
             self._reaper_thread.join(timeout=timeout)
         with self._lock:
             for entry in self._scopes.values():
-                try:
-                    entry.manager.stop_all()
-                except Exception:
-                    pass
+                # Fleet mode: entry.manager is the shared fleet manager —
+                # the fleet scheduler owns its shutdown below.
+                if self._fleet_scheduler is None:
+                    try:
+                        entry.manager.stop_all()
+                    except Exception:
+                        pass
                 if entry.worktree:
                     try:
                         entry.worktree.cleanup()
                     except Exception:
                         pass
             self._scopes.clear()
+        if self._fleet_scheduler is not None:
+            self._fleet_scheduler.stop(timeout=timeout)
 
     # ------------------------------------------------------------------
     # Scope management
@@ -180,6 +201,9 @@ class HostedDaemonCoordinator:
         """
         key = HostedScopeKey(user_id=user_id, repo=repo, branch=branch)
         scope_id = key.scope_id
+
+        if self._fleet_scheduler is not None:
+            return self._ensure_scope_fleet(key, github_token)
 
         with self._lock:
             entry = self._scopes.get(scope_id)
@@ -205,6 +229,43 @@ class HostedDaemonCoordinator:
             "Created daemon scope: %s (%d daemons)", scope_id, len(manager.daemon_names)
         )
         return manager
+
+    def _ensure_scope_fleet(
+        self, key: HostedScopeKey, github_token: str | None
+    ) -> DaemonManager:
+        """``ensure_scope`` in fleet mode (Design v4).
+
+        The scope is an identity/visibility record only: its entry shares the
+        repo fleet's manager and owns no threads or worktree, so reaping it
+        never affects background work. Every touch refreshes the fleet's
+        activity clock and — when a token is present — its write identity.
+        """
+        assert self._fleet_scheduler is not None
+        scope_id = key.scope_id
+        fleet = self._fleet_scheduler.ensure_fleet(
+            user_id=key.user_id,
+            repo=key.repo,
+            branch=key.branch,
+            github_token=github_token,
+        )
+        with self._lock:
+            entry = self._scopes.get(scope_id)
+            if entry is not None:
+                entry.last_touched = time.monotonic()
+                return entry.manager
+            self._scopes[scope_id] = _ScopeEntry(
+                key=key,
+                manager=fleet.manager,
+                last_touched=time.monotonic(),
+                registration_errors=fleet.registration_errors,
+            )
+        logger.info(
+            "Created daemon scope %s → fleet %s (%d daemons)",
+            scope_id,
+            key.repo,
+            len(fleet.manager.daemon_names),
+        )
+        return fleet.manager
 
     def _register_daemons_for_scope(
         self,
@@ -273,9 +334,91 @@ class HostedDaemonCoordinator:
                 # Clean up ASKPASS temp file from failed clone attempt
                 wt.cleanup()
 
+        registration_errors = self._register_premium_daemons(
+            manager,
+            namespace=scope_id,
+            scope_ctx=scope_ctx,
+            threads_dir=threads_dir,
+            worktree=wt,
+            start_threads=True,
+            include_request_overrides=True,
+        )
+
+        # Publish registration errors onto the scope entry for daemon_status.
+        self._publish_registration_errors(scope_id, registration_errors)
+
+    def _register_daemons_for_fleet(
+        self, fleet: Any, github_token: str | None = None
+    ) -> None:
+        """Register premium daemons into a repo fleet (Design v4).
+
+        Differences from the per-scope path: repo-keyed namespace, no
+        per-request ``X-Daemon-Config`` layer (D1 — per-user overrides do
+        not drive the shared fleet), threadless daemons (the process
+        scheduler drives ticks), and a fleet-owned worktree.
+        """
+        from .hosted_fleet import fleet_namespace
+
+        namespace = fleet_namespace(fleet.repo)
+
+        threads_dir: Path | None = None
+        wt: HostedWorktree | None = None
+        if github_token and fleet.repo:
+            wt = HostedWorktree(
+                repo=fleet.repo,
+                github_token=github_token,
+                scope_id=namespace,
+            )
+            if wt.initialize():
+                threads_dir = wt.path
+                fleet.worktree = wt
+                logger.info(
+                    "WORKTREE: fleet %s using local worktree at %s",
+                    fleet.repo,
+                    threads_dir,
+                )
+            else:
+                logger.warning(
+                    "WORKTREE: fleet %s clone failed, falling back to GitHub API",
+                    fleet.repo,
+                )
+                wt.cleanup()
+                wt = None
+
+        errors = self._register_premium_daemons(
+            fleet.manager,
+            namespace=namespace,
+            scope_ctx=fleet.scope_ctx,
+            threads_dir=threads_dir,
+            worktree=wt,
+            start_threads=False,
+            include_request_overrides=False,
+        )
+        fleet.registration_errors.extend(errors)
+
+    def _register_premium_daemons(
+        self,
+        manager: DaemonManager,
+        *,
+        namespace: str,
+        scope_ctx: Any,
+        threads_dir: Path | None,
+        worktree: "HostedWorktree | None",
+        start_threads: bool,
+        include_request_overrides: bool,
+    ) -> list[dict[str, str]]:
+        """Shared premium-daemon registration ladder.
+
+        Used by both the legacy per-scope path (``start_threads=True``: each
+        daemon owns a thread) and the fleet path (``start_threads=False``:
+        the process scheduler drives ticks). Returns structured registration
+        errors for the caller to publish.
+        """
+        wt = worktree
+
         def _configure(daemon):
-            """Inject scope namespace, context, and worktree path into a daemon."""
-            daemon.state_namespace = scope_id
+            """Inject namespace, context, and worktree path into a daemon."""
+            daemon.state_namespace = namespace
             daemon._scope_context = scope_ctx
             # Set worktree path so daemon uses local reads instead of GitHub API
             if threads_dir is not None:
@@ -284,15 +427,14 @@ class HostedDaemonCoordinator:
             # Reload checkpoint from the namespaced path.
             from .state import load_checkpoint
 
-            daemon._checkpoint = load_checkpoint(daemon.name, namespace=scope_id)
+            daemon._checkpoint = load_checkpoint(daemon.name, namespace=namespace)
 
-        # Capture per-daemon registration failures here; flushed onto
-        # entry.registration_errors after the loop so daemon_status can
-        # surface them. Replaces the pre-2026-05-04 silent
-        # `try/except Exception` pattern that converted ValueError
-        # (e.g., from STRICT_NAMESPACE) into "your daemons didn't
-        # register and you have no way to know why". Filed against
-        # thread `hosted-premium-daemons-zero-registration-2026-05-04`.
+        # Capture per-daemon registration failures here; returned to the
+        # caller so daemon_status can surface them. Replaces the
+        # pre-2026-05-04 silent `try/except Exception` pattern that
+        # converted ValueError (e.g., from STRICT_NAMESPACE) into "your
+        # daemons didn't register and you have no way to know why". Filed
+        # against thread `hosted-premium-daemons-zero-registration-2026-05-04`.
         registration_errors: list[dict[str, str]] = []
 
         def _record_failure(daemon_name: str, exc: BaseException) -> None:
@@ -300,25 +442,26 @@ class HostedDaemonCoordinator:
             msg = str(exc)
             registration_errors.append({"daemon": daemon_name, "error": msg})
             logger.warning(
-                "Could not register daemon %s for hosted scope %s: %s",
+                "Could not register daemon %s for %s: %s",
                 daemon_name,
-                scope_id,
+                namespace,
                 msg,
             )
 
         try:
-            daemons_config = self._resolve_daemon_config()
+            daemons_config = self._resolve_daemon_config(
+                include_request_overrides=include_request_overrides
+            )
         except Exception as exc:
             # Config-resolution failure isn't per-daemon — record it as a
             # synthetic "_config" entry so daemon_status surfaces something
             # actionable, then return early (no daemons can be registered
             # without a config).
             _record_failure("_config", exc)
-            self._publish_registration_errors(scope_id, registration_errors)
-            return
+            return registration_errors
 
         if not daemons_config.enabled:
-            return
+            return registration_errors
 
         # Only premium daemons register in hosted scopes.
         # Local daemons (thread_auditor, decision_detector/extractor,
@@ -346,6 +489,17 @@ class HostedDaemonCoordinator:
                 self._try_register_t2_indexer_hosted(manager, _configure)
             except Exception as exc:
                 _record_failure("t2_indexer", exc)
+
+        # Supersession enricher — like t2_indexer it writes the shared T2 graph,
+        # so it is premium/hosted. Opt-in (not in _hosted_daemon_defaults): stays
+        # off until explicitly enabled, and report-only (monitor) until graduated.
+        if _hosted_ok("enrich_supersession"):
+            try:
+                self._try_register_enrich_supersession_hosted(
+                    manager, _configure, daemons_config.enrich_supersession
+                )
+            except Exception as exc:
+                _record_failure("enrich_supersession", exc)
 
         if _hosted_ok("project_coordinator"):
             try:
@@ -452,17 +606,19 @@ class HostedDaemonCoordinator:
                 except Exception as exc:
                     _record_failure("trend_snapshot", exc)
 
-        # Always attempt start_all — even if some daemons failed registration,
-        # the ones that succeeded should run. Pre-2026-05-04 this was inside
-        # the outer try-block, so one daemon's failure aborted start_all and
-        # nothing started.
-        try:
-            manager.start_all()
-        except Exception as exc:
-            _record_failure("_start_all", exc)
+        # Legacy per-scope mode: each daemon owns a thread. Always attempt
+        # start_all — even if some daemons failed registration, the ones
+        # that succeeded should run. Pre-2026-05-04 this was inside the
+        # outer try-block, so one daemon's failure aborted start_all and
+        # nothing started. Fleet mode skips this: the process scheduler
+        # drives ticks and marks daemons managed after registration.
+        if start_threads:
+            try:
+                manager.start_all()
+            except Exception as exc:
+                _record_failure("_start_all", exc)
 
-        # Publish registration errors onto the scope entry for daemon_status.
-        self._publish_registration_errors(scope_id, registration_errors)
+        return registration_errors
 
     def _publish_registration_errors(
         self, scope_id: str, errors: list[dict[str, str]]
@@ -571,7 +727,9 @@ class HostedDaemonCoordinator:
         return parsed
 
     @staticmethod
-    def _resolve_daemon_config() -> "DaemonsConfig":
+    def _resolve_daemon_config(
+        include_request_overrides: bool = True,
+    ) -> "DaemonsConfig":
         """Resolve daemon config for hosted scopes.
 
         Builds a config by layering user overrides (sent via
@@ -633,14 +791,19 @@ class HostedDaemonCoordinator:
         # but onto the merged hosted+deployment base — a header that
         # only sets ``project_coordinator.enabled = false`` should
         # leave the deployment's other overrides intact.
-        from watercooler_mcp.context import get_effective_context
-
-        ctx = get_effective_context()
+        #
+        # Fleet mode passes ``include_request_overrides=False`` (Design v4
+        # D1): one shared fleet serves every tenant of the repo, so a
+        # single request's per-user header must not shape it.
         overrides: Optional[dict[str, Any]] = None
-        if ctx and ctx.daemon_config_json:
-            overrides = HostedDaemonCoordinator._parse_daemon_config_header(
-                ctx.daemon_config_json
-            )
+        if include_request_overrides:
+            from watercooler_mcp.context import get_effective_context
+
+            ctx = get_effective_context()
+            if ctx and ctx.daemon_config_json:
+                overrides = HostedDaemonCoordinator._parse_daemon_config_header(
+                    ctx.daemon_config_json
+                )
 
         # Validation: try the full merge first.  On schema violation,
         # retry WITHOUT the header — hostile / malformed request input
@@ -727,6 +890,76 @@ class HostedDaemonCoordinator:
         _configure(d)
         manager.register(d)
 
+    @staticmethod
+    def _try_register_enrich_supersession_hosted(
+        manager: DaemonManager, _configure, cfg
+    ) -> None:
+        """Register the supersession enricher in a hosted scope if graphiti is available.
+
+        Mirrors :meth:`_try_register_t2_indexer_hosted` — the daemon writes the shared
+        T2 FalkorDB graph, so it runs on Railway where that backend lives.
+        """
+        import os
+
+        from watercooler.memory_config import get_memory_backend, is_memory_enabled
+
+        try:
+            backend = get_memory_backend()
+        except ValueError:
+            return
+        if not (is_memory_enabled() and backend == "graphiti"):
+            return
+
+        try:
+            from watercooler_memory.backends.graphiti import GraphitiBackend
+            from watercooler_mcp import memory as mem
+        except ImportError:
+            logger.warning(
+                "DAEMONS: graphiti imports unavailable, skipping enrich_supersession (hosted)"
+            )
+            return
+
+        code_root: Optional[Path] = None
+        try:
+            from watercooler_mcp.config import resolve_thread_context
+
+            ctx = resolve_thread_context(Path.cwd())
+            code_root = ctx.code_root
+        except Exception:
+            pass
+
+        if code_root is None and not os.getenv("WATERCOOLER_GRAPHITI_DATABASE"):
+            logger.warning(
+                "DAEMONS: skipping enrich_supersession (hosted) — could not resolve "
+                "code_root and WATERCOOLER_GRAPHITI_DATABASE is not set."
+            )
+            return
+
+        graphiti_config = mem.load_graphiti_config(code_path=code_root)
+        if graphiti_config is None:
+            return
+
+        graphiti_backend = mem.get_graphiti_backend(graphiti_config)
+        if not isinstance(graphiti_backend, GraphitiBackend):
+            return
+
+        try:
+            from .enrich_supersession import EnrichSupersessionDaemon
+        except ImportError as exc:
+            logger.debug("EnrichSupersessionDaemon not available: %s", exc)
+            return
+
+        d = EnrichSupersessionDaemon(
+            backend=graphiti_backend,
+            interval=cfg.interval,
+            emit_mode=cfg.emit_mode,
+            emit_bases=frozenset(cfg.emit_bases),
+            code_root=code_root,
+            enabled=True,
+        )
+        _configure(d)
+        manager.register(d)
+
     def touch_scope(self, scope_id: str) -> None:
         """Update the last-touched timestamp for a scope."""
         with self._lock:
@@ -735,14 +968,20 @@ class HostedDaemonCoordinator:
                 entry.last_touched = time.monotonic()
 
     def teardown_scope(self, scope_id: str) -> None:
-        """Stop daemons, clean up worktree, and remove a scope."""
+        """Stop daemons, clean up worktree, and remove a scope.
+
+        Fleet mode: the entry's manager is the shared repo fleet — reaping a
+        scope removes only the identity/visibility record, never the fleet's
+        background work (Design v4 §2.3).
+        """
         with self._lock:
             entry = self._scopes.pop(scope_id, None)
         if entry:
-            try:
-                entry.manager.stop_all()
-            except Exception:
-                pass
+            if self._fleet_scheduler is None:
+                try:
+                    entry.manager.stop_all()
+                except Exception:
+                    pass
             if entry.worktree:
                 try:
                     entry.worktree.cleanup()
@@ -789,12 +1028,18 @@ class HostedDaemonCoordinator:
                 entry = self._scopes.get(scope_id)
                 if not entry:
                     return {"error": f"scope {scope_id} not found"}
-                return {
+                payload = {
                     "scope_id": scope_id,
                     "daemons": entry.manager.status_all(),
                     "idle_seconds": time.monotonic() - entry.last_touched,
                     "registration_errors": list(entry.registration_errors),
                 }
+                if self._fleet_scheduler is not None:
+                    payload["fleet"] = {
+                        "repo": entry.key.repo,
+                        "execution": "process_scheduler",
+                    }
+                return payload
             if user_id:
                 result: dict[str, Any] = {}
                 for sid, entry in self._scopes.items():
@@ -825,6 +1070,11 @@ class HostedDaemonCoordinator:
         **kwargs: Any,
     ) -> list[Finding]:
         """Aggregate findings from one or all scopes."""
+        # Fleet mode, all-scope aggregate: scope entries share fleet
+        # managers, so iterating scopes would double-count a repo with
+        # multiple tenants. Aggregate per fleet instead.
+        if self._fleet_scheduler is not None and not scope_id:
+            return self._fleet_scheduler.get_all_findings(**kwargs)
         findings: list[Finding] = []
         with self._lock:
             entries = (
@@ -866,6 +1116,16 @@ class HostedDaemonCoordinator:
         # in this class uses.
         if scope_id:
             self.touch_scope(scope_id)
+
+        # Resolve the namespace from the daemon itself: in fleet mode
+        # findings live under the repo-keyed fleet namespace, not the
+        # scope_id (legacy mode the two are equal, so this is a no-op).
+        if scope_id:
+            with self._lock:
+                entry = self._scopes.get(scope_id)
+            d = entry.manager.get_daemon(daemon_name) if entry else None
+            if d is not None and d.state_namespace:
+                namespace = d.state_namespace
 
         return _ack_finding(daemon_name, finding_id, namespace=namespace)
 

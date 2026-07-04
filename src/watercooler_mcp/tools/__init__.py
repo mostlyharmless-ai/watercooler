@@ -17,6 +17,7 @@ Each module provides a register_*_tools(mcp) function to register its tools.
 from .annotations_xref import register_annotations_xref_tools
 from .decisions import register_decisions_tools
 from .diagnostic import register_diagnostic_tools
+from .promotion import register_promotion_tools
 from .thread_query import register_thread_query_tools
 from .thread_write import register_thread_write_tools
 from .sync import register_sync_tools
@@ -25,6 +26,7 @@ from .memory import register_memory_tools
 from .migration import register_migration_tools
 from .federation import register_federation_tools
 from .roles import register_role_tools
+from .setup import register_setup_tools
 
 
 def register_all_tools(mcp):
@@ -44,6 +46,8 @@ def register_all_tools(mcp):
     register_role_tools(mcp)
     register_decisions_tools(mcp)
     register_annotations_xref_tools(mcp)
+    register_promotion_tools(mcp)
+    register_setup_tools(mcp)
 
 
 __all__ = [
@@ -51,6 +55,8 @@ __all__ = [
     "register_annotations_xref_tools",
     "register_decisions_tools",
     "register_diagnostic_tools",
+    "register_promotion_tools",
+    "register_setup_tools",
     "register_thread_query_tools",
     "register_thread_write_tools",
     "register_sync_tools",

@@ -92,6 +92,14 @@ class ThreadEntry:
     end_line: int
     start_offset: int
     end_offset: int
+    # Authority-ladder provenance (optional; carried from the graph node so the MCP
+    # read surface can expose who authorized a Decision/Closure — #879). Parsing from
+    # markdown does not populate these; they come from the graph read path.
+    actor_class: Optional[str] = None
+    decision_origin: Optional[str] = None
+    authority_basis: Optional[str] = None
+    source_entry_id: Optional[str] = None
+    human_authorized_by: Optional[str] = None
 
 
 def _find_entry_line_indexes(lines: List[str]) -> List[Tuple[int, str, str]]:

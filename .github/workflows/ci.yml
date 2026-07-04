@@ -31,6 +31,8 @@ jobs:
 
     - name: Run tests
       run: pytest tests/ -v --ignore=tests/benchmarks --ignore=tests/unit/test_middleware_timeout.py -m "not integration_falkor and not integration_leanrag_llm and not integration_graphiti"
+    - name: Vocabulary advisory check (non-blocking)
+      run: python scripts/check_vocabulary.py || true
 
   public-build-verify:
     runs-on: ubuntu-latest
@@ -82,3 +84,21 @@ jobs:
 
     - name: Run public-build smoke tests
       run: pytest tests/integration/test_public_build_smoke.py -v
+
+  public-leak-lint:
+    # Deterministic check for tests that would leak private dependencies
+    # into the public sync. Fast (~1s), stdlib-only. Catches the leak
+    # pattern that took five recurrences (entry 01KPFPX8 from 2026-04-18
+    # → v0.5.0 → v0.5.1 → v0.5.2) before this lint landed. See
+    # scripts/lint-public-test-leaks.py for the algorithm.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Run public-test-leak lint
+      run: python3 scripts/lint-public-test-leaks.py

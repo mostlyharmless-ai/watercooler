@@ -46,6 +46,7 @@ from ..hosted_ops import (
     get_baseline_sync_status_hosted,
 )
 from watercooler.path_resolver import derive_group_id
+from watercooler.refs import format_entry_ref
 
 from ._boost import boost_decision_items, sanitize_boost
 
@@ -666,12 +667,39 @@ def _search_baseline_impl(
                 "timestamp": result.entry.timestamp,
                 "summary": result.entry.summary,
             }
+            # Omit `ref` when under-specified, matching every other call site.
+            ref = format_entry_ref(
+                result.entry.thread_topic,
+                result.entry.index,
+                result.entry.entry_id,
+            )
+            if ref:
+                item["entry"]["ref"] = ref
 
         output["results"].append(item)
 
     if parity_banner:
         output["_parity_warning"] = parity_banner.strip()
     return json.dumps(output, indent=2)
+
+
+def _supersession_fields(r: Dict[str, Any]) -> Dict[str, Any]:
+    """Lift the earned ``superseded_by`` link from the edge ``attributes`` payload.
+
+    The enrichment daemon writes ``superseded_by``/``superseded_at`` as edge properties;
+    graphiti surfaces them under ``attributes`` (``properties(e)`` → EntityEdge.attributes).
+    Entry-6 of ``t2-supercession-testing-proposal`` requires the ``watercooler_search``
+    formatter to expose them too, not just ``get_entity_edge`` — otherwise the whitelist
+    below silently drops them. Only present on superseded facts; no extra query.
+    """
+    attrs = r.get("attributes") or {}
+    superseded_by = attrs.get("superseded_by")
+    if not superseded_by:
+        return {}
+    fields: Dict[str, Any] = {"superseded_by": superseded_by}
+    if attrs.get("superseded_at"):
+        fields["superseded_at"] = attrs["superseded_at"]
+    return fields
 
 
 async def _search_graphiti_impl(
@@ -746,6 +774,7 @@ async def _search_graphiti_impl(
                 "target_node": r.get("target_node_uuid", ""),
                 "valid_at": r.get("valid_at"),
                 "invalid_at": r.get("invalid_at"),
+                **_supersession_fields(r),
             }
             for r in results
         ],
@@ -1161,7 +1190,12 @@ async def _search_graph_impl(
             superseded *before* this time. Only effective with Graphiti facts mode.
 
     Returns:
-        JSON with search results including matched nodes and metadata.
+        JSON with search results including matched nodes and metadata. For
+        entry hits (entries mode), each ``entry`` carries ``thread_topic`` (the
+        human-friendly thread slug — pass it as ``topic`` to write back),
+        ``index`` (entry position), and ``ref`` (the canonical citation
+        ``<thread_topic>:<index> (<entry_id>)``). Thread hits carry
+        ``thread.topic``. These are absent for facts/entities/episodes modes.
 
     Examples:
         # Search thread entries (default mode)
@@ -1432,10 +1466,7 @@ def _resolve_hosted_t1_target(context: Any) -> tuple[str, str]:
     Codex re-review (01KPZ367CBHGCZZ6JWWM36KFE6): the hosted context
     constructed by ``_require_context_hosted`` carries ``code_repo`` (the
     ``<org>/<repo>`` slug from the X-Repo header) — not ``repo_slug`` or
-    ``project_group_id``. Derive both from ``code_repo``; normalise the
-    ``-threads`` suffix so a threads-repo X-Repo value still resolves the
-    correct canonical ``<org>_<repo>`` group id and ``<org>_<repo>_t1``
-    database.
+    ``project_group_id``. Derive both from ``code_repo``.
 
     Returns ``("", "")`` if neither attribute is available.
     """
@@ -1447,8 +1478,6 @@ def _resolve_hosted_t1_target(context: Any) -> tuple[str, str]:
     if not slug or "/" not in slug:
         return "", ""
     owner, repo = slug.split("/", 1)
-    if repo.endswith("-threads"):
-        repo = repo.removesuffix("-threads")
     canonical_slug = f"{owner}/{repo}"
 
     try:
@@ -2144,7 +2173,10 @@ def _annotate_impl(
     topic_err = _validate_topic(topic)
     if topic_err:
         return f"Error: {topic_err}"
-    add_kinds = {"reaction", "tag", "flag", "xref", "pin"}
+    # xref_supersedes: the L3 human ratification of a supersession (earned-edge RFC P3) —
+    # an append-only "entry A is superseded by entry B" record; its presence is what
+    # list_decisions reports as superseded_by_ratified (afforded→authored).
+    add_kinds = {"reaction", "tag", "flag", "xref", "xref_supersedes", "pin"}
     if kind not in add_kinds:
         return f"Error: kind must be one of {sorted(add_kinds)}, got '{kind}'"
     if target_type not in VALID_TARGET_TYPES:
@@ -2593,6 +2625,15 @@ def _delete_thread_impl(
         def _do_delete_thread():
             if thread_dir.exists():
                 shutil.rmtree(thread_dir)
+            # Cascade to the human-readable markdown projection. The graph is
+            # authoritative; threads/<topic>.md is a derived, write-only
+            # projection. Leaving it behind orphans the file AND lets
+            # recover_graph() (which rebuilds the graph FROM markdown)
+            # ghost-resurrect this deleted thread later.
+            from watercooler.fs import find_thread_path
+            md_path = find_thread_path(topic, threads_dir)
+            if md_path is not None:
+                md_path.unlink(missing_ok=True)
             # Evict from in-memory manifest cache
             from watercooler.baseline_graph.storage import invalidate_manifest_cache
             invalidate_manifest_cache(graph_dir)
