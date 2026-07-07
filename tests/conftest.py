@@ -213,3 +213,23 @@ def _bypass_write_guard(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None
     """
     monkeypatch.setenv("WATERCOOLER_ALLOW_LOCAL_ONLY", "1")
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_handoff_receipts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Generator[None, None, None]:
+    """Keep tests from appending to the real ~/.watercooler/handoff_receipts.jsonl.
+
+    ``handoff_receipts._receipts_file()`` reads the env var at call time, so
+    this is a complete guard: without it, any test that reaches
+    ``_submit_t1_upsert`` / ``_submit_graphiti_to_hosted`` writes into the
+    operator's live receipts file (observed in production receipts as
+    ``MagicMock`` errors). Suites that assert on receipts re-point the env
+    var to their own path and are unaffected.
+    """
+    monkeypatch.setenv(
+        "WATERCOOLER_HANDOFF_RECEIPTS_FILE",
+        str(tmp_path / "handoff_receipts.jsonl"),
+    )
+    yield

@@ -984,6 +984,12 @@ def _health_hosted_impl(ctx: Context) -> str:
     except Exception:
         pass
 
+    status_lines.append(
+        '\nGraph Detail: watercooler_health(detail="graph") — per-graph '
+        "databases, node/episode counts, scope flags (canonical / "
+        "legacy-orphan / foreign)"
+    )
+
     return "\n".join(status_lines)
 
 
@@ -1072,6 +1078,173 @@ def _health_setup_impl(ctx: Context, code_path: str = "") -> str:
     return json.dumps(build_setup_report(resolution), indent=2)
 
 
+def _graph_admin_allowed(ctx: Context) -> bool:
+    """True when the caller may enumerate graphs across scopes.
+
+    watercooler_health itself stays under the ``diagnostics`` capability
+    (L1) — this gate applies ONLY to the cross-scope enumeration branch
+    of ``detail="graph"``, so ordinary health is never grant-dependent.
+
+    Allowed: non-hosted surfaces (single-operator deployments), service
+    keys (explicit ``key_type=="service"`` bypass — CapabilityAuthorizer
+    checks user grants only), and per-user identities holding the
+    ``graph_admin`` grant.
+    """
+    from ..auth import is_hosted_mode
+
+    if not is_hosted_mode():
+        return True
+    try:
+        from ..context import get_effective_context
+
+        http_ctx = get_effective_context()
+    except Exception:
+        http_ctx = None
+    if http_ctx is None:
+        # Hosted mode without request context = internal/operator path.
+        return True
+    if getattr(http_ctx, "auth_key_type", None) == "service":
+        return True
+    caps = getattr(http_ctx, "capabilities", None)
+    if caps is not None and "graph_admin" in caps:
+        return True
+    authorizer = getattr(_runtime, "authorizer", None)
+    user_id = getattr(http_ctx, "user_id", "") or ""
+    if authorizer is not None and user_id:
+        # PR #1064 review (P1): ensure() returns None on ALLOW and a
+        # JSON denial *string* on DENY — it does not raise for denial.
+        # Treat any exception (grant-service outage etc.) as deny too:
+        # fail closed on the tenancy gate.
+        try:
+            denial = authorizer.ensure(
+                "graph_admin", user_id, preloaded_capabilities=caps
+            )
+        except Exception:
+            return False
+        return denial is None
+    return False
+
+
+def _health_graph_impl(ctx: Context, code_path: str = "") -> str:
+    """``watercooler_health(detail="graph")`` — graph-level observability.
+
+    Mixed-tool routing (incident bug-hybrid-static-x-repo-cross-tenant-
+    t2-scope, PR 4): hosted surfaces enumerate the connected FalkorDB
+    directly; ``local_hybrid`` forwards to the hosted server through the
+    per-repo premium client (the graph state lives on hosted FalkorDB);
+    stdio-local enumerates the locally-configured FalkorDB or reports
+    cleanly that no graph backend is attached.
+    """
+    import json as _json
+
+    surface = getattr(_runtime, "surface", "") or ""
+
+    # --- hybrid: forward to hosted -------------------------------------
+    if surface == "local_hybrid" and getattr(_runtime, "premium_client", None):
+        try:
+            from .._async_utils import run_coro_in_fresh_loop as _fresh_loop
+
+            # Prefer the per-repo pooled client when the pool exists
+            # (feat/premium-client-pool) so the hosted side derives scope
+            # flags for the call's repo; fall back to the default premium
+            # client so this detail also works standalone.
+            client = _runtime.premium_client
+            pool = getattr(_runtime, "premium_pool", None)
+            if pool is not None:
+                try:
+                    client = (
+                        pool.client_for_path(code_path)
+                        if code_path
+                        else pool.default
+                    )
+                except Exception:
+                    client = getattr(pool, "default", client)
+            text = _fresh_loop(
+                client.call_tool_text(
+                    "watercooler_health",
+                    {"detail": "graph", "code_path": code_path},
+                )
+            )
+            try:
+                report = _json.loads(text)
+            except (TypeError, ValueError):
+                return text  # hosted returned prose/error — pass through
+            report["routed_via"] = "hybrid_forward"
+            report["local_falkordb"] = (
+                "not configured (hybrid: hosted FalkorDB owns T1/T2)"
+            )
+            return _json.dumps(report, indent=2)
+        except Exception as e:
+            return _json.dumps(
+                {
+                    "available": False,
+                    "error": f"hosted graph detail unreachable: {e}",
+                },
+                indent=2,
+            )
+
+    # --- hosted / local direct enumeration ------------------------------
+    from ..graph_detail import build_graph_detail, indexer_coverage
+
+    canonical_bases: set[str] = set()
+    threads_dir = None
+    try:
+        from watercooler.path_resolver import derive_project_group_id
+
+        try:
+            from ..context import get_effective_context
+
+            http_ctx = get_effective_context()
+        except Exception:
+            http_ctx = None
+        if http_ctx is not None and getattr(http_ctx, "repo", None):
+            owner_repo = str(http_ctx.repo)
+            if "/" in owner_repo:
+                canonical_bases.add(
+                    derive_project_group_id(repo_slug=owner_repo)
+                )
+        elif code_path:
+            try:
+                context = resolve_thread_context(Path(code_path))
+                threads_dir = context.threads_dir
+                from watercooler.path_resolver import derive_repo_slug
+
+                try:
+                    slug = derive_repo_slug(threads_dir=threads_dir)
+                except Exception:
+                    slug = None
+                canonical_bases.add(
+                    derive_project_group_id(
+                        repo_slug=slug, threads_dir=threads_dir
+                    )
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    report = build_graph_detail(
+        canonical_bases=canonical_bases,
+        include_all_scopes=_graph_admin_allowed(ctx),
+    )
+    if report.get("available") and threads_dir is not None:
+        t2_name = next(
+            (b + "_t2" for b in canonical_bases), None
+        )
+        t2_episodes = next(
+            (
+                g.get("episodes")
+                for g in report.get("graphs", [])
+                if g.get("name") == t2_name
+            ),
+            None,
+        )
+        report["indexer_coverage"] = indexer_coverage(
+            threads_dir, t2_episodes
+        )
+    return _json.dumps(report, indent=2)
+
+
 def _health_impl(ctx: Context, code_path: str = "", detail: str = "") -> str:
     """Check server health and configuration including branch parity status.
 
@@ -1081,9 +1254,15 @@ def _health_impl(ctx: Context, code_path: str = "", detail: str = "") -> str:
     Args:
         code_path: Optional path to code repository for parity checks.
         detail: Pass ``"identity"`` for the resolved agent identity and a
-            write-readiness assessment (folded-in watercooler_whoami), or
+            write-readiness assessment (folded-in watercooler_whoami),
             ``"setup"`` for a read-only setup-readiness report (the same
-            contract as ``watercooler_init``, but mutating nothing).
+            contract as ``watercooler_init``, but mutating nothing), or
+            ``"graph"`` for graph-level observability: every FalkorDB
+            database with node/edge/episode counts and a scope flag
+            (canonical / legacy_orphan / foreign), last-write sanity, and
+            indexer coverage. Hybrid forwards the graph detail to the
+            hosted server; cross-scope enumeration is gated by the
+            ``graph_admin`` capability (service keys pass implicitly).
 
     Example output:
         Watercooler MCP Server v0.1.0
@@ -1098,6 +1277,9 @@ def _health_impl(ctx: Context, code_path: str = "", detail: str = "") -> str:
 
     if str(detail).strip().lower() == "setup":
         return _health_setup_impl(ctx, code_path)
+
+    if str(detail).strip().lower() == "graph":
+        return _health_graph_impl(ctx, code_path)
 
     # Hosted mode guard — additive early return
     from ..auth import is_hosted_mode
@@ -1558,6 +1740,12 @@ def _health_impl(ctx: Context, code_path: str = "", detail: str = "") -> str:
 
         except Exception as e:
             status_lines.append(f"\nGitHub: Error - {e}")
+
+        status_lines.append(
+            '\nGraph Detail: watercooler_health(detail="graph") — '
+            "per-graph databases, counts, scope flags (hybrid forwards "
+            "to hosted)"
+        )
 
         return _format_warnings_for_response("\n".join(status_lines))
     except Exception as e:

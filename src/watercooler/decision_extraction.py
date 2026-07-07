@@ -1021,6 +1021,10 @@ def candidate_warrant(
         source_entry_type=entry.get("entry_type"),
         extractor_warning=ext.warning,
         moral_delegation_warning=moral.moral_delegation_warning,
+        # C2: the source node carries its own location — stamp it so evidence
+        # pointers are resolvable without a lookup.
+        source_topic=entry.get("thread_topic"),
+        source_index=entry.get("index"),
     )
 
 

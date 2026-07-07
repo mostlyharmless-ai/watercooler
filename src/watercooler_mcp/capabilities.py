@@ -48,6 +48,12 @@ CapabilityId = Literal[
     "daemon_control",
     "federation_search",
     "diagnostics",
+    # Grant-style capability (no route): gates the cross-scope graph
+    # enumeration branch of watercooler_health(detail="graph"). The health
+    # tool itself stays under "diagnostics" so ordinary health is never
+    # grant-dependent (incident bug-hybrid-static-x-repo-cross-tenant-
+    # t2-scope, PR 4 / review :5).
+    "graph_admin",
 ]
 
 _ALL_CAPABILITY_IDS: frozenset[str] = frozenset(
@@ -68,6 +74,7 @@ _ALL_CAPABILITY_IDS: frozenset[str] = frozenset(
         "daemon_control",
         "federation_search",
         "diagnostics",
+        "graph_admin",
     }
 )
 
@@ -97,6 +104,10 @@ HYBRID_DEFAULT_ROUTES: dict[str, RouteChoice] = {
     "daemon_control": "remote",
     "federation_search": "local",
     "diagnostics": "local",
+    # Grant-style capability: no tool maps to it for routing (it gates the
+    # cross-scope branch inside watercooler_health(detail="graph")); the
+    # entry exists to keep the route table total over _ALL_CAPABILITY_IDS.
+    "graph_admin": "local",
 }
 
 # ---------------------------------------------------------------------------
@@ -109,12 +120,17 @@ HYBRID_DEFAULT_ROUTES: dict[str, RouteChoice] = {
 # run_pipeline= (memory_migration / memory_admin_cluster, disabled by default);
 # a bare-name mount would expose the disabled modes (PR4a review). list_decisions
 # is mixed because include_supersession=True performs a T2 memory read while
-# the default listing remains baseline-only.
+# the default listing remains baseline-only. graphiti_add_episode is mixed
+# (was proxy-mounted) so its hybrid wrapper can select a per-repo premium
+# client from the pool via code_path — a bare mount asserted the boot repo's
+# X-Repo on every ingest (incident
+# bug-hybrid-static-x-repo-cross-tenant-t2-scope).
 MIXED_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "watercooler_search",
         "watercooler_bulk_index",
         "watercooler_list_decisions",
+        "watercooler_graphiti_add_episode",
     }
 )
 
@@ -125,7 +141,6 @@ HYBRID_REMOTE_MOUNT_TOOLS: frozenset[str] = frozenset(
         "watercooler_diagnose_memory",
         "watercooler_graph_trace",
         "watercooler_memory_task_status",
-        "watercooler_graphiti_add_episode",
         # Daemon tools: routed to Railway in hybrid mode
         "watercooler_daemon_status",
         "watercooler_daemon_findings",
@@ -277,6 +292,9 @@ TOOL_MATRIX: dict[str, ToolSpec] = {
         "baseline_search", "L1", arg_sensitive=True,
         note="include_supersession=True → memory_query; default listing → baseline_search",
     ),
+    # C1 (candidate-research-backend-support): open-candidates listing — a
+    # pure baseline read over entry bodies + disposition markers, no T2 leg.
+    "watercooler_list_pending_candidates": ToolSpec("baseline_search", "L1"),
     # ── Semantic similarity ──────────────────────────────────────────────
     # PR3b: hosted T1 embedding upsert/list/delete, action-selected.
     "watercooler_semantic": ToolSpec(

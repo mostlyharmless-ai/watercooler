@@ -231,6 +231,10 @@ def _say_impl(
             entry_id=entry_id,
             create_if_missing=create_if_missing,
             code_branch=context.code_branch,
+            # Code-state provenance (C3): repo + commit the entry was written
+            # against, from the resolved thread context.
+            code_repo=context.code_repo,
+            code_commit=context.code_commit,
         )
 
         if write_error:
@@ -277,6 +281,10 @@ def _say_impl(
             body=body,
             entry_id=entry_id,
             code_branch=context.code_branch,
+            # Code-state provenance (C3): repo + commit the entry was written
+            # against, from the resolved thread context.
+            code_repo=context.code_repo,
+            code_commit=context.code_commit,
             code_root=Path(code_path) if code_path else None,
             authority_fields=authority_fields,
             support_fields=support_fields,
@@ -414,6 +422,10 @@ def _ack_impl(
             title=title or "Ack",
             body=body or "Acknowledged",
             code_branch=context.code_branch,
+            # Code-state provenance (C3): repo + commit the entry was written
+            # against, from the resolved thread context.
+            code_repo=context.code_repo,
+            code_commit=context.code_commit,
             role=role or "pm",
         )
 
@@ -472,6 +484,10 @@ def _ack_impl(
             body=body or None,
             entry_id=entry_id,
             code_branch=context.code_branch,
+            # Code-state provenance (C3): repo + commit the entry was written
+            # against, from the resolved thread context.
+            code_repo=context.code_repo,
+            code_commit=context.code_commit,
             code_root=Path(code_path) if code_path else None,
         )
 
@@ -578,6 +594,10 @@ def _handoff_impl(
             target_agent=target_agent,
             note=note,
             code_branch=context.code_branch,
+            # Code-state provenance (C3): repo + commit the entry was written
+            # against, from the resolved thread context.
+            code_repo=context.code_repo,
+            code_commit=context.code_commit,
             role=role or "pm",
             title=title,
         )
@@ -630,6 +650,10 @@ def _handoff_impl(
                     ball=target_agent,
                     entry_id=entry_id,
                     code_branch=context.code_branch,
+            # Code-state provenance (C3): repo + commit the entry was written
+            # against, from the resolved thread context.
+            code_repo=context.code_repo,
+            code_commit=context.code_commit,
                 )
 
         push_warning = _run_with_sync_report_push(
@@ -687,6 +711,10 @@ def _handoff_impl(
                 note=note or None,
                 entry_id=entry_id,
                 code_branch=context.code_branch,
+            # Code-state provenance (C3): repo + commit the entry was written
+            # against, from the resolved thread context.
+            code_repo=context.code_repo,
+            code_commit=context.code_commit,
                 code_root=Path(code_path) if code_path else None,
             )
 

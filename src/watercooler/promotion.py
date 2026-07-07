@@ -171,6 +171,20 @@ _PROMOTION_BASIS_RE = re.compile(
 _PROMOTED_SPEC_RE = re.compile(r"^Spec:\s*\S*-promoted\s*$", re.MULTILINE)
 
 
+# The dashboard's candidate-judgment route (watercooler-site
+# app/api/dashboard/threads/[topic]/candidate) records its dispositions with a
+# `Candidate-Entry:` reference marker, while the MCP promote path writes
+# `Disposition-Target:` (format_candidate_disposition_body). A pending-candidates
+# listing must match BOTH, or a dashboard-rejected candidate reappears as open.
+_CANDIDATE_ENTRY_RE = re.compile(
+    r"^Candidate-Entry:\s*([0-9A-HJKMNP-TV-Z]{26})\s*$", re.MULTILINE
+)
+
+# Disposition kinds that resolve a candidate. keep_exploring / reframe are
+# deliberately non-terminal — the candidate stays open (§5.4).
+_TERMINAL_DISPOSITION_KINDS = frozenset({"promoted", "rejected"})
+
+
 def _extract_disposition_target(disp_entry: dict) -> Optional[str]:
     body = disp_entry.get("body", "") or ""
     m = _DISPOSITION_TARGET_RE.search(body)
@@ -181,6 +195,41 @@ def _extract_disposition_kind(disp_entry: dict) -> Optional[str]:
     body = disp_entry.get("body", "") or ""
     m = _DISPOSITION_KIND_RE.search(body)
     return m.group(1).lower() if m else None
+
+
+def candidate_has_terminal_disposition(
+    candidate_entry_id: str, thread_entries: list[dict]
+) -> bool:
+    """Whether *candidate_entry_id* has been terminally dispositioned.
+
+    Terminal means either a ``CandidateDisposition: promoted|rejected`` Note
+    referencing the candidate — via ``Disposition-Target:`` (the MCP promote
+    path) or ``Candidate-Entry:`` (the dashboard judgment route) — or a genuine
+    promoted entry stamped ``Promoted-From:`` (#886: the promotion committed
+    but its paired disposition Note never got written). Non-terminal
+    dispositions (``keep_exploring``, ``reframe``) leave the candidate open by
+    design.
+
+    Args:
+        candidate_entry_id: Bare ULID of the candidate Note.
+        thread_entries: All entry dicts of the candidate's thread (any order).
+
+    Returns:
+        True if the candidate is resolved and must not be listed as pending.
+    """
+    for entry in thread_entries:
+        kind = _extract_disposition_kind(entry)
+        if kind in _TERMINAL_DISPOSITION_KINDS:
+            body = entry.get("body", "") or ""
+            target = _extract_disposition_target(entry)
+            if target is None:
+                m = _CANDIDATE_ENTRY_RE.search(body)
+                target = m.group(1) if m else None
+            if target == candidate_entry_id:
+                return True
+        if _extract_promoted_from(entry) == candidate_entry_id:
+            return True
+    return False
 
 
 def _extract_promoted_from(entry: dict) -> Optional[str]:
@@ -685,6 +734,8 @@ def promotion_warrant(
     human_authorized_by: str,
     quote_verified: Optional[bool] = None,
     source_entry_type: Optional[str] = None,
+    source_topic: Optional[str] = None,
+    source_index: Optional[int] = None,
 ) -> authority_support.WarrantReadModel:
     """The §6 warrant read-model for a promoted Decision (#896 Leg 2).
 
@@ -700,6 +751,10 @@ def promotion_warrant(
         human_authorized_by=scrub_authority_identifier(human_authorized_by),
         source_entry_type=source_entry_type,
         moral_delegation_warning=meta.moral_delegation_warning,
+        # C2: location of the live-resolved source entry, when the caller had
+        # it in hand — makes evidence pointers resolvable without a lookup.
+        source_topic=source_topic,
+        source_index=source_index,
     )
 
 
@@ -710,6 +765,8 @@ def format_promotion_decision_body(
     quote_verified: Optional[bool] = None,
     quote_reverification_reason: Optional[str] = None,
     source_entry_type: Optional[str] = None,
+    source_topic: Optional[str] = None,
+    source_index: Optional[int] = None,
     edits: Optional[dict] = None,
 ) -> str:
     """Construct the Decision body for a promoted candidate.
@@ -864,6 +921,8 @@ def format_promotion_decision_body(
         human_authorized_by=human_authorized_by,
         quote_verified=quote_verified,
         source_entry_type=source_entry_type,
+        source_topic=source_topic,
+        source_index=source_index,
     )
     lines.append("")
     lines.extend(authority_support.render_support_section(warrant))
@@ -1088,6 +1147,8 @@ def plan_promotion(
     quote_verified: Optional[bool] = None,
     quote_reverification_reason: Optional[str] = None,
     source_entry_type: Optional[str] = None,
+    source_topic: Optional[str] = None,
+    source_index: Optional[int] = None,
 ) -> PromotionPlan:
     """Plan a promotion of a candidate Note to a supported durable entry.
 
@@ -1106,6 +1167,12 @@ def plan_promotion(
             forwarded to ``format_promotion_decision_body``. ``record_state``
             support requires it to be a record-state type — the candidate's
             self-asserted marker is not trusted.
+        source_topic: Thread topic of the live-resolved source entry (C2) —
+            stamped onto the warrant's evidence pointers so consumers can jump
+            to the source without resolving the bare ULID. The source may live
+            on another thread, so this comes from the resolution, never assumed
+            equal to ``candidate_topic``. Omit when the source was unreadable.
+        source_index: The live-resolved source entry's index; same purpose.
         existing_thread_entries: All entries already on the candidate's thread
             (the caller supplies them; this function filters by marker). When
             supplied, blocks double-promotion if a prior ``CandidateDisposition``
@@ -1144,6 +1211,8 @@ def plan_promotion(
         quote_verified=quote_verified,
         quote_reverification_reason=quote_reverification_reason,
         source_entry_type=source_entry_type,
+        source_topic=source_topic,
+        source_index=source_index,
         edits=edits,
     )
 
@@ -1175,6 +1244,8 @@ def plan_promotion(
         human_authorized_by=human_authorized_by,
         quote_verified=quote_verified,
         source_entry_type=source_entry_type,
+        source_topic=source_topic,
+        source_index=source_index,
     ).to_entry_fields()
 
     return PromotionPlan(

@@ -1156,6 +1156,8 @@ def _build_per_thread_graph_data(
     body: str | None = None,
     timestamp: str | None = None,
     code_branch: str | None = None,
+    code_repo: str | None = None,
+    code_commit: str | None = None,
 ) -> tuple[dict, list[dict], list[dict]]:
     """Build per-thread graph data structures.
 
@@ -1177,6 +1179,9 @@ def _build_per_thread_graph_data(
         body: Entry body (required if entry_id provided)
         timestamp: Entry timestamp (required if entry_id provided)
         code_branch: Code branch this entry was created in context of
+        code_repo: Code repo (owner/name) the entry was written against (C3)
+        code_commit: Code-repo commit the entry was written against (C3);
+            absent in hosted writes — the hosted server has no code checkout
 
     Returns:
         Tuple of (meta, entries, edges)
@@ -1216,6 +1221,12 @@ def _build_per_thread_graph_data(
             }
             if code_branch:
                 entry_node["code_branch"] = code_branch
+            # Code-state provenance (C3) — omitted when absent so legacy and
+            # context-less entries keep the identical minimal node shape.
+            if code_repo:
+                entry_node["code_repo"] = code_repo
+            if code_commit:
+                entry_node["code_commit"] = code_commit
             entries.append(entry_node)
 
             # Add CONTAINS edge (thread -> entry)
@@ -1496,6 +1507,8 @@ def say_hosted(
     entry_id: Optional[str] = None,
     create_if_missing: bool = True,
     code_branch: Optional[str] = None,
+    code_repo: Optional[str] = None,
+    code_commit: Optional[str] = None,
 ) -> tuple[str | None, dict]:
     """Add an entry to a thread using GitHub API.
 
@@ -1577,6 +1590,11 @@ def say_hosted(
             effective_code_branch = code_branch
             if not effective_code_branch and http_ctx:
                 effective_code_branch = http_ctx.effective_branch
+            # C3: repo defaults to the request's tenant repo; commit has no
+            # hosted default (no code checkout) — explicit param only.
+            effective_code_repo = code_repo
+            if not effective_code_repo and http_ctx:
+                effective_code_repo = http_ctx.repo
 
             new_meta, new_entries, new_edges = _build_per_thread_graph_data(
                 topic=topic,
@@ -1594,6 +1612,8 @@ def say_hosted(
                 body=body,
                 timestamp=timestamp,
                 code_branch=effective_code_branch,
+                code_repo=effective_code_repo,
+                code_commit=code_commit,
             )
 
             # Write to per-thread format. Bundles graph (meta + entries
@@ -1810,6 +1830,8 @@ def ack_hosted(
     body: str = "Acknowledged",
     entry_id: Optional[str] = None,
     code_branch: Optional[str] = None,
+    code_repo: Optional[str] = None,
+    code_commit: Optional[str] = None,
     role: str = "pm",
 ) -> tuple[str | None, dict]:
     """Acknowledge a thread without flipping the ball (per-thread format only).
@@ -1856,6 +1878,11 @@ def ack_hosted(
             effective_code_branch = code_branch
             if not effective_code_branch and http_ctx:
                 effective_code_branch = http_ctx.effective_branch
+            # C3: repo defaults to the request's tenant repo; commit has no
+            # hosted default (no code checkout) — explicit param only.
+            effective_code_repo = code_repo
+            if not effective_code_repo and http_ctx:
+                effective_code_repo = http_ctx.repo
 
             # Build updated graph data with ack entry (ball unchanged)
             new_meta, new_entries, new_edges = _build_per_thread_graph_data(
@@ -1874,6 +1901,8 @@ def ack_hosted(
                 body=body,
                 timestamp=timestamp,
                 code_branch=effective_code_branch,
+                code_repo=effective_code_repo,
+                code_commit=code_commit,
             )
 
             # Atomic write — graph + .md projection + entry enrichment
@@ -1943,6 +1972,8 @@ def handoff_hosted(
     note: str = "",
     entry_id: Optional[str] = None,
     code_branch: Optional[str] = None,
+    code_repo: Optional[str] = None,
+    code_commit: Optional[str] = None,
     role: str = "pm",
     title: Optional[str] = None,
 ) -> tuple[str | None, dict]:
@@ -1992,6 +2023,9 @@ def handoff_hosted(
             effective_code_branch = code_branch
             if not effective_code_branch and http_ctx_local:
                 effective_code_branch = http_ctx_local.effective_branch
+            effective_code_repo = code_repo
+            if not effective_code_repo and http_ctx_local:
+                effective_code_repo = http_ctx_local.repo
 
             # Build updated graph data
             if note:
@@ -2012,6 +2046,8 @@ def handoff_hosted(
                     body=note,
                     timestamp=timestamp,
                     code_branch=effective_code_branch,
+                    code_repo=effective_code_repo,
+                    code_commit=code_commit,
                 )
             else:
                 # Just update ball, no entry

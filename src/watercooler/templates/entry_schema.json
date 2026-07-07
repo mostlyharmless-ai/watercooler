@@ -87,6 +87,14 @@
       "type": "string",
       "description": "Optional. Branch tag on the entry; not a storage dimension."
     },
+    "code_repo": {
+      "type": "string",
+      "description": "Optional (C3). Code repo (owner/name) the entry was written against; absent on legacy entries."
+    },
+    "code_commit": {
+      "type": "string",
+      "description": "Optional (C3). Code-repo commit the entry was written against; absent on legacy entries and hosted writes (no code checkout)."
+    },
 
     "actor_class": {
       "type": "string",
@@ -179,10 +187,12 @@
           "label": {"type": "string"},
           "entry_id": {"type": "string"},
           "quote_hash": {"type": "string"},
-          "detail": {"type": "string"}
+          "detail": {"type": "string"},
+          "topic": {"type": "string", "description": "Optional (C2). Thread topic of the referenced entry_id — present only alongside entry_id, when the producer knew the location."},
+          "index": {"type": "integer", "minimum": 0, "description": "Optional (C2). The referenced entry's index within its thread; same presence rule as topic."}
         }
       },
-      "description": "#896 Leg 2. Per-support inspection pointers so a consumer can drill to the actual quote/record rather than trust a bare count (the §6 inspect-don't-trust substrate)."
+      "description": "#896 Leg 2. Per-support inspection pointers so a consumer can drill to the actual quote/record rather than trust a bare count (the §6 inspect-don't-trust substrate). C2 adds optional topic/index locators on entry_id-bearing pointers."
     },
     "legacy_extraction_policy_status": {
       "type": "string",

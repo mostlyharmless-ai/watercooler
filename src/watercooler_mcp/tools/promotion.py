@@ -345,6 +345,8 @@ def _promote_candidate_impl(
     quote_verified = None
     quote_reverification_reason = None
     source_entry_type = None
+    source_topic = None
+    source_index = None
     if target_type == "Decision":
         # Re-validate the candidate's evidence quotes against the LIVE source entry
         # so the promoted Decision's warrant reflects the real source — not the
@@ -379,6 +381,10 @@ def _promote_candidate_impl(
         # Live source entry type — record_state must reflect what the source
         # actually is, not the candidate's self-asserted marker (#887).
         source_entry_type = source_node.get("entry_type") if source_node else None
+        # C2: the resolved node knows where it lives — the source may be on
+        # another thread, so take topic/index from the resolution itself.
+        source_topic = source_node.get("thread_topic") if source_node else None
+        source_index = source_node.get("index") if source_node else None
 
     try:
         plan = plan_promotion(
@@ -392,6 +398,8 @@ def _promote_candidate_impl(
             quote_verified=quote_verified,
             quote_reverification_reason=quote_reverification_reason,
             source_entry_type=source_entry_type,
+            source_topic=source_topic,
+            source_index=source_index,
         )
     except PromotionError as exc:
         return f"❌ watercooler_promote_candidate: {exc}"

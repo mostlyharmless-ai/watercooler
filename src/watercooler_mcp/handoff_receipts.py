@@ -43,6 +43,30 @@ def _receipts_file() -> Path:
     return DEFAULT_HANDOFF_RECEIPTS_FILE
 
 
+_MAX_ERROR_DETAIL_CHARS = 500
+
+
+def summarize_remote_error(payload: Dict[str, Any]) -> str:
+    """Flatten a remote error payload into a receipt-sized error string.
+
+    ``premium_client.call_tool_text`` attaches ``message``, ``status_code``
+    and ``remote_error`` (the remote HTTP body, e.g. a
+    ``repo_claim_mismatch`` explanation) to its ``remote_call_failed``
+    envelope. Receipts that record only ``payload["error"]`` lose all of
+    that; this helper preserves it in one bounded string.
+    """
+    err = str(payload.get("error") or payload.get("status") or "rejected")
+    parts = [err]
+    status = payload.get("status_code")
+    if status:
+        parts.append(f"http={status}")
+    detail = payload.get("remote_error") or payload.get("message") or ""
+    detail = str(detail).strip()
+    if detail and detail != err:
+        parts.append(detail[:_MAX_ERROR_DETAIL_CHARS])
+    return ": ".join(parts)
+
+
 def append_handoff_receipt(
     *,
     backend: str,

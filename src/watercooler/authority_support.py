@@ -134,7 +134,10 @@ class WarrantReadModel:
         support_evidence: Compact per-support pointers so a consumer can inspect
             support rather than trust a bare count. Each is a dict with
             ``tether`` and ``label`` plus optional ``entry_id``, ``quote_hash``,
-            ``detail``.
+            ``detail``, and — when the producer knows where the referenced
+            entry lives — ``topic`` and ``index``, so a consumer can build a
+            jump link in one step instead of resolving the ULID first (C2,
+            thread candidate-research-backend-support).
     """
 
     support_counts: dict[str, int]
@@ -179,11 +182,23 @@ def _evidence(
     entry_id: Optional[str] = None,
     quote_hash_value: Optional[str] = None,
     detail: Optional[str] = None,
+    topic: Optional[str] = None,
+    index: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Build one compact evidence pointer, omitting empty optional fields."""
+    """Build one compact evidence pointer, omitting empty optional fields.
+
+    ``topic``/``index`` locate the referenced ``entry_id`` (C2): consumers can
+    then link straight to the source entry instead of resolving the bare ULID.
+    Only meaningful alongside ``entry_id``; omitted when unknown so older
+    producers and topic-less pointers keep the same minimal shape.
+    """
     ev: dict[str, Any] = {"tether": tether, "label": label}
     if entry_id:
         ev["entry_id"] = entry_id
+        if topic:
+            ev["topic"] = topic
+        if index is not None:
+            ev["index"] = index
     if quote_hash_value:
         ev["quote_hash"] = quote_hash_value
     if detail:
@@ -275,6 +290,8 @@ def derive_candidate_support(
     source_entry_type: Optional[str] = None,
     extractor_warning: Optional[str] = None,
     moral_delegation_warning: bool = False,
+    source_topic: Optional[str] = None,
+    source_index: Optional[int] = None,
 ) -> WarrantReadModel:
     """Derive the warrant read model for a Decision candidate from existing facts.
 
@@ -308,6 +325,10 @@ def derive_candidate_support(
         source_entry_type: ``entry_type`` of the source entry, if known.
         extractor_warning: Free-text warning the extractor emitted, if any.
         moral_delegation_warning: Whether a procedural moral-delegation warning fired.
+        source_topic: Thread topic of the source entry, when the caller knows
+            it — stamped onto entry_id-bearing pointers so consumers can build
+            jump links in one step (C2). Omitted when unknown.
+        source_index: The source entry's index within its thread; same purpose.
 
     Returns:
         A :class:`WarrantReadModel`.
@@ -330,6 +351,8 @@ def derive_candidate_support(
                     "verified_quote",
                     entry_id=source_entry_id,
                     quote_hash_value=quote_hash(quote),
+                    topic=source_topic,
+                    index=source_index,
                 )
             )
     elif quotes:
@@ -358,6 +381,8 @@ def derive_candidate_support(
                 TETHER_RECORD_STATE,
                 f"source_is_{source_entry_type.lower()}",
                 entry_id=source_entry_id,
+                topic=source_topic,
+                index=source_index,
             )
         )
 

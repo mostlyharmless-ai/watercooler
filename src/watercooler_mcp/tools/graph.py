@@ -2987,7 +2987,11 @@ def _build_hybrid_search_wrapper(runtime):
                     "capability": capability,
                     "message": "Remote premium client is not configured.",
                 })
-            return await runtime.premium_client.call_tool_text(
+            from ..premium_client import select_pool_client
+
+            return await select_pool_client(
+                runtime, kwargs.get("code_path")
+            ).call_tool_text(
                 "watercooler_search", kwargs
             )
         if target == "disabled":

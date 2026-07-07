@@ -179,11 +179,24 @@ def _canonicalize_t2_group_id(caller_group_id: str) -> tuple[str, dict | None]:
 
     caller_canonical = _ensure_t2_suffix(caller_group_id)
     if caller_canonical and caller_canonical != scoped:
-        logger.warning(
-            "HOSTED_T2: caller-supplied group_id %r (canonical %r) does not "
-            "match http_ctx-derived %r; using hosted scope (tenant isolation).",
-            caller_group_id, caller_canonical, scoped,
-        )
+        # Move 1 alignment (incident bug-hybrid-static-x-repo-cross-tenant-
+        # t2-scope): T2 ingest applies the same scope-authority policy as
+        # T1 — warn off-strict, fail closed under WATERCOOLER_STRICT_SCOPE.
+        # The prior warn-and-re-home behavior silently wrote the episode
+        # into the auth-derived graph while the client recorded success.
+        from ..auth.scope import ScopeResolutionError, enforce_caller_hint
+
+        try:
+            enforce_caller_hint(
+                derived=scoped,
+                caller_supplied=caller_canonical,
+                field="group_id",
+            )
+        except ScopeResolutionError as e:
+            return "", {
+                "success": False,
+                "error": f"scope_resolution_failed: {e}",
+            }
     return scoped, None
 
 # Runtime context (set by register_memory_tools)
@@ -3214,13 +3227,144 @@ def _build_hybrid_bulk_index_wrapper(runtime):
                         "message": "Remote premium client is not configured.",
                     }),
                 )])
-            remote_text = await runtime.premium_client.call_tool_text(
+            # PR #1062 re-review P1: default bulk_index mode is
+            # memory_ingest — a WRITE — so it must not use
+            # select_pool_client's read-only boot fallback. A present but
+            # underivable code_path fails closed locally (submitting
+            # would index the BOOT repo's scope, not the one the caller
+            # named); an absent code_path legitimately targets the boot
+            # scope and uses the default client.
+            client = runtime.premium_client
+            pool = getattr(runtime, "premium_pool", None)
+            if pool is not None:
+                bulk_code_path = kwargs.get("code_path")
+                if bulk_code_path:
+                    try:
+                        client = pool.client_for_path(bulk_code_path)
+                    except Exception as e:
+                        return ToolResult([TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": False,
+                                "error": (
+                                    "scope_resolution_failed: no repo "
+                                    "slug derivable from code_path="
+                                    f"{bulk_code_path!r} ({e}); refusing "
+                                    "to run a remote ingest under the "
+                                    "boot X-Repo."
+                                ),
+                            }),
+                        )])
+                else:
+                    client = pool.default
+
+            remote_text = await client.call_tool_text(
                 "watercooler_bulk_index", kwargs
             )
             return ToolResult([TextContent(type="text", text=remote_text)])
         return await _bulk_index_impl(ctx, **kwargs)
 
     return _hybrid_bulk_index
+
+
+def _build_hybrid_graphiti_add_episode_wrapper(runtime):
+    """Build a hybrid wrapper for ``watercooler_graphiti_add_episode``.
+
+    graphiti_add_episode is a *mixed* tool (was proxy-mounted until the
+    bug-hybrid-static-x-repo-cross-tenant-t2-scope incident): a bare
+    proxy-mount routed every direct ingest call through the boot repo's
+    frozen ``X-Repo``, so cross-repo episodes were mis-scoped server-side.
+    The wrapper forwards to the hosted endpoint through the per-repo
+    premium client selected by the call's ``code_path``; without a usable
+    ``code_path`` the default (boot-repo) client is used and the hosted
+    strict-scope guard is the backstop.
+    """
+    import functools
+    from ..capabilities import tool_capability
+
+    @functools.wraps(_graphiti_add_episode_impl)
+    async def _hybrid_graphiti_add_episode(ctx, **kwargs):
+        capability = tool_capability("watercooler_graphiti_add_episode", kwargs)
+        target = runtime.capability_profile.resolve_execution_target(
+            capability,
+            local_available=False,
+            remote_available=runtime.premium_client is not None,
+        )
+        if target == "disabled":
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps(
+                    {"error": "capability_disabled", "capability": capability},
+                    indent=2,
+                ),
+            )])
+        if runtime.premium_client is None:
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "remote_unavailable",
+                    "capability": capability,
+                    "message": "Remote premium client is not configured.",
+                }),
+            )])
+
+        # PR #1062 review P1: ingest is a repo-scoped WRITE — it must not
+        # silently fall back to the boot client. Per-repo client from
+        # code_path when derivable; otherwise the boot client is legal
+        # ONLY when the supplied group_id targets the boot scope (or no
+        # group was supplied — the server canonicalizes from X-Repo).
+        # A foreign group with no resolvable path fails closed locally.
+        client = runtime.premium_client
+        pool = getattr(runtime, "premium_pool", None)
+        if pool is not None:
+            client = None
+            code_path = kwargs.get("code_path")
+            if code_path:
+                try:
+                    client = pool.client_for_path(code_path)
+                except Exception:
+                    client = None
+            if client is None:
+                caller_group = _ensure_t2_suffix(
+                    str(kwargs.get("group_id") or "")
+                )
+                boot_group = ""
+                try:
+                    from watercooler.path_resolver import (
+                        derive_t2_database_name,
+                    )
+
+                    boot_group = derive_t2_database_name(
+                        repo_slug=pool.default.resolved_repo
+                    )
+                except Exception:
+                    boot_group = ""
+                if not caller_group or (
+                    boot_group and caller_group == boot_group
+                ):
+                    client = pool.default
+                else:
+                    return ToolResult([TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": False,
+                            "error": (
+                                "scope_resolution_failed: group_id "
+                                f"{caller_group!r} does not target the "
+                                f"boot scope {boot_group!r} and no "
+                                "per-repo client could be resolved from "
+                                f"code_path={code_path!r}; pass a "
+                                "code_path inside the target repo."
+                            ),
+                        }),
+                    )])
+
+        remote_text = await client.call_tool_text(
+            "watercooler_graphiti_add_episode", kwargs
+        )
+        return ToolResult([TextContent(type="text", text=remote_text)])
+
+    return _hybrid_graphiti_add_episode
 
 
 def register_memory_tools(mcp, *, selected=None, runtime=None):
@@ -3231,8 +3375,10 @@ def register_memory_tools(mcp, *, selected=None, runtime=None):
         selected: Optional collection of tool names to register.
             ``None`` means register all tools in this module.
         runtime: Optional ToolRuntime. When the surface is ``local_hybrid``,
-            the mixed tool watercooler_bulk_index gets a hybrid wrapper that
-            routes local/remote/disabled per call.
+            the mixed tools watercooler_bulk_index and
+            watercooler_graphiti_add_episode get hybrid wrappers that
+            route local/remote/disabled (and select the per-repo premium
+            client) per call.
 
     Note:
         The following tools have been removed (use replacements):
@@ -3257,8 +3403,12 @@ def register_memory_tools(mcp, *, selected=None, runtime=None):
         if (
             runtime is not None
             and getattr(runtime, "surface", None) == "local_hybrid"
-            and tool_name == "watercooler_bulk_index"
         ):
-            actual_impl = _build_hybrid_bulk_index_wrapper(runtime)
+            if tool_name == "watercooler_bulk_index":
+                actual_impl = _build_hybrid_bulk_index_wrapper(runtime)
+            elif tool_name == "watercooler_graphiti_add_episode":
+                actual_impl = _build_hybrid_graphiti_add_episode_wrapper(
+                    runtime
+                )
         registered = mcp.tool(name=tool_name)(actual_impl)
         _globals[global_name] = registered

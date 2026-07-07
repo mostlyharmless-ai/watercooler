@@ -71,6 +71,10 @@ class HttpRequestContext:
     session_id: Optional[str] = None
     client_id: Optional[str] = None
     daemon_config_json: Optional[str] = None  # Serialized DaemonsConfig from hybrid client
+    # HMAC key classification ("per_user" | "service") from the auth
+    # stage; None for bearer/identity paths. Consumed by grant gates
+    # that give service identities an explicit bypass (graph_admin).
+    auth_key_type: Optional[str] = None
 
     def is_complete(self) -> bool:
         """Check if context has all required fields for hosted operations.

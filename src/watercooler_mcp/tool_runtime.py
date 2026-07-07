@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 from .capabilities import CapabilityProfile
 
 if TYPE_CHECKING:
-    from .premium_client import PremiumToolClient
+    from .premium_client import PremiumClientPool, PremiumToolClient
     from .capability_auth import CapabilityAuthorizer
     from .deployment_profile import DeploymentAvailability
 
@@ -31,6 +31,11 @@ class ToolRuntime:
     surface: SurfaceName
     capability_profile: CapabilityProfile = field(default_factory=CapabilityProfile)
     premium_client: Optional[PremiumToolClient] = None
+    # Per-(repo, branch) client cache for hybrid multi-repo sessions
+    # (incident bug-hybrid-static-x-repo-cross-tenant-t2-scope). None on
+    # non-hybrid surfaces and in legacy construction paths; callers fall
+    # back to ``premium_client``.
+    premium_pool: Optional[PremiumClientPool] = None
     authorizer: Optional[CapabilityAuthorizer] = None
     deployment_availability: Optional[DeploymentAvailability] = None
 

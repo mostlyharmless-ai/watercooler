@@ -945,6 +945,8 @@ def main(argv: list[str] | None = None) -> None:
         quote_verified = None
         quote_reverification_reason = None
         source_entry_type = None
+        source_topic = None
+        source_index = None
         if args.target_type == "Decision":
             source_node = None
             if meta.source_entry_id:
@@ -967,6 +969,10 @@ def main(argv: list[str] | None = None) -> None:
             # Live source entry type — record_state must reflect what the source
             # actually is, not the candidate's self-asserted marker (#887).
             source_entry_type = source_node.get("entry_type") if source_node else None
+            # C2: the resolved node knows where it lives — the source may be on
+            # another thread, so take topic/index from the resolution itself.
+            source_topic = source_node.get("thread_topic") if source_node else None
+            source_index = source_node.get("index") if source_node else None
 
         try:
             plan = plan_promotion(
@@ -980,6 +986,8 @@ def main(argv: list[str] | None = None) -> None:
                 quote_verified=quote_verified,
                 quote_reverification_reason=quote_reverification_reason,
                 source_entry_type=source_entry_type,
+                source_topic=source_topic,
+                source_index=source_index,
             )
         except PromotionError as exc:
             print(f"❌ promote-candidate: {exc}", file=sys.stderr)
@@ -1015,6 +1023,12 @@ def main(argv: list[str] | None = None) -> None:
                     source_entry_id=args.candidate_entry_id,
                     target_type=args.target_type,
                 ),
+                # §6 structured tether read-model — MCP-path parity (PR #1075
+                # review): without this, CLI-promoted Decisions rendered the
+                # support section in prose but dropped the structured fields
+                # (incl. the C2 resolvable topic/index evidence pointers) that
+                # graph consumers read.
+                support_fields=plan.decision_support_fields,
             ),
             no_sync=args.no_sync,
         )

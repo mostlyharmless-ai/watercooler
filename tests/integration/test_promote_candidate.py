@@ -672,6 +672,65 @@ class TestPromoteCandidateCLI:
             "--no-sync",
         ]
 
+    def test_cli_promotion_persists_structured_support_fields(
+        self, tmp_path, candidate_entry
+    ):
+        """MCP-path parity (PR #1075 review): the CLI's Decision write must pass
+        ``support_fields=plan.decision_support_fields`` — otherwise the CLI
+        renders the support section in prose but drops the structured read model
+        (incl. the C2 resolvable ``topic``/``index`` evidence pointers) that
+        graph consumers read."""
+        from watercooler import cli
+
+        live_source = {
+            "entry_id": _SOURCE_ID,
+            "entry_type": "Decision",
+            "thread_topic": "source-thread",
+            "index": 2,
+            "body": "We decided to use PostgreSQL. It fits the ops model.",
+        }
+
+        def fake_lookup(_threads_dir, entry_id, topic=None):
+            return candidate_entry if entry_id == _CANDIDATE_ID else live_source
+
+        say_calls: list[dict] = []
+
+        def fake_say(topic, **kw):
+            say_calls.append({"entry_type": kw.get("entry_type"), **kw})
+            return (
+                f"✅ Entry added to '{topic}'\n"
+                f"Title: t\nRole: implementer | Type: {kw.get('entry_type')}\n"
+                f"Entry-ID: {kw.get('entry_id')}\n"
+            )
+
+        with (
+            patch(
+                "watercooler.baseline_graph.writer.get_entry_node_from_graph",
+                side_effect=fake_lookup,
+            ),
+            patch(
+                "watercooler.baseline_graph.writer.get_entries_for_thread",
+                return_value=[],
+            ),
+            patch("watercooler.commands_graph.say", side_effect=fake_say),
+            pytest.raises(SystemExit) as exc,
+        ):
+            cli.main(self._argv(tmp_path))
+        assert exc.value.code in (None, 0)
+
+        decision_writes = [c for c in say_calls if c["entry_type"] == "Decision"]
+        assert len(decision_writes) == 1
+        support = decision_writes[0].get("support_fields")
+        assert support, "CLI Decision write must persist the structured read model"
+        located = [
+            ev for ev in support["support_evidence"] if ev.get("entry_id")
+        ]
+        assert located, "expected entry_id-bearing evidence pointers"
+        for ev in located:
+            # C2: location comes from the LIVE source resolution.
+            assert ev["topic"] == "source-thread"
+            assert ev["index"] == 2
+
     def test_load_failure_fails_closed_exit_2(
         self, tmp_path, candidate_entry, capsys
     ):

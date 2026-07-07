@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 from typing import Any, List, Optional
 
-from .handoff_receipts import append_handoff_receipt
+from .handoff_receipts import append_handoff_receipt, summarize_remote_error
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ def install_hybrid_callbacks(runtime: Any) -> None:
         return
 
     premium = runtime.premium_client
+    pool = getattr(runtime, "premium_pool", None)
 
     def _upsert(
         threads_dir: Path,
@@ -59,6 +60,7 @@ def install_hybrid_callbacks(runtime: Any) -> None:
     ) -> bool:
         return _submit_t1_upsert(
             premium=premium,
+            pool=pool,
             threads_dir=threads_dir,
             entry_id=entry_id,
             topic=topic,
@@ -72,6 +74,7 @@ def install_hybrid_callbacks(runtime: Any) -> None:
     def _delete(threads_dir: Path, entry_id: str, topic: str = "") -> bool:
         return _submit_t1_delete(
             premium=premium,
+            pool=pool,
             threads_dir=threads_dir,
             entry_id=entry_id,
             topic=topic,
@@ -80,8 +83,12 @@ def install_hybrid_callbacks(runtime: Any) -> None:
     bg_sync.register_t1_remote_embedding_callbacks(upsert=_upsert, delete=_delete)
 
 
-def _derive_group_id(threads_dir: Path) -> str:
-    """Return the canonical ``<org>_<repo>`` project group id.
+def _derive_group_and_slug(threads_dir: Path) -> tuple[str, Optional[str]]:
+    """Return ``(project_group_id, repo_slug)`` for the entry's repo.
+
+    ``repo_slug`` is ``None`` when the git remote is unreadable (the
+    group falls back to the repo-only form); callers use it to select a
+    per-repo premium client from the pool.
 
     Codex review: source the slug from the git remote so the T1 hybrid
     write lands in the canonical hosted database rather than a repo-only
@@ -110,8 +117,11 @@ def _derive_group_id(threads_dir: Path) -> str:
                 threads_dir, e,
             )
             repo_slug = None
-        return derive_project_group_id(
-            repo_slug=repo_slug, threads_dir=threads_dir
+        return (
+            derive_project_group_id(
+                repo_slug=repo_slug, threads_dir=threads_dir
+            ),
+            repo_slug,
         )
     except Exception as e:
         # Round 14 + round 20 (MEDIUM): fail closed. The prior code had a
@@ -132,6 +142,38 @@ def _derive_group_id(threads_dir: Path) -> str:
         raise
 
 
+def _select_client(
+    premium: Any, pool: Any, repo_slug: Optional[str], threads_dir: Path
+) -> Optional[Any]:
+    """Pick the per-repo pooled client for a repo-scoped WRITE.
+
+    Returns ``None`` — the caller records a ``submit_failed`` receipt and
+    refuses — when a NON-boot repo's client cannot be built (PR #1062
+    review P1: falling back to the boot client would submit the write
+    under the wrong ``X-Repo``; non-strict hosted mode would re-home it
+    and record success). The boot ``premium`` client is used only when
+    the pool is absent (legacy construction), the slug could not be
+    derived (repo-only group; server-side strict guard is the backstop),
+    or the write genuinely targets the boot scope.
+    """
+    if pool is not None and repo_slug:
+        try:
+            return pool.client_for_repo(repo_slug, repo_root=threads_dir)
+        except Exception as e:
+            if not pool.is_boot_scope(repo_slug):
+                logger.error(
+                    "T1_HYBRID: pool client for %s unavailable (%s); "
+                    "refusing to submit a foreign-scope write under the "
+                    "boot X-Repo.", repo_slug, e,
+                )
+                return None
+            logger.warning(
+                "T1_HYBRID: pool client for boot scope %s unavailable "
+                "(%s); using default client.", repo_slug, e,
+            )
+    return premium
+
+
 def _submit_t1_upsert(
     *,
     premium: Any,
@@ -143,11 +185,12 @@ def _submit_t1_upsert(
     entry_type: str = "",
     agent: str = "",
     timestamp: str = "",
+    pool: Any = None,
 ) -> bool:
     try:
-        group_id = _derive_group_id(threads_dir)
+        group_id, repo_slug = _derive_group_and_slug(threads_dir)
     except Exception as e:
-        # Round 14 (MEDIUM): _derive_group_id now raises rather than
+        # Round 14 (MEDIUM): _derive_group_and_slug raises rather than
         # returning "unknown" when it cannot resolve the canonical
         # target. Record a submit_failed receipt and refuse — better
         # a missing embedding than one in the wrong database.
@@ -157,6 +200,17 @@ def _submit_t1_upsert(
             entry_id=entry_id,
             topic=topic,
             error=f"group_id_unresolved: {e}",
+        )
+        return False
+    premium = _select_client(premium, pool, repo_slug, threads_dir)
+    if premium is None:
+        append_handoff_receipt(
+            backend="t1_semantic",
+            stage="submit_failed",
+            entry_id=entry_id,
+            topic=topic,
+            group_id=group_id,
+            error=f"pool_client_unavailable: {repo_slug}",
         )
         return False
     args = {
@@ -197,7 +251,7 @@ def _submit_t1_upsert(
             entry_id=entry_id,
             topic=topic,
             group_id=group_id,
-            error=str(payload.get("error") or payload.get("status") or "rejected"),
+            error=summarize_remote_error(payload),
         )
         return False
 
@@ -219,9 +273,10 @@ def _submit_t1_delete(
     threads_dir: Path,
     entry_id: str,
     topic: str = "",
+    pool: Any = None,
 ) -> bool:
     try:
-        group_id = _derive_group_id(threads_dir)
+        group_id, repo_slug = _derive_group_and_slug(threads_dir)
     except Exception as e:
         append_handoff_receipt(
             backend="t1_semantic",
@@ -229,6 +284,18 @@ def _submit_t1_delete(
             entry_id=entry_id,
             topic=topic,
             error=f"group_id_unresolved: {e}",
+            extra={"op": "delete"},
+        )
+        return False
+    premium = _select_client(premium, pool, repo_slug, threads_dir)
+    if premium is None:
+        append_handoff_receipt(
+            backend="t1_semantic",
+            stage="submit_failed",
+            entry_id=entry_id,
+            topic=topic,
+            group_id=group_id,
+            error=f"pool_client_unavailable: {repo_slug}",
             extra={"op": "delete"},
         )
         return False
@@ -263,7 +330,7 @@ def _submit_t1_delete(
         topic=topic,
         group_id=group_id,
         submission_status=str(payload.get("status") or ("deleted" if ok else "rejected")),
-        error=str(payload.get("error", "")) if not ok else "",
+        error=summarize_remote_error(payload) if not ok else "",
         extra={"op": "delete"},
     )
     return ok

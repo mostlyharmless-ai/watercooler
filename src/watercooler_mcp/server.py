@@ -266,7 +266,7 @@ def _run_hybrid(transport_config: dict, *, boot_cwd: Path | None = None) -> None
     """
     from .capabilities import HYBRID_DEFAULT_ROUTES, CapabilityProfile, validate_capability_routes
     from .tool_runtime import ToolRuntime
-    from .premium_client import PremiumToolClient
+    from .premium_client import PremiumClientPool, PremiumToolClient
     from .server_factory import build_mcp_server
 
     # Build capability profile from defaults + user overrides
@@ -287,11 +287,19 @@ def _run_hybrid(transport_config: dict, *, boot_cwd: Path | None = None) -> None
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    # Per-(repo, branch) client pool: multi-repo sessions assert the
+    # correct X-Repo per call instead of the boot repo on every request
+    # (incident bug-hybrid-static-x-repo-cross-tenant-t2-scope).
+    premium_pool = PremiumClientPool(
+        transport_config, premium_client, boot_cwd=boot_cwd
+    )
+
     # Build runtime and server
     runtime = ToolRuntime(
         surface="local_hybrid",
         capability_profile=profile,
         premium_client=premium_client,
+        premium_pool=premium_pool,
     )
 
     # Start local T1 services only.

@@ -189,6 +189,10 @@ class _AuthResult:
     repo: Optional[str] = None
     branch: Optional[str] = None
     capabilities: Optional[frozenset] = None  # Preloaded from credentials response
+    # HMAC key classification ("per_user" | "service"); None on non-HMAC
+    # paths. Lets grant checks give service identities an explicit
+    # bypass (e.g. graph_admin) instead of inferring from user_id shape.
+    key_type: Optional[str] = None
 
 
 def _stage_request_id(request: Any) -> str:
@@ -592,6 +596,7 @@ async def _attempt_hmac_v3_auth(
         github_token=github_token,
         repo=x_repo,
         branch=x_branch,
+        key_type=key_info.key_type,
     )
 
 
@@ -932,6 +937,7 @@ def _stage_set_context(
                 capabilities=auth_result.capabilities,
                 session_id=session_id,
                 daemon_config_json=daemon_config_json,
+                auth_key_type=auth_result.key_type,
             )
         )
 

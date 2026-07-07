@@ -254,6 +254,15 @@ proxy_branch = "main"
 
 Or via environment variables: `WATERCOOLER_CODE_REPO` and `WATERCOOLER_CODE_BRANCH`.
 
+`proxy_repo` (or the boot cwd's git remote) sets the *default* hosted
+repo context only. Multi-repo sessions — e.g. launched from a parent
+directory of several repos, passing an explicit `code_path` per write —
+are supported: hybrid memory submissions assert each call's repo in
+`X-Repo` via a per-(repo, branch) premium-client pool, and the hosted
+server validates every asserted repo against the identity's connected-repo
+claim. A repo that isn't connected on the dashboard fails with a
+`repo_claim_mismatch` receipt rather than being silently re-scoped.
+
 ### Capability route overrides (hybrid)
 
 Hybrid mode's default per-capability routing:

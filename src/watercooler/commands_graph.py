@@ -143,6 +143,8 @@ def append_entry(
     user_tag: str | None = None,
     entry_id: str | None = None,
     code_branch: Optional[str] = None,
+    code_repo: Optional[str] = None,
+    code_commit: Optional[str] = None,
     code_root: Optional[Path] = None,
     authority_fields: Optional[dict] = None,
     support_fields: Optional[dict] = None,
@@ -225,6 +227,9 @@ def append_entry(
             "timestamp": now,
             "summary": "",  # Summary generated later by enrichment
             "code_branch": code_branch,
+            # Code-state provenance (C3) — the writer's code repo + commit.
+            "code_repo": code_repo,
+            "code_commit": code_commit,
         }
         if authority_fields:
             # Whitelist the recognised keys; ignore unknowns.
@@ -348,6 +353,8 @@ def say(
     user_tag: str | None = None,
     entry_id: str | None = None,
     code_branch: Optional[str] = None,
+    code_repo: Optional[str] = None,
+    code_commit: Optional[str] = None,
     code_root: Optional[Path] = None,
     authority_fields: Optional[dict] = None,
     support_fields: Optional[dict] = None,
@@ -383,6 +390,8 @@ def say(
         user_tag=user_tag,
         entry_id=entry_id,
         code_branch=code_branch,
+        code_repo=code_repo,
+        code_commit=code_commit,
         code_root=code_root,
         authority_fields=authority_fields,
         support_fields=support_fields,
@@ -404,6 +413,8 @@ def ack(
     user_tag: str | None = None,
     entry_id: str | None = None,
     code_branch: Optional[str] = None,
+    code_repo: Optional[str] = None,
+    code_commit: Optional[str] = None,
     code_root: Optional[Path] = None,
     authority_fields: Optional[dict] = None,
     support_fields: Optional[dict] = None,
@@ -442,6 +453,8 @@ def ack(
         user_tag=user_tag,
         entry_id=entry_id,
         code_branch=code_branch,
+        code_repo=code_repo,
+        code_commit=code_commit,
         code_root=code_root,
         authority_fields=authority_fields,
         support_fields=support_fields,
@@ -459,6 +472,8 @@ def handoff(
     user_tag: str | None = None,
     entry_id: str | None = None,
     code_branch: Optional[str] = None,
+    code_repo: Optional[str] = None,
+    code_commit: Optional[str] = None,
     code_root: Optional[Path] = None,
 ) -> Path:
     """Flip the ball to the counterpart using graph-canonical approach.
@@ -507,6 +522,8 @@ def handoff(
         user_tag=user_tag,
         entry_id=entry_id,
         code_branch=code_branch,
+        code_repo=code_repo,
+        code_commit=code_commit,
         code_root=code_root,
     )
 

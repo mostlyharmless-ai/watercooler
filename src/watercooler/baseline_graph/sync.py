@@ -2989,7 +2989,50 @@ def sync_to_memory_backend(
                 and worker.is_running
                 and worker.has_executor(backend)
             ):
-                group_id = derive_group_id(threads_dir=threads_dir)
+                # Money-loop guard (incident bug-hybrid-static-x-repo-cross-
+                # tenant-t2-scope): prefer the canonical <org>_<repo> form
+                # from the git remote. The bare threads_dir-basename form
+                # produced cwd-derived groups on hosted (threads under /app
+                # → group "app" → episodes filed into the app_t2 side graph
+                # while the indexer re-bought the same entries for days).
+                from watercooler.path_resolver import (
+                    derive_project_group_id,
+                    derive_repo_slug,
+                )
+
+                try:
+                    repo_slug = derive_repo_slug(threads_dir=threads_dir)
+                except Exception:
+                    repo_slug = None
+                if repo_slug is None:
+                    # PR #1061 review (P1): under hosted mode a repo-only
+                    # basename fallback (e.g. "watercooler_cloud") is just
+                    # as much a side graph as "app" — and it survives the
+                    # executor's single-token check because it contains an
+                    # underscore. Structural checks cannot distinguish
+                    # repo-only from <org>_<repo>, so fail closed HERE:
+                    # no derivable slug under hosted = no enqueue. The
+                    # hosted t2_indexer backfills the entry canonically
+                    # from its X-Repo-scoped sweep, so nothing is lost.
+                    try:
+                        from watercooler_mcp.auth import is_hosted_mode
+
+                        _hosted = is_hosted_mode()
+                    except Exception:
+                        _hosted = False
+                    if _hosted:
+                        logger.error(
+                            f"MEMORY: hosted enqueue for {topic}/{entry_id} "
+                            f"has no derivable <org>/<repo> slug from "
+                            f"threads_dir={threads_dir}; refusing to enqueue "
+                            f"under a repo-only side-graph name (money-loop "
+                            f"guard). The t2_indexer will backfill this "
+                            f"entry from its scoped sweep."
+                        )
+                        return False
+                group_id = derive_project_group_id(
+                    repo_slug=repo_slug, threads_dir=threads_dir
+                )
                 content = entry_summary if entry_summary else entry_body
 
                 task_id = enqueue_memory_task(

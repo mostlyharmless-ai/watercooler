@@ -3,6 +3,9 @@
 Tools:
 - watercooler_list_decisions: List Decision entries with filters + xref
   resolution. Surfaces both hand-authored and daemon-extracted decisions.
+- watercooler_list_pending_candidates: List open candidate Notes awaiting
+  human judgment (C1 ask, thread candidate-research-backend-support) — the
+  server-authoritative feed for dashboard candidate queues.
 """
 
 from __future__ import annotations
@@ -21,6 +24,10 @@ from watercooler.baseline_graph import storage
 from watercooler.baseline_graph.annotations import get_annotation_state
 from watercooler.baseline_graph.storage import get_graph_dir
 from watercooler.decision_extraction import DECISION_EXTRACTED_TAG
+from watercooler.promotion import (
+    candidate_has_terminal_disposition,
+    parse_candidate_body,
+)
 
 from ..errors import ContextError, HostedModeError, ValidationError
 from ..observability import log_debug, log_error, log_warning
@@ -42,8 +49,9 @@ _ENTRY_ID_PREFIX = "entry:"
 _SUPERSESSION_EDGE_LIMIT = 2000
 
 
-# Module-level reference (populated on registration)
+# Module-level references (populated on registration)
 list_decisions = None
+list_pending_candidates = None
 
 
 def _bare_entry_id(value: Any) -> str:
@@ -899,6 +907,230 @@ def _list_decisions_impl(
         raise
 
 
+# ---------------------------------------------------------------------------
+# Pending candidates (C1, thread candidate-research-backend-support)
+# ---------------------------------------------------------------------------
+
+# The candidate-status marker value that means "awaiting human judgment"
+# (decision_extraction.format_candidate_note_body). A candidate's own body is
+# append-only, so pending-ness is this status MINUS a terminal disposition.
+_PENDING_STATUS = "needs_human_confirmation"
+
+
+def _collect_pending_for_topic(
+    topic: str, nodes: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Pending-candidate records for one thread's entry nodes.
+
+    A pending candidate is a Note whose body carries
+    ``Candidate-Status: needs_human_confirmation`` and which has no terminal
+    disposition anywhere on the thread (``candidate_has_terminal_disposition``:
+    the MCP ``Disposition-Target:`` marker, the dashboard's ``Candidate-Entry:``
+    marker, or a ``Promoted-From:``-stamped promoted entry).
+    """
+    pending: list[dict[str, Any]] = []
+    for node in nodes:
+        if node.get("entry_type") != "Note":
+            continue
+        body = node.get("body")
+        if not isinstance(body, str) or "Candidate-Status:" not in body:
+            continue
+        entry_id = _bare_entry_id(node.get("id", ""))
+        if not entry_id:
+            continue
+        meta = parse_candidate_body(body, entry_id, topic)
+        if meta.candidate_status != _PENDING_STATUS:
+            continue
+        if candidate_has_terminal_disposition(entry_id, nodes):
+            continue
+        pending.append(
+            {
+                "entry_id": entry_id,
+                "topic": topic,
+                "index": node.get("index"),
+                "title": node.get("title") or "",
+                "timestamp": node.get("timestamp") or "",
+                "agent": node.get("agent") or "",
+                "candidate_type": meta.candidate_type,
+                "surface_kind": meta.surface_kind,
+                "confidence": meta.confidence,
+                "source_entry_id": (
+                    _bare_entry_id(meta.source_entry_id)
+                    if meta.source_entry_id
+                    else None
+                ),
+            }
+        )
+    return pending
+
+
+def _finalize_candidates_payload(
+    collected: list[dict[str, Any]],
+    limit: int,
+    skipped_topics: list[str] | None = None,
+) -> ToolResult:
+    """Sort (newest first), truncate, and JSON-serialise the candidate list."""
+    collected.sort(key=lambda c: c.get("timestamp") or "", reverse=True)
+    total = len(collected)
+    truncated = collected[:limit]
+    payload: dict[str, Any] = {
+        "schema_version": _SCHEMA_VERSION,
+        "total": total,
+        "returned": len(truncated),
+        "candidates": truncated,
+    }
+    if skipped_topics is not None:
+        payload["skipped_topics"] = skipped_topics
+    return ToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload, indent=2))]
+    )
+
+
+def _list_pending_candidates_hosted(
+    *, topic_filter: str | None, limit: int
+) -> ToolResult:
+    """Hosted (GitHub-backed) implementation of list_pending_candidates.
+
+    There is no candidates index (unlike decisions), so this is always the
+    per-thread scan: ``list_topic_dirs_hosted`` for discovery, then
+    ``load_all_entries_hosted`` (one snapshot-consistent fan-out; topics whose
+    entries can't load are reported via ``skipped_topics``, mirroring
+    ``_list_decisions_hosted``'s fallback path). With ``topic_filter`` set,
+    only that topic is loaded — the cheap path dashboards should prefer when
+    they already know the thread.
+    """
+    from ..hosted_ops import list_topic_dirs_hosted, load_all_entries_hosted
+
+    if topic_filter:
+        topics = [topic_filter]
+    else:
+        dirs_err, topics = list_topic_dirs_hosted()
+        if dirs_err:
+            log_error(
+                f"list_pending_candidates_hosted: list_topic_dirs_hosted "
+                f"failed: {dirs_err}"
+            )
+            raise HostedModeError(
+                f"Failed to enumerate threads in hosted repository: {dirs_err}",
+                operation="list_pending_candidates",
+            )
+
+    err, entries_by_topic = load_all_entries_hosted(topics=topics)
+    if err:
+        log_error(
+            f"list_pending_candidates_hosted: load_all_entries_hosted "
+            f"failed: {err}"
+        )
+        raise HostedModeError(
+            f"Failed to load entries from hosted repository: {err}",
+            operation="list_pending_candidates",
+        )
+
+    skipped_topics = sorted(set(topics) - set(entries_by_topic.keys()))
+    if skipped_topics:
+        log_warning(
+            f"list_pending_candidates_hosted: {len(skipped_topics)} topic(s) "
+            f"skipped during entries load: {skipped_topics!r}"
+        )
+
+    collected: list[dict[str, Any]] = []
+    for t, nodes in entries_by_topic.items():
+        collected.extend(_collect_pending_for_topic(t, nodes))
+
+    return _finalize_candidates_payload(collected, limit, skipped_topics=skipped_topics)
+
+
+def _list_pending_candidates_impl(
+    ctx: Context,
+    topic: str = "",
+    limit: int = 50,
+    code_path: str = "",
+) -> ToolResult:
+    """List open candidate Notes awaiting human judgment, across threads.
+
+    A candidate Note's body is append-only — its ``Candidate-Status`` stays
+    ``needs_human_confirmation`` forever — so "pending" is computed here as
+    status match MINUS a terminal disposition: a ``CandidateDisposition:
+    promoted|rejected`` Note referencing the candidate via
+    ``Disposition-Target:`` (MCP promote path) or ``Candidate-Entry:`` (the
+    dashboard judgment route), or a ``Promoted-From:``-stamped promoted entry
+    (#886). Non-terminal dispositions (keep_exploring, reframe) leave a
+    candidate pending by design (§5.4).
+
+    This is the server-authoritative feed for candidate-review queues (C1,
+    thread ``candidate-research-backend-support``) — dashboards previously
+    composed it client-side from loaded thread bodies, which cannot see
+    beyond loaded threads. Pure L1 read: asserts no authority, mutates
+    nothing.
+
+    Args:
+        topic: Filter to a single thread topic (empty = all threads). Prefer
+            setting it when the thread is known — hosted mode then loads one
+            topic instead of fanning out across the repository.
+        limit: Max candidates to return (default 50, max 500).
+        code_path: Path to the code repository containing threads.
+
+    Returns:
+        JSON ToolResult ``{schema_version, total, returned, candidates: [...]}``,
+        newest first. Each candidate carries ``entry_id``, ``topic``, ``index``,
+        ``title``, ``timestamp``, ``agent``, ``candidate_type``,
+        ``surface_kind``, ``confidence`` (0-5 or null), and ``source_entry_id``
+        (bare ULID of the entry it was extracted from, or null).
+        ``skipped_topics`` is present on hosted calls so callers can detect
+        partial results.
+    """
+    try:
+        if limit < 1 or limit > _MAX_LIMIT:
+            raise ValidationError(
+                f"limit must be between 1 and {_MAX_LIMIT}", field="limit"
+            )
+
+        error, context = validation._require_context(code_path)
+        if error:
+            raise ContextError(error, code_path=code_path)
+        if context is None:
+            raise ContextError(
+                "Unable to resolve code context for the provided code_path.",
+                code_path=code_path,
+            )
+
+        topic_filter = topic.strip() or None
+
+        if is_hosted_context(context):
+            log_debug(
+                f"list_pending_candidates: hosted path, topic={topic_filter!r}"
+            )
+            return _list_pending_candidates_hosted(
+                topic_filter=topic_filter, limit=limit
+            )
+
+        threads_dir = context.threads_dir
+        graph_dir = get_graph_dir(threads_dir)
+
+        topics_to_scan = (
+            [topic_filter] if topic_filter else storage.list_thread_topics(graph_dir)
+        )
+        log_debug(
+            f"list_pending_candidates: scanning {len(topics_to_scan)} topic(s)"
+        )
+
+        collected: list[dict[str, Any]] = []
+        for t in topics_to_scan:
+            thread_dir = storage.get_thread_graph_dir(graph_dir, t)
+            if not thread_dir.exists():
+                continue
+            nodes = list(storage.load_thread_entries(graph_dir, t))
+            collected.extend(_collect_pending_for_topic(t, nodes))
+
+        return _finalize_candidates_payload(collected, limit)
+
+    except (ValidationError, ContextError, HostedModeError):
+        raise
+    except Exception as exc:
+        log_error(f"list_pending_candidates failed: {exc}")
+        raise
+
+
 def _build_hybrid_list_decisions_wrapper(runtime):
     """Build a hybrid wrapper for ``watercooler_list_decisions``.
 
@@ -927,7 +1159,11 @@ def _build_hybrid_list_decisions_wrapper(runtime):
                         "message": "Remote premium client is not configured.",
                     }),
                 )])
-            remote_text = await runtime.premium_client.call_tool_text(
+            from ..premium_client import select_pool_client
+
+            remote_text = await select_pool_client(
+                runtime, kwargs.get("code_path")
+            ).call_tool_text(
                 "watercooler_list_decisions", kwargs
             )
             return ToolResult([TextContent(type="text", text=remote_text)])
@@ -946,7 +1182,21 @@ def _build_hybrid_list_decisions_wrapper(runtime):
 
 def register_decisions_tools(mcp, *, runtime=None) -> None:
     """Register decision-listing tools with the MCP server."""
-    global list_decisions
-    hybrid = runtime is not None and getattr(runtime, "surface", None) == "local_hybrid"
+    global list_decisions, list_pending_candidates
+    surface = getattr(runtime, "surface", None) if runtime is not None else None
+    hybrid = surface == "local_hybrid"
     actual_impl = _build_hybrid_list_decisions_wrapper(runtime) if hybrid else _list_decisions_impl
     list_decisions = mcp.tool(name="watercooler_list_decisions")(actual_impl)
+    # Pure baseline read (no T2 leg) — no hybrid wrapper needed, mirroring
+    # register_promotion_tools' direct registration.
+    #
+    # NOT on hosted_premium: server_factory mounts this registrar on the
+    # premium surface only as a special case so watercooler_list_decisions'
+    # remote memory-query leg (include_supersession=True) has a target — the
+    # rest of the baseline thread-tool bundle is intentionally excluded there,
+    # and this baseline_search/L1 dashboard feed must not leak with it
+    # (PR #1074 review).
+    if surface != "hosted_premium":
+        list_pending_candidates = mcp.tool(
+            name="watercooler_list_pending_candidates"
+        )(_list_pending_candidates_impl)

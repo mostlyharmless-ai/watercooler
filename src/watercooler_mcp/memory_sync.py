@@ -479,7 +479,10 @@ def _submit_graphiti_to_hosted(
     Submission failure is a sync failure — we do NOT fall back to local
     execution because hybrid must never live-write T2 locally.
     """
-    from .handoff_receipts import append_handoff_receipt
+    from .handoff_receipts import (
+        append_handoff_receipt,
+        summarize_remote_error,
+    )
 
     try:
         from watercooler.path_resolver import (
@@ -576,9 +579,42 @@ def _submit_graphiti_to_hosted(
         "source_description": source_desc,
     }
 
+    # Per-repo client selection (incident bug-hybrid-static-x-repo-cross-
+    # tenant-t2-scope): assert the ENTRY's repo in X-Repo, not the boot
+    # repo. Pool absent (legacy construction) → default client; the
+    # server-side strict guard is the backstop.
+    client = runtime.premium_client
+    pool = getattr(runtime, "premium_pool", None)
+    if pool is not None:
+        try:
+            client = pool.client_for_repo(repo_slug, repo_root=threads_dir)
+        except Exception as e:
+            # PR #1062 review P1: never submit a foreign-scope write under
+            # the boot X-Repo — non-strict hosted mode would re-home it
+            # and the receipt would say "submitted".
+            if not pool.is_boot_scope(repo_slug):
+                log.error(
+                    f"MEMORY: pool client for {repo_slug} unavailable "
+                    f"({e}); refusing to submit a foreign-scope write "
+                    "under the boot X-Repo."
+                )
+                append_handoff_receipt(
+                    backend="graphiti",
+                    stage="submit_failed",
+                    entry_id=entry_id,
+                    topic=topic,
+                    group_id=group_id,
+                    error=f"pool_client_unavailable: {repo_slug}",
+                )
+                return False
+            log.warning(
+                f"MEMORY: pool client for boot scope {repo_slug} "
+                f"unavailable ({e}); using default client."
+            )
+
     try:
         text = _run_coro_in_fresh_loop(
-            runtime.premium_client.call_tool_text(
+            client.call_tool_text(
                 "watercooler_graphiti_add_episode", arguments
             )
         )
@@ -613,9 +649,9 @@ def _submit_graphiti_to_hosted(
         return False
 
     if not payload.get("success", False):
+        error_detail = summarize_remote_error(payload)
         log.warning(
-            f"MEMORY: hybrid submit rejected for {topic}/{entry_id}: "
-            f"{payload.get('error', 'unknown')}"
+            f"MEMORY: hybrid submit rejected for {topic}/{entry_id}: {error_detail}"
         )
         append_handoff_receipt(
             backend="graphiti",
@@ -623,7 +659,7 @@ def _submit_graphiti_to_hosted(
             entry_id=entry_id,
             topic=topic,
             group_id=group_id,
-            error=str(payload.get("error", "rejected")),
+            error=error_detail,
         )
         return False
 
@@ -1190,7 +1226,10 @@ async def _graphiti_remote_handoff(task: "MemoryTask") -> Dict[str, Any]:
     The executor already runs on the worker's private event loop, so the RPC
     is awaited directly (no ``run_coro_in_fresh_loop`` needed here).
     """
-    from .handoff_receipts import append_handoff_receipt
+    from .handoff_receipts import (
+        append_handoff_receipt,
+        summarize_remote_error,
+    )
 
     runtime = get_runtime()
     premium = getattr(runtime, "premium_client", None) if runtime else None
@@ -1202,6 +1241,78 @@ async def _graphiti_remote_handoff(task: "MemoryTask") -> Dict[str, Any]:
         raise RuntimeError("Queued Graphiti task missing group_id")
 
     group_id = _canonicalize_group_id(task.group_id, task_id=task.task_id)
+
+    # Per-repo client selection (incident bug-hybrid-static-x-repo-cross-
+    # tenant-t2-scope). Slug from the task's code_path when derivable;
+    # a legacy task without one may use the boot client ONLY when its
+    # group matches the boot repo's canonical T2 name — never submit a
+    # foreign group under the boot X-Repo.
+    pool = getattr(runtime, "premium_pool", None) if runtime else None
+    if pool is not None:
+        repo_slug = None
+        if task.code_path:
+            try:
+                from watercooler.path_resolver import derive_repo_slug
+
+                repo_slug = derive_repo_slug(
+                    code_path=task.code_path,
+                    threads_dir=Path(task.code_path),
+                )
+            except Exception:
+                repo_slug = None
+        if repo_slug:
+            try:
+                premium = pool.client_for_repo(
+                    repo_slug, repo_root=Path(task.code_path)
+                )
+            except Exception as e:
+                # PR #1062 review P1: a foreign-scope queued write must
+                # not fall back to the boot client — dead-letter it.
+                if not pool.is_boot_scope(repo_slug):
+                    from .memory_queue import PermanentTaskError
+
+                    append_handoff_receipt(
+                        backend="graphiti", stage="submit_failed",
+                        entry_id=task.entry_id, topic=task.topic,
+                        group_id=group_id,
+                        error=f"pool_client_unavailable: {repo_slug}",
+                    )
+                    raise PermanentTaskError(
+                        f"queued task {task.task_id!r}: pool client for "
+                        f"{repo_slug!r} unavailable ({e}); refusing to "
+                        f"submit a foreign-scope write under the boot "
+                        f"X-Repo."
+                    ) from e
+                logger.warning(
+                    "MEMORY_QUEUE: pool client for boot scope %s "
+                    "unavailable (%s); using default client.",
+                    repo_slug, e,
+                )
+        else:
+            from watercooler.path_resolver import derive_t2_database_name
+
+            try:
+                boot_t2 = derive_t2_database_name(
+                    repo_slug=pool.default.resolved_repo
+                )
+            except Exception:
+                boot_t2 = ""
+            if group_id != boot_t2:
+                from .memory_queue import PermanentTaskError
+
+                append_handoff_receipt(
+                    backend="graphiti", stage="submit_failed",
+                    entry_id=task.entry_id, topic=task.topic,
+                    group_id=group_id,
+                    error="repo_slug_unresolved_for_scope",
+                )
+                raise PermanentTaskError(
+                    f"queued task {task.task_id!r}: no repo slug derivable "
+                    f"from code_path={task.code_path!r} and group "
+                    f"{group_id!r} does not match the boot scope "
+                    f"{boot_t2!r}; refusing to submit a foreign group "
+                    f"under the boot X-Repo."
+                )
     content = task.content or ""
     episode_title = (
         task.title
@@ -1245,12 +1356,20 @@ async def _graphiti_remote_handoff(task: "MemoryTask") -> Dict[str, Any]:
         raise RuntimeError("Graphiti hybrid handoff returned non-JSON response")
 
     if not payload.get("success", False):
-        err = str(payload.get("error", "rejected"))
+        err = summarize_remote_error(payload)
         append_handoff_receipt(
             backend="graphiti", stage="submit_failed",
             entry_id=task.entry_id, topic=task.topic, group_id=group_id,
             error=err,
         )
+        if "scope_resolution_failed" in err:
+            # Deterministic rejection — the hosted server will refuse this
+            # task's group/X-Repo pairing on every retry. Dead-letter now.
+            from .memory_queue import PermanentTaskError
+
+            raise PermanentTaskError(
+                f"Graphiti hybrid handoff rejected (permanent): {err}"
+            )
         raise RuntimeError(f"Graphiti hybrid handoff rejected: {err}")
 
     remote_task_id = str(
@@ -1310,6 +1429,34 @@ def _register_graphiti_executor(worker: "MemoryTaskWorker") -> None:
         canonical_database = _canonicalize_group_id(
             task.group_id, task_id=task.task_id
         )
+
+        # Money-loop guard (incident bug-hybrid-static-x-repo-cross-tenant-
+        # t2-scope): under hosted mode the canonical database is always
+        # ``<org>_<repo>_t2`` — a single-token base (``app``, ``watercooler``)
+        # is a cwd/threads_dir-basename fallback, not a tenant. Writing it
+        # would file episodes into a side graph the t2_indexer never reads,
+        # re-enqueueing (and re-billing) the same entries forever. Permanent:
+        # retrying cannot fix an enqueue-time scope loss.
+        try:
+            from .auth import is_hosted_mode as _is_hosted
+            hosted = _is_hosted()
+        except Exception:
+            hosted = False
+        base = (
+            canonical_database[:-3]
+            if canonical_database.endswith("_t2")
+            else canonical_database
+        )
+        if hosted and "_" not in base:
+            from .memory_queue import PermanentTaskError
+
+            raise PermanentTaskError(
+                f"scope_resolution_failed: queued graphiti task "
+                f"{task.task_id!r} carries non-canonical group_id="
+                f"{task.group_id!r} (database {canonical_database!r}); "
+                f"refusing to write to a default/cwd-derived graph under "
+                f"hosted mode."
+            )
 
         # ``database=canonical_database`` is the trusted no-request-context
         # override for this worker thread (no ``http_ctx`` here). Hosted

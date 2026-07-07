@@ -95,6 +95,14 @@ class EntryData:
     summary: str = ""
     embedding: Optional[List[float]] = None
     code_branch: Optional[str] = None
+    # Code-state provenance (C3, thread candidate-research-backend-support):
+    # the code repo + commit the entry was written against. Previously only in
+    # orphan-branch commit-message footers; stamped here so consumers can ask
+    # "was this about code that still exists in this form?" without git
+    # archaeology. None on legacy entries and where the writer honestly lacks
+    # them (e.g. hosted has no code checkout → no commit).
+    code_repo: Optional[str] = None
+    code_commit: Optional[str] = None
     # Authority-ladder provenance (Phase 1a; written by the daemon, the
     # promotion helper, and the canonical write path. None on legacy entries.
     # Valid values: ACTOR_CLASS_VALUES / DECISION_ORIGIN_VALUES /
@@ -223,6 +231,12 @@ def _build_entry_node(
     }
     if data.code_branch:
         node["code_branch"] = data.code_branch
+    # Code-state provenance (C3) — omitted when absent so legacy and
+    # context-less entries keep the identical minimal node shape.
+    if data.code_repo:
+        node["code_repo"] = data.code_repo
+    if data.code_commit:
+        node["code_commit"] = data.code_commit
     # Authority-ladder provenance fields. None values are omitted so legacy
     # entries (written before Phase 1a fields existed) and present-day entries
     # without authority context produce identical node shapes.

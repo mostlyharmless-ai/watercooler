@@ -191,10 +191,17 @@ class PremiumToolClient:
         *,
         name: str = "Watercooler Premium",
         call_timeout: float = DEFAULT_CALL_TIMEOUT,
+        resolved_repo: str = "",
+        resolved_branch: str = "",
     ) -> None:
         self._client = client
         self._name = name
         self._call_timeout = call_timeout
+        # The repo/branch the transport headers assert (set by the factory).
+        # Exposed so pool/wiring code can key on the resolved identity
+        # without re-deriving it from config/cwd.
+        self.resolved_repo = resolved_repo
+        self.resolved_branch = resolved_branch
 
     # ------------------------------------------------------------------
     # Factory
@@ -250,7 +257,12 @@ class PremiumToolClient:
             call_timeout=call_timeout,
             init_timeout=init_timeout,
         )
-        return cls(client, call_timeout=call_timeout)
+        return cls(
+            client,
+            call_timeout=call_timeout,
+            resolved_repo=headers.get("X-Repo", ""),
+            resolved_branch=headers.get("X-Branch", ""),
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -401,3 +413,176 @@ class PremiumToolClient:
                 if remote_error:
                     payload["remote_error"] = remote_error
             return json.dumps(payload)
+
+
+class PremiumClientPool:
+    """Lazy per-(repo, branch) ``PremiumToolClient`` cache for hybrid.
+
+    One authenticated identity (the Bearer ``api_key``), N single-repo
+    scopes: pool entries differ ONLY in the ``X-Repo`` / ``X-Branch``
+    context headers baked into their transports. The auth identity is
+    never arg-steerable — the hosted server validates every asserted
+    repo against the token's multi-repo ``repos`` claim per request
+    (``auth.check_repo_claim``). This restores the tool surface's
+    per-call ``code_path`` contract at the transport layer (incident
+    bug-hybrid-static-x-repo-cross-tenant-t2-scope: the boot-frozen
+    header mis-scoped every cross-repo memory submission).
+
+    The 2026-06-26 session-wedge invariants are preserved: entries are
+    ordinary ``PremiumToolClient`` instances, so every call still opens
+    a fresh session (``_fresh_session``); there is no persistent pooled
+    connection to duplicate, only header/object overhead per entry.
+    """
+
+    # Leak canary only — never enforced. Repos × active branches per
+    # session stays small; sustained growth past this means a caller is
+    # feeding garbage slugs/branches.
+    _WARN_ENTRIES = 64
+
+    def __init__(
+        self,
+        transport_config: dict[str, Any],
+        default_client: PremiumToolClient,
+        *,
+        boot_cwd: Path | None = None,
+    ) -> None:
+        import threading
+
+        self._transport_config = dict(transport_config)
+        self._boot_cwd = boot_cwd
+        self._default = default_client
+        self._default_key = (
+            self._canon_slug(default_client.resolved_repo),
+            default_client.resolved_branch or "",
+        )
+        self._clients: dict[tuple[str, str], PremiumToolClient] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _canon_slug(repo_slug: str) -> str:
+        """Lowercased ``<org>/<repo>`` — mirrors ``auth.scope.canonical_repo``
+        normalization for cache-key purposes (no validation here; the
+        server remains the authority on what the identity may assert)."""
+        return (repo_slug or "").strip().strip("/").removesuffix(".git").lower()
+
+    @property
+    def default(self) -> PremiumToolClient:
+        """The boot-repo client (daemon/status/health traffic)."""
+        return self._default
+
+    @property
+    def default_slug(self) -> str:
+        """Canonical slug of the boot repo (lowercased ``<org>/<repo>``)."""
+        return self._default_key[0]
+
+    def is_boot_scope(self, repo_slug: str) -> bool:
+        """True when *repo_slug* names the boot repo (canonical compare)."""
+        return self._canon_slug(repo_slug) == self._default_key[0]
+
+    def client_for_repo(
+        self, repo_slug: str, *, repo_root: Path | str | None = None
+    ) -> PremiumToolClient:
+        """Return a client whose headers assert *repo_slug*.
+
+        ``repo_root`` (when given) is used to resolve the branch header
+        best-effort; on failure the default client's branch is reused —
+        ``X-Branch`` is advisory for memory ingest (scope is repo-level;
+        the entry payload's ``code_branch`` stays authoritative for
+        attribution).
+        """
+        slug = self._canon_slug(repo_slug)
+        if not slug:
+            raise ValueError("client_for_repo: empty repo slug")
+
+        branch = ""
+        if repo_root is not None:
+            try:
+                from watercooler.config_facade import config as wc_config
+
+                branch = wc_config.context(Path(repo_root)).code_branch or ""
+            except Exception:
+                branch = ""
+        if not branch:
+            branch = self._default.resolved_branch or ""
+
+        key = (slug, branch)
+        if key == self._default_key:
+            return self._default
+        with self._lock:
+            client = self._clients.get(key)
+            if client is None:
+                client = PremiumToolClient.from_transport_config(
+                    {
+                        **self._transport_config,
+                        "proxy_repo": slug,
+                        "proxy_branch": branch,
+                    },
+                    boot_cwd=self._boot_cwd,
+                )
+                self._clients[key] = client
+                logger.info(
+                    "PREMIUM_POOL: new client for repo=%s branch=%s "
+                    "(%d pooled)", slug, branch, len(self._clients),
+                )
+                if len(self._clients) > self._WARN_ENTRIES:
+                    logger.warning(
+                        "PREMIUM_POOL: %d pooled clients exceeds the leak "
+                        "canary (%d) — check callers for unstable "
+                        "slug/branch derivation.",
+                        len(self._clients), self._WARN_ENTRIES,
+                    )
+            return client
+
+    def client_for_path(self, path: Path | str) -> PremiumToolClient:
+        """Derive ``<org>/<repo>`` from the git remote at *path* and delegate.
+
+        Raises:
+            ValueError: when no slug can be derived — callers fail closed
+                (submit_failed receipt), exactly as the derivation sites
+                do today.
+        """
+        from watercooler.path_resolver import derive_repo_slug
+
+        root = Path(path)
+        try:
+            slug = derive_repo_slug(threads_dir=root)
+        except Exception as e:
+            raise ValueError(
+                f"client_for_path: no repo slug derivable from {root} ({e})"
+            ) from e
+        if not slug:
+            raise ValueError(
+                f"client_for_path: no repo slug derivable from {root}"
+            )
+        return self.client_for_repo(slug, repo_root=root)
+
+
+def select_pool_client(runtime: Any, code_path: Any = None) -> Any:
+    """Return the premium client that should serve a call for *code_path*.
+
+    Pool-aware helper for mixed-tool READ wrappers: with a pool and a
+    usable ``code_path``, the per-repo client asserts the call's repo in
+    ``X-Repo``; otherwise the default (boot-repo) client is returned.
+
+    The boot-client fallback is acceptable for READS ONLY (a mis-scoped
+    read returns the wrong tenant's results to a caller who omitted
+    ``code_path`` — no data is written anywhere). Repo-scoped WRITE
+    paths must NOT use this helper's silent fallback: they fail closed
+    locally unless the write's target group is the boot scope (PR #1062
+    review P1 — falling back on a foreign write re-submits it under the
+    boot X-Repo, which non-strict hosted mode would re-home).
+    """
+    client = getattr(runtime, "premium_client", None)
+    pool = getattr(runtime, "premium_pool", None)
+    if pool is None:
+        return client
+    if not code_path:
+        return pool.default
+    try:
+        return pool.client_for_path(code_path)
+    except Exception as e:
+        logger.debug(
+            "PREMIUM_POOL: no per-repo client for %r (%s); using default.",
+            code_path, e,
+        )
+        return pool.default

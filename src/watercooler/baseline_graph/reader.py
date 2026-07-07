@@ -70,6 +70,10 @@ class GraphEntry:
     commit_refs: List[str] = None
     access_count: int = 0
     code_branch: Optional[str] = None
+    # Code-state provenance (C3): repo + commit the entry was written against.
+    # None on legacy entries and where the writer lacked them (hosted commit).
+    code_repo: Optional[str] = None
+    code_commit: Optional[str] = None
     # Authority-ladder provenance (read-side mirror of EntryData; None on legacy /
     # non-authority entries). Surfaced so agents can query who authorized a
     # Decision/Closure instead of re-parsing body prose (#879).
@@ -174,6 +178,9 @@ def _node_to_entry(node: Dict[str, Any]) -> GraphEntry:
         commit_refs=node.get("commit_refs", []),
         access_count=node.get("access_count", 0),
         code_branch=node.get("code_branch"),
+        # Code-state provenance (C3; None when absent — legacy node shape)
+        code_repo=node.get("code_repo"),
+        code_commit=node.get("code_commit"),
         # Authority-ladder provenance (None when absent — legacy node shape)
         actor_class=node.get("actor_class"),
         decision_origin=node.get("decision_origin"),

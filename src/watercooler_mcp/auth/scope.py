@@ -16,8 +16,10 @@ this request authorised for?"
 
 Strict mode
 -----------
-``WATERCOOLER_STRICT_SCOPE=1`` flips warn-and-override behaviour to
-hard-fail. Default off in v2.0; default on after test-cjh shakedown.
+``WATERCOOLER_STRICT_SCOPE`` controls whether caller-hint mismatches
+warn-and-override (off) or hard-fail (on). Default ON — ratified as
+the production posture 2026-07-06 (Decision on security-audit-2026-04-28,
+prompted by the cross-tenant re-homing incident). Set ``=0`` to opt out.
 
 Federation escape hatch
 -----------------------
@@ -52,12 +54,14 @@ def compute_namespace(scope_id: str) -> str:
 
 
 def strict_mode() -> bool:
-    """Return True when ``WATERCOOLER_STRICT_SCOPE`` is set to a truthy value.
+    """Return True unless ``WATERCOOLER_STRICT_SCOPE`` is set to a falsy value.
 
-    Public so callers (tests, diagnostic surfaces) can branch on the
-    same predicate the resolver uses.
+    Default ON (ratified 2026-07-06 as the production posture). Set the
+    env var to ``0``/``false``/``no``/``off`` to opt out. Public so
+    callers (tests, diagnostic surfaces) can branch on the same
+    predicate the resolver uses.
     """
-    return os.getenv("WATERCOOLER_STRICT_SCOPE", "0").lower() in (
+    return os.getenv("WATERCOOLER_STRICT_SCOPE", "1").lower() in (
         "1",
         "true",
         "yes",
@@ -602,6 +606,37 @@ def resolve_unscoped_or_error(
         return None
 
 
+def enforce_caller_hint(
+    *,
+    derived: str,
+    caller_supplied: str,
+    field: str = "group_id",
+) -> None:
+    """Warn — or raise in strict mode — when an advisory caller hint mismatches.
+
+    Shared policy core for every scope-authority comparison: callers always
+    use the *derived* value, never the hint. Non-strict, a mismatch logs a
+    WARNING; under ``WATERCOOLER_STRICT_SCOPE`` it raises
+    ``ScopeResolutionError`` (the v2.1 default after test-cjh shakedown).
+
+    Accepts pre-derived strings so resolvers that scope off request context
+    directly (e.g. the T2 group canonicalizer working from ``http_ctx.repo``)
+    apply the identical policy as ``ResolvedScope``-based callers.
+    """
+    if not caller_supplied:
+        return
+    if caller_supplied == derived:
+        return
+
+    msg = (
+        f"caller-supplied {field}={caller_supplied!r} does not match "
+        f"auth-derived {field}={derived!r}; hosted scope wins (tenant isolation)."
+    )
+    if strict_mode():
+        raise ScopeResolutionError(f"strict_mode: {msg}")
+    logger.warning("scope.caller_hint_mismatch: %s", msg)
+
+
 def warn_caller_hint_mismatch(
     *,
     scope: ResolvedScope,
@@ -617,23 +652,14 @@ def warn_caller_hint_mismatch(
     In strict mode, mismatches escalate to ScopeResolutionError. This
     is the v2.1 default after test-cjh shakedown.
     """
-    if not caller_supplied:
-        return
     derived = {
         "group_id": scope.project_group_id,
         "repo": scope.repo,
         "scope_id": scope.scope_id,
     }[field]
-    if caller_supplied == derived:
-        return
-
-    msg = (
-        f"caller-supplied {field}={caller_supplied!r} does not match "
-        f"auth-derived {field}={derived!r}; hosted scope wins (tenant isolation)."
+    enforce_caller_hint(
+        derived=derived, caller_supplied=caller_supplied, field=field
     )
-    if strict_mode():
-        raise ScopeResolutionError(f"strict_mode: {msg}")
-    logger.warning("scope.caller_hint_mismatch: %s", msg)
 
 
 __all__ = [
@@ -641,6 +667,7 @@ __all__ = [
     "ScopeResolutionError",
     "compute_namespace",
     "derive_stdio_namespace",
+    "enforce_caller_hint",
     "resolve_scope",
     "resolve_scope_or_none",
     "resolve_scope_or_off_hosted",
