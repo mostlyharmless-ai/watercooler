@@ -3,6 +3,10 @@
 Connect watercooler to Claude Code, Codex, or Cursor. Each section is fully self-contained —
 no cross-references between sections.
 
+> This page covers manual MCP server setup. For packaged Claude Code / Codex plugins
+> that bundle the MCP server with the skills in one install, see
+> [PLUGINS.md](./PLUGINS.md).
+
 After connecting, `watercooler_health` is a recommended sanity check for
 diagnosing setup problems early — but it is not required. You can skip
 straight to posting your first thread; thread actions don't gate on
@@ -185,8 +189,8 @@ Three modes, selected via `transport` in `~/.watercooler/config.toml` (or the
 | Mode | What runs where | When to use | Tool surface |
 |---|---|---|---|
 | `stdio` (default) | Everything runs locally. Premium tools are not registered (no hosted endpoint configured). Local FalkorDB starts via Docker; local LLM + embedding services start. `watercooler_daemon_status` shows local daemons. | Open-source install, no hosted account. Offline / airgapped. | Open-core baseline. The private `watercooler[memory]` install adds the T2/T3 memory and premium daemon tools that register for the `local_full` surface. Call `tools/list` to see the exact set for your install. |
-| `hybrid` | Threads, baseline graph, and local daemons run in the local process. Premium capabilities (memory query/observe/ingest, hosted coordinator daemons) are forwarded to the hosted endpoint. Local LLM and embedding services still start; FalkorDB does NOT start locally. **Observability splits by design**: `watercooler_health` reports local daemon state (tick counts, errors, findings), and `watercooler_daemon_status` reports the hosted daemon set — together they cover both halves. | Recommended for teams on the hosted plan. | Local baseline tools plus premium tools mounted from the hosted endpoint. The exact set depends on the entitlements granted to your agent API key and on any `capability_routes` overrides in your config. |
-| `proxy` | All tool calls forwarded to the hosted endpoint. No local services start; the local process is a thin passthrough. | Environments without local git access, or validating the full hosted surface. | Hosted-full surface (37 tools on production today, observed via `tools/list`). Local-maintenance graph tools are held back by `graph_tools_for_surface()`, which returns `GRAPH_TOOL_NAMES - _HOSTED_EXCLUDED_GRAPH_TOOLS` — removing `watercooler_graph_enrich`, `watercooler_graph_project`, and `watercooler_sync_repair` from the hosted graph set (all three frozenset members). `watercooler_reindex` was retired in PR4b (superseded by the graph-first `watercooler_list_threads`), so `register_sync_tools` now registers no tools. |
+| `hybrid` | Threads, baseline graph, and local daemons run in the local process. Premium capabilities (memory query/observe/ingest, hosted coordinator daemons) are forwarded to the hosted endpoint. Local LLM and embedding services still start; FalkorDB does NOT start locally. **Observability splits by design**: `watercooler_health` reports local daemon state (tick counts, errors, findings), and `watercooler_daemon_status` reports the hosted daemon set — together they cover both halves. | Recommended for teams on the hosted plan. | Local baseline tools plus premium tools registered as per-call wrappers that forward to the hosted endpoint, asserting each call's repo from its `code_path` (R3 / #1063 — nothing is bare-mounted; a bare mount froze the boot repo's scope for the session). The exact set depends on the entitlements granted to your agent API key and on any `capability_routes` overrides in your config. |
+| `proxy` | All tool calls forwarded to the hosted endpoint. No local services start; the local process is a thin passthrough. **Multi-repo per session (pool-routed, #1082)**: the session pins one `X-Repo` at startup (`[mcp].proxy_repo` or the boot cwd's git remote) as its default; a call whose `code_path` positively derives a *different* repo is transparently routed to that repo's pooled premium client — reads and writes — subject to the hosted ownership check (an unclaimed repo is refused per request). Calls with no `code_path`, or one that doesn't resolve to a git repo with an origin remote, stay on the pinned default. Routing failures surface as structured `proxy_route_error` results; a cross-repo call is never silently served from the pinned repo's data. | Environments without local git access, or validating the full hosted surface. | Hosted-full surface (37 tools on production today, observed via `tools/list`). Local-maintenance graph tools are held back by `graph_tools_for_surface()`, which returns `GRAPH_TOOL_NAMES - _HOSTED_EXCLUDED_GRAPH_TOOLS` — removing `watercooler_graph_enrich`, `watercooler_graph_project`, and `watercooler_sync_repair` from the hosted graph set (all three frozenset members). `watercooler_reindex` was retired in PR4b (superseded by the graph-first `watercooler_list_threads`), so `register_sync_tools` now registers no tools. |
 
 Agent client configs stay stdio regardless of mode — the choice lives in `config.toml`,
 not in each client's MCP registration.
@@ -203,6 +207,41 @@ The three modes map to the product tiers laid out in the
   plus proxied T2/T3, authenticated with a dashboard-issued agent API key.
 - **`proxy`** — Tier 3 "Fully hosted" (deferred in the brainstorm, wired up
   today). Thin local shim; everything executes on Railway.
+
+### Choosing between `hybrid` and `proxy`
+
+Both are authenticated hosted-premium clients; they differ in where the
+everyday substrate runs. Design rationale of record: Design Spec v4
+(`dual-mode-architecture-brainstorm:32`).
+
+Choose **`hybrid`** when you want:
+
+- **Local thread operations** — reads/writes against your local git
+  worktree: no network round-trip on the highest-frequency calls, works
+  offline, and the thread record is a git artifact on your own disk.
+- The premium T2 graph **without local infrastructure** — hybrid never
+  requires Docker or FalkorDB.
+- The trade: hybrid runs two local `llama-server` processes (LLM +
+  embedder) for baseline enrichment and summaries. If you don't want
+  *any* local services, hybrid is the wrong mode.
+
+Choose **`proxy`** when you want:
+
+- **Zero local services** — no llama-server, no FalkorDB, no local
+  daemons; models, graph, daemons, and thread storage all execute on the
+  hosted instance.
+- The trade: every call (including thread reads/writes) is an HTTPS
+  round-trip, and thread operations go through the hosted server's
+  GitHub-API path rather than a local worktree — higher per-call
+  latency, no offline operation.
+- Multi-repo sessions work in both modes: proxy sessions boot pinned to
+  one repo (`[mcp].proxy_repo` or the boot cwd) as their *default*, and
+  a call whose `code_path` derives a different claimed repo is routed to
+  that repo per call (#1091). Unclaimed repos are refused per request.
+
+Cost note for proxy: the model work largely runs hosted in both modes;
+what moves is per-entry baseline enrichment (fractions of a cent per
+entry on the hosted LLM) and request/API volume on the hosted service.
 
 ### Credentials (required for `hybrid` and `proxy`)
 
@@ -311,9 +350,9 @@ about who it is. Three cases:
 
 | Hybrid config | `authority_scope` | What the tool shows |
 |---|---|---|
-| Default (`daemon_observe = "remote"`, all premium daemons `route = "auto"` or `"hosted"`) | `hosted_premium_daemons` | Hosted premium daemons on Railway. Tool is proxy-mounted. |
+| Default (`daemon_observe = "remote"`, all premium daemons `route = "auto"` or `"hosted"`) | `hosted_premium_daemons` | Hosted premium daemons on Railway. Tool registers as a per-call forwarder (R3): `daemon_findings` / `pulse_snapshot` select the premium client from the call's `code_path`; `daemon_status` has no `code_path` and forwards on the boot client. |
 | Exception A: `[mcp.capability_routes] daemon_observe = "local"` | `local_daemons_hybrid_override` | Local daemons. Hosted daemons **not** surfaced. |
-| Exception B: `[mcp.daemons.<name>] route = "local"` on a premium daemon | `local_daemons_hybrid_override` | Local daemons (including the pinned premium one). Proxy daemon-tool mount is suppressed by the code at `server_factory.py:424-436`. Hosted daemons **not** surfaced. |
+| Exception B: `[mcp.daemons.<name>] route = "local"` on a premium daemon | `local_daemons_hybrid_override` | Local daemons (including the pinned premium one). The local tool implementations register instead of the remote forwarders. Hosted daemons **not** surfaced. |
 
 **Important:** the clean split-authority contract (`watercooler_health` for
 local, `watercooler_daemon_status` for hosted) requires both **default
@@ -340,7 +379,7 @@ disabled, interval, tick count, findings, errors), each labelled `[local]` or
 ```
 
 For detailed status of the hosted daemons themselves, call `watercooler_daemon_status`.
-In hybrid mode this tool is mounted from the hosted endpoint and returns the
+In hybrid mode this tool forwards to the hosted endpoint per call (R3) and returns the
 `HostedDaemonCoordinator` view. A successful response (or a `capability_not_enabled`
 JSON error returned from the hosted side) confirms hybrid routing is wired up. A
 "tool not registered" error means the client did not see the premium surface — re-check

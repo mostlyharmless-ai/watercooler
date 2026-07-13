@@ -1,0 +1,70 @@
+{
+  "do_not_edit": "GENERATED from copy.bara.sky by scripts/gen_open_core_skills_manifest.py - do not hand-edit; regenerate and CI byte-compares.",
+  "generated_by": "scripts/gen_open_core_skills_manifest.py",
+  "source_file": "copy.bara.sky",
+  "manifest_version": 1,
+  "identity": [
+    "find-related",
+    "recall",
+    "search-threads",
+    "threads",
+    "update-agent-context",
+    "watercooler-health",
+    "watercooler-onboarding"
+  ],
+  "transforms": [
+    {
+      "order": 0,
+      "type": "core.move",
+      "digest": "sha256:26fd1fcb88efba0cdd3de1933d8de07f853adf3a3bd67c8c89ffd9e08bae6674",
+      "source": ".claude/skills/watercooler-health/SKILL.public.md",
+      "target": ".claude/skills/watercooler-health/SKILL.md",
+      "scope": ".claude/skills/watercooler-health/SKILL.public.md"
+    },
+    {
+      "order": 1,
+      "type": "core.replace",
+      "digest": "sha256:2f6ff4f7bbcb847e9398286f389748789ec0e32212c4f4b370c1d14b7e057b70",
+      "before": "mcp__watercooler-cloud__",
+      "after": "mcp__watercooler__",
+      "paths": [
+        ".claude/skills/**"
+      ],
+      "scope": ".claude/skills/**"
+    },
+    {
+      "order": 2,
+      "type": "core.move",
+      "digest": "sha256:ab8bfdd1a0a8c6ffda068c81b01453c20bd8da6a3bd79b4e999a1d90b5cbf07b",
+      "source": ".claude/skills",
+      "target": "skills",
+      "scope": ".claude/skills"
+    }
+  ],
+  "invocation": {
+    "server_name": "watercooler",
+    "mcp_prefix": "mcp__watercooler__",
+    "package": "watercooler",
+    "entry_point": "watercooler-mcp",
+    "repo_url": "git+https://github.com/mostlyharmless-ai/watercooler",
+    "extras": "[local]",
+    "source_ref": {
+      "release": {
+        "policy": "pinned",
+        "template": "@v${version}"
+      },
+      "marketplace": {
+        "policy": "pinned",
+        "template": "@v${version}"
+      },
+      "latest": {
+        "policy": "floating",
+        "ref": "@main"
+      },
+      "dev": {
+        "policy": "floating",
+        "ref": "@main"
+      }
+    }
+  }
+}

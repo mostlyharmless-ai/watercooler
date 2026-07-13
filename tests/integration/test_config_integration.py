@@ -30,6 +30,7 @@ port = 8080
 
         # Patch home directory to use our temp config
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.chdir(tmp_path)
 
         # Clear MCP config cache
         import watercooler_mcp.config as mcp_config
@@ -63,6 +64,7 @@ port = 3000
         from watercooler.config_loader import clear_config_cache
         clear_config_cache()
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.chdir(tmp_path)
 
         import watercooler_mcp.config as mcp_config
         mcp_config._loaded_config = None
@@ -93,6 +95,7 @@ interval = 60.0
         from watercooler.config_loader import clear_config_cache
         clear_config_cache()
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.chdir(tmp_path)
 
         import watercooler_mcp.config as mcp_config
         mcp_config._loaded_config = None
@@ -125,6 +128,7 @@ max_bytes = 5242880
         from watercooler.config_loader import clear_config_cache
         clear_config_cache()
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.chdir(tmp_path)
 
         import watercooler_mcp.config as mcp_config
         mcp_config._loaded_config = None
@@ -154,6 +158,7 @@ default_spec = "custom-spec"
         from watercooler.config_loader import clear_config_cache
         clear_config_cache()
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.chdir(tmp_path)
 
         import watercooler_mcp.config as mcp_config
         mcp_config._loaded_config = None
@@ -178,6 +183,7 @@ default_agent = "Agent1"
         from watercooler.config_loader import clear_config_cache
         clear_config_cache()
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.chdir(tmp_path)
 
         import watercooler_mcp.config as mcp_config
         mcp_config._loaded_config = None

@@ -34,6 +34,51 @@ jobs:
     - name: Vocabulary advisory check (non-blocking)
       run: python scripts/check_vocabulary.py || true
 
+  two-tenant-falkor:
+    # V2 of the completion plan (thread audit-transport-modes-hosted-db-2026-07):
+    # the two-tenant isolation + provenance fixture against a REAL FalkorDB.
+    # The default `test` job excludes every falkor-marked test, which is how
+    # the cross-tenant scope and provenance gaps shipped unobserved — this
+    # job is the standing red light. LLM/embedder are stubbed in-fixture;
+    # no external API or secrets required.
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    env:
+      # No llama-server auto-start attempts on the runner: the attempt
+      # spawns a startup worker thread that is still alive at interpreter
+      # exit, and Python 3.12 aborts pytest ("FATAL: exception not
+      # rethrown", exit 134) AFTER all tests pass. Belt-and-braces with
+      # the fixture's own setenv.
+      WATERCOOLER_AUTO_START_SERVICES: "0"
+    services:
+      falkordb:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6379:6379
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install package with graphiti extras
+      run: pip install -e ".[dev]"
+
+    - name: Run two-tenant fixture against real FalkorDB
+      # Tee the output and fail on skips: a skip means FalkorDB was
+      # unreachable, and that must fail the job, not pass it silently
+      # (the exact deferral-rot failure mode this job exists to prevent).
+      run: |
+        set -o pipefail
+        pytest tests/integration/test_two_tenant_scope.py -m integration_falkor -v 2>&1 | tee /tmp/two-tenant-out
+        if grep -qE '[0-9]+ skipped' /tmp/two-tenant-out; then
+          echo "ERROR: two-tenant fixture reported skips — FalkorDB service not reachable?"
+          exit 1
+        fi
+
   public-build-verify:
     runs-on: ubuntu-latest
     steps:
@@ -102,3 +147,105 @@ jobs:
 
     - name: Run public-test-leak lint
       run: python3 scripts/lint-public-test-leaks.py
+
+  open-core-skills-manifest:
+    # Deterministic drift check for the generated open-core skills manifest
+    # (src/watercooler/open_core_skills.json). Fails if the manifest is stale
+    # relative to copy.bara.sky (identity or ordered transform sequence) or if
+    # the skill identity disagrees with PERMITTED_SUBTREES in the Copybara
+    # allowlist validator. Fast (~1s), stdlib-only.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Check open-core skills manifest
+      run: python3 scripts/check-open-core-skills-manifest.py
+
+    - name: Install test dependencies
+      run: python3 -m pip install -e ".[dev]"
+
+    - name: Run client-package renderer tests
+      run: python3 -m pytest tests/unit/test_client_package_render.py tests/unit/test_codex_package_render.py tests/integration/test_public_skill_render.py -q
+
+  claude-plugin-validate:
+    # Hermetic client-native smoke for the generated Claude plugin (plan 1d,
+    # verdict (b) in dev_docs/research/2026-07-08-claude-cli-ci-hermeticity.md):
+    # `claude plugin validate` runs without login; `--plugin-dir` load checks
+    # require auth and stay a documented manual pre-release gate. Pin floor is
+    # v2.1.186 (validate bugfix for local `source: "."` plugins); HOME points
+    # at an empty scratch dir so hermeticity is self-verifying, and stdin must
+    # be /dev/null or the CLI hangs.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install Claude Code CLI (pinned)
+      run: npm install -g @anthropic-ai/claude-code@2.1.204
+
+    - name: Render Claude package (dev channel)
+      run: python3 scripts/gen_client_packages.py --target claude --channel dev --out /tmp/claude-pkg
+
+    - name: Validate plugin manifest (hermetic, no login)
+      run: |
+        mkdir -p /tmp/ci-empty-home
+        HOME=/tmp/ci-empty-home claude plugin validate /tmp/claude-pkg/watercooler --strict </dev/null
+
+  codex-plugin-smoke:
+    # Hermetic Codex-native smoke for the generated Codex plugin, per the E2
+    # experiment verdict in
+    # dev_docs/research/2026-07-09-codex-catalog-hermeticity.md. Isolation is
+    # via $CODEX_HOME pointed at a fresh scratch dir (proven clean by a
+    # before/after mtime diff of the real ~/.codex in the experiment) — no
+    # login/auth is required for `local`-source marketplaces. The load-bearing
+    # gate is `codex plugin add <plugin>@<marketplace>`: it's the only command
+    # in the five-subcommand surface that dereferences the plugin's recorded
+    # source path and fails loudly (exit 1) on a broken catalog entry —
+    # `marketplace add` and `plugin list --json` alone stay at exit 0 even
+    # against a broken source. Pin floor is the version E2 exercised
+    # (0.142.5).
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install Codex CLI (pinned)
+      run: npm install -g @openai/codex@0.142.5
+
+    - name: Render Codex package (dev channel)
+      run: |
+        mkdir -p /tmp/codex-pkg/plugins/codex
+        python3 scripts/gen_client_packages.py --target codex --channel dev \
+          --out /tmp/codex-pkg \
+          --codex-marketplace-source-path ./plugins/codex/watercooler
+
+    - name: Arrange marketplace fixture
+      # The generator writes the plugin tree at <out>/watercooler, but the
+      # catalog (.agents/plugins/marketplace.json) records the source path
+      # passed above (./plugins/codex/watercooler, relative to the
+      # marketplace root). Move the rendered tree to match before adding the
+      # marketplace, or `plugin add` fails with a path-not-found error.
+      run: mv /tmp/codex-pkg/watercooler /tmp/codex-pkg/plugins/codex/watercooler
+
+    - name: Codex plugin install smoke (hermetic)
+      env:
+        CODEX_HOME: /tmp/codex-smoke-home/.codex
+      run: |
+        mkdir -p "$CODEX_HOME"
+        codex plugin marketplace add /tmp/codex-pkg --json </dev/null
+        codex plugin add "watercooler@watercooler" --json </dev/null
+        codex plugin list --json </dev/null | grep -q '"pluginId": "watercooler@watercooler"'
+        codex plugin list --json </dev/null | grep -q '"version": "'

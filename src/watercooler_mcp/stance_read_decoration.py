@@ -208,7 +208,13 @@ def _fetch_findings(
 
 
 def _routes_remote(runtime: Any) -> bool:
-    """Whether ``watercooler_daemon_findings`` is mounted from the premium proxy.
+    """Whether ``watercooler_daemon_findings`` routes to the premium remote.
+
+    R3 (#1063) retired the proxy mount of daemon tools — they register
+    locally as per-call pooled forwarders — so this resolves the
+    ``daemon_observe`` capability the same way the server_factory daemon
+    registration branch does, instead of consulting the now-empty mount
+    list.
 
     Imports ``server_factory`` lazily inside the function to keep the mcp-layer
     ``server_factory`` a strict layer *above* this decoration module.
@@ -218,19 +224,26 @@ def _routes_remote(runtime: Any) -> bool:
     server builder, which the lazy import deliberately avoids.
     """
     try:
-        from .server_factory import (
-            _premium_daemon_pinned_local,
-            mountable_remote_tools_for_hybrid,
-        )
+        from .capabilities import tool_capability
+        from .server_factory import _premium_daemon_pinned_local
 
-        if "watercooler_daemon_findings" not in mountable_remote_tools_for_hybrid(runtime):
+        if getattr(runtime, "surface", None) != "local_hybrid":
             return False
-        # Match the actual mounted surface, not just the capability route. When a
-        # premium daemon is pinned route="local", build_mcp_server suppresses the
-        # proxy daemon mount and registers the LOCAL daemon tools instead
-        # (server_factory.py:488-538), so watercooler_daemon_findings is served
-        # locally even though the capability resolved "remote". Route local to
-        # match, or we'd query the proxy and miss the locally-pinned producer.
+        cap = tool_capability("watercooler_daemon_findings")
+        target = runtime.capability_profile.resolve_execution_target(
+            cap,
+            local_available=True,
+            remote_available=getattr(runtime, "premium_client", None)
+            is not None,
+        )
+        if target != "remote":
+            return False
+        # Match the actual registered surface, not just the capability
+        # route. When a premium daemon is pinned route="local",
+        # build_mcp_server registers the LOCAL daemon tool impls instead,
+        # so watercooler_daemon_findings is served locally even though the
+        # capability resolved "remote". Route local to match, or we'd
+        # query the proxy and miss the locally-pinned producer.
         if _premium_daemon_pinned_local():
             return False
         return True

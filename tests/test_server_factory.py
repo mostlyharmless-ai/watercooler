@@ -80,6 +80,23 @@ class TestMemoryToolsForSurface:
         )
         assert "watercooler_bulk_index" in memory_tools_for_surface(rt)
 
+    def test_local_hybrid_registers_pooled_reads_as_mixed(self):
+        """R3 (#1063): the four memory read tools register locally in hybrid
+        (per-call pooled wrappers) rather than being proxy-mounted by bare
+        name — a bare mount froze the boot X-Repo for the session."""
+        profile = CapabilityProfile(routes=HYBRID_DEFAULT_ROUTES)
+        rt = ToolRuntime(
+            surface="local_hybrid",
+            capability_profile=profile,
+            premium_client=MagicMock(),
+        )
+        assert {
+            "watercooler_smart_query",
+            "watercooler_diagnose_memory",
+            "watercooler_graph_trace",
+            "watercooler_memory_task_status",
+        } <= memory_tools_for_surface(rt)
+
 
 class TestMigrationToolsForSurface:
     def test_local_full_gets_none(self):
@@ -94,7 +111,10 @@ class TestMigrationToolsForSurface:
 
 
 class TestMountableRemoteTools:
-    def test_hybrid_with_premium_client(self):
+    def test_hybrid_mounts_nothing_since_r3(self):
+        """R3 (#1063): every former bare mount is now a per-call mixed
+        wrapper — a bare mount pins the boot X-Repo for the session. The
+        mount machinery stays for future genuinely session-scoped tools."""
         profile = CapabilityProfile(routes=HYBRID_DEFAULT_ROUTES)
         rt = ToolRuntime(
             surface="local_hybrid",
@@ -102,16 +122,16 @@ class TestMountableRemoteTools:
             premium_client=MagicMock(),
         )
         result = mountable_remote_tools_for_hybrid(rt)
-        assert result == set(HYBRID_REMOTE_MOUNT_TOOLS)
+        assert result == set(HYBRID_REMOTE_MOUNT_TOOLS) == set()
 
     def test_non_hybrid_returns_empty(self):
         rt = ToolRuntime(surface="local_full")
         assert mountable_remote_tools_for_hybrid(rt) == set()
 
-    def test_mountable_remote_tools_for_hybrid_includes_daemon_findings(self):
-        """PR5 D1 — acknowledge_finding folded into daemon_findings; the
-        daemon_findings tool (carrying the acknowledge action) is proxy-mounted
-        to Railway in hybrid, exactly as acknowledge_finding was."""
+    def test_daemon_findings_not_proxy_mounted(self):
+        """PR5 D1 routed daemon_findings (carrying the acknowledge action)
+        to Railway via proxy mount; R3 keeps the remote routing but through
+        a per-call pooled wrapper, so it must no longer be bare-mounted."""
         profile = CapabilityProfile(routes=HYBRID_DEFAULT_ROUTES)
         rt = ToolRuntime(
             surface="local_hybrid",
@@ -119,7 +139,7 @@ class TestMountableRemoteTools:
             premium_client=MagicMock(),
         )
         result = mountable_remote_tools_for_hybrid(rt)
-        assert "watercooler_daemon_findings" in result
+        assert "watercooler_daemon_findings" not in result
 
     def test_bulk_index_not_proxy_mounted(self):
         """PR4a review fix — bulk_index is mixed; it must NOT be proxy-mounted.

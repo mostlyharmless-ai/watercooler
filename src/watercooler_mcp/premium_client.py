@@ -341,6 +341,38 @@ class PremiumToolClient:
             )
         return create_proxy(self._client, name=name)
 
+    async def call_tool_result(self, name: str, arguments: dict[str, Any]):
+        """Call a remote tool and return a full-fidelity ``ToolResult``.
+
+        The routed proxy leg (multi-repo routing, #1082 / completion
+        sequence Wave 2) requires behavioral parity with FastMCP's own
+        proxy forwarding: content blocks, structured content, meta, and
+        error state must all survive. ``call_tool_text`` (below) is a
+        first-text convenience and is NOT sufficient there — it drops
+        multi-content responses and flattens errors to a JSON string
+        (Codex review 01KX0B3EZB166VXBEE87DSWT9G, constraint 2).
+
+        ``raise_on_error=False`` so a hosted-side refusal (e.g. the repo
+        ownership check rejecting an unclaimed X-Repo) comes back as a
+        ``ToolResult`` with ``is_error=True`` and the server's own error
+        content — surfaced to the caller, not swallowed.
+        """
+        from fastmcp.tools.tool import ToolResult
+
+        async with self._fresh_session() as client:
+            result = await client.call_tool(
+                name,
+                arguments,
+                timeout=self._call_timeout,
+                raise_on_error=False,
+            )
+        return ToolResult(
+            content=result.content,
+            structured_content=result.structured_content,
+            meta=result.meta,
+            is_error=result.is_error,
+        )
+
     async def call_tool_text(self, name: str, arguments: dict[str, Any]) -> str:
         """Call a remote tool and return the text result.
 

@@ -460,22 +460,20 @@ def build_mcp_server(runtime: ToolRuntime) -> FastMCP:
 
         register_role_tools(mcp)
 
-    # Daemon tools — registered on all surfaces EXCEPT local_hybrid when
-    # daemon capabilities route to remote (they'll be mounted from proxy).
+    # Daemon tools — always registered locally; in hybrid mode with the
+    # daemon capabilities routed remote they register as per-call pooled
+    # forwarders instead of the local implementations (R3 — they were
+    # proxy-mounted before, which froze the boot X-Repo per session).
     # Exception: in hybrid mode a user can pin an individual premium
-    # daemon local via ``[mcp.daemons.<name>] route = "local"``.  When
-    # that happens the local daemon has no tools to drive it if we skip
-    # ``register_daemon_tools``, so mount them here regardless of the
-    # capability-route resolution — AND suppress the proxy mount of
-    # daemon tools further down (otherwise the local tool
-    # implementations, which query ``get_daemon_runtime()``, would
-    # silently shadow the remote premium daemons).  Operators wanting
-    # visibility of hosted daemons alongside a locally-pinned one must
-    # explicitly set ``[mcp.capability_routes] daemon_observe = "local"``
-    # and accept that the local daemon tools do not surface hosted
-    # daemons — merging both surfaces is a larger refactor.
-    _register_daemons_locally = True
-    _suppress_proxy_daemon_tools = False
+    # daemon local via ``[mcp.daemons.<name>] route = "local"``.  The
+    # local implementations are kept in that case so the pinned daemon
+    # has tools to drive it (the local impls, which query
+    # ``get_daemon_runtime()``, do not surface hosted daemons).
+    # Operators wanting visibility of hosted daemons alongside a
+    # locally-pinned one must explicitly set
+    # ``[mcp.capability_routes] daemon_observe = "local"`` and accept
+    # the same limitation — merging both surfaces is a larger refactor.
+    _daemon_remote_route = False
     if surface == "local_hybrid":
         from .capabilities import tool_capability
 
@@ -485,19 +483,13 @@ def build_mcp_server(runtime: ToolRuntime) -> FastMCP:
             local_available=True,
             remote_available=runtime.premium_client is not None,
         )
-        if target == "remote":
-            if _premium_daemon_pinned_local():
-                # Route stays "remote" for the capability, but a
-                # specific daemon is pinned local — we must mount the
-                # local tool surface for it and prevent the proxy from
-                # mirroring the same names.
-                _suppress_proxy_daemon_tools = True
-            else:
-                _register_daemons_locally = False
-    if _register_daemons_locally:
-        from .tools.daemon import register_daemon_tools
+        if target == "remote" and not _premium_daemon_pinned_local():
+            _daemon_remote_route = True
+    from .tools.daemon import register_daemon_tools
 
-        register_daemon_tools(mcp)
+    register_daemon_tools(
+        mcp, runtime=runtime, remote_route=_daemon_remote_route
+    )
 
     # Graph tools (selected per surface)
     from .tools.graph import register_graph_tools
@@ -526,16 +518,11 @@ def build_mcp_server(runtime: ToolRuntime) -> FastMCP:
 
         register_semantic_tools(mcp)
 
-    # Mount remote tools for hybrid surface
+    # Mount remote tools for hybrid surface. Empty since R3 (the last
+    # bare mounts became per-call mixed wrappers); kept for any future
+    # genuinely session-scoped remote tool.
     if surface == "local_hybrid" and runtime.premium_client is not None:
         mount_names = mountable_remote_tools_for_hybrid(runtime)
-        if _suppress_proxy_daemon_tools:
-            # A premium daemon is pinned local; the local daemon tools
-            # (registered above) would win FastMCP name resolution and
-            # silently shadow the remote daemon observations.  Skip the
-            # proxy mount of daemon tools instead.  Memory / migration
-            # tools are unaffected.
-            mount_names = mount_names - DAEMON_TOOL_NAMES
         if mount_names:
             premium_proxy = runtime.premium_client.proxy_server()
             mcp.mount(premium_proxy, tool_names={n: n for n in mount_names})

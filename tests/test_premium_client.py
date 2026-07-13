@@ -477,3 +477,50 @@ class TestTimeoutPlumbing:
         kwargs = mock_client_cls.call_args.kwargs
         assert kwargs["init_timeout"] == DEFAULT_INIT_TIMEOUT
         assert kwargs["timeout"] == DEFAULT_CALL_TIMEOUT
+
+
+class TestCallToolResult:
+    """Full-fidelity call path for the routed proxy leg (#1082 Wave 2;
+    Codex constraint 2 — call_tool_text's first-text extraction is not
+    sufficient for routed proxy calls)."""
+
+    @pytest.mark.anyio
+    async def test_mirrors_all_result_fields_and_disables_raise(self):
+        from mcp.types import TextContent as _TC
+
+        remote = MagicMock()
+        remote.content = [
+            _TC(type="text", text="part one"),
+            _TC(type="text", text="part two"),
+        ]
+        remote.structured_content = {"k": "v"}
+        remote.meta = {"trace": "abc"}
+        remote.is_error = True
+        mock_client = _async_cm_client(call_tool=AsyncMock(return_value=remote))
+
+        pc = PremiumToolClient(mock_client)
+        result = await pc.call_tool_result("watercooler_say", {"body": "x"})
+
+        mock_client.call_tool.assert_called_once_with(
+            "watercooler_say",
+            {"body": "x"},
+            timeout=pc._call_timeout,
+            raise_on_error=False,
+        )
+        assert result.content == remote.content
+        assert result.structured_content == {"k": "v"}
+        assert result.meta == {"trace": "abc"}
+        assert result.is_error is True
+
+    @pytest.mark.anyio
+    async def test_transport_exception_propagates(self):
+        """Unlike call_tool_text, transport failures raise — the routing
+        middleware converts them to structured proxy_route_error results,
+        preserving the no-silent-fallback contract."""
+        mock_client = _async_cm_client(
+            call_tool=AsyncMock(side_effect=RuntimeError("boom"))
+        )
+
+        pc = PremiumToolClient(mock_client)
+        with pytest.raises(RuntimeError, match="boom"):
+            await pc.call_tool_result("watercooler_say", {"body": "x"})

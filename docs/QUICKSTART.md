@@ -78,6 +78,10 @@ cmd /c "claude mcp add --transport stdio --scope user watercooler -- uvx --from 
 Restart Claude Code after running. For Codex, Cursor, or manual config, see
 [MCP-CLIENTS.md](./MCP-CLIENTS.md) — each section is self-contained.
 
+> **Prefer a single-install plugin?** See [PLUGINS.md](./PLUGINS.md) for packaged
+> Claude Code / Codex plugins that bundle the MCP server registration with the skills
+> in one install (coming with the first packaged release).
+
 > **How this works:** `uvx` downloads and runs the MCP server on demand — no separate
 > install step is needed. Claude Code launches the server automatically when it needs
 > watercooler tools.

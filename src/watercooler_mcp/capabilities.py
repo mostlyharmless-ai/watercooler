@@ -125,28 +125,51 @@ HYBRID_DEFAULT_ROUTES: dict[str, RouteChoice] = {
 # client from the pool via code_path — a bare mount asserted the boot repo's
 # X-Repo on every ingest (incident
 # bug-hybrid-static-x-repo-cross-tenant-t2-scope).
+# The seven pooled read tools below are mixed for the same reason as
+# graphiti_add_episode: a bare proxy-mount froze every call to the boot
+# repo's X-Repo, so cross-repo READS silently returned the boot tenant's
+# data in multi-repo sessions (R3 of completion plan v3,
+# audit-transport-modes-hosted-db-2026-07:12; GitHub issue #1063). Their
+# hybrid wrappers select the per-repo premium client from the call's
+# code_path via select_pool_client (boot fallback is acceptable for reads).
 MIXED_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "watercooler_search",
         "watercooler_bulk_index",
         "watercooler_list_decisions",
         "watercooler_graphiti_add_episode",
-    }
-)
-
-# Pure remote-mount tools: mounted from the premium proxy in hybrid mode.
-HYBRID_REMOTE_MOUNT_TOOLS: frozenset[str] = frozenset(
-    {
         "watercooler_smart_query",
         "watercooler_diagnose_memory",
         "watercooler_graph_trace",
         "watercooler_memory_task_status",
-        # Daemon tools: routed to Railway in hybrid mode
         "watercooler_daemon_status",
         "watercooler_daemon_findings",
         "watercooler_pulse_snapshot",
     }
 )
+
+# Repo-scoped read tools that route to the premium remote per call in hybrid
+# mode (R3). memory_task_status and daemon_status take no code_path — their
+# wrappers forward on the default (boot) client; the tool-surface scope table
+# in docs/AUTHENTICATION_HOSTED.md records this.
+HYBRID_POOLED_READ_TOOLS: frozenset[str] = frozenset(
+    {
+        "watercooler_smart_query",
+        "watercooler_diagnose_memory",
+        "watercooler_graph_trace",
+        "watercooler_memory_task_status",
+        "watercooler_daemon_status",
+        "watercooler_daemon_findings",
+        "watercooler_pulse_snapshot",
+    }
+)
+
+# Pure remote-mount tools: mounted from the premium proxy in hybrid mode.
+# Empty since R3 converted the last seven bare mounts to per-call mixed
+# wrappers (HYBRID_POOLED_READ_TOOLS) — a bare mount pins the boot X-Repo
+# for the whole session. The mount machinery in server_factory stays for
+# any future tool that is genuinely session-scoped.
+HYBRID_REMOTE_MOUNT_TOOLS: frozenset[str] = frozenset()
 
 # Daemon tools: observe and control daemons (routed to Railway in hybrid mode).
 # acknowledge_finding folded into daemon_findings(action="acknowledge") in PR5

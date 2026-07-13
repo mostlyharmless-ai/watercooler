@@ -344,6 +344,20 @@ def load_graphiti_config(
     llm_api_key = llm.api_key or ("LOCAL_NO_KEY" if llm_is_local else "")
     embedding_api_key = embedding.api_key or ("LOCAL_NO_KEY" if embedding_is_local else "")
 
+    # A1-full: the entry-episode mapping cache is PER-TENANT, keyed by the
+    # resolved database. The previous global default file was tenant-blind —
+    # the original cause of the cross-tenant index_miss (one shared file,
+    # rebuilt for whichever tenant last ran). The graph is the source of
+    # truth (entry_id properties + marker heal); this file is only a cache.
+    entry_episode_index_path = None
+    if resolved_database:
+        entry_episode_index_path = (
+            Path.home()
+            / ".watercooler"
+            / "graphiti"
+            / f"entry_episode_index_{resolved_database}.json"
+        )
+
     return GraphitiConfig(
         llm_api_key=llm_api_key,
         llm_api_base=llm.api_base or None,
@@ -357,6 +371,7 @@ def load_graphiti_config(
         falkordb_socket_timeout=db.socket_timeout,
         reranker=reranker,
         database=resolved_database,
+        entry_episode_index_path=entry_episode_index_path,
     )
 
 

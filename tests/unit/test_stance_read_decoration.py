@@ -619,27 +619,47 @@ def test_fetch_remote_success_envelope_with_count() -> None:
     assert status == "success" and findings is not None and len(findings) == 1
 
 
+class _RouteProfile:
+    def __init__(self, target: str) -> None:
+        self._target = target
+
+    def resolve_execution_target(self, cap, *, local_available, remote_available):
+        return self._target
+
+
+class _RouteRuntime:
+    def __init__(self, target: str = "remote", surface: str = "local_hybrid") -> None:
+        self.surface = surface
+        self.premium_client = object()
+        self.capability_profile = _RouteProfile(target)
+
+
 def test_routes_remote_false_when_daemon_pinned_local(monkeypatch: pytest.MonkeyPatch) -> None:
     import watercooler_mcp.server_factory as sf
 
-    monkeypatch.setattr(sf, "mountable_remote_tools_for_hybrid", lambda _rt: {"watercooler_daemon_findings"})
     monkeypatch.setattr(sf, "_premium_daemon_pinned_local", lambda: True)
-    assert srd._routes_remote(object()) is False
+    assert srd._routes_remote(_RouteRuntime()) is False
 
 
 def test_routes_remote_true_when_not_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
     import watercooler_mcp.server_factory as sf
 
-    monkeypatch.setattr(sf, "mountable_remote_tools_for_hybrid", lambda _rt: {"watercooler_daemon_findings"})
     monkeypatch.setattr(sf, "_premium_daemon_pinned_local", lambda: False)
-    assert srd._routes_remote(object()) is True
+    assert srd._routes_remote(_RouteRuntime()) is True
 
 
-def test_routes_remote_false_when_not_mountable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_routes_remote_false_when_capability_not_remote(monkeypatch: pytest.MonkeyPatch) -> None:
     import watercooler_mcp.server_factory as sf
 
-    monkeypatch.setattr(sf, "mountable_remote_tools_for_hybrid", lambda _rt: set())
-    assert srd._routes_remote(object()) is False
+    monkeypatch.setattr(sf, "_premium_daemon_pinned_local", lambda: False)
+    assert srd._routes_remote(_RouteRuntime(target="local")) is False
+
+
+def test_routes_remote_false_when_not_hybrid(monkeypatch: pytest.MonkeyPatch) -> None:
+    import watercooler_mcp.server_factory as sf
+
+    monkeypatch.setattr(sf, "_premium_daemon_pinned_local", lambda: False)
+    assert srd._routes_remote(_RouteRuntime(surface="local_full")) is False
 
 
 def test_fetch_findings_disabled_route_does_not_fetch_local(

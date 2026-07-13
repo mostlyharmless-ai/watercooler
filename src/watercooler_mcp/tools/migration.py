@@ -895,6 +895,12 @@ async def _migrate_to_memory_backend_impl(
                                 reference_time=ref_time,
                                 group_id=unified_group_id,
                                 previous_episode_uuids=previous_uuids,
+                                episode_metadata={
+                                    "entry_id": entry_id,
+                                    "thread_id": topic,
+                                    "chunk_index": i + 1,
+                                    "total_chunks": total_chunks,
+                                },
                             )
 
                             episode_uuid = ep_result.get("episode_uuid", "unknown")

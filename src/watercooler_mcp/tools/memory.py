@@ -545,6 +545,16 @@ def _add_canonical_identity_fields(diagnostics: dict, code_path: str = "") -> No
     # runtime-observable without a live FalkorDB probe. Callers that
     # need the split-naming state should query the hosted admin
     # surface instead.
+    #
+    # Honesty contract (audit-transport-modes-hosted-db-2026-07 plan v3
+    # §C): a diagnostic must not assert a state it failed to establish.
+    # Signal-probe failure reports "indeterminate" + the reason — never a
+    # silent default to "phase_1_local_only". And because both signals
+    # are process-local globals wired only on the local_hybrid surface
+    # (memory_sync / server construction), "phase_1_local_only" computed
+    # in a hosted server process — or in a hybrid/proxy process whose
+    # handoff never got wired — describes THIS process, not the caller's
+    # deployment state; those cases carry an explicit conflict note.
     try:
         from watercooler.baseline_graph.sync import (
             _t1_remote_upsert_enabled,
@@ -552,9 +562,12 @@ def _add_canonical_identity_fields(diagnostics: dict, code_path: str = "") -> No
         )
         t1_hybrid = _t1_remote_upsert_enabled()
         t2_handoff = is_hybrid_t2_handoff_active()
-    except Exception:
-        t1_hybrid = False
-        t2_handoff = False
+    except Exception as phase_exc:
+        diagnostics["phase_indicator"] = "indeterminate"
+        diagnostics["phase_indicator_error"] = (
+            f"{type(phase_exc).__name__}: {phase_exc}"
+        )
+        return
 
     if t1_hybrid and t2_handoff:
         phase = "phase_8_hybrid_t1_hosted"
@@ -562,6 +575,26 @@ def _add_canonical_identity_fields(diagnostics: dict, code_path: str = "") -> No
         phase = "phase_5_hybrid_t2_handoff"
     else:
         phase = "phase_1_local_only"
+        if hosted_mode:
+            diagnostics["phase_indicator_note"] = (
+                "phase indicator conflicts with configured routes: this "
+                "process serves hosted requests, where the hybrid handoff "
+                "signals are never set — 'phase_1_local_only' describes "
+                "this server process, not your session's split-surface "
+                "state."
+            )
+        else:
+            try:
+                from ..config import get_watercooler_config
+                _transport = get_watercooler_config().mcp.transport
+            except Exception:
+                _transport = None
+            if _transport in ("hybrid", "proxy"):
+                diagnostics["phase_indicator_note"] = (
+                    f"phase indicator conflicts with configured routes: "
+                    f"transport is '{_transport}' (remote ingest) but no "
+                    f"hybrid handoff signal is wired in this process."
+                )
     diagnostics["phase_indicator"] = phase
 
 
@@ -1127,6 +1160,9 @@ async def _graphiti_add_episode_impl(
                     reference_time=ref_time,
                     group_id=group_id,
                     previous_episode_uuids=previous_episode_uuids,
+                    episode_metadata=(
+                        {"entry_id": entry_id} if entry_id else None
+                    ),
                 )
 
                 episode_uuid = result.get("episode_uuid", "unknown")
@@ -1616,15 +1652,23 @@ def _apply_decision_boost_evidence(
     return boost_decision_items(evidence, boost) > 0
 
 
-def _resolve_t2_provenance(
+async def _resolve_t2_provenance(
     result: Any,
     code_path_resolved: Path | None,
 ) -> dict[str, int]:
     """Apply 3-hop T2 backtrace, populating ``thread_entry_id`` on T2 evidence.
 
     Mutates each ``result.evidence[i].provenance`` dict in place. Returns a
-    stats dict with ``attempted/succeeded/failed/not_applicable`` counts.
+    stats dict with ``attempted/succeeded/failed/not_applicable`` counts,
+    plus ``healed`` when the same-request graph heal recovered mappings.
     Shared between hosted and non-hosted ``smart_query`` paths.
+
+    Index misses self-heal in the same request: mappings absent from the
+    node-local index (wiped on a redeploy, or never built for this tenant)
+    are recovered by one batched lookup against the backend's graph and
+    written through to the index — the first query after a redeploy
+    resolves with no manual rebuild (completion plan v3,
+    ``audit-transport-modes-hosted-db-2026-07``).
     """
     from watercooler_memory.tier_strategy import Tier
 
@@ -1664,6 +1708,7 @@ def _resolve_t2_provenance(
             or IndexConfig(backend="graphiti").index_path
         )
         prov_index = _get_cached_provenance_index(index_path)
+        missed: list[tuple[Any, str]] = []
         for ev in t2_evidence:
             episodes = ev.provenance.get("episodes") or []
             if not episodes:
@@ -1679,8 +1724,8 @@ def _resolve_t2_provenance(
                     ev.provenance["provenance_resolution_status"] = "resolved"
                     prov_stats["succeeded"] += 1
                 else:
-                    ev.provenance["provenance_resolution_status"] = "index_miss"
-                    prov_stats["failed"] += 1
+                    # Deferred: same-request graph heal below, THEN index_miss.
+                    missed.append((ev, ep_uuid))
             except Exception as lookup_exc:
                 ev.provenance["provenance_resolution_status"] = "lookup_error"
                 prov_stats["failed"] += 1
@@ -1689,6 +1734,39 @@ def _resolve_t2_provenance(
                     ep_uuid,
                     lookup_exc,
                 )
+
+        if missed:
+            # Same-request heal: one batched, tenant-scoped graph lookup for
+            # every missed episode UUID (per-miss trigger — an emptiness
+            # trigger can never fire for a second tenant while any tenant's
+            # rows populate the shared index file).
+            healed: dict[str, str] = {}
+            try:
+                from ..memory import get_graphiti_backend
+
+                backend = get_graphiti_backend(graphiti_config)
+                if backend is not None and hasattr(
+                    backend, "resolve_episode_entry_ids"
+                ):
+                    healed = await backend.resolve_episode_entry_ids(
+                        [ep_uuid for _, ep_uuid in missed]
+                    )
+            except Exception as heal_exc:
+                logger.debug(
+                    "resolve_provenance: same-request graph heal failed: %s",
+                    heal_exc,
+                )
+            for ev, ep_uuid in missed:
+                entry_id = healed.get(ep_uuid)
+                if entry_id:
+                    ev.provenance["thread_entry_id"] = entry_id
+                    ev.provenance["episode_uuid"] = ep_uuid
+                    ev.provenance["provenance_resolution_status"] = "resolved"
+                    prov_stats["succeeded"] += 1
+                    prov_stats["healed"] = prov_stats.get("healed", 0) + 1
+                else:
+                    ev.provenance["provenance_resolution_status"] = "index_miss"
+                    prov_stats["failed"] += 1
     except Exception as setup_exc:
         logger.debug("resolve_provenance: setup failed: %s", setup_exc)
         for ev in t2_evidence:
@@ -1950,7 +2028,9 @@ async def _smart_query_impl(
 
                         if result.evidence:
                             prov_stats = (
-                                _resolve_t2_provenance(result, code_path_resolved)
+                                await _resolve_t2_provenance(
+                                    result, code_path_resolved
+                                )
                                 if resolve_provenance
                                 else None
                             )
@@ -2130,7 +2210,7 @@ async def _smart_query_impl(
             )
 
             prov_stats = (
-                _resolve_t2_provenance(result, code_path_resolved)
+                await _resolve_t2_provenance(result, code_path_resolved)
                 if resolve_provenance
                 else None
             )
@@ -2608,6 +2688,7 @@ async def _bulk_index_impl(
     preflight_only: bool = False,
     run_pipeline: bool = False,
     rebuild_index_only: bool = False,
+    backfill_provenance: bool = False,
     group_id: str = "",
     dry_run: bool = False,
     incremental: bool = True,
@@ -2672,13 +2753,15 @@ async def _bulk_index_impl(
     # Mode dispatch (B1/B2 collapse) — preflight and pipeline are distinct
     # operations folded under bulk_index; each resolves its own capability
     # per-(tool, args) via capabilities._ARG_RESOLVERS.
-    if sum(bool(m) for m in (preflight_only, run_pipeline, rebuild_index_only)) > 1:
+    if sum(bool(m) for m in (
+        preflight_only, run_pipeline, rebuild_index_only, backfill_provenance,
+    )) > 1:
         return ToolResult([TextContent(
             type="text",
             text=json.dumps({
                 "error": (
-                    "preflight_only, run_pipeline, and rebuild_index_only "
-                    "are mutually exclusive"
+                    "preflight_only, run_pipeline, rebuild_index_only, and "
+                    "backfill_provenance are mutually exclusive"
                 ),
             }),
         )])
@@ -2728,14 +2811,56 @@ async def _bulk_index_impl(
             )])
 
         queue = get_queue()
-        # rebuild_index_only queues nothing — it must work even when the
-        # memory queue is not initialised (e.g. right after a redeploy).
-        if queue is None and not rebuild_index_only:
+        # rebuild_index_only / backfill_provenance queue nothing — they must
+        # work even when the memory queue is not initialised (e.g. right
+        # after a redeploy).
+        if queue is None and not (rebuild_index_only or backfill_provenance):
             return ToolResult([TextContent(
                 type="text",
                 text=json.dumps({
                     "error": "Memory queue not initialised",
                 }),
+            )])
+
+        # A1-full per-tenant backfill: stamp first-class provenance
+        # properties onto pre-existing episodes from durable markers only
+        # (orphans reported, idempotent). Tenant scope comes from the
+        # backend's own resolved database — no cross-tenant reach.
+        if backfill_provenance:
+            from .. import memory as mem
+            graphiti_config = mem.load_graphiti_config(
+                code_path=code_path if code_path else None
+            )
+            backend_obj = (
+                mem.get_graphiti_backend(graphiti_config)
+                if graphiti_config
+                else None
+            )
+            if (
+                backend_obj is None
+                or isinstance(backend_obj, dict)
+                or not hasattr(backend_obj, "backfill_provenance_properties")
+            ):
+                return ToolResult([TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "graphiti_backend_unavailable",
+                        "message": (
+                            "backfill_provenance requires a configured "
+                            "Graphiti backend."
+                        ),
+                    }),
+                )])
+            report = await asyncio.to_thread(
+                backend_obj.backfill_provenance_properties
+            )
+            report["action"] = "bulk_index"
+            report["backfill_provenance"] = True
+            report["database"] = getattr(
+                backend_obj.config, "database", None
+            )
+            return ToolResult([TextContent(
+                type="text", text=json.dumps(report, indent=2)
             )])
 
         # Hosted mode: discover entries from GitHub API
@@ -3367,6 +3492,64 @@ def _build_hybrid_graphiti_add_episode_wrapper(runtime):
     return _hybrid_graphiti_add_episode
 
 
+def _build_hybrid_pooled_read_wrapper(runtime, tool_name, impl_func):
+    """Build a hybrid wrapper for a repo-scoped remote READ tool.
+
+    R3 (completion plan v3, audit-transport-modes-hosted-db-2026-07:12;
+    GitHub issue #1063): these tools were bare proxy-mounts, so every call
+    rode the boot repo's frozen ``X-Repo`` and cross-repo reads silently
+    returned the boot tenant's data. The wrapper selects the per-repo
+    premium client from the call's ``code_path`` per call;
+    ``select_pool_client``'s boot fallback is acceptable for reads (a
+    mis-scoped read writes nothing — contrast the fail-closed WRITE
+    wrappers above). ``memory_task_status`` has no ``code_path`` parameter
+    and always forwards on the boot client.
+    """
+    import functools
+    import inspect
+
+    from ..capabilities import tool_capability
+
+    @functools.wraps(impl_func)
+    async def _hybrid_pooled_read(ctx, **kwargs):
+        capability = tool_capability(tool_name, kwargs)
+        target = runtime.capability_profile.resolve_execution_target(
+            capability,
+            local_available=True,
+            remote_available=runtime.premium_client is not None,
+        )
+        if target == "disabled":
+            return ToolResult([TextContent(
+                type="text",
+                text=json.dumps(
+                    {"error": "capability_disabled", "capability": capability},
+                    indent=2,
+                ),
+            )])
+        if target == "remote":
+            if runtime.premium_client is None:
+                return ToolResult([TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "remote_unavailable",
+                        "capability": capability,
+                        "message": "Remote premium client is not configured.",
+                    }),
+                )])
+            from ..premium_client import select_pool_client
+
+            remote_text = await select_pool_client(
+                runtime, kwargs.get("code_path")
+            ).call_tool_text(tool_name, kwargs)
+            return ToolResult([TextContent(type="text", text=remote_text)])
+        result = impl_func(ctx, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    return _hybrid_pooled_read
+
+
 def register_memory_tools(mcp, *, selected=None, runtime=None):
     """Register memory tools with the MCP server.
 
@@ -3395,6 +3578,8 @@ def register_memory_tools(mcp, *, selected=None, runtime=None):
 
     _runtime = runtime
 
+    from ..capabilities import HYBRID_POOLED_READ_TOOLS
+
     _globals = globals()
     for tool_name, (impl_func, global_name) in TOOL_BUILDERS.items():
         if selected is not None and tool_name not in selected:
@@ -3409,6 +3594,10 @@ def register_memory_tools(mcp, *, selected=None, runtime=None):
             elif tool_name == "watercooler_graphiti_add_episode":
                 actual_impl = _build_hybrid_graphiti_add_episode_wrapper(
                     runtime
+                )
+            elif tool_name in HYBRID_POOLED_READ_TOOLS:
+                actual_impl = _build_hybrid_pooled_read_wrapper(
+                    runtime, tool_name, impl_func
                 )
         registered = mcp.tool(name=tool_name)(actual_impl)
         _globals[global_name] = registered

@@ -145,7 +145,7 @@ https://astral.sh/uv/install.sh | sh`, or `pip install uv`). `uvx` then runs the
 MCP server on demand — no separate install. For **Claude Code**:
 
 ```bash
-claude mcp add --transport stdio --scope user watercooler-cloud -- uvx --from 'git+https://github.com/mostlyharmless-ai/watercooler@main[local]' watercooler-mcp
+claude mcp add --transport stdio --scope user watercooler -- uvx --from 'git+https://github.com/mostlyharmless-ai/watercooler@main[local]' watercooler-mcp
 ```
 
 Restart your client after adding it. For **Codex**, **Cursor**, manual config,

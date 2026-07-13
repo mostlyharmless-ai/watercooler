@@ -176,8 +176,10 @@ def _append_memory_sync_block(status_lines: list[str], context: Any) -> None:
       ``semantic_similarity``, ``daemon_observe``;
     - canonical identity quadruple: ``repo_slug``, ``repo_name``,
       ``project_group_id``, physical ``t1_database`` + ``t2_database``;
-    - mismatch warnings (e.g., local FalkorDB reachable while the T2
-      route is remote — a muddle-producing configuration);
+    - local FalkorDB status, modality-gated: probed and reported only
+      when the configuration actually uses a local FalkorDB
+      (``startup.local_falkordb_in_use``); configurations with no local
+      FalkorDB tier report "not used" without touching the port;
     - local submission queue depth + receipt counts (Phase 4);
     - remote handoff receipt counts per backend/stage (Phase 5 + Phase 8);
     - pointers to hosted-authority tools for scopes this tool does not
@@ -256,36 +258,56 @@ def _append_memory_sync_block(status_lines: list[str], context: Any) -> None:
         f"    t2_database       = {t2_db}",
     ])
 
-    # --- Local FalkorDB reachability + mismatch warnings ---------------
-    local_falkor_reachable = False
+    # --- Local FalkorDB (probed only when the configuration uses it) ---
+    # A configuration that does not use local FalkorDB must not look for
+    # one: an unrelated local Redis/FalkorDB on 6379 is not a watercooler
+    # signal, and reachability is not a hazard. The regression this
+    # section's deleted "Mismatch" warning feared (in-process
+    # GraphitiBackend re-enabled under hybrid) is pinned structurally by
+    # tests on get_graphiti_backend's hybrid_refused guard instead
+    # (audit-transport-modes-hosted-db-2026-07 plan v3).
+    from ..startup import local_falkordb_in_use
+
+    falkor_in_use: bool | None
     try:
-        import socket as _socket
-        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        s.settimeout(0.2)
-        try:
-            s.connect(("127.0.0.1", 6379))
-            local_falkor_reachable = True
-        except OSError:
-            local_falkor_reachable = False
-        finally:
-            s.close()
-    except Exception:
-        local_falkor_reachable = False
+        falkor_in_use, falkor_reason, falkor_detail = local_falkordb_in_use()
+    except Exception as falkor_exc:
+        falkor_in_use, falkor_reason = None, None
+        falkor_detail = f"{type(falkor_exc).__name__}: {falkor_exc}"
 
-    status_lines.append(
-        f"  Local FalkorDB (127.0.0.1:6379): "
-        f"{'reachable' if local_falkor_reachable else 'not reachable'}"
-    )
-
-    memory_ingest_route = _resolved_route("memory_ingest")
-    semantic_similarity_route = _resolved_route("semantic_similarity")
-    if transport == "hybrid" and local_falkor_reachable and memory_ingest_route == "remote":
+    # ``backend_unresolvable`` means the helper FAILED to establish the
+    # T2 backend setting — not that local FalkorDB is unused. Rendering
+    # it as "not used" would be the same class of false reassurance as
+    # the phase_indicator bug (PR #1086 review): report indeterminate,
+    # don't probe.
+    if falkor_in_use is None or falkor_reason == "backend_unresolvable":
         status_lines.append(
-            "  ⚠️  Mismatch: hybrid mode with memory_ingest=remote, but a "
-            "local FalkorDB is reachable. Leftover state may shadow the "
-            "hosted path if a code-path regression re-enables in-process "
-            "GraphitiBackend. Track the muddle-fix landing via the "
-            "hybrid-falkordb-state-vs-intent thread."
+            f"  Local FalkorDB: usage indeterminate ({falkor_detail})"
+        )
+    elif not falkor_in_use:
+        status_lines.append(
+            f"  Local FalkorDB: not used in this configuration "
+            f"({falkor_detail})"
+        )
+    else:
+        local_falkor_reachable = False
+        try:
+            import socket as _socket
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            s.settimeout(0.2)
+            try:
+                s.connect(("127.0.0.1", 6379))
+                local_falkor_reachable = True
+            except OSError:
+                local_falkor_reachable = False
+            finally:
+                s.close()
+        except Exception:
+            local_falkor_reachable = False
+
+        status_lines.append(
+            f"  Local FalkorDB (127.0.0.1:6379): "
+            f"{'reachable' if local_falkor_reachable else 'not reachable'}"
         )
 
     # --- Local submission queue summary (Phase 4) ----------------------
@@ -983,6 +1005,30 @@ def _health_hosted_impl(ctx: Context) -> str:
         pass
     except Exception:
         pass
+
+    # State-root persistence (single stat — no network I/O). The missing
+    # alarm that let an ephemeral state root pass every health check until
+    # the wipe was rediscovered as a "novel bug"
+    # (audit-transport-modes-hosted-db-2026-07 plan v3 §D). The Railway
+    # volume mounts at ${HOME}/.watercooler; a state root that is not a
+    # mountpoint inside a hosted container is wiped on every redeploy.
+    try:
+        state_root = Path.home() / ".watercooler"
+        if os.path.ismount(state_root):
+            status_lines.append(f"\nState Root: {state_root} (volume-backed)")
+        else:
+            detail = (
+                "does not exist" if not state_root.exists()
+                else "is not volume-backed"
+            )
+            status_lines.append(
+                f"\n⚠️  State Root: {state_root} {detail} — a redeploy "
+                "WIPES the memory queue, provenance cache, handoff "
+                "receipts, and daemon state. Attach a persistent volume "
+                "mounted at this path."
+            )
+    except Exception as e:
+        status_lines.append(f"\nState Root: check failed ({e})")
 
     status_lines.append(
         '\nGraph Detail: watercooler_health(detail="graph") — per-graph '

@@ -791,18 +791,90 @@ def _acknowledge_finding_impl(
     )
 
 
-def register_daemon_tools(mcp) -> None:
+def _build_hybrid_pooled_daemon_wrapper(runtime, tool_name, impl_func):
+    """Build a per-call hybrid routing wrapper for a daemon tool.
+
+    R3 (completion plan v3, audit-transport-modes-hosted-db-2026-07:12;
+    GitHub issue #1063): daemon tools were bare proxy-mounts in hybrid
+    mode, freezing every call to the boot repo's ``X-Repo``. The wrapper
+    selects the per-repo premium client from the call's ``code_path``
+    (``daemon_findings`` / ``pulse_snapshot``); ``daemon_status`` has no
+    ``code_path`` parameter and always forwards on the boot client — the
+    tool-surface scope table in docs/AUTHENTICATION_HOSTED.md records
+    this.
+
+    The capability is re-resolved **per call** (PR #1081 review):
+    ``daemon_findings`` is arg-sensitive — ``action="acknowledge"`` is
+    the folded-in acknowledge_finding and resolves to ``daemon_control``
+    (L3), not ``daemon_observe``. A registration-time-only resolution
+    would forward acknowledge writes to the hosted endpoint even when an
+    operator disabled or localized ``daemon_control``, reintroducing a
+    capability bypass on the write path. A locally-pinned premium daemon
+    never reaches this wrapper (the registration branch keeps the local
+    impls instead).
+    """
+    import functools
+    import inspect
+
+    from ..capabilities import tool_capability
+
+    @functools.wraps(impl_func)
+    async def _hybrid_daemon_route(ctx, **kwargs):
+        capability = tool_capability(tool_name, kwargs)
+        target = runtime.capability_profile.resolve_execution_target(
+            capability,
+            local_available=True,
+            remote_available=getattr(runtime, "premium_client", None)
+            is not None,
+        )
+        if target == "disabled":
+            return json.dumps(
+                {"error": "capability_disabled", "capability": capability},
+                indent=2,
+            )
+        if target == "remote":
+            from ..premium_client import select_pool_client
+
+            return await select_pool_client(
+                runtime, kwargs.get("code_path")
+            ).call_tool_text(tool_name, kwargs)
+        result = impl_func(ctx, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    return _hybrid_daemon_route
+
+
+def register_daemon_tools(mcp, *, runtime=None, remote_route=False) -> None:
     """Register daemon tools with the MCP server.
 
     Args:
         mcp: The FastMCP server instance
+        runtime: ToolRuntime for the surface (required when
+            ``remote_route`` is True).
+        remote_route: When True (hybrid surface whose daemon_observe
+            capability resolves remote, no local pin), register per-call
+            routing wrappers instead of the local implementations. The
+            wrappers re-resolve the capability per call, so arg-sensitive
+            routes (daemon_findings action="acknowledge" → daemon_control)
+            honor their own configuration.
     """
     global daemon_status, daemon_findings, pulse_snapshot_tool
 
-    daemon_status = mcp.tool(name="watercooler_daemon_status")(_daemon_status_impl)
+    def _impl(tool_name, impl_func):
+        if remote_route and runtime is not None:
+            return _build_hybrid_pooled_daemon_wrapper(
+                runtime, tool_name, impl_func
+            )
+        return impl_func
+
+    daemon_status = mcp.tool(name="watercooler_daemon_status")(
+        _impl("watercooler_daemon_status", _daemon_status_impl)
+    )
     daemon_findings = mcp.tool(name="watercooler_daemon_findings")(
-        _daemon_findings_impl
+        _impl("watercooler_daemon_findings", _daemon_findings_impl)
     )
     pulse_snapshot_tool = mcp.tool(name="watercooler_pulse_snapshot")(
-        _pulse_snapshot_impl
+        _impl("watercooler_pulse_snapshot", _pulse_snapshot_impl)
     )

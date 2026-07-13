@@ -550,3 +550,353 @@ class TestBulkIndexWriteFailClosed:
         await wrapper(MagicMock(), code_path="/path/to/site")
         site_client.call_tool_text.assert_awaited_once()
         default.call_tool_text.assert_not_awaited()
+
+
+class TestPooledReadConversion:
+    """R3 (#1063 / audit-transport-modes-hosted-db-2026-07 plan v3): the
+    seven formerly proxy-mounted read tools route through the per-repo
+    premium client selected by the call's ``code_path``. Reads use
+    ``select_pool_client``'s boot fallback (a mis-scoped read writes
+    nothing), unlike the fail-closed WRITE wrappers above."""
+
+    def _wrapper_runtime(self, pool):
+        from watercooler_mcp.capabilities import (
+            HYBRID_DEFAULT_ROUTES,
+            CapabilityProfile,
+        )
+
+        runtime = MagicMock()
+        runtime.surface = "local_hybrid"
+        runtime.premium_client = pool.default
+        runtime.premium_pool = pool
+        runtime.capability_profile = CapabilityProfile(
+            routes=dict(HYBRID_DEFAULT_ROUTES)
+        )
+        return runtime
+
+    def _pool(self, default, per_repo=None):
+        pool = MagicMock()
+        pool.default = default
+        if per_repo is None:
+            pool.client_for_path = MagicMock(
+                side_effect=AssertionError("must not be called")
+            )
+        else:
+            pool.client_for_path = MagicMock(return_value=per_repo)
+        return pool
+
+    @pytest.mark.anyio
+    async def test_smart_query_code_path_uses_per_repo_client(self) -> None:
+        from watercooler_mcp.tools.memory import (
+            _build_hybrid_pooled_read_wrapper,
+            _smart_query_impl,
+        )
+
+        default = _client("mostlyharmless-ai/watercooler")
+        site_client = _client("mostlyharmless-ai/watercooler-site")
+        pool = self._pool(default, per_repo=site_client)
+        wrapper = _build_hybrid_pooled_read_wrapper(
+            self._wrapper_runtime(pool),
+            "watercooler_smart_query",
+            _smart_query_impl,
+        )
+
+        await wrapper(MagicMock(), query="q", code_path="/path/to/site")
+        site_client.call_tool_text.assert_awaited_once()
+        default.call_tool_text.assert_not_awaited()
+        assert pool.client_for_path.call_args.args[0] == "/path/to/site"
+        forwarded = site_client.call_tool_text.call_args.args
+        assert forwarded[0] == "watercooler_smart_query"
+        assert forwarded[1]["code_path"] == "/path/to/site"
+
+    @pytest.mark.anyio
+    async def test_smart_query_absent_code_path_uses_boot_client(self) -> None:
+        from watercooler_mcp.tools.memory import (
+            _build_hybrid_pooled_read_wrapper,
+            _smart_query_impl,
+        )
+
+        default = _client("mostlyharmless-ai/watercooler")
+        pool = self._pool(default)
+        wrapper = _build_hybrid_pooled_read_wrapper(
+            self._wrapper_runtime(pool),
+            "watercooler_smart_query",
+            _smart_query_impl,
+        )
+
+        await wrapper(MagicMock(), query="q")
+        default.call_tool_text.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_underivable_code_path_falls_back_to_boot(self) -> None:
+        """READ fallback semantics: an underivable code_path degrades to
+        the boot client instead of failing closed (contrast the ingest
+        wrapper's scope_resolution_failed above)."""
+        from watercooler_mcp.tools.memory import (
+            _build_hybrid_pooled_read_wrapper,
+            _graph_trace_impl,
+        )
+
+        default = _client("mostlyharmless-ai/watercooler")
+        pool = self._pool(default)
+        pool.client_for_path = MagicMock(side_effect=ValueError("no slug"))
+        wrapper = _build_hybrid_pooled_read_wrapper(
+            self._wrapper_runtime(pool),
+            "watercooler_graph_trace",
+            _graph_trace_impl,
+        )
+
+        await wrapper(MagicMock(), entry_id="E1", code_path="/not/a/repo")
+        default.call_tool_text.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_memory_task_status_forwards_on_boot_client(self) -> None:
+        """memory_task_status has no code_path parameter — it always
+        forwards on the boot client (scope table documents this)."""
+        from watercooler_mcp.tools.memory import (
+            _build_hybrid_pooled_read_wrapper,
+            _memory_task_status_impl,
+        )
+
+        default = _client("mostlyharmless-ai/watercooler")
+        pool = self._pool(default)
+        wrapper = _build_hybrid_pooled_read_wrapper(
+            self._wrapper_runtime(pool),
+            "watercooler_memory_task_status",
+            _memory_task_status_impl,
+        )
+
+        await wrapper(MagicMock(), task_id="t1")
+        default.call_tool_text.assert_awaited_once()
+        assert (
+            default.call_tool_text.call_args.args[0]
+            == "watercooler_memory_task_status"
+        )
+
+    @pytest.mark.anyio
+    async def test_remote_unavailable_without_premium_client(self) -> None:
+        from watercooler_mcp.tools.memory import (
+            _build_hybrid_pooled_read_wrapper,
+            _smart_query_impl,
+        )
+        from watercooler_mcp.capabilities import (
+            HYBRID_DEFAULT_ROUTES,
+            CapabilityProfile,
+        )
+
+        runtime = MagicMock()
+        runtime.surface = "local_hybrid"
+        runtime.premium_client = None
+        runtime.premium_pool = None
+        runtime.capability_profile = CapabilityProfile(
+            routes=dict(HYBRID_DEFAULT_ROUTES)
+        )
+        wrapper = _build_hybrid_pooled_read_wrapper(
+            runtime, "watercooler_smart_query", _smart_query_impl
+        )
+
+        result = await wrapper(MagicMock(), query="q")
+        payload = json.loads(result.content[0].text)
+        assert payload["error"] in {"remote_unavailable", "capability_disabled"}
+
+    @pytest.mark.anyio
+    async def test_local_route_calls_local_impl(self) -> None:
+        """A user-pinned local route bypasses the pool entirely and runs
+        the local implementation."""
+        from watercooler_mcp.tools.memory import (
+            _build_hybrid_pooled_read_wrapper,
+        )
+
+        default = _client("mostlyharmless-ai/watercooler")
+        pool = self._pool(default)
+        runtime = self._wrapper_runtime(pool)
+
+        class _LocalProfile:
+            def resolve_execution_target(self, cap, **_kw):
+                return "local"
+
+        runtime.capability_profile = _LocalProfile()
+
+        called = {}
+
+        async def _local_impl(ctx, **kwargs):
+            called.update(kwargs)
+            return "local-result"
+
+        wrapper = _build_hybrid_pooled_read_wrapper(
+            runtime, "watercooler_smart_query", _local_impl
+        )
+        result = await wrapper(MagicMock(), query="q")
+        assert result == "local-result"
+        assert called == {"query": "q"}
+        default.call_tool_text.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_daemon_findings_code_path_uses_per_repo_client(self) -> None:
+        from watercooler_mcp.tools.daemon import (
+            _build_hybrid_pooled_daemon_wrapper,
+            _daemon_findings_impl,
+        )
+
+        default = _client("mostlyharmless-ai/watercooler")
+        site_client = _client("mostlyharmless-ai/watercooler-site")
+        pool = self._pool(default, per_repo=site_client)
+        wrapper = _build_hybrid_pooled_daemon_wrapper(
+            self._wrapper_runtime(pool),
+            "watercooler_daemon_findings",
+            _daemon_findings_impl,
+        )
+
+        await wrapper(MagicMock(), code_path="/path/to/site")
+        site_client.call_tool_text.assert_awaited_once()
+        default.call_tool_text.assert_not_awaited()
+        assert (
+            site_client.call_tool_text.call_args.args[0]
+            == "watercooler_daemon_findings"
+        )
+
+    @pytest.mark.anyio
+    async def test_daemon_status_forwards_on_boot_client(self) -> None:
+        """daemon_status has no code_path parameter — boot-client forward,
+        documented in the scope table."""
+        from watercooler_mcp.tools.daemon import (
+            _build_hybrid_pooled_daemon_wrapper,
+            _daemon_status_impl,
+        )
+
+        default = _client("mostlyharmless-ai/watercooler")
+        pool = self._pool(default)
+        wrapper = _build_hybrid_pooled_daemon_wrapper(
+            self._wrapper_runtime(pool),
+            "watercooler_daemon_status",
+            _daemon_status_impl,
+        )
+
+        await wrapper(MagicMock(), daemon="t2_indexer")
+        default.call_tool_text.assert_awaited_once()
+        forwarded = default.call_tool_text.call_args.args
+        assert forwarded[0] == "watercooler_daemon_status"
+        assert forwarded[1]["daemon"] == "t2_indexer"
+
+    def _wrapper_runtime_with_routes(self, pool, overrides):
+        from watercooler_mcp.capabilities import (
+            HYBRID_DEFAULT_ROUTES,
+            CapabilityProfile,
+        )
+
+        runtime = MagicMock()
+        runtime.surface = "local_hybrid"
+        runtime.premium_client = pool.default
+        runtime.premium_pool = pool
+        routes = dict(HYBRID_DEFAULT_ROUTES)
+        routes.update(overrides)
+        runtime.capability_profile = CapabilityProfile(routes=routes)
+        return runtime
+
+    @pytest.mark.anyio
+    async def test_acknowledge_honors_disabled_daemon_control(self) -> None:
+        """PR #1081 review (blocking): daemon_findings(action="acknowledge")
+        resolves to daemon_control (L3), not daemon_observe. With
+        daemon_control disabled while daemon_observe stays remote, the
+        acknowledge write must be refused per call — not forwarded to the
+        hosted endpoint on the registration-time observe route."""
+        from watercooler_mcp.tools.daemon import (
+            _build_hybrid_pooled_daemon_wrapper,
+            _daemon_findings_impl,
+        )
+
+        default = _client("mostlyharmless-ai/watercooler")
+        pool = self._pool(default)
+        runtime = self._wrapper_runtime_with_routes(
+            pool, {"daemon_control": "disabled"}
+        )
+        wrapper = _build_hybrid_pooled_daemon_wrapper(
+            runtime, "watercooler_daemon_findings", _daemon_findings_impl
+        )
+
+        result = await wrapper(
+            MagicMock(), action="acknowledge", finding_id="F1"
+        )
+        payload = json.loads(result)
+        assert payload["error"] == "capability_disabled"
+        assert payload["capability"] == "daemon_control"
+        default.call_tool_text.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_acknowledge_honors_local_daemon_control(self) -> None:
+        """daemon_control routed local runs the local implementation —
+        the observe-remote registration path must not hijack the write."""
+        from watercooler_mcp.tools.daemon import (
+            _build_hybrid_pooled_daemon_wrapper,
+        )
+
+        default = _client("mostlyharmless-ai/watercooler")
+        pool = self._pool(default)
+        runtime = self._wrapper_runtime_with_routes(
+            pool, {"daemon_control": "local"}
+        )
+        called = {}
+
+        def _local_impl(ctx, **kwargs):
+            called.update(kwargs)
+            return "local-ack"
+
+        wrapper = _build_hybrid_pooled_daemon_wrapper(
+            runtime, "watercooler_daemon_findings", _local_impl
+        )
+        result = await wrapper(
+            MagicMock(), action="acknowledge", finding_id="F1"
+        )
+        assert result == "local-ack"
+        assert called["action"] == "acknowledge"
+        default.call_tool_text.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_acknowledge_forwards_remote_on_default_routes(self) -> None:
+        """Default hybrid routes daemon_control remote — acknowledge still
+        forwards, now via the per-call pooled client."""
+        from watercooler_mcp.tools.daemon import (
+            _build_hybrid_pooled_daemon_wrapper,
+            _daemon_findings_impl,
+        )
+
+        default = _client("mostlyharmless-ai/watercooler")
+        site_client = _client("mostlyharmless-ai/watercooler-site")
+        pool = self._pool(default, per_repo=site_client)
+        wrapper = _build_hybrid_pooled_daemon_wrapper(
+            self._wrapper_runtime(pool),
+            "watercooler_daemon_findings",
+            _daemon_findings_impl,
+        )
+
+        await wrapper(
+            MagicMock(),
+            action="acknowledge",
+            finding_id="F1",
+            code_path="/path/to/site",
+        )
+        site_client.call_tool_text.assert_awaited_once()
+        default.call_tool_text.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_daemon_observe_disabled_refuses_listing(self) -> None:
+        """The plain listing leg re-resolves too: daemon_observe disabled
+        refuses instead of forwarding."""
+        from watercooler_mcp.tools.daemon import (
+            _build_hybrid_pooled_daemon_wrapper,
+            _daemon_status_impl,
+        )
+
+        default = _client("mostlyharmless-ai/watercooler")
+        pool = self._pool(default)
+        runtime = self._wrapper_runtime_with_routes(
+            pool, {"daemon_observe": "disabled"}
+        )
+        wrapper = _build_hybrid_pooled_daemon_wrapper(
+            runtime, "watercooler_daemon_status", _daemon_status_impl
+        )
+
+        result = await wrapper(MagicMock())
+        payload = json.loads(result)
+        assert payload["error"] == "capability_disabled"
+        default.call_tool_text.assert_not_awaited()

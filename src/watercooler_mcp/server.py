@@ -244,6 +244,33 @@ def _run_proxy(transport_config: dict, *, boot_cwd: Path | None = None) -> None:
     # create_proxy, so the proxy builds a fresh session per request.
     client = build_premium_client(url, headers, api_key)
     proxy = create_proxy(client, name="Watercooler Cloud (Proxy)")
+
+    # Multi-repo routing (#1082, completion-sequence Wave 2, Codex-approved
+    # 01KX0B3EZB166VXBEE87DSWT9G): a call whose code_path positively derives
+    # a different repo is routed to that repo's pooled premium client (reads
+    # AND writes); underivable/absent code_path stays on the pinned session;
+    # an unclaimed derived repo is refused by the hosted ownership check.
+    # If the pool cannot be constructed, degrade to the A2 guard (refuse
+    # cross-repo calls deterministically) rather than run unguarded.
+    from .premium_client import PremiumClientPool, PremiumToolClient
+    from .proxy_guard import ProxyRepoScopeMiddleware
+
+    pool = None
+    try:
+        boot_ptc = PremiumToolClient.from_transport_config(
+            transport_config, boot_cwd=boot_cwd
+        )
+        pool = PremiumClientPool(transport_config, boot_ptc, boot_cwd=boot_cwd)
+    except Exception as exc:
+        print(
+            f"Warning: multi-repo routing unavailable ({exc}); "
+            "cross-repo calls will be refused (single-repo guard mode).",
+            file=sys.stderr,
+        )
+
+    proxy.add_middleware(
+        ProxyRepoScopeMiddleware(headers.get("X-Repo", ""), pool=pool)
+    )
     proxy.run()
 
 

@@ -2363,6 +2363,157 @@ def _falkordb_startup_worker(host: str, port: int) -> None:
         _update_service_status("falkordb", ServiceState.FAILED, message=error_msg)
 
 
+def local_falkordb_in_use() -> tuple[bool, str, str]:
+    """Decide whether this configuration uses a local FalkorDB at all.
+
+    Single source of truth for the "does local FalkorDB matter here?"
+    decision, shared by the auto-start gate (:func:`ensure_falkordb_running`)
+    and the health diagnostics (``tools/diagnostic.py``) so the two surfaces
+    cannot drift. A configuration that does not use local FalkorDB must not
+    look for one — reachability of an unrelated local Redis/FalkorDB is not
+    a watercooler signal (audit-transport-modes-hosted-db-2026-07 plan v3).
+
+    Returns:
+        ``(in_use, reason_code, detail)``. ``reason_code`` is a
+        machine-checkable branch tag: ``transport_hosted`` /
+        ``routes_all_remote`` / ``no_local_tier`` / ``backend_unresolvable``
+        (all ``in_use=False``), or ``t1_semantic`` / ``t2_graphiti`` /
+        ``t1_and_t2`` (``in_use=True``). ``detail`` is a human-readable
+        reason suitable for status lines and logs.
+    """
+    from watercooler.memory_config import get_memory_backend
+
+    # In ``hybrid`` and ``proxy`` modes, T1/T2 graph operations are routed
+    # to the hosted FalkorDB on Railway. The local FalkorDB on
+    # 127.0.0.1:6379 isn't on any code path (design principle #9).
+    try:
+        from .config import get_watercooler_config
+        transport = get_watercooler_config().mcp.transport
+    except Exception as cfg_exc:
+        # PR #656 review (LOW): a malformed config or unexpected
+        # runtime error here would silently fall through to stdio
+        # behavior — treating local FalkorDB as in-use even when the
+        # operator's intent was hybrid. Log so the failure is
+        # visible in operator-facing logs; behavior still falls
+        # through to the conservative path so a broken config
+        # doesn't lock the operator out of stdio mode entirely.
+        log_error(
+            "STARTUP: failed to resolve transport config; "
+            "falling back to stdio (local FalkorDB auto-start "
+            f"may run unexpectedly): {cfg_exc}"
+        )
+        transport = "stdio"
+    if transport in ("hybrid", "proxy"):
+        return (
+            False,
+            "transport_hosted",
+            f"Transport is '{transport}' — using hosted FalkorDB",
+        )
+
+    # Explicit-routes skip. Catches operators who have configured
+    # transport=stdio but explicitly routed all FalkorDB-using
+    # capabilities to "remote" (uncommon but valid — e.g.
+    # stdio-only client wanting to use the hosted backend without
+    # the hybrid transport label).
+    #
+    # NOTE: This check does NOT catch the silent-fallback case
+    # documented in bug-falkordb-startup-gate-hybrid-2026-05-12
+    # entry 01KRDMK58S59A2WRPHCBY46XPS — when load_config raises
+    # and falls back to WatercoolerConfig(), capability_routes is
+    # empty {}, and the all-remote check returns False. The
+    # operative fix for that incident is the log_warning
+    # promotion in src/watercooler_mcp/config.py (the silent
+    # fallback is now observable in logs).
+    #
+    # Capability list mirrors the "remote" entries in
+    # HYBRID_DEFAULT_ROUTES in src/watercooler_mcp/capabilities.py
+    # that drive FalkorDB-backed code paths. Keep this list in
+    # sync with that source if new FalkorDB-using capabilities
+    # are added.
+    try:
+        from .config import get_watercooler_config
+        routes = get_watercooler_config().mcp.capability_routes or {}
+    except Exception as routes_exc:
+        log_warning(
+            f"STARTUP: failed to resolve capability_routes; "
+            f"explicit-routes FalkorDB skip check disabled: "
+            f"{type(routes_exc).__name__}: {routes_exc}"
+        )
+        routes = {}
+
+    falkordb_caps = (
+        "memory_ingest",
+        "memory_query",
+        "memory_observe",
+        "daemon_observe",
+        "semantic_similarity",
+    )
+    if routes and all(routes.get(c) == "remote" for c in falkordb_caps):
+        return (
+            False,
+            "routes_all_remote",
+            "All FalkorDB-using routes are remote",
+        )
+
+    # T1-aware gate: FalkorDB is needed if EITHER T1 baseline semantic
+    # (gated by mcp.graph.generate_embeddings) OR T2 graphiti
+    # (gated by memory.backend == "graphiti") is enabled. The previous
+    # gate only checked T2 and missed T1's separate dependency on
+    # FalkorDBEntryStore (src/watercooler/baseline_graph/falkordb_entries.py),
+    # which left stdio + T1-only users without auto-start. Bug closed by
+    # that change; see thread bug-falkordb-startup-gate-t1-2026-05-04
+    # plan entry 01KQTGHGPYXQ51Z1S94BKVZFZJ.
+    try:
+        from .config import get_watercooler_config
+        needs_falkordb_for_t1 = (
+            get_watercooler_config().mcp.graph.generate_embeddings
+        )
+    except Exception as graph_cfg_exc:
+        # Conservative fallback: assume T1 semantic is on (matches schema
+        # default). Logged so the failure is visible but doesn't lock the
+        # operator out of stdio mode.
+        log_error(
+            "STARTUP: failed to resolve mcp.graph.generate_embeddings; "
+            f"assuming True (schema default): {graph_cfg_exc}"
+        )
+        needs_falkordb_for_t1 = True
+
+    try:
+        backend = get_memory_backend()
+    except Exception as exc:
+        # Catch broad Exception (matches the surrounding transport-config
+        # and graph-config catches) so a stale import, a missing memory
+        # backend module, or any other runtime error during backend
+        # resolution can't escape to a caller's outer ``except Exception``
+        # and mark FalkorDB as FAILED. The intent of this gate is the
+        # graceful fallback path — protect it from any exception type,
+        # not just ValueError.
+        log_error(f"MEMORY config error: {exc}")
+        return (
+            False,
+            "backend_unresolvable",
+            f"memory backend unresolvable: {exc}",
+        )
+
+    needs_falkordb_for_t2 = (backend == "graphiti")
+
+    if not (needs_falkordb_for_t1 or needs_falkordb_for_t2):
+        return (
+            False,
+            "no_local_tier",
+            "neither T1 semantic (mcp.graph.generate_embeddings) "
+            f"nor T2 (memory.backend={backend!r}) is enabled",
+        )
+    if needs_falkordb_for_t1 and needs_falkordb_for_t2:
+        return (
+            True, "t1_and_t2",
+            "T1 baseline semantic + T2 graphiti use local FalkorDB",
+        )
+    if needs_falkordb_for_t2:
+        return (True, "t2_graphiti", "T2 graphiti uses local FalkorDB")
+    return (True, "t1_semantic", "T1 baseline semantic uses local FalkorDB")
+
+
 def ensure_falkordb_running() -> None:
     """Start FalkorDB if any FalkorDB-backed tier needs it.
 
@@ -2395,140 +2546,23 @@ def ensure_falkordb_running() -> None:
     its own field rather than overloading ``auto_start_services``.
     """
     try:
-        from watercooler.memory_config import get_memory_backend, resolve_database_config
+        from watercooler.memory_config import resolve_database_config
 
-        # Plan v20 follow-on: in ``hybrid`` and ``proxy`` modes, T1/T2 graph
-        # operations are routed to the hosted FalkorDB on Railway. The local
-        # FalkorDB on 127.0.0.1:6379 isn't on any code path — auto-starting
-        # it produces the "Local FalkorDB reachable but memory_ingest=remote"
-        # mismatch warning every health-check, and risks shadowing the
-        # hosted path if a regression accidentally re-enables an
-        # in-process GraphitiBackend (design principle #9).
-        try:
-            from .config import get_watercooler_config
-            transport = get_watercooler_config().mcp.transport
-        except Exception as cfg_exc:
-            # PR #656 review (LOW): a malformed config or unexpected
-            # runtime error here would silently fall through to stdio
-            # behavior — auto-starting a local FalkorDB even when the
-            # operator's intent was hybrid. Log so the failure is
-            # visible in operator-facing logs; behavior still falls
-            # through to the conservative path so a broken config
-            # doesn't lock the operator out of stdio mode entirely.
-            log_error(
-                "STARTUP: failed to resolve transport config; "
-                "falling back to stdio (local FalkorDB auto-start "
-                f"may run unexpectedly): {cfg_exc}"
-            )
-            transport = "stdio"
-        if transport in ("hybrid", "proxy"):
+        # Modality gate — shared with the health diagnostics so the two
+        # surfaces cannot drift (audit-transport-modes-hosted-db-2026-07
+        # plan v3): local_falkordb_in_use() owns the transport check, the
+        # explicit-routes skip, and the T1/T2 tier split.
+        in_use, gate_reason, gate_detail = local_falkordb_in_use()
+        if not in_use:
+            if gate_reason == "backend_unresolvable":
+                # Graceful-fallback contract preserved: backend-resolution
+                # failure logs (inside the helper) and leaves the falkordb
+                # service status untouched.
+                return
             _update_service_status(
-                "falkordb", ServiceState.DISABLED,
-                message=f"Transport is '{transport}' — using hosted FalkorDB",
+                "falkordb", ServiceState.DISABLED, message=gate_detail,
             )
-            log_debug(
-                f"Transport is '{transport}', skipping local FalkorDB "
-                f"auto-start (hosted Railway FalkorDB owns T1/T2 in this mode)"
-            )
-            return
-
-        # Explicit-routes skip. Catches operators who have configured
-        # transport=stdio but explicitly routed all FalkorDB-using
-        # capabilities to "remote" (uncommon but valid — e.g.
-        # stdio-only client wanting to use the hosted backend without
-        # the hybrid transport label).
-        #
-        # NOTE: This check does NOT catch the silent-fallback case
-        # documented in bug-falkordb-startup-gate-hybrid-2026-05-12
-        # entry 01KRDMK58S59A2WRPHCBY46XPS — when load_config raises
-        # and falls back to WatercoolerConfig(), capability_routes is
-        # empty {}, and the all-remote check returns False. The
-        # operative fix for that incident is the log_warning
-        # promotion in src/watercooler_mcp/config.py (the silent
-        # fallback is now observable in logs).
-        #
-        # Capability list mirrors the "remote" entries in
-        # HYBRID_DEFAULT_ROUTES in src/watercooler_mcp/capabilities.py
-        # that drive FalkorDB-backed code paths. Keep this list in
-        # sync with that source if new FalkorDB-using capabilities
-        # are added.
-        try:
-            from .config import get_watercooler_config
-            routes = get_watercooler_config().mcp.capability_routes or {}
-        except Exception as routes_exc:
-            log_warning(
-                f"STARTUP: failed to resolve capability_routes; "
-                f"explicit-routes FalkorDB skip check disabled: "
-                f"{type(routes_exc).__name__}: {routes_exc}"
-            )
-            routes = {}
-
-        falkordb_caps = (
-            "memory_ingest",
-            "memory_query",
-            "memory_observe",
-            "daemon_observe",
-            "semantic_similarity",
-        )
-        if routes and all(routes.get(c) == "remote" for c in falkordb_caps):
-            _update_service_status(
-                "falkordb", ServiceState.DISABLED,
-                message="All FalkorDB-using routes are remote",
-            )
-            log_debug(
-                "All FalkorDB-using capability routes ("
-                + ", ".join(falkordb_caps)
-                + ") are 'remote', skipping local FalkorDB auto-start"
-            )
-            return
-
-        # T1-aware gate: FalkorDB is needed if EITHER T1 baseline semantic
-        # (gated by mcp.graph.generate_embeddings) OR T2 graphiti
-        # (gated by memory.backend == "graphiti") is enabled. The previous
-        # gate only checked T2 and missed T1's separate dependency on
-        # FalkorDBEntryStore (src/watercooler/baseline_graph/falkordb_entries.py),
-        # which left stdio + T1-only users without auto-start. Bug closed by
-        # this change; see thread bug-falkordb-startup-gate-t1-2026-05-04
-        # plan entry 01KQTGHGPYXQ51Z1S94BKVZFZJ.
-        try:
-            from .config import get_watercooler_config
-            needs_falkordb_for_t1 = (
-                get_watercooler_config().mcp.graph.generate_embeddings
-            )
-        except Exception as graph_cfg_exc:
-            # Conservative fallback: assume T1 semantic is on (matches schema
-            # default). Logged so the failure is visible but doesn't lock the
-            # operator out of stdio mode.
-            log_error(
-                "STARTUP: failed to resolve mcp.graph.generate_embeddings; "
-                f"assuming True (schema default): {graph_cfg_exc}"
-            )
-            needs_falkordb_for_t1 = True
-
-        try:
-            backend = get_memory_backend()
-        except Exception as exc:
-            # Catch broad Exception (matches the surrounding transport-config
-            # and graph-config catches) so a stale import, a missing memory
-            # backend module, or any other runtime error during backend
-            # resolution can't escape to the outer ``except Exception`` and
-            # mark FalkorDB as FAILED. The intent of this gate is the
-            # graceful fallback path — protect it from any exception type,
-            # not just ValueError.
-            log_error(f"MEMORY config error: {exc}")
-            return
-
-        needs_falkordb_for_t2 = (backend == "graphiti")
-
-        if not (needs_falkordb_for_t1 or needs_falkordb_for_t2):
-            reason = (
-                "neither T1 semantic (mcp.graph.generate_embeddings) "
-                f"nor T2 (memory.backend={backend!r}) is enabled"
-            )
-            _update_service_status(
-                "falkordb", ServiceState.DISABLED, message=reason,
-            )
-            log_debug(f"Skipping FalkorDB auto-start: {reason}")
+            log_debug(f"Skipping local FalkorDB auto-start: {gate_detail}")
             return
 
         # Get database config

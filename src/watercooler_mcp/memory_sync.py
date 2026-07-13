@@ -241,6 +241,16 @@ async def _call_graphiti_add_episode(
             source_description=source_desc,
             reference_time=ref_time,
             group_id=unified_group_id,
+            episode_metadata=(
+                {
+                    "entry_id": entry_id,
+                    "thread_id": topic,
+                    "chunk_index": 1,
+                    "total_chunks": 1,
+                }
+                if entry_id
+                else None
+            ),
         )
 
         episode_uuid = result.get("episode_uuid", "unknown")
@@ -389,6 +399,12 @@ async def _call_graphiti_add_episode_chunked(
                     reference_time=ref_time,
                     group_id=unified_group_id,
                     previous_episode_uuids=previous_episode_uuids.copy() if previous_episode_uuids else None,
+                    episode_metadata={
+                        "entry_id": entry_id,
+                        "thread_id": topic,
+                        "chunk_index": chunk_num,
+                        "total_chunks": total_chunks,
+                    },
                 )
 
                 episode_uuid = result.get("episode_uuid", "unknown")

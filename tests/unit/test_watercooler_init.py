@@ -17,6 +17,18 @@ from watercooler_mcp.tools.diagnostic import _health_setup_impl
 from watercooler_mcp.tools.setup import _init_impl
 
 
+@pytest.fixture(autouse=True)
+def isolated_config_cache():
+    """Keep ambient repo config out of setup tests' temp repositories."""
+    from watercooler.config_loader import clear_config_cache
+
+    clear_config_cache()
+    config._loaded_config = None
+    yield
+    clear_config_cache()
+    config._loaded_config = None
+
+
 def _git(args, cwd):
     subprocess.run(
         ["git", *args],
@@ -39,6 +51,7 @@ def repo(tmp_path, monkeypatch):
 
     wt_base = tmp_path / "worktrees"
     monkeypatch.setattr(config, "WORKTREE_BASE", wt_base)
+    monkeypatch.chdir(code)
     # Keep parity/sync probes offline and deterministic.
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
     return code
@@ -120,6 +133,7 @@ def test_non_git_path_reports_clearly(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "WORKTREE_BASE", tmp_path / "worktrees")
     plain = tmp_path / "not-a-repo"
     plain.mkdir()
+    monkeypatch.chdir(plain)
     r = json.loads(_init_impl(None, code_path=str(plain)))
     assert r["usable_now"] is False
     assert "git" in r["summary"].lower()
@@ -163,6 +177,7 @@ def test_health_setup_non_git_matches_init(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "WORKTREE_BASE", tmp_path / "worktrees")
     plain = tmp_path / "not-a-repo"
     plain.mkdir()
+    monkeypatch.chdir(plain)
     h = json.loads(_health_setup_impl(None, code_path=str(plain)))
     i = json.loads(_init_impl(None, code_path=str(plain)))
     assert h["usable_now"] is False
