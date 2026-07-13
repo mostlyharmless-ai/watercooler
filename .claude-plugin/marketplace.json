@@ -1,0 +1,21 @@
+{
+  "name": "watercooler",
+  "description": "Official Watercooler plugin marketplace \u2014 open-core skills + MCP server.",
+  "owner": {
+    "name": "Watercooler",
+    "url": "https://github.com/mostlyharmless-ai/watercooler"
+  },
+  "plugins": [
+    {
+      "name": "watercooler",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/mostlyharmless-ai/watercooler.git",
+        "path": "plugins/claude/watercooler",
+        "sha": "217339b19567e895d397c09a1b0bd2a89a065e25",
+        "ref": "v0.5.5"
+      },
+      "description": "Watercooler \u2014 graph-first threaded memory for agentic coding teams."
+    }
+  ]
+}
