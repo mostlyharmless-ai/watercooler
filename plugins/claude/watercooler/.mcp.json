@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "watercooler": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/mostlyharmless-ai/watercooler@v0.5.5[local]",
+        "watercooler-mcp"
+      ]
+    }
+  }
+}

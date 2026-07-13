@@ -1,0 +1,11 @@
+{
+  "name": "watercooler",
+  "version": "0.5.5",
+  "description": "Watercooler \u2014 graph-first threaded memory for agentic coding teams.",
+  "author": {
+    "name": "Watercooler",
+    "url": "https://github.com/mostlyharmless-ai/watercooler"
+  },
+  "homepage": "https://github.com/mostlyharmless-ai/watercooler",
+  "license": "Apache-2.0"
+}

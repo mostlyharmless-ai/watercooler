@@ -1,0 +1,20 @@
+{
+  "name": "watercooler",
+  "interface": {
+    "displayName": "Watercooler"
+  },
+  "plugins": [
+    {
+      "name": "watercooler",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex/watercooler"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "productivity"
+    }
+  ]
+}
