@@ -4,7 +4,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/mostlyharmless-ai/watercooler@v0.5.5[local]",
+        "git+https://github.com/mostlyharmless-ai/watercooler@v0.5.6[local]",
         "watercooler-mcp"
       ]
     }

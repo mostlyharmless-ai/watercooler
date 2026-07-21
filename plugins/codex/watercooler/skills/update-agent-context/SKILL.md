@@ -746,6 +746,28 @@ Decision entry and is subject to Step 7 re-validation like any other bullet — 
 not dropped merely because it was hand-added rather than machine-extracted. Only
 bullets *without* a ULID (unprovenanced additions) must be removed.
 
+**Criterion projections are NOT yours to edit.** A bullet whose provenance comment
+carries a `derived-from <ULID>@<version>` marker (e.g.
+`<!-- derived-from 01KXXXXX...@1 | approval: … | evidence: … -->`) is a **Commons
+criterion projection**, written and owned by `scripts/commons_export.py` under a
+human approval Decision (L3). The comment does not start with a bare ULID — it is
+provenanced anyway; never classify it as unprovenanced. For these bullets:
+
+- **Preserve verbatim** — text and comment byte-for-byte. Step 7's
+  "revise the bullet, keep the entry ID" action does NOT apply: wording changes to
+  a ratified criterion travel through a **superseding version** (a new approval
+  Decision + `commons_export.py --version N+1`), never an in-place edit. The
+  export verifies its projections content-exactly and will refuse over a
+  hand-modified bullet.
+- **Never remove**, except: (a) the bullet is already `[STALE — superseded by @N]`
+  flagged (retirement of staled versions follows the Commons retirement policy),
+  or (b) a human retirement decision explicitly directs it.
+- **Route concerns forward** — if re-validation finds a criterion stale or wrong,
+  record that as a candidate for a superseding version (cite this skill run as
+  evidence); do not act on the block.
+- Criterion bullets do not count against the 20-bullet/500-token cap below — the
+  cap governs this skill's own extraction budget, not the export pipeline's output.
+
 Cap: **20 bullets maximum, ≤ 500 tokens**. Each bullet must meet all seven
 candidate acceptance rules:
 
