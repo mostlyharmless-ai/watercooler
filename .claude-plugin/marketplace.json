@@ -12,8 +12,8 @@
         "source": "git-subdir",
         "url": "https://github.com/mostlyharmless-ai/watercooler.git",
         "path": "plugins/claude/watercooler",
-        "sha": "217339b19567e895d397c09a1b0bd2a89a065e25",
-        "ref": "v0.5.5"
+        "sha": "e4264a123c9c4c6c9a141833211828b1388b501c",
+        "ref": "v0.5.6"
       },
       "description": "Watercooler \u2014 graph-first threaded memory for agentic coding teams."
     }
