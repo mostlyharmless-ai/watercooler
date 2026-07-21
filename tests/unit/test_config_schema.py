@@ -102,7 +102,8 @@ class TestMcpConfig:
     def test_defaults(self):
         """McpConfig has sensible defaults."""
         config = McpConfig()
-        assert config.transport == "stdio"
+        assert config.transport == "proxy"
+        assert config.url == "https://watercooler-cloud-production.up.railway.app/mcp/"
         assert config.host == "127.0.0.1"
         assert config.port == 3000
         assert config.default_agent == "Agent"

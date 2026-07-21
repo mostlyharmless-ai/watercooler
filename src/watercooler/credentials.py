@@ -17,6 +17,7 @@ import json
 import os
 import stat
 import sys
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -357,6 +358,66 @@ def _load_toml_credentials(path: Path) -> Dict[str, Any]:
         )
 
     return tomllib.loads(content.decode("utf-8"))
+
+
+def set_hosted_api_key(api_key: str, path: Path | None = None) -> Path:
+    """Persist the hosted MCP API key to ``credentials.toml`` ``[hosted].api_key``.
+
+    Creates the file (0600) if absent; otherwise updates the ``[hosted]`` section
+    in place, preserving other sections and comments. Used by ``watercooler login``.
+
+    Args:
+        api_key: The ``wc_...`` agent key from the dashboard.
+        path: Target credentials file; defaults to ``~/.watercooler/credentials.toml``.
+
+    Returns:
+        The path written.
+    """
+    if tomlkit is None:
+        raise RuntimeError(
+            "Writing credentials requires tomlkit. Install with: pip install tomlkit"
+        )
+    target = path or _get_user_credentials_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if target.exists():
+        doc = tomlkit.parse(target.read_text(encoding="utf-8"))
+    else:
+        doc = tomlkit.document()
+        doc.add(tomlkit.comment(" Watercooler Credentials"))
+        doc.add(
+            tomlkit.comment(" Keep this file secure - do not commit to version control")
+        )
+        doc.add(tomlkit.nl())
+
+    hosted = doc.get("hosted")
+    if hosted is None:
+        hosted = tomlkit.table()
+        doc.add("hosted", hosted)
+    hosted["api_key"] = api_key
+
+    # Write atomically through a 0600 temp file in the same directory: the secret
+    # is never briefly created under the umask (0644), and a crash or a partial
+    # write can't truncate the user's other credentials — the original stays
+    # intact until the atomic replace succeeds.
+    content = tomlkit.dumps(doc)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=".credentials-", suffix=".tmp"
+    )
+    try:
+        _secure_file_permissions(Path(tmp_name))  # 0600 before any bytes land
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, target)  # atomic; target inherits the temp's 0600
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    return target
 
 
 def load_credentials(auto_migrate: bool = True) -> Credentials:

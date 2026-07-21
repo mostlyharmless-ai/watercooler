@@ -32,6 +32,17 @@ __all__ = [
 
 import importlib.util as _importlib_util
 
+# Pin the test process to full-local execution routing. Module import of
+# watercooler_mcp.server is transport-gated (modality-robustness Phase 2):
+# under an EFFECTIVE proxy it deliberately skips building the local tool
+# surface, memory queue, and daemon manager. Tests rely on those import-time
+# side effects, and a developer machine may carry an authenticated proxy
+# config — so the suite pins stdio via the env override (highest precedence)
+# rather than inheriting operator state. Subprocess-based mode probes
+# (tests/unit/test_mode_matrix.py) strip WATERCOOLER_* from their child env
+# and are unaffected.
+os.environ["WATERCOOLER_MCP_TRANSPORT"] = "stdio"
+
 
 def pytest_ignore_collect(collection_path, config):  # type: ignore[override]
     """Skip test files that import unavailable optional modules at collection time.

@@ -54,6 +54,8 @@ from fastmcp.server.middleware import Middleware
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
+from .premium_client import summarize_http_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -68,14 +70,46 @@ class ProxyRepoScopeMiddleware(Middleware):
         arguments = getattr(context.message, "arguments", None) or {}
         code_path = arguments.get("code_path")
         requested = _derive_repo(code_path)
+        tool_name = getattr(context.message, "name", "<unknown>")
         if not (
             requested
             and self._pinned
             and requested.lower() != self._pinned.lower()
         ):
-            return await call_next(context)
-
-        tool_name = getattr(context.message, "name", "<unknown>")
+            try:
+                return await call_next(context)
+            except Exception as exc:
+                # Keep the hosted endpoint's error body visible (#1117):
+                # an HTTP-layer rejection on the forwarded leg (e.g. a 403
+                # ``repo_claim_mismatch`` when the token's claim changed
+                # mid-session) would otherwise be flattened by FastMCP's
+                # generic exception mapping to a bare -32603 status line.
+                status, detail = summarize_http_error(exc)
+                if detail is None:
+                    raise
+                logger.warning(
+                    "PROXY_GUARD: forwarded call %s failed with HTTP %s: %s",
+                    tool_name,
+                    status,
+                    detail,
+                )
+                return ToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=json.dumps(
+                                {
+                                    "error": "hosted_http_error",
+                                    "status_code": status,
+                                    "tool": tool_name,
+                                    "message": detail,
+                                },
+                                indent=2,
+                            ),
+                        )
+                    ],
+                    is_error=True,
+                )
 
         if self._pool is None:
             logger.warning(
@@ -122,6 +156,12 @@ class ProxyRepoScopeMiddleware(Middleware):
                 requested,
                 exc,
             )
+            # An HTTP-layer rejection carries the hosted endpoint's own
+            # error body — include it rather than only str(exc) (#1117).
+            status, detail = summarize_http_error(exc)
+            hosted = (
+                f" Hosted response (HTTP {status}): {detail}" if detail else ""
+            )
             return _structured_error(
                 error="proxy_route_error",
                 pinned=self._pinned,
@@ -131,6 +171,7 @@ class ProxyRepoScopeMiddleware(Middleware):
                     f"routing to derived repo {requested!r} failed "
                     f"({type(exc).__name__}: {exc}). The call was NOT "
                     f"served from the pinned repo {self._pinned!r}."
+                    + hosted
                 ),
             )
 

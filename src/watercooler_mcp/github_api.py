@@ -248,7 +248,9 @@ class GitHubClient:
 
         Raises:
             GitHubNotFoundError: If file doesn't exist.
-            GitHubAPIError: On other API errors.
+            GitHubAPIError: On other API errors, or if content could not
+                be retrieved for a non-empty file (e.g. blob over the
+                Git Blobs API's 100MB ceiling).
         """
         endpoint = f"/repos/{self.owner}/{self.repo_name}/contents/{_encode_contents_path(path)}"
         if self.branch:
@@ -256,8 +258,39 @@ class GitHubClient:
 
         data = self._make_request("GET", endpoint)
 
-        # Decode base64 content
         content_b64 = data.get("content", "")
+
+        # Contents API won't inline blobs over 1MB: it returns 200 with
+        # encoding "none", empty content, and a valid sha. Treating that
+        # as an empty file silently truncates threads on the next write
+        # (2026-07-20 incident). Fall back to the Git Blobs API, which
+        # serves blobs up to 100MB.
+        if not content_b64 and data.get("size", 0) > 0:
+            # A 404 here must NOT escape as GitHubNotFoundError: the
+            # Contents response just proved the file exists, and callers
+            # (e.g. _read_per_thread_graph, file_exists) read NotFound as
+            # "file absent" — which would re-open the truncate-on-write
+            # window this fallback exists to close.
+            try:
+                blob = self._make_request(
+                    "GET",
+                    f"/repos/{self.owner}/{self.repo_name}/git/blobs/{data['sha']}",
+                )
+            except GitHubNotFoundError as e:
+                raise GitHubAPIError(
+                    f"Git Blobs fallback for {path} (sha {data['sha']}) "
+                    f"returned 404 although the Contents API reports the "
+                    f"file exists with size {data.get('size')}: {e}"
+                ) from e
+            content_b64 = blob.get("content", "")
+            if not content_b64:
+                raise GitHubAPIError(
+                    f"File {path} has size {data.get('size')} but no content "
+                    f"is retrievable via the Contents or Git Blobs API "
+                    f"(encoding={blob.get('encoding')!r}); refusing to treat "
+                    f"it as empty"
+                )
+
         # GitHub returns content with newlines, remove them before decoding
         content_b64_clean = content_b64.replace("\n", "")
         content = base64.b64decode(content_b64_clean).decode("utf-8")

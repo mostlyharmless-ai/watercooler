@@ -78,7 +78,19 @@ def resolve_local_stance_producer(daemons_config: Any, transport: str) -> Option
         # Active but hosted-routed: decision_stance is correctly suppressed,
         # and no LOCAL daemon produces stance_advisory findings either.
         return None
-    if daemons_config.decision_stance.enabled:
+    # decision_stance goes through the SAME placement policy as every other
+    # registration (review #1135 P1, round 2): it is thread-analytic, so
+    # under an effective proxy it resolves "hosted" and there is no LOCAL
+    # producer — the sidecar and init_daemons must agree, or the Stop hook
+    # polls stale local stance findings while execution moved hosted.
+    ds_cfg = daemons_config.decision_stance
+    if (
+        ds_cfg.enabled
+        and daemon_execution_policy(
+            "decision_stance", ds_cfg, transport, in_hosted_coordinator=False
+        )
+        == "local"
+    ):
         return "decision_stance"
     return None
 
@@ -116,6 +128,27 @@ def resolve_active_stance_producer() -> Optional[str]:
         transport = getattr(wc_config.mcp, "transport", "stdio")
     except Exception:
         return "decision_stance"
+
+    # EFFECTIVE transport, same recipe as init_daemons (review #1135 P1,
+    # round 2): a credential-less proxy resolves to stdio and DOES register
+    # the local producer — reading the raw config value here would make the
+    # Stop hook skip findings that genuinely exist. Fail-open to the raw
+    # value so credential IO trouble never changes the answer class.
+    try:
+        import os as _os
+
+        from ..config import effective_transport as _eff
+
+        transport = _eff(
+            transport,
+            _os.getenv(
+                "WATERCOOLER_MCP_URL", getattr(wc_config.mcp, "url", "") or ""
+            )
+            or "",
+            config.get_hosted_api_key() or "",
+        )
+    except Exception:  # noqa: BLE001 — best-effort effective resolution
+        pass
 
     try:
         from ..auth import is_hosted_mode
@@ -156,6 +189,33 @@ def resolve_active_findings_sources(scope: str = "") -> list[FindingsSource]:
     passes a real ``scope`` correctly gets the strict-namespace guard
     enforced rather than carrying the exemption ambiently.
     """
+    # Under an EFFECTIVE proxy no LOCAL findings log is authoritative for
+    # this repo — decision_extractor included (thread-analytic, hosted
+    # there). Mirrors stop_hook._local_findings_apply for callers that reach
+    # full resolution directly (review #1135 P1, round 3).
+    try:
+        import os as _os
+
+        from watercooler.config_facade import config as _facade
+
+        from ..config import effective_transport as _eff
+
+        wc_mcp = _facade.full().mcp
+        if (
+            _eff(
+                getattr(wc_mcp, "transport", "stdio"),
+                _os.getenv(
+                    "WATERCOOLER_MCP_URL", getattr(wc_mcp, "url", "") or ""
+                )
+                or "",
+                _facade.get_hosted_api_key() or "",
+            )
+            == "proxy"
+        ):
+            return []
+    except Exception:  # noqa: BLE001 — fail open to normal local polling
+        pass
+
     stance_daemon = resolve_active_stance_producer()
     names = ["decision_extractor"]
     if stance_daemon is not None:

@@ -10,9 +10,11 @@ This page covers prerequisites, first-run approval, and invocation — read it a
 [QUICKSTART.md](./QUICKSTART.md) (manual MCP setup, no plugin) and
 [MCP-CLIENTS.md](./MCP-CLIENTS.md) (per-client MCP config reference).
 
-> **Availability.** Packaged plugin artifacts ship with the first packaged release.
-> Until then, use the manual setup in [QUICKSTART.md](./QUICKSTART.md) — the MCP server
-> and skills work the same way, just without a single-install plugin wrapper.
+> **Availability.** Packaged plugin artifacts are available starting with **v0.5.5** —
+> see the install channels for [Claude Code](#claude-code) and [Codex](#codex) below.
+> The manual setup in [QUICKSTART.md](./QUICKSTART.md) remains a supported alternative:
+> the MCP server and skills work the same way, just without a single-install plugin
+> wrapper.
 
 ---
 
@@ -47,23 +49,33 @@ equivalent credential) separately from the plugin install.
 **What the plugin delivers:** the 7 skills under `skills/`, plus `.mcp.json` registering
 the `watercooler` MCP server (so tool calls resolve as `mcp__watercooler__*`).
 
-**Install channels.** Marketplace details are pending a product decision — the
-mechanisms below are documented generically until the first packaged release ships
-exact commands:
+**Install channels.** Live as of v0.5.5:
 
-- **Marketplace add** — add the Watercooler-owned marketplace, then install the
-  `watercooler` plugin from it. *Coming with the first packaged release.*
-- **`--plugin-url` trial install** — load a release-asset `.zip` directly for a
+- **Marketplace add** (recommended) — add the Watercooler marketplace, then install
+  the plugin from it:
+
+  ```bash
+  claude plugin marketplace add mostlyharmless-ai/watercooler
+  claude plugin install watercooler@watercooler
+  ```
+
+  The marketplace entry is pinned to the release tag's commit, so an install
+  resolves the plugin tree as published at `vX.Y.Z` — not a moving `main`.
+- **`--plugin-url` trial install** — load the release-asset `.zip` directly for a
   session, no marketplace required:
 
   ```bash
-  claude --plugin-url https://<release-asset-url>/watercooler-claude-plugin.zip
+  claude --plugin-url https://github.com/mostlyharmless-ai/watercooler/releases/download/v0.5.5/watercooler-claude-plugin.zip
   ```
 
-  Zip archives passed to `--plugin-dir`/`--plugin-url` require **Claude Code
-  ≥ v2.1.128**. *Asset URL coming with the first packaged release.*
-- **Community marketplace** — Watercooler will also submit to the community
-  marketplace for discoverability. *Coming with the first packaged release.*
+  The URL is tag-pinned by design (never a floating `latest`) — bump the version in
+  the path to install a newer release. A `.sha256` companion asset ships alongside
+  it. Zip archives passed to `--plugin-dir`/`--plugin-url` require **Claude Code
+  ≥ v2.1.128**.
+- **Community marketplace** — submission for discoverability is pending. Submissions
+  go through Anthropic's in-app review pipeline (not a pull request against the
+  catalog repo, which auto-closes them); approved plugins appear in
+  `anthropics/claude-plugins-community` after review and a nightly sync.
 
 **First-run MCP approval.** Claude Code prompts to trust a newly added MCP server the
 first time it's used — approve the `watercooler` server when prompted. If the server
@@ -98,8 +110,19 @@ skills. If you're used to bare `/recall` from a standalone setup, switch to the
 (`.codex-plugin/plugin.json`).
 
 **Install channel.** Codex plugins distribute through a repo/team marketplace catalog
-(`.agents/plugins/marketplace.json`), not ad hoc copying. *Marketplace entry and exact
-install command are coming with the first packaged release.*
+(`.agents/plugins/marketplace.json`), not ad hoc copying. The catalog ships at the root
+of the public repo and its entry points at `./plugins/codex/watercooler`, so clone the
+repo and add it as a marketplace:
+
+```bash
+git clone https://github.com/mostlyharmless-ai/watercooler.git
+codex plugin marketplace add ./watercooler
+codex plugin add watercooler@watercooler
+```
+
+Unlike the Claude entry, the Codex catalog schema has no ref/sha pin field (`source:
+"local"` only), so the tree you get is the one in your checkout — check out the
+`vX.Y.Z` tag if you want a specific release rather than public `main`.
 
 **First-run MCP approval — enable the server explicitly.** Unlike Claude Code's
 zero-touch `.mcp.json` pickup, a Codex plugin's bundled MCP server is **not**

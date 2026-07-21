@@ -18,9 +18,24 @@ later commit once their semantics are settled.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
+
+# TOML loading: tomllib (3.11+) with tomli fallback (same pattern as role_loader)
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    try:
+        import tomllib  # type: ignore
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore
+        except ImportError:
+            tomllib = None  # type: ignore
 
 # PR-number patterns, conservative to avoid matching bare issue refs:
 # - GitHub PR URLs: ".../pull/950"
@@ -266,3 +281,63 @@ def assess_thread_learning(
         return LearningAssessment("capture_gap", c.id, c.severity, prs)
 
     return LearningAssessment("not_applicable", None, None, prs)
+
+
+# ---------------------------------------------------------------------------
+# F3 — canonical root-cause taxonomy (Decision 01KXQ32Q7Z41F0P7A1JHN0S527)
+# ---------------------------------------------------------------------------
+
+_TAXONOMY_RESOURCE = "root_cause_taxonomy.toml"
+
+
+@lru_cache(maxsize=1)
+def load_root_cause_taxonomy() -> dict[str, Any]:
+    """Load the packaged canonical root-cause taxonomy.
+
+    Resolved via ``importlib.resources`` (the repository's packaged-asset
+    convention — same as ``role_loader`` / ``schema_validation``), never a
+    source-tree-relative path. Returns ``{"version": int, "category": [...]}``.
+    """
+    if tomllib is None:  # pragma: no cover - Python 3.10 without tomli
+        raise RuntimeError(
+            "Root-cause taxonomy requires tomllib (Python 3.11+) or the "
+            "'tomli' package."
+        )
+    resource = files("watercooler") / "templates" / _TAXONOMY_RESOURCE
+    data = tomllib.loads(resource.read_text(encoding="utf-8"))
+    if not isinstance(data.get("version"), int) or not data.get("category"):
+        raise RuntimeError(
+            f"Malformed root-cause taxonomy resource {_TAXONOMY_RESOURCE!r}: "
+            "expected an integer 'version' and a non-empty 'category' list."
+        )
+    return data
+
+
+def root_cause_taxonomy_version() -> int:
+    """The packaged taxonomy's version (stamped as ``<slug>@<version>``)."""
+    return int(load_root_cause_taxonomy()["version"])
+
+
+def normalize_root_cause(text: str | None) -> str:
+    """Map a free-text root cause to its canonical taxonomy slug.
+
+    Deterministic, deliberately dumb matching: lowercase substring hints;
+    the FIRST category (in taxonomy file order) with a hit wins. Unmatched
+    or empty input falls open to ``other`` — a root cause is never dropped,
+    only unclassified. Recurrence counting (Phase 5 precision pass and the
+    future recurrence generator) groups by this slug, never by the raw
+    LLM string.
+    """
+    if not text or not text.strip():
+        return "other"
+    lowered = text.lower()
+    for category in load_root_cause_taxonomy()["category"]:
+        for hint in category.get("hints", []):
+            if hint and hint in lowered:
+                return str(category["slug"])
+    return "other"
+
+
+def canonical_root_cause_stamp(text: str | None) -> str:
+    """The full ``<slug>@<version>`` value for a durable-surface marker."""
+    return f"{normalize_root_cause(text)}@{root_cause_taxonomy_version()}"

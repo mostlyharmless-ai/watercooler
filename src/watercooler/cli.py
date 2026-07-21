@@ -520,6 +520,57 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("setup-stop-hook", help="Wire watercooler-stop-hook as a Stop hook")
 
+    p_login = sub.add_parser(
+        "login",
+        help="Authenticate to the hosted Watercooler service (saves your API key to credentials.toml)",
+        description=(
+            "Save your hosted agent API key to ~/.watercooler/credentials.toml. The "
+            "key is read (in precedence order) from the WATERCOOLER_HOSTED_API_KEY "
+            "environment variable, from stdin with --stdin, or from a hidden "
+            "interactive prompt — never as a command-line argument."
+        ),
+    )
+    p_login.add_argument(
+        "--dashboard-url",
+        default=None,
+        help="Dashboard base URL (default: WATERCOOLER_DASHBOARD_URL or https://watercoolerdev.com)",
+    )
+    p_login.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Read the API key from stdin (non-interactive; no terminal echo or shell history).",
+    )
+    p_login.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Print the dashboard URL instead of opening a browser.",
+    )
+
+    p_sweep = sub.add_parser(
+        "sweep-expired-candidates",
+        help="F1 TTL sweep: mark pending Learning candidates older than the TTL as expired (ball-preserving; dormant, still promotable)",
+    )
+    p_sweep.add_argument("--threads-dir", help="Threads directory (default: auto-resolve)")
+    p_sweep.add_argument("--topic", help="Limit the sweep to one thread topic")
+    p_sweep.add_argument(
+        "--ttl-days",
+        type=int,
+        default=None,
+        help="Override the TTL (default: [mcp.daemons.learnings].candidate_ttl_days, 30)",
+    )
+    p_sweep.add_argument("--dry-run", action="store_true", help="Report what would expire; write nothing")
+    p_sweep.add_argument("--no-sync", action="store_true", help="Skip git sync after writes")
+
+    p_reconcile = sub.add_parser(
+        "reconcile-blessed-projection",
+        help="Repair the team-lessons projection for a promoted lesson (idempotent per leg: pointer + both xrefs)",
+    )
+    p_reconcile.add_argument("--topic", required=True, help="Source thread topic of the promoted lesson")
+    p_reconcile.add_argument("--lesson-id", required=True, help="Entry ULID of the promoted ## Lesson Note")
+    p_reconcile.add_argument("--blessed-thread", default=None, help="Override the blessed thread (default: config, 'team-lessons')")
+    p_reconcile.add_argument("--threads-dir", help="Threads directory (default: auto-resolve)")
+    p_reconcile.add_argument("--no-sync", action="store_true", help="Skip git sync after writes")
+
     # Roles commands
     p_roles = sub.add_parser("roles", help="Roles management")
     roles_sub = p_roles.add_subparsers(dest="roles_cmd")
@@ -1139,6 +1190,213 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "setup-stop-hook":
         from .commands import setup_stop_hook
         sys.exit(setup_stop_hook())
+
+    if args.cmd == "login":
+        import getpass
+        import os
+        import webbrowser
+
+        from .credentials import set_hosted_api_key
+
+        dashboard = (
+            args.dashboard_url
+            or os.getenv("WATERCOOLER_DASHBOARD_URL")
+            or "https://watercoolerdev.com"
+        ).rstrip("/")
+        settings_url = f"{dashboard}/settings"
+
+        # Key sources, in precedence order — none echo the secret or expose it in
+        # shell history or process arguments:
+        #   1. WATERCOOLER_HOSTED_API_KEY env var (CI / automation)
+        #   2. stdin, one line, with --stdin (pipelines)
+        #   3. hidden interactive getpass prompt
+        key = os.getenv("WATERCOOLER_HOSTED_API_KEY")
+        if not key and args.stdin:
+            # --stdin is a non-interactive contract: an empty pipe (EOF, or its
+            # secret producer failed) must error, never fall through to a prompt
+            # that would stall a pipeline holding a controlling TTY.
+            key = sys.stdin.readline().strip()
+            if not key:
+                print(
+                    "❌ --stdin was given but no API key was read from stdin.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        if not key:
+            print(f"Create an agent API key (wc_...) at: {settings_url}", file=sys.stderr)
+            if not args.no_browser:
+                try:
+                    webbrowser.open(settings_url)
+                except Exception:  # noqa: BLE001 - headless/no-browser is fine
+                    pass
+            try:
+                key = getpass.getpass("Paste your agent API key (wc_...) [hidden]: ")
+            except (EOFError, KeyboardInterrupt):
+                print("\nLogin cancelled.", file=sys.stderr)
+                sys.exit(1)
+
+        key = (key or "").strip()
+        if not key.startswith("wc_") or len(key) < 8:
+            print(
+                "❌ That doesn't look like an agent API key — expected a 'wc_...' value "
+                f"from {settings_url}.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        path = set_hosted_api_key(key)
+        print(f"✅ Saved your hosted API key to {path} (stored, not verified here).")
+        print(
+            "   Restart your MCP server so it picks up the key: a running server "
+            "selects its transport at startup and keeps using the old one — likely "
+            "local — until it restarts, so there is no hosted call to trigger otherwise."
+        )
+        print(
+            f"   If a hosted call is then refused, connect your repo at "
+            f"{dashboard}/settings/repositories (repo-claim check)."
+        )
+        sys.exit(0)
+
+    if args.cmd == "sweep-expired-candidates":
+        from datetime import datetime, timezone
+
+        from ulid import ULID
+
+        from .baseline_graph import storage
+        from .baseline_graph.storage import get_graph_dir
+        from .commands_graph import ack, get_thread_from_graph
+        from .path_resolver import resolve_threads_dir
+        from .promotion import DEFAULT_CANDIDATE_TTL_DAYS, plan_candidate_expiries
+
+        threads_dir = resolve_threads_dir(args.threads_dir)
+        graph_dir = get_graph_dir(threads_dir)
+
+        ttl_days = args.ttl_days
+        if ttl_days is not None and not (1 <= ttl_days <= 365):
+            # Same bounds the config schema enforces (ge=1, le=365): an
+            # unbounded override (0, negative) could instantly expire the
+            # entire eligible queue.
+            print(
+                f"❌ --ttl-days must be between 1 and 365 (got {ttl_days}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if ttl_days is None:
+            try:
+                from .config_loader import load_config
+
+                ttl_days = load_config().mcp.daemons.learnings.candidate_ttl_days
+            except Exception:
+                ttl_days = DEFAULT_CANDIDATE_TTL_DAYS
+
+        topics = [args.topic] if args.topic else storage.list_thread_topics(graph_dir)
+        now = datetime.now(timezone.utc)
+        planned = []
+        for t in topics:
+            entries = list(storage.load_thread_entries(graph_dir, t))
+            # F1 historical-owner fallback: pre-stamp candidates record the
+            # source thread's current ball-holder on their expiry Note.
+            thread_node = get_thread_from_graph(threads_dir, t) or {}
+            planned.extend(
+                plan_candidate_expiries(
+                    t, entries, now=now, ttl_days=ttl_days,
+                    thread_ball=(str(thread_node.get("ball") or "").strip() or None),
+                )
+            )
+
+        if not planned:
+            print(f"✅ Sweep: no pending Learning candidates past the {ttl_days}-day TTL.")
+            sys.exit(0)
+
+        if args.dry_run:
+            print(f"Would expire {len(planned)} candidate(s) (TTL {ttl_days}d):")
+            for p in planned:
+                print(f"  {p.topic}: {p.candidate_entry_id}  (emitted {p.emitted_at})")
+            sys.exit(0)
+
+        written = 0
+        for p in planned:
+            # Ball-preserving by construction: commands_graph.ack keeps the
+            # thread's current ball and passes no status change (F1 — a
+            # lifecycle sweep must not mutate workflow ownership).
+            _cli_write_with_sync(
+                threads_dir, p.topic, f"expire candidate {p.candidate_entry_id}",
+                lambda p=p: ack(
+                    p.topic, threads_dir=threads_dir,
+                    agent="Candidate Lifecycle Sweep", role="scribe",
+                    title=p.title, entry_type="Note", body=p.body,
+                    entry_id=str(ULID()),
+                ),
+                no_sync=args.no_sync,
+            )
+            written += 1
+            print(f"⏳ expired: {p.topic}: {p.candidate_entry_id}")
+        print(f"✅ Sweep complete: {written} candidate(s) marked expired (TTL {ttl_days}d).")
+        sys.exit(0)
+
+    if args.cmd == "reconcile-blessed-projection":
+        from .blessed_projection import (
+            DEFAULT_BLESSED_THREAD,
+            _default_pointer_writer,
+            _default_xref_writer,
+            reconcile_blessed_projection,
+        )
+        from .path_resolver import resolve_threads_dir
+
+        threads_dir = resolve_threads_dir(args.threads_dir)
+        blessed_topic = args.blessed_thread
+        if blessed_topic is None:
+            try:
+                from .config_loader import load_config
+
+                blessed_topic = (
+                    load_config().mcp.daemons.learnings.blessed_thread or ""
+                ).strip()
+            except Exception:
+                blessed_topic = DEFAULT_BLESSED_THREAD
+        if not blessed_topic:
+            print("❌ Blessed projection is disabled (blessed_thread is empty).",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        # Each leg writes under its own topic-scoped sync wrapper — the legs
+        # are independently retryable by design (review P1-3), so partial
+        # failure leaves a state a re-run completes.
+        lib_pointer = _default_pointer_writer(threads_dir, blessed_topic, "Blessed Projection (CLI)")
+        lib_xref = _default_xref_writer(threads_dir, "Blessed Projection (CLI)")
+
+        def pointer_writer(title, body):
+            return _cli_write_with_sync(
+                threads_dir, blessed_topic,
+                f"blessed pointer for {args.lesson_id}",
+                lambda: lib_pointer(title, body), no_sync=args.no_sync,
+            )
+
+        def xref_writer(topic, target_entry_id, value_entry_id):
+            return _cli_write_with_sync(
+                threads_dir, topic,
+                f"blessed xref {target_entry_id} -> {value_entry_id}",
+                lambda: lib_xref(topic, target_entry_id, value_entry_id),
+                no_sync=args.no_sync,
+            )
+
+        result = reconcile_blessed_projection(
+            threads_dir, args.topic, args.lesson_id,
+            blessed_topic=blessed_topic, actor="Blessed Projection (CLI)",
+            pointer_writer=pointer_writer, xref_writer=xref_writer,
+        )
+        print(f"pointer:       {result.pointer}"
+              + (f"  ({result.pointer_entry_id})" if result.pointer_entry_id else ""))
+        print(f"xref (lesson): {result.xref_lesson}")
+        print(f"xref (pointer): {result.xref_pointer}")
+        for e in result.errors:
+            print(f"⚠️  {e}", file=sys.stderr)
+        if result.complete:
+            print("✅ Blessed projection complete.")
+            sys.exit(0)
+        print("❌ Blessed projection incomplete — re-run after fixing the errors above.",
+              file=sys.stderr)
+        sys.exit(1)
 
     if args.cmd == "roles":
         roles_cmd = getattr(args, "roles_cmd", None)

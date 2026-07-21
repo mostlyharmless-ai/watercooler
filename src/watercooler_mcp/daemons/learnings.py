@@ -289,7 +289,16 @@ class ExtractLearningsDaemon(BaseDaemon):
                                     and cand_key not in existing
                                 ):
                                     emitted = self._emit_learning_candidate(
-                                        topic, Path(code_root), result, assessment
+                                        topic,
+                                        Path(code_root),
+                                        result,
+                                        assessment,
+                                        # F1: immutable owner stamp = the source
+                                        # thread's ball-holder at emission time.
+                                        disposition_owner=str(
+                                            (thread_node or {}).get("ball") or ""
+                                        ).strip()
+                                        or None,
                                     )
                                     if emitted is not None:
                                         findings.append(emitted)
@@ -449,15 +458,21 @@ class ExtractLearningsDaemon(BaseDaemon):
         code_root: Path,
         result: SynthesisResult,
         a: LearningAssessment,
+        *,
+        disposition_owner: str | None = None,
     ) -> Finding | None:
         """Write a thread-visible learning *candidate* Note to the source thread.
 
         Authority-safe: an ``entry_type="Note"`` marked ``needs_human_confirmation``
         / ``Authority: none`` (never Decision/Closure/supersession/status). Returns
         a ``learning_candidate_emitted`` finding on a durable write, else None.
+        ``disposition_owner`` stamps the F1 owner marker at emission.
         """
         body = format_learning_candidate_body(
-            result, topic=topic, pr_numbers=list(a.pr_numbers)
+            result,
+            topic=topic,
+            pr_numbers=list(a.pr_numbers),
+            disposition_owner=disposition_owner,
         )
         candidate_entry_id = str(ULID())
         write = daemon_write_entry(

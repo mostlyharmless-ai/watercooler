@@ -10,7 +10,9 @@ is committed.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -168,6 +170,53 @@ def test_zip_shape(manifest, tmp_path) -> None:
     assert len(skill_dirs) == 7
     for name in skill_dirs:
         assert (root / "skills" / name / "SKILL.md").is_file()
+
+
+def test_zip_is_byte_deterministic(manifest, tmp_path) -> None:
+    """Same content in → same archive bytes out, regardless of file mtimes.
+
+    Review P3 (PR #1104): the archive previously embedded filesystem mtimes
+    (``ZipFile.write``) and the wall clock (``writestr``), so re-rendering the
+    same version produced a different zip — and a different published
+    ``.sha256`` — for byte-identical plugin content. The release workflow
+    re-uploads assets with ``--clobber`` on a resumed publish, so a same-version
+    re-run would swap the asset out from under anyone who had already
+    checksummed it.
+    """
+    root_a = render_claude_package(manifest, tmp_path / "a", "1.2.3", "release")
+    zip_a = tmp_path / "a.zip"
+    build_zip(root_a, zip_a, "1.2.3")
+
+    root_b = render_claude_package(manifest, tmp_path / "b", "1.2.3", "release")
+    # Perturb mtimes: the pre-fix implementation embedded these in the archive.
+    for p in sorted(root_b.rglob("*")):
+        os.utime(p, (0, 0))
+    zip_b = tmp_path / "b.zip"
+    build_zip(root_b, zip_b, "1.2.3")
+
+    assert zip_a.read_bytes() == zip_b.read_bytes()
+    assert (
+        hashlib.sha256(zip_a.read_bytes()).hexdigest()
+        == hashlib.sha256(zip_b.read_bytes()).hexdigest()
+    )
+
+
+def test_zip_entries_have_pinned_metadata(manifest, tmp_path) -> None:
+    """Every entry carries the fixed epoch and mode — no host/time leakage."""
+    plugin_root = render_claude_package(manifest, tmp_path, "1.2.3", "release")
+    zip_path = tmp_path / "watercooler-claude-plugin.zip"
+    build_zip(plugin_root, zip_path, "1.2.3")
+
+    with zipfile.ZipFile(zip_path) as zf:
+        infos = zf.infolist()
+    assert infos, "archive must not be empty"
+    for info in infos:
+        assert info.date_time == (1980, 1, 1, 0, 0, 0)
+        assert info.external_attr >> 16 == 0o644
+    # Entries are written in sorted order (VERSION.json is appended last).
+    names = [i.filename for i in infos]
+    assert names[:-1] == sorted(names[:-1])
+    assert names[-1] == "watercooler/VERSION.json"
 
 
 def test_zip_contains_checksum_and_version_stamp(manifest, tmp_path) -> None:

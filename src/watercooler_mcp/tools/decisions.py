@@ -25,8 +25,9 @@ from watercooler.baseline_graph.annotations import get_annotation_state
 from watercooler.baseline_graph.storage import get_graph_dir
 from watercooler.decision_extraction import DECISION_EXTRACTED_TAG
 from watercooler.promotion import (
-    candidate_has_terminal_disposition,
+    candidate_expires_at,
     parse_candidate_body,
+    resolve_candidate_state,
 )
 
 from ..errors import ContextError, HostedModeError, ValidationError
@@ -406,12 +407,16 @@ def _apply_supersession(
     degrades a decision to an honest ``unknown`` — never a false ``in_force``
     (epistemic-custody §6.5).
     """
-    from watercooler_memory.supersession import summarize_supersession
-
     if backend is None:
         for decision in collected:
             decision["supersession"] = _unknown_supersession("t2_unavailable")
         return
+
+    # Import only after the None-check: watercooler_memory is private and
+    # absent from the open-core build, where backend acquisition always
+    # yields None — importing first made this degrade path unreachable on
+    # public installs (ModuleNotFoundError instead of honest unknown).
+    from watercooler_memory.supersession import summarize_supersession
 
     # Recover the entry→episode index when a node-local cache was wiped (a hosted
     # ephemeral-filesystem redeploy empties it). Baseline-sync episodes carry no
@@ -917,17 +922,54 @@ def _list_decisions_impl(
 _PENDING_STATUS = "needs_human_confirmation"
 
 
+def _effective_candidate_ttl_days() -> int:
+    """The configured F1 TTL ([mcp.daemons.learnings].candidate_ttl_days).
+
+    One resolution shared by the listing's ``expires_at`` and (via config) the
+    sweep, so the API can never report an expiry date the sweep won't honor.
+    """
+    try:
+        from watercooler.config_loader import load_config
+
+        return int(load_config().mcp.daemons.learnings.candidate_ttl_days)
+    except Exception:  # noqa: BLE001 — config trouble degrades to the default
+        from watercooler.promotion import DEFAULT_CANDIDATE_TTL_DAYS
+
+        return DEFAULT_CANDIDATE_TTL_DAYS
+
+
 def _collect_pending_for_topic(
-    topic: str, nodes: list[dict[str, Any]]
+    topic: str,
+    nodes: list[dict[str, Any]],
+    *,
+    include_expired: bool = False,
+    thread_ball: str | None = None,
+    ttl_days: int | None = None,
 ) -> list[dict[str, Any]]:
     """Pending-candidate records for one thread's entry nodes.
 
     A pending candidate is a Note whose body carries
-    ``Candidate-Status: needs_human_confirmation`` and which has no terminal
-    disposition anywhere on the thread (``candidate_has_terminal_disposition``:
-    the MCP ``Disposition-Target:`` marker, the dashboard's ``Candidate-Entry:``
-    marker, or a ``Promoted-From:``-stamped promoted entry).
+    ``Candidate-Status: needs_human_confirmation`` and whose resolved
+    lifecycle state (``resolve_candidate_state``: state-machine fold over the
+    thread's entries — MCP ``Disposition-Target:`` marker, the dashboard's
+    ``Candidate-Entry:`` marker, or a ``Promoted-From:``-stamped promoted
+    entry) is ``pending``. With ``include_expired``, dormant ``expired``
+    candidates are included too (their ``state`` field distinguishes them);
+    ``promoted``/``rejected`` are never listed.
+
+    F1 lifecycle fields per record: ``state``, ``expires_at``
+    (emission + TTL), ``disposition_owner`` and ``owner_source`` —
+    the immutable ``Disposition-Owner:`` emission stamp when present
+    (``emission_stamp``), else the source thread's current ball-holder
+    (``ball_holder``; ``unavailable`` when the caller has no thread meta,
+    e.g. hosted scans).
     """
+    listed_states = {"pending", "expired"} if include_expired else {"pending"}
+    # Resolve the effective TTL once per topic (config-backed unless the caller
+    # pins it) so every row's expires_at reflects the policy the sweep enforces.
+    effective_ttl = (
+        ttl_days if ttl_days is not None else _effective_candidate_ttl_days()
+    )
     pending: list[dict[str, Any]] = []
     for node in nodes:
         if node.get("entry_type") != "Note":
@@ -941,8 +983,15 @@ def _collect_pending_for_topic(
         meta = parse_candidate_body(body, entry_id, topic)
         if meta.candidate_status != _PENDING_STATUS:
             continue
-        if candidate_has_terminal_disposition(entry_id, nodes):
+        state = resolve_candidate_state(entry_id, nodes).state
+        if state not in listed_states:
             continue
+        if meta.disposition_owner:
+            owner, owner_source = meta.disposition_owner, "emission_stamp"
+        elif thread_ball:
+            owner, owner_source = thread_ball, "ball_holder"
+        else:
+            owner, owner_source = None, "unavailable"
         pending.append(
             {
                 "entry_id": entry_id,
@@ -959,6 +1008,12 @@ def _collect_pending_for_topic(
                     if meta.source_entry_id
                     else None
                 ),
+                "state": state,
+                "expires_at": candidate_expires_at(
+                    node.get("timestamp") or "", effective_ttl
+                ),
+                "disposition_owner": owner,
+                "owner_source": owner_source,
             }
         )
     return pending
@@ -987,7 +1042,7 @@ def _finalize_candidates_payload(
 
 
 def _list_pending_candidates_hosted(
-    *, topic_filter: str | None, limit: int
+    *, topic_filter: str | None, limit: int, include_expired: bool = False
 ) -> ToolResult:
     """Hosted (GitHub-backed) implementation of list_pending_candidates.
 
@@ -1033,9 +1088,24 @@ def _list_pending_candidates_hosted(
             f"skipped during entries load: {skipped_topics!r}"
         )
 
+    from ..hosted_ops import load_thread_metadata_hosted
+
     collected: list[dict[str, Any]] = []
     for t, nodes in entries_by_topic.items():
-        collected.extend(_collect_pending_for_topic(t, nodes))
+        # F1 historical-owner fallback works on hosted too: the thread's ball
+        # comes from hosted metadata (stamp still wins when present).
+        thread_ball: str | None = None
+        try:
+            meta_err, t_meta = load_thread_metadata_hosted(t)
+            if not meta_err and isinstance(t_meta, dict):
+                thread_ball = (t_meta.get("ball") or "").strip() or None
+        except Exception:  # noqa: BLE001 — owner fallback is best-effort
+            thread_ball = None
+        collected.extend(
+            _collect_pending_for_topic(
+                t, nodes, include_expired=include_expired, thread_ball=thread_ball
+            )
+        )
 
     return _finalize_candidates_payload(collected, limit, skipped_topics=skipped_topics)
 
@@ -1045,6 +1115,7 @@ def _list_pending_candidates_impl(
     topic: str = "",
     limit: int = 50,
     code_path: str = "",
+    include_expired: bool = False,
 ) -> ToolResult:
     """List open candidate Notes awaiting human judgment, across threads.
 
@@ -1069,13 +1140,18 @@ def _list_pending_candidates_impl(
             topic instead of fanning out across the repository.
         limit: Max candidates to return (default 50, max 500).
         code_path: Path to the code repository containing threads.
+        include_expired: Also list dormant ``expired`` candidates (TTL-swept;
+            still directly promotable). Default False — only ``pending``.
 
     Returns:
         JSON ToolResult ``{schema_version, total, returned, candidates: [...]}``,
         newest first. Each candidate carries ``entry_id``, ``topic``, ``index``,
         ``title``, ``timestamp``, ``agent``, ``candidate_type``,
-        ``surface_kind``, ``confidence`` (0-5 or null), and ``source_entry_id``
-        (bare ULID of the entry it was extracted from, or null).
+        ``surface_kind``, ``confidence`` (0-5 or null), ``source_entry_id``
+        (bare ULID of the entry it was extracted from, or null), and the F1
+        lifecycle fields ``state`` (pending|expired), ``expires_at``,
+        ``disposition_owner`` + ``owner_source`` (emission_stamp |
+        ball_holder | unavailable).
         ``skipped_topics`` is present on hosted calls so callers can detect
         partial results.
     """
@@ -1101,7 +1177,9 @@ def _list_pending_candidates_impl(
                 f"list_pending_candidates: hosted path, topic={topic_filter!r}"
             )
             return _list_pending_candidates_hosted(
-                topic_filter=topic_filter, limit=limit
+                topic_filter=topic_filter,
+                limit=limit,
+                include_expired=include_expired,
             )
 
         threads_dir = context.threads_dir
@@ -1120,7 +1198,17 @@ def _list_pending_candidates_impl(
             if not thread_dir.exists():
                 continue
             nodes = list(storage.load_thread_entries(graph_dir, t))
-            collected.extend(_collect_pending_for_topic(t, nodes))
+            # F1 owner fallback: the source thread's current ball-holder,
+            # used only when the candidate carries no Disposition-Owner stamp.
+            meta = storage.load_thread_meta(graph_dir, t) or {}
+            collected.extend(
+                _collect_pending_for_topic(
+                    t,
+                    nodes,
+                    include_expired=include_expired,
+                    thread_ball=(meta.get("ball") or None),
+                )
+            )
 
         return _finalize_candidates_payload(collected, limit)
 

@@ -118,6 +118,40 @@ _PREMIUM_DAEMONS: frozenset[str] = frozenset(
     }
 )
 
+# Placement classes for OPEN-CORE daemons (modality-robustness plan,
+# audit-transport-modes-hosted-db-2026-07:68, Fork A / design :66).
+# Invariant: execution follows the data — a daemon registers where the
+# threads it reads/writes live. Under ``proxy`` the thread store is hosted,
+# so thread-analytic daemons must never tick against the local worktree
+# (the split-brain documented at :61), and daemons whose FUNCTION is the
+# local machine are mode-inapplicable there.
+#
+# ``decision_stance`` is thread-analytic: it is the open-core stance
+# fallback under the PCD registration mutex, and it reads threads. The
+# hosted coordinator's mutex keeps it unregistered whenever
+# project_coordinator is active, hosted-side included.
+_THREAD_ANALYTIC_DAEMONS: frozenset[str] = frozenset(
+    {
+        "learnings",
+        "decision_detector",
+        "decision_extractor",
+        "thread_auditor",
+        "decision_stance",
+    }
+)
+
+# Local-machine daemons: worktree sync/commit, local service probing, and
+# the private content pipeline (which reads local working state).
+_LOCAL_INFRASTRUCTURE_DAEMONS: frozenset[str] = frozenset(
+    {
+        "committer",
+        "sync_guard",
+        "t2_health_probe",
+        "content_scout",
+        "content_refiner",
+    }
+)
+
 
 def daemon_execution_policy(
     daemon_name: str,
@@ -137,25 +171,45 @@ def daemon_execution_policy(
     Resolution order:
       * ``sub_config.enabled is False`` → ``skip``
       * ``sub_config.route == "disabled"`` → ``skip``
-      * ``sub_config.route == "local"`` → ``local``
+      * ``sub_config.route == "local"`` → ``local`` — EXCEPT under effective
+        ``proxy``, where the thin client runs no local daemons and the
+        override is ignored (logged) and resolved as ``auto``
       * ``sub_config.route == "hosted"`` → ``hosted``
       * ``sub_config.route == "auto"`` (default):
           - ``in_hosted_coordinator=True`` → ``hosted``
           - ``daemon_name`` is a premium daemon and transport is
             ``hybrid`` or ``proxy`` → ``hosted``
+          - ``transport == "proxy"``: thread-analytic open-core daemons →
+            ``hosted`` (the thread store is hosted; ticking locally would
+            split-brain against a stale worktree), local-infrastructure
+            daemons → ``skip`` (mode-inapplicable — there is no local
+            worktree/service to manage)
           - otherwise → ``local``
 
     Non-premium daemons (``sync_guard``, ``thread_auditor``, etc.) have
-    no ``route`` field; they always register locally when
+    no ``route`` field; under stdio/http/hybrid they register locally when
     ``enabled=True`` and the process is not running as the hosted
     coordinator.  ``sub_config.route`` attribute access uses
-    ``getattr(..., "auto")`` to tolerate this.
+    ``getattr(..., "auto")`` to tolerate this. Callers should pass the
+    EFFECTIVE transport (a credential-less proxy resolves to ``stdio``).
     """
     if not getattr(sub_config, "enabled", False):
         return "skip"
     route = getattr(sub_config, "route", "auto")
     if route == "disabled":
         return "skip"
+    if route == "local" and transport == "proxy":
+        # Proxy is CATEGORICALLY remote (review #1135 P1, round 3): the thin
+        # proxy process never initializes a daemon manager, so an explicit
+        # ``route="local"`` is a promise nothing can keep — honoring it here
+        # would make resolvers report a producer that never registers.
+        # Ignore the override and resolve as ``auto`` (→ hosted/skip below).
+        logger.info(
+            "DAEMONS: route='local' on %s is not honorable under effective "
+            "proxy (thin client runs no local daemons); resolving as 'auto'",
+            daemon_name,
+        )
+        route = "auto"
     if route == "local":
         return "local"
     if route == "hosted":
@@ -165,6 +219,12 @@ def daemon_execution_policy(
         return "hosted"
     if daemon_name in _PREMIUM_DAEMONS and transport in ("hybrid", "proxy"):
         return "hosted"
+    if transport == "proxy":
+        # Modality-robustness Fork A (audit :62): execution follows the data.
+        if daemon_name in _THREAD_ANALYTIC_DAEMONS:
+            return "hosted"
+        if daemon_name in _LOCAL_INFRASTRUCTURE_DAEMONS:
+            return "skip"
     return "local"
 
 
@@ -685,7 +745,33 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
     # In hybrid/proxy mode premium daemons default to ``hosted`` so
     # the Railway-side coordinator owns them; users override with
     # ``[mcp.daemons.<name>] route = "local"``.
-    _transport = getattr(wc_config.mcp, "transport", "stdio")
+    # EFFECTIVE transport (modality-robustness Phase 2): a credential-less
+    # proxy resolves to stdio and must keep the full local daemon set; an
+    # authenticated proxy must not tick thread-analytic daemons against the
+    # local worktree (Fork A, audit :62). Fail-open to the configured value
+    # so a credentials-read error can never strip a local install's daemons.
+    _configured_transport = getattr(wc_config.mcp, "transport", "stdio")
+    try:
+        from watercooler.config_facade import config as _facade
+
+        from ..config import effective_transport as _eff
+
+        # Env-override-aware url (review #1135 P1): the config LOADER already
+        # folds WATERCOOLER_MCP_TRANSPORT into ``wc_config.mcp.transport``,
+        # but WATERCOOLER_MCP_URL is applied only by
+        # ``get_mcp_transport_config()`` — read it here so this resolution
+        # matches main()'s dispatch snapshot. The transport value is taken
+        # from the (possibly test-mocked) config, NOT re-read from env.
+        _transport = _eff(
+            _configured_transport,
+            os.getenv(
+                "WATERCOOLER_MCP_URL", getattr(wc_config.mcp, "url", "") or ""
+            )
+            or "",
+            _facade.get_hosted_api_key() or "",
+        )
+    except Exception:  # noqa: BLE001 — never let credential IO break daemons
+        _transport = _configured_transport
 
     def _local_ok(name: str) -> bool:
         sub_cfg = getattr(daemons_config, name, None)
@@ -767,7 +853,7 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
             )
 
     # Register thread auditor if enabled
-    if daemons_config.thread_auditor.enabled:
+    if daemons_config.thread_auditor.enabled and _local_ok("thread_auditor"):
         try:
             from .auditor import ThreadAuditorDaemon
         except Exception as exc:  # noqa: BLE001
@@ -787,8 +873,15 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
     # queue). Until the write path is wired to enqueue commit tasks (the Phase B
     # middleware flip) it simply idles on an empty queue — registering it now is
     # the wiring step, not a behavior change.
+    # committer has no DaemonsConfig sub-model (gated on [mcp.sync]); it is
+    # local-infrastructure and mode-inapplicable under an effective proxy
+    # (review #1135 P1: every built-in registration consults the policy).
     _sync_cfg = getattr(wc_config.mcp, "sync", None)
-    if _sync_cfg is not None and getattr(_sync_cfg, "async_sync", False) is True:
+    if (
+        _sync_cfg is not None
+        and getattr(_sync_cfg, "async_sync", False) is True
+        and _transport != "proxy"
+    ):
         def _make_committer():
             from .committer import CommitterDaemon, get_commit_queue
 
@@ -803,7 +896,7 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
         _safe_register("committer", _make_committer)
 
     # Register content scout if enabled (private — not in open-core build)
-    if daemons_config.content_scout.enabled:
+    if daemons_config.content_scout.enabled and _local_ok("content_scout"):
         try:
             from .content_scout import ContentScoutDaemon
         except ImportError as exc:
@@ -820,7 +913,7 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
             )
 
     # Register content refiner if enabled (private — not in open-core build)
-    if daemons_config.content_refiner.enabled:
+    if daemons_config.content_refiner.enabled and _local_ok("content_refiner"):
         try:
             from .content_refiner import ContentRefinerDaemon
         except ImportError as exc:
@@ -837,7 +930,7 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
             )
 
     # Register decision detector if enabled (local + hosted — ships in open-core build)
-    if daemons_config.decision_detector.enabled:
+    if daemons_config.decision_detector.enabled and _local_ok("decision_detector"):
         try:
             from .decision_detector import DetectDecisionsDaemon
         except Exception as exc:  # noqa: BLE001
@@ -852,7 +945,7 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
             )
 
     # Register decision extractor if enabled (local + hosted — ships in open-core build)
-    if daemons_config.decision_extractor.enabled:
+    if daemons_config.decision_extractor.enabled and _local_ok("decision_extractor"):
         try:
             from .decision_extractor import ExtractDecisionsDaemon
         except Exception as exc:  # noqa: BLE001
@@ -869,7 +962,7 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
     # Register learnings daemon if enabled (local — ships in open-core build).
     # Default-off; Phase 1 scaffolding emits only L1 annotations + findings.
     # See Decision 01KV2D50W2FYBW0SA6Y9Y081V9.
-    if daemons_config.learnings.enabled:
+    if daemons_config.learnings.enabled and _local_ok("learnings"):
         try:
             from .learnings import ExtractLearningsDaemon
         except Exception as exc:  # noqa: BLE001
@@ -900,7 +993,9 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
 
     # Register project coordinator if it is the active stance producer
     # (enabled and locally routed).
-    if _active_stance_producer == "project_coordinator":
+    if _active_stance_producer == "project_coordinator" and _local_ok(
+        "project_coordinator"
+    ):
         try:
             from .project_coordinator import ProjectCoordinatorDaemon
         except Exception as exc:  # noqa: BLE001
@@ -920,7 +1015,7 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
     # lives inside ``resolve_local_stance_producer`` and avoids double
     # emission of stance_advisory findings under the same ``stance:{role}``
     # topic.
-    if _active_stance_producer == "decision_stance":
+    if _active_stance_producer == "decision_stance" and _local_ok("decision_stance"):
         try:
             from .decision_stance import DecisionStanceDaemon
         except Exception as exc:  # noqa: BLE001
@@ -1022,7 +1117,7 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
             )
 
     # Register sync guard if enabled
-    if daemons_config.sync_guard.enabled:
+    if daemons_config.sync_guard.enabled and _local_ok("sync_guard"):
         try:
             from .sync_guard import SyncGuardDaemon
         except Exception as exc:  # noqa: BLE001
@@ -1038,7 +1133,7 @@ def init_daemons(*, start: bool = True) -> DaemonManager:
     # Register the T2 health probe if enabled — scheduled synthetic T2 liveness
     # + Slack alerting. Client-side monitor: always local (never the hosted
     # coordinator). No-op internally unless transport is hybrid/proxy.
-    if daemons_config.t2_health_probe.enabled:
+    if daemons_config.t2_health_probe.enabled and _local_ok("t2_health_probe"):
         try:
             from .t2_health_probe import T2HealthProbeDaemon
         except Exception as exc:  # noqa: BLE001

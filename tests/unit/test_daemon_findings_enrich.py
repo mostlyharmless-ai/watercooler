@@ -9,6 +9,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from watercooler_mcp.tools.daemon import _daemon_findings_impl
@@ -122,6 +123,12 @@ class TestEnrichStatsWhenNoCoordinatorLeads:
                 return_value=hosted,
             ),
             patch("watercooler_mcp.daemons.ensure_hosted_scope_for_current_context"),
+            # Hosted listings require a resolved caller scope (#1131: absent
+            # context fails closed instead of aggregating all scopes).
+            patch(
+                "watercooler_mcp.context.get_effective_context",
+                return_value=SimpleNamespace(scope_id="user:org/repo"),
+            ),
         ):
             result = json.loads(
                 _daemon_findings_impl(

@@ -34,17 +34,34 @@ class WatercoolerError(ToolError):
 
 
 class ThreadNotFoundError(WatercoolerError):
-    """Raised when a thread does not exist."""
+    """Raised when a thread does not exist.
+
+    ``hint`` names the remedy available at the failing call site (e.g.
+    "pass create_if_missing=true"); ``suggestions`` lists the closest
+    existing topic slugs so a mistyped topic is a one-retry recovery
+    instead of a dead end (#1121).
+    """
 
     code = "THREAD_NOT_FOUND"
 
-    def __init__(self, topic: str, repo: str | None = None):
+    def __init__(
+        self,
+        topic: str,
+        repo: str | None = None,
+        hint: str | None = None,
+        suggestions: list[str] | None = None,
+    ):
         self.topic = topic
         self.repo = repo
+        self.suggestions = suggestions or []
         if repo:
             message = f"Thread '{topic}' not found in repository: {repo}"
         else:
             message = f"Thread '{topic}' not found"
+        if hint:
+            message += f". {hint}"
+        if self.suggestions:
+            message += f" Nearest existing topics: {', '.join(self.suggestions)}."
         super().__init__(message, topic=topic, repo=repo)
 
 

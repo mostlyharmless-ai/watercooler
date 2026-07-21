@@ -460,12 +460,57 @@ def _promote_candidate_impl(
     )
     disposition_entry_id = _parse_entry_id(disposition_response)
 
+    # D2 blessed-surface projection (Decision 01KXQ32Q7Z41F0P7A1JHN0S527):
+    # project a pointer to the blessed thread + xrefs both ways. Runs as a
+    # reconcile (idempotent per leg); ANY failure here must never fail the
+    # promotion — the repair path is `watercooler reconcile-blessed-projection`,
+    # not re-promotion (which the Promoted-From guard correctly refuses).
+    blessed_lines: list[str] = []
+    if target_type == "Learning":
+        try:
+            blessed_lines = _project_blessed_lesson(
+                topic=topic,
+                lesson_entry_id=decision_entry_id,
+                ctx=ctx,
+                code_path=code_path,
+                agent_func=agent_func,
+                actor=human_authorized_by,
+            )
+        except Exception as exc:  # noqa: BLE001 — never fail the promotion
+            log.error("blessed projection failed for %s: %s", decision_entry_id, exc)
+            # Rereview #1131 P2: failures that escape _project_blessed_lesson
+            # (hosted reader/context errors included) must ALSO leave a durable
+            # repair record — the boundary is the one place every failure mode
+            # passes through.
+            from watercooler.blessed_projection import ReconcileResult
+
+            _persist_blessed_repair_finding(
+                topic=topic,
+                lesson_entry_id=decision_entry_id,
+                result=ReconcileResult(
+                    pointer="failed",
+                    xref_lesson="failed",
+                    xref_pointer="failed",
+                    errors=[f"projection raised before reconcile returned: {exc}"],
+                ),
+                repair_cmd=(
+                    f"watercooler reconcile-blessed-projection --topic {topic} "
+                    f"--lesson-id {decision_entry_id}"
+                ),
+            )
+            blessed_lines = [
+                f"⚠️ Blessed projection failed ({exc}); repair with: "
+                f"watercooler reconcile-blessed-projection --topic {topic} "
+                f"--lesson-id {decision_entry_id}",
+            ]
+
     lines = [
         f"✅ Promoted candidate {candidate_entry_id} to {target_type} on "
         f"thread '{topic}'.",
         f"{target_type} Entry-ID: {decision_entry_id}",
         f"CandidateDisposition Entry-ID: {disposition_entry_id or '(write failed — verify)'}",
         f"Authorized by: {human_authorized_by.strip()}",
+        *blessed_lines,
         "",
         "Decision write response:",
         decision_response,
@@ -474,6 +519,207 @@ def _promote_candidate_impl(
         disposition_response,
     ]
     return "\n".join(lines)
+
+
+def _project_blessed_lesson(
+    *,
+    topic: str,
+    lesson_entry_id: str,
+    ctx: Context,
+    code_path: str,
+    agent_func: str,
+    actor: str,
+) -> list[str]:
+    """Run the blessed projection through MCP writers (synced per write).
+
+    Returns human-readable status lines for the promote response. Raises only
+    on unexpected errors — per-leg failures are reported in the result lines
+    (the caller wraps this whole call in a promotion-safe try/except anyway).
+    """
+    from watercooler.blessed_projection import reconcile_blessed_projection
+
+    from ..validation import _require_context, is_hosted_context
+    from .graph import _annotate_impl
+    from .thread_write import _ack_impl
+
+    blessed_topic = _blessed_thread_name()
+    if not blessed_topic:
+        return []  # projection disabled by config
+
+    error, context = _require_context(code_path)
+    if error or context is None:
+        return [f"⚠️ Blessed projection skipped: {error or 'no context'}"]
+
+    def _pointer_writer(title: str, body: str):
+        response = _ack_impl(
+            topic=blessed_topic,
+            ctx=ctx,
+            title=title,
+            body=body,
+            code_path=code_path,
+            agent_func=agent_func,
+            role="scribe",
+        )
+        return _parse_entry_id(response)
+
+    def _xref_writer(t: str, target_entry_id: str, value_entry_id: str) -> bool:
+        response = _annotate_impl(
+            t, target_entry_id, "entry", "xref", value_entry_id, code_path, actor
+        )
+        try:
+            parsed = json.loads(response) if isinstance(response, str) else None
+        except ValueError:
+            parsed = None
+        return isinstance(parsed, dict) and parsed.get("status") == "ok"
+
+    # Hosted mode has no local baseline filesystem — `context.threads_dir` is
+    # the hosted sentinel and the lib's default readers would fail before the
+    # pointer ever gets written (review #1131 P1). Inject GitHub-backed readers.
+    entries_loader = xrefs_loader = None
+    if is_hosted_context(context):
+        from ..hosted_ops import get_annotations_hosted, load_all_entries_hosted
+
+        def entries_loader(t: str) -> list:  # noqa: F811 — deliberate rebind
+            err, by_topic = load_all_entries_hosted(topics=[t])
+            if err:
+                raise RuntimeError(f"hosted entries load failed for '{t}': {err}")
+            return list(by_topic.get(t, []))
+
+        def xrefs_loader(t: str, target_entry_id: str) -> list:  # noqa: F811
+            err, res = get_annotations_hosted(t, target_entry_id)
+            if err:
+                raise RuntimeError(
+                    f"hosted annotations load failed for '{t}': {err}"
+                )
+            state = res.get("annotation_state") or {}
+            return list(state.get("xrefs") or [])
+
+    result = reconcile_blessed_projection(
+        context.threads_dir,
+        topic,
+        lesson_entry_id,
+        blessed_topic=blessed_topic,
+        actor=actor,
+        pointer_writer=_pointer_writer,
+        xref_writer=_xref_writer,
+        entries_loader=entries_loader,
+        xrefs_loader=xrefs_loader,
+    )
+    status = (
+        f"Blessed projection → '{blessed_topic}': pointer={result.pointer}, "
+        f"xrefs={result.xref_lesson}/{result.xref_pointer}"
+    )
+    lines = [status]
+    if not result.complete:
+        repair_cmd = (
+            f"watercooler reconcile-blessed-projection --topic {topic} "
+            f"--lesson-id {lesson_entry_id}"
+        )
+        lines.append(
+            f"⚠️ Blessed projection incomplete ({'; '.join(result.errors) or 'see legs'}); "
+            f"repair with: {repair_cmd}"
+        )
+        _persist_blessed_repair_finding(
+            topic=topic,
+            lesson_entry_id=lesson_entry_id,
+            result=result,
+            repair_cmd=repair_cmd,
+            hosted_hint=is_hosted_context(context),
+        )
+    return lines
+
+
+def _persist_blessed_repair_finding(
+    *, topic: str, lesson_entry_id: str, result, repair_cmd: str,
+    hosted_hint: bool = False,
+) -> None:
+    """Persist the promised repair record for an incomplete projection.
+
+    Review #1131 P2: the synchronous promote response can be dropped or
+    ignored; a missing blessed projection must stay discoverable. Findings
+    JSONL is the durable, dashboard-visible surface — best-effort here (a
+    findings-write failure is logged, never raised: promotion success stays
+    independent of the projection AND of its bookkeeping).
+    """
+    try:
+        from ulid import ULID
+
+        from ..daemons.state import Finding, append_findings
+
+        # Tenant scoping (rereview #1131 P1, all rounds): hosted requests
+        # persist under the auth-derived namespace so tenants never share a
+        # findings file. ``_resolve_aux_scope`` treats the caller as local
+        # only when POSITIVELY known local (no hosted request hint AND no
+        # live HostedDaemonCoordinator); a hosted caller with broken or
+        # ABSENT auth context raises ScopeResolutionError, which propagates
+        # to this function's best-effort handler — the record is logged as
+        # lost, never written to the global store.
+        from .daemon import _resolve_aux_scope
+
+        namespace, allow_unscoped, scope = _resolve_aux_scope(
+            hosted_hint=hosted_hint
+        )
+        if scope is not None:
+            scope_fields: dict = {
+                "scope_id": scope.scope_id,
+                "user_id": scope.user_id,
+                "repo": scope.repo,
+            }
+        else:
+            scope_fields = {}
+
+        append_findings(
+            "blessed_projection",
+            [
+                Finding(
+                    finding_id=str(ULID()),
+                    daemon_name="blessed_projection",
+                    severity="warning",
+                    category="blessed_projection_incomplete",
+                    topic=topic,
+                    entry_id=lesson_entry_id,
+                    message=(
+                        f"Blessed projection incomplete for lesson "
+                        f"{lesson_entry_id}; repair with: {repair_cmd}"
+                    ),
+                    details={
+                        "lesson_entry_id": lesson_entry_id,
+                        "source_topic": topic,
+                        "legs": {
+                            "pointer": result.pointer,
+                            "xref_lesson": result.xref_lesson,
+                            "xref_pointer": result.xref_pointer,
+                        },
+                        "errors": list(result.errors),
+                        "repair_command": repair_cmd,
+                    },
+                    **scope_fields,
+                )
+            ],
+            namespace=namespace,
+            _allow_unscoped=allow_unscoped,
+        )
+    except Exception as exc:  # noqa: BLE001 — bookkeeping must not raise
+        log.error(
+            "blessed repair finding persist failed for lesson %s "
+            "(topic %s, repair: %s): %s",
+            lesson_entry_id,
+            topic,
+            repair_cmd,
+            exc,
+        )
+
+
+def _blessed_thread_name() -> str:
+    """The configured blessed-surface thread ('' disables the projection)."""
+    try:
+        from watercooler.config_loader import load_config
+
+        return (load_config().mcp.daemons.learnings.blessed_thread or "").strip()
+    except Exception:  # noqa: BLE001 — config trouble must not break promotion
+        from watercooler.blessed_projection import DEFAULT_BLESSED_THREAD
+
+        return DEFAULT_BLESSED_THREAD
 
 
 def _promote_candidate_tool(

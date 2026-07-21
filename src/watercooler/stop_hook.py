@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -95,6 +96,112 @@ def _source(name: str) -> _Source:
     return _Source(name, _DAEMONS_DIR / name / "findings.jsonl")
 
 
+def _local_findings_apply() -> bool:
+    """Whether THIS repo's process runs local daemons at all.
+
+    Under an EFFECTIVE proxy (configured proxy + url + hosted API key) the
+    thread store and every thread-analytic daemon — decision_extractor
+    included — execute hosted, so no local findings log is authoritative for
+    this repo and the hook must poll nothing locally. Resolved per-repo and
+    reader-side (review #1135 P1, round 3): the user-global stance sidecar is
+    shared with OTHER repos' live local fleets and must not be consulted,
+    cleared, or trusted to encode this repo's mode.
+
+    Deliberately cheap and dependency-free (this runs every turn): env vars
+    plus a direct ``tomllib`` read of the project/user config and the
+    credentials file — no pydantic build, no package imports. Any failure
+    fails OPEN (returns True → normal local polling), preserving pre-existing
+    behavior when configuration is unreadable.
+    """
+    try:
+        try:
+            import tomllib
+        except ImportError:  # Python 3.10 — repo-standard fallback
+            import tomli as tomllib  # type: ignore
+
+        # Track env-key PRESENCE, not truthiness (review #1135 P1, round 5):
+        # get_mcp_transport_config() uses os.getenv(key, config_value), so a
+        # present-but-empty override stays empty at runtime — an
+        # authenticated configured proxy with WATERCOOLER_MCP_URL="" is
+        # EFFECTIVELY stdio, and the gate must not resurrect the config or
+        # baked URL over it.
+        transport_env_set = "WATERCOOLER_MCP_TRANSPORT" in os.environ
+        transport = os.environ.get("WATERCOOLER_MCP_TRANSPORT", "")
+        url_env_set = "WATERCOOLER_MCP_URL" in os.environ
+        url = os.environ.get("WATERCOOLER_MCP_URL", "")
+
+        def _read_mcp(path: Path) -> dict | None:
+            """[mcp] table, {} when the file is absent, None when unreadable.
+
+            Absent and unreadable must differ: an ABSENT config resolves to
+            the shipped schema defaults (hosted-first proxy), while an
+            UNPARSEABLE one is genuine uncertainty — the caller fails open
+            to normal polling rather than guessing a mode.
+            """
+            try:
+                if path.is_file():
+                    with open(path, "rb") as fh:
+                        return tomllib.load(fh).get("mcp", {}) or {}
+            except (OSError, tomllib.TOMLDecodeError):
+                return None
+            return {}
+
+        # Project config (walk up from cwd) overrides user config — the same
+        # precedence the config loader applies.
+        project_mcp: dict | None = {}
+        cur = Path.cwd()
+        for candidate in (cur, *cur.parents):
+            cfg_path = candidate / ".watercooler" / "config.toml"
+            if cfg_path.is_file():
+                project_mcp = _read_mcp(cfg_path)
+                break
+        user_mcp = _read_mcp(Path.home() / ".watercooler" / "config.toml")
+        if project_mcp is None or user_mcp is None:
+            return True  # unreadable config: fail open to normal polling
+
+        # Absent values resolve to the SHIPPED schema defaults (hosted-first,
+        # #1128): credentials-without-config is the normal onboarding state
+        # and IS an authenticated proxy (review #1135 P1, round 4). The
+        # constants are shared with McpConfig via transport_defaults so the
+        # two resolutions cannot drift.
+        from .transport_defaults import DEFAULT_HOSTED_MCP_URL, DEFAULT_TRANSPORT
+
+        def _setting(key: str, default: str) -> str:
+            # Pydantic applies field defaults only for ABSENT keys — an
+            # explicit empty string (the documented endpoint-free pattern)
+            # must stay empty, not resurrect the default.
+            if key in project_mcp:
+                return str(project_mcp[key])
+            if key in user_mcp:
+                return str(user_mcp[key])
+            return default
+
+        if not transport_env_set:
+            transport = _setting("transport", DEFAULT_TRANSPORT)
+        if transport != "proxy":
+            return True
+        if not url_env_set:
+            url = _setting("url", DEFAULT_HOSTED_MCP_URL)
+
+        api_key = ""
+        try:
+            creds_path = Path.home() / ".watercooler" / "credentials.toml"
+            if creds_path.is_file():
+                with open(creds_path, "rb") as fh:
+                    api_key = str(
+                        (tomllib.load(fh).get("hosted", {}) or {}).get("api_key", "")
+                    )
+        except (OSError, tomllib.TOMLDecodeError):
+            api_key = ""
+
+        # Credential-less proxy is EFFECTIVELY stdio (#1128 fallback): local
+        # daemons run, local findings apply.
+        return not (url and api_key)
+    except Exception as exc:  # noqa: BLE001 — fail open to normal polling
+        logger.debug("stop_hook: effective-transport check failed: %s", exc)
+        return True
+
+
 def _findings_sources() -> list[Any]:
     """Resolve the findings sources to poll — sidecar fast path, best-effort.
 
@@ -109,7 +216,13 @@ def _findings_sources() -> list[Any]:
     started this machine, or an older build), and to decision_extractor-only
     if even that import fails — so a missing optional dependency degrades the
     hook to its pre-Phase-3 behavior rather than silencing it entirely.
+
+    Under an EFFECTIVE proxy for THIS repo, no local source applies at all
+    (``_local_findings_apply``) — the sidecar belongs to whichever repo runs
+    a local fleet and is not consulted.
     """
+    if not _local_findings_apply():
+        return []
     try:
         if _ACTIVE_STANCE_PRODUCER_SIDECAR.is_file():
             names = ["decision_extractor"]

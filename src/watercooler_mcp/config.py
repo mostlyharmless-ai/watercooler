@@ -736,16 +736,18 @@ def get_watercooler_config(project_path: Optional[Path] = None) -> "WatercoolerC
         except Exception as e:
             # Promoted from log_debug per bug-falkordb-startup-gate-hybrid-2026-05-12
             # entry 01KRDMK58S59A2WRPHCBY46XPS: a silent fallback to schema
-            # defaults can flip transport from hybrid to stdio in transient
-            # subprocesses, bypassing the FalkorDB hybrid skip in
-            # startup.ensure_falkordb_running. Make this visible at the
-            # operator's default log level so config-resolution failures
-            # are diagnosable.
+            # defaults can flip transport from an operator's explicit value to
+            # the proxy default in transient subprocesses, bypassing the FalkorDB
+            # hybrid skip in startup.ensure_falkordb_running (the proxy default
+            # itself falls back to local stdio without hosted credentials). Make
+            # this visible at the operator's default log level so
+            # config-resolution failures are diagnosable.
             log_warning(
                 f"CONFIG: load_config failed; falling back to schema defaults "
-                f"(transport=stdio, capability_routes={{}}). This may cause "
-                f"unwanted local-FalkorDB auto-start if operator intent was "
-                f"hybrid/proxy. Underlying error: {type(e).__name__}: {e}"
+                f"(transport=proxy, capability_routes={{}}). This may cause "
+                f"unwanted local-service auto-start if operator intent was "
+                f"hybrid or an authenticated proxy. Underlying error: "
+                f"{type(e).__name__}: {e}"
             )
             from watercooler.config_schema import WatercoolerConfig
 
@@ -785,6 +787,27 @@ def get_mcp_transport_config() -> Dict[str, Any]:
         "proxy_branch": os.getenv("WATERCOOLER_CODE_BRANCH", config.mcp.proxy_branch),
         "capability_routes": config.mcp.capability_routes,
     }
+
+
+def effective_transport(transport: str, url: str, api_key: str) -> str:
+    """Resolve the transport that will actually run.
+
+    ``proxy`` has no local fallback of its own — it forwards to a remote
+    endpoint and needs both a URL and an API key. Without either, the runtime
+    (``server._resolve_effective_transport``) and the setup report treat it as
+    local ``stdio``. All other transports pass through unchanged.
+
+    Args:
+        transport: The configured transport.
+        url: The remote endpoint URL (may be empty).
+        api_key: The hosted API key (empty when not authenticated).
+
+    Returns:
+        ``"stdio"`` for a credential-less proxy, else ``transport`` unchanged.
+    """
+    if transport == "proxy" and not (url and api_key):
+        return "stdio"
+    return transport
 
 
 def get_sync_config() -> Dict[str, Any]:

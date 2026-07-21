@@ -244,7 +244,13 @@ def test_tracked_credentials_are_flagged(repo):
 # ── config validation is repo-scoped and read-only (#019) ─────────────────────
 
 
-def test_malformed_project_config_reports_not_ok(repo):
+def test_malformed_project_config_reports_not_ok(repo, monkeypatch):
+    # Local config validity is what's under test — pin the effective transport
+    # local by clearing hosted credentials so the proxy default falls back to
+    # stdio (otherwise a credentialed machine would report hosted-N/A).
+    from watercooler.config_facade import config as _facade
+
+    monkeypatch.setattr(_facade, "get_hosted_api_key", lambda: "")
     cfg = repo / ".watercooler" / "config.toml"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text("this is = = not valid toml\n")
@@ -255,7 +261,10 @@ def test_malformed_project_config_reports_not_ok(repo):
     assert r["usable_now"] is False
 
 
-def test_init_malformed_config_is_not_usable(repo):
+def test_init_malformed_config_is_not_usable(repo, monkeypatch):
+    from watercooler.config_facade import config as _facade
+
+    monkeypatch.setattr(_facade, "get_hosted_api_key", lambda: "")
     (repo / ".watercooler").mkdir(parents=True, exist_ok=True)
     (repo / ".watercooler" / "config.toml").write_text("broken = = toml\n")
     r = _init(repo)
@@ -312,13 +321,20 @@ def test_worktree_on_wrong_branch_not_counted(repo):
 # ── local-init applicability is the deployment axis, not the transport (#P2) ──
 
 
-def _deployment_context_with(monkeypatch, *, transport, hosted):
+def _deployment_context_with(
+    monkeypatch, *, transport, hosted, url="https://h.example/mcp/", api_key="wc_live"
+):
     import watercooler_mcp.auth as auth
     import watercooler_mcp.config as cfg
+    from watercooler.config_facade import config as facade
     from watercooler_mcp.setup_report import deployment_context
 
-    monkeypatch.setattr(cfg, "get_mcp_transport_config", lambda: {"transport": transport})
+    monkeypatch.setattr(
+        cfg, "get_mcp_transport_config", lambda: {"transport": transport, "url": url}
+    )
     monkeypatch.setattr(auth, "is_hosted_mode", lambda: hosted)
+    # proxy's effective transport depends on hosted credentials; control them.
+    monkeypatch.setattr(facade, "get_hosted_api_key", lambda: api_key)
     return deployment_context()
 
 
@@ -340,8 +356,18 @@ def test_hosted_http_disallows_local_init(monkeypatch):
 
 
 def test_proxy_disallows_local_init(monkeypatch):
-    # proxy forwards to a remote server — no local checkout to bind.
+    # A credentialed proxy forwards to a remote server — no local checkout to bind.
     _, _, applies = _deployment_context_with(
-        monkeypatch, transport="proxy", hosted=False
+        monkeypatch, transport="proxy", hosted=False, api_key="wc_live"
     )
     assert applies is False
+
+
+def test_proxy_without_credentials_falls_back_to_local(monkeypatch):
+    # The proxy default with no hosted key actually runs local stdio, so a local
+    # checkout applies and the report must reflect the effective transport.
+    transport, _, applies = _deployment_context_with(
+        monkeypatch, transport="proxy", hosted=False, api_key=""
+    )
+    assert transport == "stdio"
+    assert applies is True

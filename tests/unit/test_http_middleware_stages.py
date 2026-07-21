@@ -202,8 +202,10 @@ class TestStageAuthenticate:
     @pytest.mark.anyio
     async def test_bearer_valid(self):
         """Valid Bearer token resolves to bearer auth mode."""
-        token_info = MagicMock(user_id="user-1", token="ghp_abc", repos=None, capabilities=None)
-        req = _make_request(headers={"Authorization": "Bearer valid-key"})
+        token_info = MagicMock(user_id="user-1", token="ghp_abc", repos={"org/repo"}, capabilities=None)
+        req = _make_request(
+            headers={"Authorization": "Bearer valid-key", "X-Repo": "org/repo"}
+        )
         result = await _stage_authenticate(
             req,
             "rid",
@@ -311,10 +313,15 @@ class TestStageAuthenticate:
         token_info = MagicMock(
             user_id="user-warn",
             token="ghp_warn",
-            repos=None,  # claim absent → warn-mode accepts (Move 2)
+            # Wave 6: the repo-claim code default is enforce, so the
+            # fixture carries a claim + matching X-Repo — this test's
+            # subject is the HMAC/bearer identity gate, not repo claims.
+            repos={"org/repo"},
             capabilities=None,
         )
-        req = _make_request(headers={"X-User-ID": "user-warn"})
+        req = _make_request(
+            headers={"X-User-ID": "user-warn", "X-Repo": "org/repo"}
+        )
 
         captured: list[dict] = []
 
@@ -579,10 +586,12 @@ class TestStageAuthenticate:
         token_info = MagicMock(
             user_id="bearer-user",
             token="ghp_bearer",
-            repos=None,
+            repos={"org/repo"},
             capabilities=None,
         )
-        req = _make_request(headers={"Authorization": "Bearer agent-key"})
+        req = _make_request(
+            headers={"Authorization": "Bearer agent-key", "X-Repo": "org/repo"}
+        )
         result = await _stage_authenticate(
             req,
             "rid-bearer-enforce",
@@ -613,8 +622,10 @@ class TestStageAuthenticate:
     @pytest.mark.anyio
     async def test_bearer_bypasses_other_paths(self):
         """Valid Bearer succeeds without any HMAC headers."""
-        token_info = MagicMock(user_id="agent-1", token="ghp_agent", repos=None, capabilities=None)
-        req = _make_request(headers={"Authorization": "Bearer agent-key"})
+        token_info = MagicMock(user_id="agent-1", token="ghp_agent", repos={"org/repo"}, capabilities=None)
+        req = _make_request(
+            headers={"Authorization": "Bearer agent-key", "X-Repo": "org/repo"}
+        )
         result = await _stage_authenticate(
             req,
             "rid",

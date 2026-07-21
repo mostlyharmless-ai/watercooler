@@ -41,6 +41,11 @@ jobs:
     # the cross-tenant scope and provenance gaps shipped unobserved — this
     # job is the standing red light. LLM/embedder are stubbed in-fixture;
     # no external API or secrets required.
+    #
+    # Private-repo only: the public manifest carries no graphiti dependency
+    # (private-manifest-only pin, PR #1109), so graphiti_core can never
+    # import on the public side — every fixture setup errors.
+    if: github.repository == 'mostlyharmless-ai/watercooler-cloud'
     timeout-minutes: 10
     runs-on: ubuntu-latest
     env:
@@ -136,6 +141,11 @@ jobs:
     # pattern that took five recurrences (entry 01KPFPX8 from 2026-04-18
     # → v0.5.0 → v0.5.1 → v0.5.2) before this lint landed. See
     # scripts/lint-public-test-leaks.py for the algorithm.
+    #
+    # Private-repo only: the lint gates what SHIPS publicly, so it runs
+    # where the private tree exists; the script itself is not in the
+    # public allowlist (fails file-not-found on the public side).
+    if: github.repository == 'mostlyharmless-ai/watercooler-cloud'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -154,6 +164,10 @@ jobs:
     # relative to copy.bara.sky (identity or ordered transform sequence) or if
     # the skill identity disagrees with PERMITTED_SUBTREES in the Copybara
     # allowlist validator. Fast (~1s), stdlib-only.
+    #
+    # Private-repo only: the drift check reads copy.bara.sky and the
+    # checker script — neither ships publicly.
+    if: github.repository == 'mostlyharmless-ai/watercooler-cloud'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -180,6 +194,12 @@ jobs:
     # v2.1.186 (validate bugfix for local `source: "."` plugins); HOME points
     # at an empty scratch dir so hermeticity is self-verifying, and stdin must
     # be /dev/null or the CLI hangs.
+    #
+    # Private-repo only: the renderer replays the manifest's Copybara
+    # transforms against the PRIVATE source tree; on the public (already
+    # transformed) tree the render is meaningless, and the generator
+    # script does not ship publicly.
+    if: github.repository == 'mostlyharmless-ai/watercooler-cloud'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -213,6 +233,11 @@ jobs:
     # `marketplace add` and `plugin list --json` alone stay at exit 0 even
     # against a broken source. Pin floor is the version E2 exercised
     # (0.142.5).
+    #
+    # Private-repo only: same reason as claude-plugin-validate — the render
+    # only makes sense from the private source tree, and the generator
+    # script does not ship publicly.
+    if: github.repository == 'mostlyharmless-ai/watercooler-cloud'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4

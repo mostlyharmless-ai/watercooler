@@ -326,13 +326,18 @@ def _normalise_repos_claim(raw: Any) -> Optional[frozenset[str]]:
 def repo_claim_mode() -> str:
     """Return the configured repo-claim enforcement mode.
 
-    ``warn`` (default for v2.0): claim absent → log + accept; claim
-    present → enforce membership.
+    ``enforce`` (default since Wave 6, 2026-07-15): claim absent →
+    403; claim present → enforce membership. Ratified after the R4
+    telemetry window (7 days sustained-zero ``repo_claim_absent``,
+    thread ``audit-transport-modes-hosted-db-2026-07:44``) with
+    production already running enforce via env override since
+    2026-04-30 (see ``docs/RAILWAY_OPERATIONS.md``).
 
-    ``enforce`` (default for v2.1 after dashboard rollout): claim
-    absent → 403; claim present → enforce membership.
+    ``warn`` (opt-down, set ``WATERCOOLER_REQUIRE_REPO_CLAIM=warn``):
+    claim absent → log + accept; claim present → enforce membership.
+    Rollout/debug escape hatch only.
     """
-    raw = os.getenv("WATERCOOLER_REQUIRE_REPO_CLAIM", "warn").lower()
+    raw = os.getenv("WATERCOOLER_REQUIRE_REPO_CLAIM", "enforce").lower()
     if raw in ("enforce", "1", "true", "yes", "on"):
         return "enforce"
     return "warn"

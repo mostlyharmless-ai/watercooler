@@ -29,6 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Hosted repo-claim enforcement is now the code default** (Wave 6,
+  2026-07-15). `repo_claim_mode()` defaults to `enforce` when
+  `WATERCOOLER_REQUIRE_REPO_CLAIM` is unset: a hosted request whose token
+  lacks a `repos` claim is rejected with 403 instead of logged-and-accepted.
+  Ratified after the R4 telemetry window (7 days sustained-zero
+  `repo_claim_absent`, thread `audit-transport-modes-hosted-db-2026-07:44`);
+  Railway production has run enforce via env override since 2026-04-30, so
+  this aligns the shipped default with production reality. Behavior change
+  is confined to fresh installs and environments without the override —
+  exactly the population that should fail closed. Set
+  `WATERCOOLER_REQUIRE_REPO_CLAIM=warn` to opt down (rollout/debug escape
+  hatch). Rejections surface actionably in proxy transport since #1120.
+
 - **Write contract is now write-behind by default** (#906). With `async_sync`
   enabled (the default), a single-writer committer daemon owns commit+push
   (batched), and ordinary writes return under a new `[mcp.sync].default_confirm`

@@ -28,6 +28,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import authority_support
@@ -83,6 +84,15 @@ class CandidateMetadata:
     lesson_statement: Optional[str] = None
     root_cause: Optional[str] = None
     fix: Optional[str] = None
+    # F1: immutable owner stamp written at emission (Disposition-Owner marker).
+    # None on candidates that predate the stamp — owner then falls back to the
+    # source thread's current ball-holder at read time.
+    disposition_owner: Optional[str] = None
+    # F3: version-bound canonical root-cause slug (`Root-Cause-Canonical:
+    # <slug>@<version>`). None on pre-taxonomy candidates (the frozen sidecar
+    # carries their backfilled slugs).
+    root_cause_canonical: Optional[str] = None
+    root_cause_taxonomy_version: Optional[int] = None
     raw_body: str = ""
 
 
@@ -127,6 +137,18 @@ _MARKER_PATTERNS: dict[str, re.Pattern[str]] = {
     ),
     "Moral-Delegation-Reason": re.compile(
         r"^Moral-Delegation-Reason:\s*(.+?)\s*$", re.MULTILINE
+    ),
+    # F1 (Commons cluster Decision 01KXQ32Q7Z41F0P7A1JHN0S527): immutable
+    # disposition-owner stamp written at candidate emission. Takes precedence
+    # over the source thread's current ball-holder when resolving who owns
+    # dispositioning the candidate.
+    "Disposition-Owner": re.compile(
+        r"^Disposition-Owner:\s*(.+?)\s*$", re.MULTILINE
+    ),
+    # F3: canonical root-cause slug, version-bound (`<slug>@<taxonomy-version>`)
+    # so live records stay unambiguous as the taxonomy evolves.
+    "Root-Cause-Canonical": re.compile(
+        r"^Root-Cause-Canonical:\s*([a-z0-9-]+)@(\d+)\s*$", re.MULTILINE
     ),
 }
 
@@ -184,6 +206,12 @@ _CANDIDATE_ENTRY_RE = re.compile(
 # deliberately non-terminal — the candidate stays open (§5.4).
 _TERMINAL_DISPOSITION_KINDS = frozenset({"promoted", "rejected"})
 
+# F1 lifecycle (Commons cluster Decision 01KXQ32Q7Z41F0P7A1JHN0S527): `expired`
+# is DORMANT, not terminal — an expired candidate leaves the default pending
+# list but stays discoverable (include_expired) and remains directly promotable
+# (`expired → promoted` is an accepted transition). Only the TTL sweep writes it.
+_DORMANT_DISPOSITION_KINDS = frozenset({"expired"})
+
 
 def _extract_disposition_target(disp_entry: dict) -> Optional[str]:
     body = disp_entry.get("body", "") or ""
@@ -197,39 +225,138 @@ def _extract_disposition_kind(disp_entry: dict) -> Optional[str]:
     return m.group(1).lower() if m else None
 
 
+@dataclass
+class CandidateState:
+    """Resolved lifecycle state of a candidate Note.
+
+    ``state`` is one of:
+
+    - ``pending`` — no state-changing evidence on the thread.
+    - ``promoted`` / ``rejected`` — ABSORBING: once reached, no later
+      disposition Note changes it (a stale ``keep_exploring``/``reframe``
+      appended after ``rejected`` does not reopen; reopening a terminal
+      outcome would need a separately authorized transition, which does not
+      exist).
+    - ``expired`` — DORMANT: set by the TTL sweep; excluded from the default
+      pending listing but directly promotable (``expired → promoted``).
+
+    ``evidence_entry_id``/``evidence_source`` name what produced the state:
+    ``disposition`` (a ``CandidateDisposition`` Note) or ``promoted_entry``
+    (a genuine ``Promoted-From:``-stamped promotion — the #886 synthetic
+    resolved state, which holds even when the paired disposition write failed).
+    """
+
+    state: str = "pending"
+    evidence_entry_id: Optional[str] = None
+    evidence_source: Optional[str] = None
+    disposition_kind: Optional[str] = None
+
+
+def _entry_fold_key(entry: dict) -> tuple:
+    """Stable total order for the disposition fold.
+
+    Primary order is the numeric thread ``index``. Entries without a usable
+    numeric index sort AFTER all indexed entries, ordered by
+    ``(timestamp, entry_id)`` — a documented, deterministic fallback (callers
+    pass thread entries in any order, so the fold must not depend on list
+    order; rereview 01KXQ0SDJKGARWM5CR8EZM8069).
+    """
+    idx = entry.get("index")
+    if isinstance(idx, bool):  # bool is an int subclass; never a real index
+        idx = None
+    if isinstance(idx, int):
+        return (0, idx, str(entry.get("entry_id") or entry.get("id") or ""))
+    return (
+        1,
+        str(entry.get("timestamp") or ""),
+        str(entry.get("entry_id") or entry.get("id") or ""),
+    )
+
+
+def _disposition_target_of(entry: dict) -> Optional[str]:
+    """The candidate a disposition Note references, via either marker."""
+    target = _extract_disposition_target(entry)
+    if target is None:
+        body = entry.get("body", "") or ""
+        m = _CANDIDATE_ENTRY_RE.search(body)
+        target = m.group(1) if m else None
+    return target
+
+
+def resolve_candidate_state(
+    candidate_entry_id: str, thread_entries: list[dict]
+) -> CandidateState:
+    """Fold the thread's entries into the candidate's lifecycle state.
+
+    A state machine over the entries in stable total order (numeric thread
+    index, with the documented ``_entry_fold_key`` fallback) — NOT a
+    last-matching-marker lookup:
+
+    - A genuine promoted entry (``Promoted-From:`` + authority markers, per
+      ``_extract_promoted_from``) puts the candidate in absorbing ``promoted``
+      even when its paired disposition Note never got written (#886).
+    - A ``CandidateDisposition: promoted|rejected`` Note targeting the
+      candidate is absorbing.
+    - ``CandidateDisposition: expired`` is dormant — it applies only while the
+      candidate is not absorbed and is superseded by a later promotion.
+    - ``keep_exploring`` / ``reframe`` (and unknown kinds) never change state.
+
+    Args:
+        candidate_entry_id: Bare ULID of the candidate Note.
+        thread_entries: All entry dicts of the candidate's thread (any order).
+    """
+    result = CandidateState()
+    for entry in sorted(thread_entries, key=_entry_fold_key):
+        if result.state in _TERMINAL_DISPOSITION_KINDS:
+            break  # absorbing — nothing later changes it
+        if _extract_promoted_from(entry) == candidate_entry_id:
+            result = CandidateState(
+                state="promoted",
+                evidence_entry_id=str(entry.get("entry_id") or entry.get("id") or "") or None,
+                evidence_source="promoted_entry",
+            )
+            continue
+        kind = _extract_disposition_kind(entry)
+        if kind is None:
+            continue
+        if _disposition_target_of(entry) != candidate_entry_id:
+            continue
+        if kind in _TERMINAL_DISPOSITION_KINDS or kind in _DORMANT_DISPOSITION_KINDS:
+            result = CandidateState(
+                state=kind,
+                evidence_entry_id=str(entry.get("entry_id") or entry.get("id") or "") or None,
+                evidence_source="disposition",
+                disposition_kind=kind,
+            )
+        # keep_exploring / reframe / unknown kinds: deliberate no-ops.
+    return result
+
+
 def candidate_has_terminal_disposition(
     candidate_entry_id: str, thread_entries: list[dict]
 ) -> bool:
     """Whether *candidate_entry_id* has been terminally dispositioned.
 
-    Terminal means either a ``CandidateDisposition: promoted|rejected`` Note
-    referencing the candidate — via ``Disposition-Target:`` (the MCP promote
-    path) or ``Candidate-Entry:`` (the dashboard judgment route) — or a genuine
-    promoted entry stamped ``Promoted-From:`` (#886: the promotion committed
-    but its paired disposition Note never got written). Non-terminal
-    dispositions (``keep_exploring``, ``reframe``) leave the candidate open by
-    design.
+    Terminal means the resolved state is ``promoted`` or ``rejected`` — via a
+    ``CandidateDisposition`` Note referencing the candidate
+    (``Disposition-Target:`` from the MCP promote path or ``Candidate-Entry:``
+    from the dashboard judgment route) or a genuine promoted entry stamped
+    ``Promoted-From:`` (#886). ``expired`` is dormant, NOT terminal — an
+    expired candidate is excluded from pending listings by its state but
+    remains promotable. Non-terminal dispositions (``keep_exploring``,
+    ``reframe``) leave the candidate open by design.
 
     Args:
         candidate_entry_id: Bare ULID of the candidate Note.
         thread_entries: All entry dicts of the candidate's thread (any order).
 
     Returns:
-        True if the candidate is resolved and must not be listed as pending.
+        True if the candidate is terminally resolved (promoted/rejected).
     """
-    for entry in thread_entries:
-        kind = _extract_disposition_kind(entry)
-        if kind in _TERMINAL_DISPOSITION_KINDS:
-            body = entry.get("body", "") or ""
-            target = _extract_disposition_target(entry)
-            if target is None:
-                m = _CANDIDATE_ENTRY_RE.search(body)
-                target = m.group(1) if m else None
-            if target == candidate_entry_id:
-                return True
-        if _extract_promoted_from(entry) == candidate_entry_id:
-            return True
-    return False
+    return (
+        resolve_candidate_state(candidate_entry_id, thread_entries).state
+        in _TERMINAL_DISPOSITION_KINDS
+    )
 
 
 def _extract_promoted_from(entry: dict) -> Optional[str]:
@@ -335,6 +462,14 @@ def parse_candidate_body(
             meta.moral_delegation_warning = value.strip().lower() == "true"
         elif key == "Moral-Delegation-Reason":
             meta.moral_delegation_reason = value
+        elif key == "Disposition-Owner":
+            meta.disposition_owner = value
+        elif key == "Root-Cause-Canonical":
+            meta.root_cause_canonical = value  # group(1) = slug
+            try:
+                meta.root_cause_taxonomy_version = int(m.group(2))
+            except (IndexError, ValueError):
+                meta.root_cause_taxonomy_version = None
 
     # Decision statement — first non-empty line after ## Candidate Decision
     cd_match = re.search(
@@ -453,41 +588,40 @@ def validate_candidate_for_promotion(
     # nothing to match"; None means "caller opted out of the check" (unit tests
     # of pure body construction). Production callers always supply the list.
     if existing_thread_entries is not None:
-        for entry in existing_thread_entries:
-            target = _extract_disposition_target(entry)
-            kind = _extract_disposition_kind(entry)
-            if (
-                target == meta.candidate_entry_id
-                and kind in ("promoted", "rejected")
-            ):
-                raise PromotionError(
-                    f"candidate {meta.candidate_entry_id} already has a "
-                    f"CandidateDisposition Note with kind={kind!r} on the "
-                    f"thread (disposition entry id "
-                    f"{entry.get('entry_id', '?')!r}); re-promotion would "
-                    f"silently duplicate the Level-3 act. Append-only: the "
-                    f"candidate body itself stays "
-                    f"`Candidate-Status: needs_human_confirmation` forever, "
-                    f"so the body check alone is insufficient."
-                )
-
-            # #886: a promoted entry already exists for this candidate even
-            # though no disposition was found — the disposition write failed
-            # after the promoted entry committed. Re-promotion would append a
-            # duplicate promoted entry. Reconcile by appending the missing
-            # disposition Note, not by re-running promotion.
-            if _extract_promoted_from(entry) == meta.candidate_entry_id:
+        resolved = resolve_candidate_state(
+            meta.candidate_entry_id, existing_thread_entries
+        )
+        # `expired` is dormant, not terminal — expired → promoted is an
+        # accepted transition (F1, Decision 01KXQ32Q7Z41F0P7A1JHN0S527), so
+        # only the absorbing states block.
+        if resolved.state in _TERMINAL_DISPOSITION_KINDS:
+            if resolved.evidence_source == "promoted_entry":
+                # #886: a promoted entry already exists for this candidate even
+                # though no disposition was found — the disposition write failed
+                # after the promoted entry committed. Re-promotion would append
+                # a duplicate promoted entry. Reconcile by appending the missing
+                # disposition Note, not by re-running promotion.
                 raise PromotionError(
                     f"candidate {meta.candidate_entry_id} already has a "
                     f"promoted entry on the thread (entry id "
-                    f"{entry.get('entry_id', '?')!r}) carrying "
-                    f"`Promoted-From: {meta.candidate_entry_id}`, but no "
-                    f"matching CandidateDisposition Note was found — the "
+                    f"{resolved.evidence_entry_id!r}) carrying "
+                    f"`Promoted-From: {meta.candidate_entry_id}` — even if no "
+                    f"matching CandidateDisposition Note exists, the "
                     f"disposition write likely failed after the promoted entry "
                     f"committed (#886). Re-promotion would write a duplicate "
                     f"promoted entry; reconcile by appending the "
                     f"missing CandidateDisposition Note instead."
                 )
+            raise PromotionError(
+                f"candidate {meta.candidate_entry_id} already has a "
+                f"CandidateDisposition Note with kind="
+                f"{resolved.disposition_kind!r} on the thread (disposition "
+                f"entry id {resolved.evidence_entry_id!r}); re-promotion would "
+                f"silently duplicate the Level-3 act. Append-only: the "
+                f"candidate body itself stays "
+                f"`Candidate-Status: needs_human_confirmation` forever, "
+                f"so the body check alone is insufficient."
+            )
 
     if meta.candidate_status and meta.candidate_status.lower() not in (
         "needs_human_confirmation",
@@ -1008,6 +1142,12 @@ def format_promotion_lesson_body(
         if meta.confidence is not None
         else "Confidence: (not recorded on candidate)"
     )
+    # F3 (Decision 01KXQ32Q7Z41F0P7A1JHN0S527): canonical slug is recomputed
+    # from the EFFECTIVE root cause (post-edits) — an edited durable lesson must
+    # never carry the candidate's stale slug. Lazy import: keeps promotion.py's
+    # import surface minimal (learning_extraction never imports promotion).
+    from .learning_extraction import canonical_root_cause_stamp
+
     lines = [
         "Spec: learnings-promoted",
         f"Promoted-From: {meta.candidate_entry_id}",
@@ -1015,6 +1155,7 @@ def format_promotion_lesson_body(
         "Authority-Source: human",
         "Authority-Basis: human_promoted",
         f"Human-Authorized-By: {auth}",
+        f"Root-Cause-Canonical: {canonical_root_cause_stamp(root_cause)}",
     ]
     if edited_fields:
         lines.append(f"Promotion-Edits: {', '.join(edited_fields)}")
@@ -1088,6 +1229,159 @@ def format_candidate_disposition_body(
         "whose `Disposition-Target` matches the candidate's entry ID.",
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# F1 candidate TTL (Commons cluster Decision 01KXQ32Q7Z41F0P7A1JHN0S527)
+# ---------------------------------------------------------------------------
+
+# Learning candidates only: Decision and Supersession candidate shapes are
+# governance candidates and must never be swept by a learning-lifecycle policy.
+_TTL_SWEEP_CANDIDATE_TYPES = frozenset({"learning"})
+
+DEFAULT_CANDIDATE_TTL_DAYS = 30
+
+
+@dataclass
+class ExpiryPlan:
+    """One planned ``CandidateDisposition: expired`` write (not yet written)."""
+
+    candidate_entry_id: str
+    topic: str
+    candidate_title: str
+    emitted_at: str
+    expires_at: str
+    title: str
+    body: str
+
+
+def candidate_expires_at(
+    emitted_at: str, ttl_days: int = DEFAULT_CANDIDATE_TTL_DAYS
+) -> Optional[str]:
+    """ISO expiry instant for a candidate emitted at *emitted_at*.
+
+    Returns None when the timestamp cannot be parsed (such a candidate is
+    never swept — fail-open keeps a malformed timestamp from silently
+    dispositioning someone's candidate).
+    """
+    try:
+        emitted = datetime.fromisoformat(str(emitted_at).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if emitted.tzinfo is None:
+        emitted = emitted.replace(tzinfo=timezone.utc)
+    return (emitted + timedelta(days=ttl_days)).isoformat()
+
+
+def format_candidate_expiry_body(
+    candidate_entry_id: str,
+    topic: str,
+    *,
+    ttl_days: int,
+    emitted_at: str,
+    owner: Optional[str] = None,
+) -> str:
+    """Body of the TTL sweep's ``CandidateDisposition: expired`` Note.
+
+    Marker parity with ``format_candidate_disposition_body`` so the state
+    resolver reads it identically. Append-only and reversible: promotion from
+    the expired state remains accepted (``expired → promoted``).
+    """
+    lines = [
+        "Spec: candidate-disposition",
+        "CandidateDisposition: expired",
+        f"Disposition-Target: {candidate_entry_id}",
+        f"Candidate-TTL-Days: {ttl_days}",
+    ]
+    if owner:
+        lines.append(f"Disposition-Owner: {_scrub_marker_value(owner)}")
+    lines += [
+        "",
+        "## Disposition",
+        f"Candidate `{candidate_entry_id}` on thread `{topic}` (emitted "
+        f"{emitted_at}) passed its {ttl_days}-day review TTL without a "
+        f"disposition and is marked **expired** by the candidate-lifecycle "
+        f"sweep (F1).",
+        "",
+        "## What expired means",
+        "Dormant, not terminal: the candidate leaves the default pending list "
+        "but remains discoverable (`include_expired`) and stays directly "
+        "promotable — `expired → promoted` is an accepted transition. "
+        "`promoted`/`rejected` outcomes are never altered by expiry.",
+    ]
+    return "\n".join(lines)
+
+
+def plan_candidate_expiries(
+    topic: str,
+    thread_entries: list[dict],
+    *,
+    now: datetime,
+    ttl_days: int = DEFAULT_CANDIDATE_TTL_DAYS,
+    thread_ball: Optional[str] = None,
+) -> list[ExpiryPlan]:
+    """Pure planner for the TTL sweep over one thread's entries.
+
+    Selects candidates that are (a) Learning candidates
+    (``_TTL_SWEEP_CANDIDATE_TYPES`` — Decision/Supersession shapes are
+    excluded by policy), (b) still ``pending`` per ``resolve_candidate_state``
+    (already-expired candidates are skipped, making the sweep idempotent), and
+    (c) older than *ttl_days*. Writing the planned Notes — through a
+    ball-preserving append — is the caller's job.
+
+    ``thread_ball`` is the F1 historical-owner fallback: a candidate that
+    predates the ``Disposition-Owner:`` emission stamp records the source
+    thread's current ball-holder on its expiry Note (stamp wins when present —
+    the same precedence the pending listing applies).
+    """
+    plans: list[ExpiryPlan] = []
+    for node in thread_entries:
+        body = node.get("body")
+        if not isinstance(body, str) or "Candidate-Status:" not in body:
+            continue
+        # entries.jsonl stores node ids as "entry:<ULID>"; disposition targets
+        # carry the bare form — normalize or the sweep's expiry Notes never
+        # match the candidate in any consumer (same convention as the decisions
+        # tool's _bare_entry_id).
+        raw_id = str(node.get("entry_id") or node.get("id") or "")
+        entry_id = raw_id.split(":", 1)[1] if raw_id.startswith("entry:") else raw_id
+        if not entry_id:
+            continue
+        meta = parse_candidate_body(body, entry_id, topic)
+        if (meta.candidate_status or "").lower() != "needs_human_confirmation":
+            continue
+        if (meta.candidate_type or "").lower() not in _TTL_SWEEP_CANDIDATE_TYPES:
+            continue
+        if resolve_candidate_state(entry_id, thread_entries).state != "pending":
+            continue
+        emitted_at = str(node.get("timestamp") or "")
+        expires_at = candidate_expires_at(emitted_at, ttl_days)
+        if expires_at is None:
+            continue
+        try:
+            expiry_dt = datetime.fromisoformat(expires_at)
+        except ValueError:
+            continue
+        if now < expiry_dt:
+            continue
+        plans.append(
+            ExpiryPlan(
+                candidate_entry_id=entry_id,
+                topic=topic,
+                candidate_title=str(node.get("title") or ""),
+                emitted_at=emitted_at,
+                expires_at=expires_at,
+                title=f"CandidateDisposition: expired {entry_id}",
+                body=format_candidate_expiry_body(
+                    entry_id,
+                    topic,
+                    ttl_days=ttl_days,
+                    emitted_at=emitted_at,
+                    owner=meta.disposition_owner or thread_ball,
+                ),
+            )
+        )
+    return plans
 
 
 # ---------------------------------------------------------------------------

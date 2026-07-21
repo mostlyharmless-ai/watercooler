@@ -14,6 +14,8 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .transport_defaults import DEFAULT_HOSTED_MCP_URL, DEFAULT_TRANSPORT
+
 logger = logging.getLogger(__name__)
 
 # Premium daemon routing — where does this daemon run?
@@ -726,6 +728,26 @@ class LearningsConfig(BaseModel):
             "Emit L2 promotion-candidate Notes on root-cause recurrence. "
             "Default-off; binds on a disposition owner + candidate TTL policy "
             "(critic conditions F1/F2) before enablement."
+        ),
+    )
+    candidate_ttl_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        description=(
+            "F1 candidate lifecycle (Decision 01KXQ32Q7Z41F0P7A1JHN0S527): days "
+            "a pending Learning candidate may sit without a disposition before "
+            "the skill-invoked, ball-preserving sweep marks it `expired` "
+            "(dormant — still promotable). Learning candidates only."
+        ),
+    )
+    blessed_thread: str = Field(
+        default="team-lessons",
+        description=(
+            "D2 blessed surface (Decision 01KXQ32Q7Z41F0P7A1JHN0S527, option "
+            "(c)): thread collecting a pointer Note (+ bidirectional xrefs) for "
+            "every promoted lesson. Empty string disables the projection. "
+            "Repair path: `watercooler reconcile-blessed-projection`."
         ),
     )
     recurrence_threshold: int = Field(
@@ -1720,12 +1742,15 @@ class McpConfig(BaseModel):
     #   hybrid — local calls run locally, premium capabilities proxied
     # See docs/MCP-CLIENTS.md for the full table and the naming-overlap caveat.
     transport: Literal["stdio", "http", "proxy", "hybrid"] = Field(
-        default="stdio",
+        default=DEFAULT_TRANSPORT,
         description=(
             "Execution-routing mode for the local watercooler-mcp process. "
             "NOT the agent↔mcp stdio pipe (which is always stdio). "
             "stdio=all-local; http=self-hosted HTTP server; "
-            "proxy=forward all calls to remote; hybrid=local + proxied premium."
+            "proxy=forward all calls to remote; hybrid=local + proxied premium. "
+            "Default is hosted-first (proxy): a boot with no hosted credentials "
+            "transparently falls back to local stdio, so an open-core / "
+            "not-yet-authenticated install still runs fully local."
         ),
     )
     host: str = Field(
@@ -1739,8 +1764,13 @@ class McpConfig(BaseModel):
         description="HTTP server port (http transport only)",
     )
     url: str = Field(
-        default="",
-        description="Remote MCP endpoint URL (proxy or hybrid remote endpoint)",
+        default=DEFAULT_HOSTED_MCP_URL,
+        description=(
+            "Remote MCP endpoint URL (proxy or hybrid remote endpoint). "
+            "Defaults to the hosted Watercooler service; override for a "
+            "self-hosted endpoint, or set an empty string with transport=stdio "
+            "for a fully local, endpoint-free install."
+        ),
     )
     capability_routes: Dict[str, str] = Field(
         default_factory=dict,

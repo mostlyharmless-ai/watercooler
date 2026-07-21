@@ -416,6 +416,27 @@ def list_threads_hosted(
             raise
 
 
+def nearest_topics_hosted(topic: str, limit: int = 3) -> list[str]:
+    """Closest existing topic slugs to *topic* by similarity.
+
+    Error-path helper for thread-not-found messages (#1121): one
+    directory listing (no per-thread meta reads), ranked with difflib.
+    Best-effort — any failure returns an empty list so enriching an
+    error message can never mask the original error.
+    """
+    import difflib
+
+    try:
+        error, client = _get_github_client()
+        if error or not client:
+            return []
+        items = client.list_files(GRAPH_THREADS_DIR)
+        topics = [f.name for f in items if f.type == "dir"]
+        return difflib.get_close_matches(topic, topics, n=limit, cutoff=0.4)
+    except Exception:
+        return []
+
+
 def read_thread_hosted(topic: str) -> tuple[str | None, str]:
     """Read thread content from GitHub repository (per-thread format).
 
@@ -1564,23 +1585,25 @@ def say_hosted(
                     return (f"Thread '{topic}' not found and create_if_missing=False", {})
                 log_debug(f"say_hosted: creating new thread in per-thread format: {topic}")
 
-            # Get or initialize status and ball
+            # Get or initialize status
             if meta is not None:
                 log_debug(f"say_hosted: found thread in per-thread format: {topic}")
                 status = meta.get("status", "OPEN")
-                old_ball = meta.get("ball", "Agent")
             else:
                 # New thread defaults
                 status = "OPEN"
-                old_ball = ""
 
-            # Determine new ball owner (flip to "other" agent)
-            agent_lower = agent.lower()
-            old_ball_lower = (old_ball or "").lower()
-            if old_ball_lower == agent_lower or not old_ball:
-                new_ball = "Agent"  # Default counterpart
-            else:
-                new_ball = agent  # Give ball to current agent
+            # Ball resolution (#1122): the hosted path has no counterpart
+            # registry to flip to — that mapping is client-side config the
+            # server never sees. The ball therefore stays with the author
+            # on every say: a thread held by its author is honest ("mine
+            # until I hand off") and surfaces in someone's waiting-on
+            # view, whereas the old hardcoded "Agent" placeholder (used
+            # whenever the thread was new or the author already held the
+            # ball) matched no participant and orphaned the thread.
+            # Directing the ball at another actor is handoff's job (or
+            # next_actor=<agent> on watercooler_write).
+            new_ball = agent
 
             # Build updated graph data with new entry
             # Thread title: use existing title if present, otherwise derive from topic
@@ -2016,7 +2039,21 @@ def handoff_hosted(
                 return (f"Thread '{topic}' not found", {})
 
             status = meta.get("status", "OPEN")
-            new_ball = target_agent or "Agent"  # Default to "Agent" if not specified
+            # No target → ball stays with the author, not the "Agent"
+            # placeholder no participant matches (#1122).
+            new_ball = target_agent or agent
+
+            # Advisory (#1122) — see helpers.ball_target_warning.
+            ball_warning = None
+            if target_agent:
+                from .helpers import ball_target_warning
+
+                authors = {
+                    e.get("agent")
+                    for e in (existing_entries or [])
+                    if e.get("agent")
+                }
+                ball_warning = ball_target_warning(target_agent, authors, agent)
 
             # Resolve code_branch: explicit param > HTTP context > None
             http_ctx_local = get_http_context()
@@ -2094,6 +2131,7 @@ def handoff_hosted(
                         "timestamp": timestamp,
                         "status": status,
                         "ball": new_ball,
+                        "ball_warning": ball_warning,
                         "sha": new_commit_sha,
                         "format": "per-thread",
                     },

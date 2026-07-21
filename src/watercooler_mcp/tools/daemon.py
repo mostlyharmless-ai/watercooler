@@ -294,6 +294,101 @@ def _daemon_status_impl(
     return json.dumps(status_payload, indent=2)
 
 
+# Non-daemon producers whose findings the ordinary listing must surface
+# (rereview #1131 P1). Each writes via daemons.state.append_findings under the
+# caller's auth-derived namespace (hosted) or unscoped (local single-tenant).
+_AUX_FINDING_SOURCES: tuple[str, ...] = ("blessed_projection",)
+
+
+def _resolve_aux_scope(*, hosted_hint: bool = False):
+    """Resolve ``(namespace, allow_unscoped)`` for aux-findings access.
+
+    Rereview #1131 P1 (round 4): the ABSENCE of auth context is not proof of
+    local mode — a hosted request whose middleware failed to install or
+    retain the contextvars must fail closed, never fall into the global
+    unscoped store. The caller is treated as positively local only when
+    neither the per-request signal (``hosted_hint``, e.g. from an already
+    resolved ``is_hosted_context``) nor the process runtime (a live
+    ``HostedDaemonCoordinator``) says hosted. In hosted mode the scope MUST
+    resolve: ``resolve_scope()`` raises ``ScopeResolutionError`` on missing
+    or incomplete context, and callers convert that into their fail-closed
+    behavior (skip the read / refuse the ack / log the lost record).
+    """
+    from ..auth.scope import resolve_scope, resolve_scope_or_off_hosted
+
+    hosted = hosted_hint
+    if not hosted:
+        from ..daemons import get_hosted_coordinator
+
+        hosted = get_hosted_coordinator() is not None
+    if hosted:
+        scope = resolve_scope()  # raises when context is absent OR incomplete
+        return scope.namespace, False, scope
+    # Positively local: still prefer a resolvable scope if one exists.
+    scope = resolve_scope_or_off_hosted()
+    if scope is not None:
+        return scope.namespace, False, scope
+    return "", True, None
+
+
+def _aux_source_findings(
+    *,
+    daemon_filter: str | None,
+    severity: str | None,
+    category: str | None,
+    topic: str | None,
+    limit: int,
+    unacknowledged_only: bool,
+) -> list:
+    """Findings from auxiliary (non-daemon) sources, caller-scoped.
+
+    Included when no daemon filter is set, or when the filter names an aux
+    source. Reads use the request's auth-derived namespace in hosted mode —
+    a tenant can only ever read its own aux findings — and the local
+    unscoped store otherwise (mirroring the write-side contract in
+    ``_persist_blessed_repair_finding``).
+    """
+    if daemon_filter and daemon_filter not in _AUX_FINDING_SOURCES:
+        return []
+    names = (daemon_filter,) if daemon_filter else _AUX_FINDING_SOURCES
+
+    # Rereview #1131 P1 (rounds 2+4): a hosted caller with broken OR absent
+    # auth context FAILS CLOSED — it must never read the global findings
+    # file. Only a positively local caller takes the unscoped store.
+    from ..auth.scope import ScopeResolutionError
+
+    try:
+        namespace, allow_unscoped, _ = _resolve_aux_scope()
+    except ScopeResolutionError:
+        log.warning(
+            "aux findings: hosted scope resolution failed; "
+            "refusing unscoped read",
+            exc_info=True,
+        )
+        return []
+
+    from ..daemons.state import load_findings
+
+    out: list = []
+    for name in names:
+        try:
+            out.extend(
+                load_findings(
+                    name,
+                    limit=limit,
+                    severity=severity,
+                    category=category,
+                    topic=topic,
+                    unacknowledged_only=unacknowledged_only,
+                    namespace=namespace,
+                    _allow_unscoped=allow_unscoped,
+                )
+            )
+        except Exception:  # noqa: BLE001 — a broken aux store must not 500 the listing
+            log.warning("aux finding source %r read failed", name, exc_info=True)
+    return out
+
+
 def _daemon_findings_impl(
     ctx: Context,
     daemon: str = "",
@@ -370,6 +465,22 @@ def _daemon_findings_impl(
 
             eff_ctx = get_effective_context()
             scope_id = eff_ctx.scope_id if eff_ctx else None
+            if not scope_id:
+                # Rereview #1131 P1 (round 5): scope_id=None means "ALL
+                # scopes" to the coordinator — a hosted caller whose auth
+                # context is absent must fail closed, never aggregate other
+                # tenants' registered-daemon findings.
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "message": (
+                            "Cannot list findings: hosted runtime without a "
+                            "resolved caller scope (missing user identity)."
+                        ),
+                        "findings": [],
+                    },
+                    indent=2,
+                )
             findings = runtime.get_findings(
                 scope_id=scope_id,
                 limit=limit,
@@ -398,6 +509,26 @@ def _daemon_findings_impl(
             },
             indent=2,
         )
+
+    # Auxiliary (non-daemon) finding sources — rereview #1131 P1: the blessed
+    # projection persists repair findings without being a registered daemon,
+    # so the ordinary all-daemon listing must merge them in explicitly. Reads
+    # use the CALLER's auth-derived namespace — no cross-tenant exposure.
+    try:
+        aux = _aux_source_findings(
+            daemon_filter=daemon or None,
+            severity=severity or None,
+            category=category or None,
+            topic=topic or None,
+            limit=limit,
+            unacknowledged_only=unacknowledged_only,
+        )
+        if aux:
+            findings = list(findings) + aux
+            findings.sort(key=lambda f: f.created_at, reverse=True)
+            findings = findings[:limit]
+    except Exception:  # noqa: BLE001 — aux sources must not break the listing
+        log.warning("_daemon_findings_impl: aux-source read failed", exc_info=True)
 
     results = [f.to_dict() for f in findings]
     enrich_stats: dict[str, Any] | None = None
@@ -722,6 +853,41 @@ def _acknowledge_finding_impl(
 
     ensure_hosted_scope_for_current_context(reason="acknowledge_finding")
 
+    # Auxiliary (non-daemon) sources: rereview #1131 P2. These findings live
+    # under the caller's auth-derived namespace (hosted) or the local
+    # unscoped store — the SAME contract as their write/list paths. The
+    # coordinator's daemon-derived namespace recovery cannot apply (there is
+    # no registered daemon to recover ``state_namespace`` from), so route the
+    # acknowledgement directly at the state layer with the caller's scope.
+    if daemon_name in _AUX_FINDING_SOURCES:
+        from ..auth.scope import ScopeResolutionError
+
+        try:
+            aux_namespace, aux_allow_unscoped, _ = _resolve_aux_scope()
+        except ScopeResolutionError as exc:
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": (
+                        "Cannot acknowledge auxiliary finding: hosted scope "
+                        f"resolution failed ({exc})."
+                    ),
+                },
+                indent=2,
+            )
+
+        from ..daemons.state import acknowledge_finding as _ack_aux
+
+        def _ack_one(fid: str) -> bool:
+            return _ack_aux(
+                daemon_name,
+                fid,
+                namespace=aux_namespace,
+                _allow_unscoped=aux_allow_unscoped,
+            )
+
+        return _run_acknowledgements(daemon_name, ids, _ack_one)
+
     runtime = get_daemon_runtime()
     if runtime is None:
         return json.dumps(
@@ -759,12 +925,17 @@ def _acknowledge_finding_impl(
         def _ack_one(fid: str) -> bool:
             return _ack(daemon_name, fid)
 
+    return _run_acknowledgements(daemon_name, ids, _ack_one)
+
+
+def _run_acknowledgements(daemon_name: str, ids: list[str], ack_one) -> str:
+    """Apply one bound per-id ack callable to each id; JSON status result."""
     acknowledged: list[str] = []
     not_found: list[str] = []
     errors: list[dict] = []
     for fid in ids:
         try:
-            ok = _ack_one(fid)
+            ok = ack_one(fid)
         except ValueError as exc:
             errors.append({"finding_id": fid, "message": str(exc)})
             continue

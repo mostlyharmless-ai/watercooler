@@ -119,53 +119,110 @@ if sys.platform == "win32":
             write_through=True
         )
 
-# Build the default local server via the shared factory.
-# This replaces manual module-level assembly with a single factory call.
-from .server_factory import build_default_local_server
-mcp = build_default_local_server()
+# ---------------------------------------------------------------------------
+# Transport-gated module initialization (modality-robustness plan Phase 2,
+# audit-transport-modes-hosted-db-2026-07:68, Fork B / gap G2).
+#
+# Under an EFFECTIVE proxy — configured proxy WITH credentials — this process
+# is a thin forwarder: building the local tool surface, starting the memory
+# task queue's worker threads, and initializing the local daemon manager are
+# pure waste, and an enabled daemon set would tick against the local worktree
+# while user traffic goes hosted (the split-brain documented at audit :61).
+#
+# The gate is the EFFECTIVE transport, not the configured string: a
+# credential-less proxy install resolves to stdio (#1128 fallback) and MUST
+# keep the full local stack. Resolution fails open to "stdio" so a config or
+# credential read error can never break a local import. Tests pin
+# WATERCOOLER_MCP_TRANSPORT=stdio in tests/conftest.py, so library/test
+# imports build the full stack regardless of operator configuration.
+# ---------------------------------------------------------------------------
 
-# Instrument FastMCP tool execution for observability
-setup_instrumentation()
 
-# Initialize memory sync callbacks (Issue #83 - callback registry pattern)
-from .memory_sync import init_memory_sync_callbacks
-init_memory_sync_callbacks()
+def _effective_import_transport() -> str:
+    """The effective execution-routing mode at import time (fail-open stdio)."""
+    try:
+        from watercooler.config_facade import config as _facade
 
-# Initialize persistent memory task queue (recovery + retry for fire-and-forget tasks)
-try:
-    from .memory_queue import init_memory_queue
-    from watercooler.memory_config import get_queue_max_workers, get_queue_task_timeout
-    init_memory_queue(
-        max_workers=get_queue_max_workers(),
-        task_timeout=get_queue_task_timeout(),
-    )
-    # Register backend executors with the queue worker
-    from .memory_sync import init_memory_queue_executors
-    init_memory_queue_executors()
+        from .config import effective_transport, get_mcp_transport_config
 
-    # Inform operator when T2 features are configured but unavailable
-    from .memory import _graphiti_importable
-    if not _graphiti_importable():
-        import logging as _startup_logging
-        _startup_logging.getLogger(__name__).info(
-            "Memory queue started but watercooler_memory not installed — "
-            "T2 (Graphiti) features unavailable. T1 operations unaffected."
+        # THE authoritative snapshot — the same env-override-aware source
+        # main() dispatches from (review #1135 P1: get_watercooler_config()
+        # alone misses WATERCOOLER_MCP_URL/_TRANSPORT, letting import and
+        # dispatch disagree — the exact split-brain this gate prevents).
+        tc = get_mcp_transport_config()
+        return effective_transport(
+            tc.get("transport", "stdio"),
+            tc.get("url", "") or "",
+            _facade.get_hosted_api_key() or "",
         )
-except Exception as _mq_err:
-    import logging as _mq_logging
-    _mq_logging.getLogger(__name__).warning(
-        "Could not initialise memory task queue: %s", _mq_err,
-    )
+    except Exception:  # noqa: BLE001 — import must never hard-fail on config IO
+        return "stdio"
 
-# Initialize daemon management system (periodic thread scanning, hygiene)
-try:
-    from .daemons import init_daemons
-    init_daemons()
-except Exception as _dm_err:
-    import logging as _dm_logging
-    _dm_logging.getLogger(__name__).warning(
-        "Could not initialise daemon manager: %s", _dm_err,
-    )
+
+_IMPORT_TRANSPORT = _effective_import_transport()
+_THIN_PROXY_IMPORT = _IMPORT_TRANSPORT == "proxy"
+
+if _THIN_PROXY_IMPORT:
+    # Thin proxy client: no local tool surface, no queue workers, no local
+    # daemon manager. ``mcp`` stays None; main() dispatches to _run_proxy,
+    # which builds its own forwarding server. Tool re-exports below resolve
+    # to their module-level None placeholders.
+    mcp = None
+    # NOTE (review #1135 P1, round 3): the thin import deliberately does NOT
+    # touch the user-global stance-producer sidecar — another repo on this
+    # machine may have a live LOCAL daemon fleet that owns it
+    # (_try_acquire_daemon_lock permits concurrent per-repo fleets). Staleness
+    # relative to THIS repo is handled reader-side: the Stop hook resolves
+    # the current repo's effective transport and skips local findings
+    # sources entirely under proxy (stop_hook._local_findings_apply).
+else:
+    # Build the default local server via the shared factory.
+    # This replaces manual module-level assembly with a single factory call.
+    from .server_factory import build_default_local_server
+    mcp = build_default_local_server()
+
+    # Instrument FastMCP tool execution for observability
+    setup_instrumentation()
+
+    # Initialize memory sync callbacks (Issue #83 - callback registry pattern)
+    from .memory_sync import init_memory_sync_callbacks
+    init_memory_sync_callbacks()
+
+    # Initialize persistent memory task queue (recovery + retry for fire-and-forget tasks)
+    try:
+        from .memory_queue import init_memory_queue
+        from watercooler.memory_config import get_queue_max_workers, get_queue_task_timeout
+        init_memory_queue(
+            max_workers=get_queue_max_workers(),
+            task_timeout=get_queue_task_timeout(),
+        )
+        # Register backend executors with the queue worker
+        from .memory_sync import init_memory_queue_executors
+        init_memory_queue_executors()
+
+        # Inform operator when T2 features are configured but unavailable
+        from .memory import _graphiti_importable
+        if not _graphiti_importable():
+            import logging as _startup_logging
+            _startup_logging.getLogger(__name__).info(
+                "Memory queue started but watercooler_memory not installed — "
+                "T2 (Graphiti) features unavailable. T1 operations unaffected."
+            )
+    except Exception as _mq_err:
+        import logging as _mq_logging
+        _mq_logging.getLogger(__name__).warning(
+            "Could not initialise memory task queue: %s", _mq_err,
+        )
+
+    # Initialize daemon management system (periodic thread scanning, hygiene)
+    try:
+        from .daemons import init_daemons
+        init_daemons()
+    except Exception as _dm_err:
+        import logging as _dm_logging
+        _dm_logging.getLogger(__name__).warning(
+            "Could not initialise daemon manager: %s", _dm_err,
+        )
 
 # Re-export registered tools for test compatibility (must be after registration)
 health = _diagnostic_tools.health
@@ -197,11 +254,112 @@ daemon_findings_tool = _daemon_tools.daemon_findings
 # ============================================================================
 
 
+def _preflight_hosted_auth(client, repo: str) -> None:
+    """One authenticated round-trip against the hosted endpoint before serving.
+
+    A definitive 4xx here is a configuration/authorisation failure — bad API
+    key, or the repo missing from the token's ``repos`` claim
+    (``repo_claim_mismatch``) — that FastMCP's proxy would otherwise surface
+    to the agent CLI as a bare JSON-RPC -32603, discarding the backend's
+    actionable error body (#1117). Exit with that body on stderr instead: the
+    same startup-failure class as the missing-URL / missing-API-key checks in
+    ``_run_proxy``, and strictly better than a live server whose every tool
+    call 403s. Anything else (network failure, timeout, 5xx) only warns — the
+    proxy builds a fresh session per request, so a transient startup failure
+    recovers on its own.
+    """
+    import asyncio
+
+    from .premium_client import summarize_http_error
+
+    async def _probe() -> None:
+        session = client.new()
+        try:
+            async with session:
+                await session.ping()
+        finally:
+            try:
+                # Same forced-teardown idiom as PremiumToolClient
+                # _fresh_session: a failed connect handshake never reaches
+                # __aexit__, so the partial session would leak without this.
+                await session._disconnect(force=True)
+            except Exception:
+                pass
+
+    try:
+        asyncio.run(_probe())
+    except Exception as exc:
+        status, detail = summarize_http_error(exc)
+        if status is not None and 400 <= status < 500:
+            detail = detail or str(exc)
+            lines = [
+                f"Error: the hosted backend rejected this proxy session "
+                f"(HTTP {status}).",
+                "",
+                f"  {detail}",
+            ]
+            if "repo_claim_mismatch" in detail:
+                lines += [
+                    "",
+                    f"Connect {repo!r} in the dashboard, or set "
+                    "[mcp].proxy_repo to a repo this token is authorised "
+                    "for. If you just connected it, the authorisation cache "
+                    "can take up to 5 minutes to refresh.",
+                ]
+            print("\n".join(lines), file=sys.stderr)
+            sys.exit(1)
+        print(
+            f"Warning: hosted preflight failed ({exc}); starting the proxy "
+            "anyway — per-request sessions will retry.",
+            file=sys.stderr,
+        )
+
+
+def _resolve_effective_transport(transport: str, transport_config: dict) -> str:
+    """Apply the hosted-first fallback to the configured transport.
+
+    ``proxy`` is the shipped default, but proxy has no local fallback — it can
+    only forward to a remote endpoint with an API key. A not-yet-authenticated
+    or open-core install has no key, so rather than hard-exit we transparently
+    fall back to local ``stdio`` (a working local instance), emitting a one-line
+    hint. Any non-proxy transport, or proxy with real credentials, is returned
+    unchanged.
+
+    Args:
+        transport: The configured transport (``stdio``/``http``/``proxy``/``hybrid``).
+        transport_config: The resolved transport config (carries ``url``).
+
+    Returns:
+        The effective transport to run.
+    """
+    if transport != "proxy":
+        return transport
+
+    from .config import effective_transport
+
+    url = transport_config.get("url", "")
+    api_key = config.get_hosted_api_key()
+    effective = effective_transport(transport, url, api_key)
+    if effective != "proxy":
+        print(
+            "Watercooler: hosted (proxy) is the default, but no hosted API key "
+            "was found in ~/.watercooler/credentials.toml — running locally "
+            "instead. Run `watercooler login` to use the hosted services, or set "
+            '[mcp].transport = "stdio" to make local-only explicit.',
+            file=sys.stderr,
+        )
+    return effective
+
+
 def _run_proxy(transport_config: dict, *, boot_cwd: Path | None = None) -> None:
     """Run the MCP server in proxy mode.
 
     Forwards all tool calls to a remote hosted MCP endpoint via FastMCP's
-    built-in proxy. No local services (llama-server, FalkorDB) are started.
+    built-in proxy. The process is a THIN client: no local services
+    (llama-server, FalkorDB) are started, and — because module import is
+    transport-gated on the effective transport (Phase 2, gap G2) — no local
+    tool surface is built, no memory-queue workers run, and no local daemon
+    manager is initialized in an authenticated proxy process.
 
     Args:
         transport_config: Dict with 'url' key for the remote endpoint.
@@ -243,6 +401,11 @@ def _run_proxy(transport_config: dict, *, boot_cwd: Path | None = None) -> None:
     # config defaults are None == infinite). This client is disconnected at
     # create_proxy, so the proxy builds a fresh session per request.
     client = build_premium_client(url, headers, api_key)
+
+    # Fail fast, with the backend's own error body, on an auth/authz
+    # rejection — see _preflight_hosted_auth (#1117).
+    _preflight_hosted_auth(client, headers.get("X-Repo", ""))
+
     proxy = create_proxy(client, name="Watercooler Cloud (Proxy)")
 
     # Multi-repo routing (#1082, completion-sequence Wave 2, Codex-approved
@@ -526,7 +689,11 @@ Environment variables:
     from .config import get_mcp_transport_config
 
     transport_config = get_mcp_transport_config()
-    transport = transport_config["transport"]
+    # Hosted-first default: proxy needs credentials; without them, fall back to
+    # local stdio so a not-yet-authenticated / open-core install still runs.
+    transport = _resolve_effective_transport(
+        transport_config["transport"], transport_config
+    )
 
     # Proxy mode: forward all tool calls to a remote hosted MCP endpoint.
     # No local services start — the proxy handles everything.
@@ -541,6 +708,20 @@ Environment variables:
 
     # Check for first-run and suggest config initialization
     check_first_run()
+
+    # Local dispatch requires the local surface. Import-time gating only
+    # skips it under an EFFECTIVE proxy, and proxy dispatch returned above —
+    # this can only trip if configuration changed between import and main()
+    # (e.g. credentials appeared at import, vanished by dispatch). Fail loud
+    # rather than crash on a None surface.
+    if mcp is None:
+        print(
+            "Error: local transport requested but the local tool surface was "
+            "not built at import (the process started as an authenticated "
+            "proxy). Restart the server so import and dispatch agree.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Auto-start llama-server for LLM if graph features are enabled
     ensure_llm_running()

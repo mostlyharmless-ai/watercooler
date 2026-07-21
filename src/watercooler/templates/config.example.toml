@@ -60,10 +60,14 @@ version = 1
 # Agent client config (`claude mcp add --transport stdio ...`) stays stdio
 # regardless of this value. Set url and api_key in credentials.toml for
 # proxy/hybrid.
+# Default: "proxy" (hosted-first). A boot with no hosted API key transparently
+# falls back to local "stdio", so an open-core / not-yet-authenticated install
+# still runs fully local. Set "stdio" to make local-only explicit.
 # Env: WATERCOOLER_MCP_TRANSPORT
-# transport = "stdio"
+# transport = "proxy"
 
-# Remote MCP endpoint URL
+# Remote MCP endpoint URL. Defaults to the hosted Watercooler service (shown
+# below); override only for a self-hosted endpoint.
 # proxy:  points to /mcp (full remote surface)
 # hybrid: points to /mcp/premium (premium capabilities only)
 # Env: WATERCOOLER_MCP_URL

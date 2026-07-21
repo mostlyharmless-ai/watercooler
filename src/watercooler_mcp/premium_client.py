@@ -161,6 +161,34 @@ def _extract_http_response(exc: BaseException) -> Any:
     return None
 
 
+def summarize_http_error(exc: BaseException) -> tuple[int | None, str | None]:
+    """Return ``(status_code, detail)`` for the HTTP response carried by *exc*.
+
+    ``detail`` is the hosted endpoint's own error body — ``error`` /
+    ``message`` from a JSON body, else the raw text (truncated) — or ``None``
+    when *exc* carries no HTTP response or the body is empty. The hosted
+    endpoint returns actionable 4xx bodies (e.g. ``repo_claim_mismatch``
+    naming the unauthorised X-Repo and the authorised repo set), but
+    ``str(exc)`` on an httpx error is only the bare status line, so callers
+    that report errors must use this to keep the body visible (#1117).
+    """
+    response = _extract_http_response(exc)
+    if response is None:
+        return None, None
+    status = getattr(response, "status_code", None)
+    detail = None
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            detail = body.get("error") or body.get("message")
+    except Exception:
+        pass
+    if not detail:
+        text = (getattr(response, "text", "") or "").strip()
+        detail = text[:2000] or None
+    return status, detail
+
+
 def build_premium_client(
     url: str,
     headers: dict[str, str],
@@ -418,32 +446,15 @@ class PremiumToolClient:
                 "message": str(exc),
             }
             # Surface the remote HTTP response body when the failure carries
-            # one. The hosted endpoint already returns actionable 4xx bodies
-            # (e.g. ``repo_claim_mismatch`` naming the unauthorised X-Repo and
-            # the caller's authorised repo set), but ``str(exc)`` on an httpx
-            # error is only the bare status line ("Client error '403
-            # Forbidden' for url ..."), so without this the caller never sees
-            # *why* the call was refused or how to fix it. The error may arrive
-            # directly, chained (__cause__/__context__), or wrapped in an
-            # ExceptionGroup (the mcp SDK raises raise_for_status() inside an
-            # anyio context) — _extract_http_response walks all of those.
-            response = _extract_http_response(exc)
-            if response is not None:
-                status = getattr(response, "status_code", None)
-                if status is not None:
-                    payload["status_code"] = status
-                remote_error = None
-                try:
-                    body = response.json()
-                    if isinstance(body, dict):
-                        remote_error = body.get("error") or body.get("message")
-                except Exception:
-                    pass
-                if not remote_error:
-                    text = (getattr(response, "text", "") or "").strip()
-                    remote_error = text[:2000] or None
-                if remote_error:
-                    payload["remote_error"] = remote_error
+            # one. The error may arrive directly, chained
+            # (__cause__/__context__), or wrapped in an ExceptionGroup (the
+            # mcp SDK raises raise_for_status() inside an anyio context) —
+            # summarize_http_error walks all of those.
+            status, remote_error = summarize_http_error(exc)
+            if status is not None:
+                payload["status_code"] = status
+            if remote_error:
+                payload["remote_error"] = remote_error
             return json.dumps(payload)
 
 

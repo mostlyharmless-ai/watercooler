@@ -240,24 +240,41 @@ def _say_impl(
         if write_error:
             log_error(f"say hosted mode failed: {write_error}")
             if "not found" in write_error.lower():
-                raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
+                # Make the dead end actionable (#1121): name the remedy for
+                # the genuinely-new-topic case and suggest near-miss slugs
+                # for the mistyped-topic case.
+                from ..hosted_ops import nearest_topics_hosted
+
+                raise ThreadNotFoundError(
+                    topic=topic,
+                    repo=context.code_repo,
+                    hint=(
+                        "Pass create_if_missing=true to start a new thread "
+                        "with this entry, or check the topic slug."
+                    ),
+                    suggestions=nearest_topics_hosted(topic),
+                )
             raise HostedModeError(write_error, operation="say")
 
         status = result.get("status", "OPEN")
-        ball = result.get("ball", "Agent")
+        ball = result.get("ball", agent)
         slack_synced = result.get("slack_synced", False)
 
+        # Hosted say keeps the ball with the author (#1122) — say so,
+        # rather than reporting a flip that didn't happen. Prose isn't
+        # ball state, but it shouldn't contradict it either.
+        keep_ball = ball == agent
         lines = [
             f"✅ Entry added to '{topic}'",
             f"Title: {title}",
             f"Role: {role} | Type: {entry_type}",
-            f"Ball flipped to: {ball}",
+            f"Ball remains with: {ball}" if keep_ball else f"Ball flipped to: {ball}",
             f"Status: {status}",
             f"Entry-ID: {entry_id}",
         ]
         if slack_synced:
             lines.append("Slack: synced")
-        lines.append(_next_signal(entry_type, ball))
+        lines.append(_next_signal(entry_type, ball, keep_ball=keep_ball))
 
         return _format_warnings_for_response("\n".join(lines))
 
@@ -608,15 +625,27 @@ def _handoff_impl(
                 raise ThreadNotFoundError(topic=topic, repo=context.code_repo)
             raise HostedModeError(write_error, operation="handoff")
 
-        new_ball = result.get("ball", target_agent or "Agent")
+        new_ball = result.get("ball", target_agent or agent)
         status = result.get("status", "OPEN")
+        ball_warning = result.get("ball_warning")
+
+        # A no-target hosted handoff keeps the ball with the author
+        # (#1122) — report keep-working, not a handoff to yourself.
+        keep_ball = target_agent is None and new_ball == agent
 
         return (
-            f"✅ Ball handed off to: {new_ball}\n"
-            f"Thread: {topic}\n"
+            (
+                f"✅ Ball remains with: {new_ball}\n"
+                if keep_ball
+                else f"✅ Ball handed off to: {new_ball}\n"
+            )
+            + f"Thread: {topic}\n"
             f"Status: {status}\n"
             + (f"Note: {note}\n" if note else "")
-            + _next_signal(ball=new_ball, target_agent=target_agent or new_ball)
+            + (f"⚠️ {ball_warning}\n" if ball_warning else "")
+            + _next_signal(
+                ball=new_ball, target_agent=target_agent, keep_ball=keep_ball
+            )
         )
 
     # =====================================================================
@@ -693,10 +722,31 @@ def _handoff_impl(
             except Exception as e:
                 logging.getLogger(__name__).warning(f"Slack handoff sync failed for {topic}: {e}")
 
+        # Advisory (#1122) — see helpers.ball_target_warning. Best-effort:
+        # the handoff itself has already committed; a scan failure must not
+        # turn a successful write into an error.
+        ball_warning = None
+        try:
+            from watercooler.baseline_graph.storage import (
+                get_graph_dir,
+                load_thread_entries,
+            )
+            from ..helpers import ball_target_warning
+
+            authors = {
+                node.get("agent")
+                for node in load_thread_entries(get_graph_dir(threads_dir), topic)
+                if node.get("agent")
+            }
+            ball_warning = ball_target_warning(target_agent, authors, agent)
+        except Exception:
+            log_debug("handoff: participant scan for ball advisory failed")
+
         return (
             f"✅ Ball handed off to: {target_agent}\n"
             f"Thread: {topic}\n"
             + (f"Note: {note}\n" if note else "")
+            + (f"⚠️ {ball_warning}\n" if ball_warning else "")
             + push_warning
             + f"\n{_next_signal(ball=target_agent, target_agent=target_agent)}"
         )
@@ -1045,6 +1095,7 @@ def _write_impl(
     downgrade_to_note: bool = False,
     code_path: str = "",
     title: str | None = None,
+    create_if_missing: bool = False,
 ) -> str:
     """Unified write path — the preferred tool for ordinary agent writes.
 
@@ -1085,6 +1136,12 @@ def _write_impl(
             title would be a generic section marker (``## TL;DR``, ``## Summary``,
             etc.) — the wrapper emits an advisory warning in the response when
             it detects this case so agents can correct at write time.
+        create_if_missing: Create the thread if it doesn't exist (default:
+            False). Applies to ``next_actor="auto"`` writes only — the first
+            entry on a new topic is authored with say semantics; acking or
+            handing off a nonexistent thread is more likely a mistyped topic
+            than an intent, so those branches still require an existing
+            thread.
 
     Returns:
         Confirmation string with Ball: / Next: advisory suffix, plus an optional
@@ -1283,7 +1340,7 @@ def _write_impl(
             ctx=ctx,
             role=role,
             entry_type=entry_type,
-            create_if_missing=False,
+            create_if_missing=create_if_missing,
             code_path=code_path,
             agent_func=agent_func,
             authority_fields=authority_fields,

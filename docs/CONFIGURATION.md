@@ -113,8 +113,8 @@ watercooler config validate --strict
 | `agent_tag` | `""` | Short lowercase tag appended to agent name |
 | `threads_dir` | `""` (auto) | Explicit threads directory; leave empty for auto-discovery |
 | `threads_base` | `""` (auto) | Base directory for the local `_local` fallback. Resolves to the parent of the code repo (or parent of cwd) when not set. Note: the orphan-branch worktree at `~/.watercooler/worktrees/<repo>/` is controlled by a hardcoded `WORKTREE_BASE` constant — it does NOT come from this key. |
-| `transport` | `"stdio"` | **Execution-routing mode for the local MCP process.** The name is a historical artefact — it does *not* control the agent↔mcp pipe (always stdio). `stdio` = run every tool call locally (default). `http` = the server itself serves HTTP (used by the hosted Railway deployment). `proxy` / `hybrid` = local process forwards some or all tool calls to a remote hosted endpoint. See [MCP-CLIENTS.md — Hosted mode](./MCP-CLIENTS.md#hosted-mode) for the full table and the naming-overlap caveat. |
-| `url` | `""` | Remote hosted endpoint URL for `proxy` or `hybrid`. Empty when `transport = "stdio"`. |
+| `transport` | `"proxy"` | **Execution-routing mode for the local MCP process.** The name is a historical artefact — it does *not* control the agent↔mcp pipe (always stdio). `proxy` (default, hosted-first) = forward all tool calls to the hosted endpoint; a boot with no hosted credentials transparently falls back to local `stdio`, so an open-core / not-yet-authenticated install still runs fully local. `stdio` = run every tool call locally. `http` = the server itself serves HTTP (used by the hosted Railway deployment). `hybrid` = local process plus proxied premium capabilities. See [MCP-CLIENTS.md — Hosted mode](./MCP-CLIENTS.md#hosted-mode) for the full table and the naming-overlap caveat. |
+| `url` | `"https://watercooler-cloud-production.up.railway.app/mcp/"` | Remote hosted endpoint URL for `proxy` or `hybrid`. Defaults to the hosted Watercooler service; override for a self-hosted endpoint, or set empty with `transport = "stdio"` for a fully local install. |
 | `proxy_repo` | `""` | Repo name (`org/repo`) sent in proxy/hybrid headers when local git discovery can't find one. |
 | `proxy_branch` | `""` | Branch name sent in proxy/hybrid headers (same fallback role). |
 | `capability_routes` | `{}` | Per-capability route overrides for hybrid mode. See [MCP-CLIENTS.md — Capability route overrides](./MCP-CLIENTS.md#capability-route-overrides-hybrid). |
@@ -397,8 +397,8 @@ Environment variables override TOML settings.
 | `WATERCOOLER_THREADS_BASE` | `mcp.threads_base` | (auto) | Base directory for the local `_local` fallback |
 | `WATERCOOLER_AUTO_BRANCH` | `mcp.auto_branch` | `true` | Auto-create threads branches |
 | `WATERCOOLER_AUTO_PROVISION` | `mcp.auto_provision` | `true` | Auto-create threads repos |
-| `WATERCOOLER_MCP_TRANSPORT` | `mcp.transport` | `"stdio"` | MCP transport: `stdio`, `http`, `proxy`, or `hybrid` |
-| `WATERCOOLER_MCP_URL` | `mcp.url` | `""` | Remote MCP endpoint URL for `proxy` or `hybrid` transport |
+| `WATERCOOLER_MCP_TRANSPORT` | `mcp.transport` | `"proxy"` | MCP transport: `stdio`, `http`, `proxy`, or `hybrid` (default `proxy`, hosted-first with local `stdio` fallback when no credentials) |
+| `WATERCOOLER_MCP_URL` | `mcp.url` | hosted `/mcp/` | Remote MCP endpoint URL for `proxy` or `hybrid` transport (defaults to the hosted Watercooler service) |
 | `WATERCOOLER_CODE_REPO` | `mcp.proxy_repo` | `""` | Override repo sent to remote MCP in `proxy` or `hybrid` mode |
 | `WATERCOOLER_CODE_BRANCH` | `mcp.proxy_branch` | `""` | Override branch sent to remote MCP in `proxy` or `hybrid` mode |
 | `WATERCOOLER_ALLOW_LOCAL_ONLY` | _(no TOML)_ | `""` | Set to `1` to explicitly allow thread writes into a directory that is not backed by a GitHub repository. Default behavior refuses such writes with an actionable error. Threads written in local-only mode are **not pushed to any remote**. See [TROUBLESHOOTING.md#local-only-mode](./TROUBLESHOOTING.md#local-only-mode). |

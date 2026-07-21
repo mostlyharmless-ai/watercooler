@@ -80,7 +80,7 @@ Restart Claude Code after running. For Codex, Cursor, or manual config, see
 
 > **Prefer a single-install plugin?** See [PLUGINS.md](./PLUGINS.md) for packaged
 > Claude Code / Codex plugins that bundle the MCP server registration with the skills
-> in one install (coming with the first packaged release).
+> in one install (available from v0.5.5).
 
 > **How this works:** `uvx` downloads and runs the MCP server on demand — no separate
 > install step is needed. Claude Code launches the server automatically when it needs

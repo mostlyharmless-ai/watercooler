@@ -19,6 +19,7 @@ def _patch_config(
     decision_stance_enabled: bool = False,
     transport: str = "stdio",
     hosted: bool = False,
+    api_key: str = "",
 ):
     class _FakeCoordinatorCfg:
         enabled = coordinator_enabled
@@ -37,6 +38,7 @@ def _patch_config(
     class _FakeMcp:
         daemons = _FakeDaemons()
         transport = _transport_value
+        url = "https://findings-source.invalid/mcp/"
 
     class _FakeFull:
         mcp = _FakeMcp()
@@ -46,9 +48,16 @@ def _patch_config(
         def full():
             return _FakeFull()
 
+        @staticmethod
+        def get_hosted_api_key():
+            # Hermetic credential source (review #1135 P1 round 2): "" =
+            # credential-less; proxy-effective cases pass an explicit key.
+            return api_key
+
     fake_module = types.ModuleType("watercooler.config_facade")
     fake_module.config = _FakeConfig()
     monkeypatch.setitem(sys.modules, "watercooler.config_facade", fake_module)
+    monkeypatch.delenv("WATERCOOLER_MCP_URL", raising=False)
     # Deterministic hosted-mode gate (default local) so the resolver's runtime
     # hosted check does not depend on the real environment.
     import watercooler_mcp.auth as _auth
@@ -225,8 +234,14 @@ class TestMirrorsRealRegistrationGate:
         if coordinator_enabled and pc_policy == "local":
             registers_locally["project_coordinator"] = True
 
+        class _DsCfg:
+            enabled = decision_stance_enabled
+
+        ds_policy = daemon_execution_policy(
+            "decision_stance", _DsCfg(), transport, in_hosted_coordinator=False
+        )
         coordinator_active = coordinator_enabled and coordinator_route != "disabled"
-        if decision_stance_enabled and not coordinator_active:
+        if decision_stance_enabled and not coordinator_active and ds_policy == "local":
             registers_locally["decision_stance"] = True
 
         local_names = list(registers_locally.keys())
@@ -246,10 +261,33 @@ class TestMirrorsRealRegistrationGate:
             # Global gate: daemons subsystem off, sub-daemons on → no producer.
             dict(daemons_enabled=False, coordinator_enabled=True, coordinator_route="local", decision_stance_enabled=True, transport="stdio"),
             dict(daemons_enabled=False, coordinator_enabled=False, coordinator_route="auto", decision_stance_enabled=True, transport="stdio"),
+            # Proxy (review #1135 P1 round 2): thread-analytic decision_stance
+            # routes hosted under EFFECTIVE proxy -> no LOCAL producer. These
+            # matrix cases pass transport="proxy" straight into the mirror +
+            # resolve_local_stance_producer (policy-level agreement).
+            dict(daemons_enabled=True, coordinator_enabled=False, coordinator_route="auto", decision_stance_enabled=True, transport="proxy", api_key="wc_findings_test_key"),
+            dict(daemons_enabled=True, coordinator_enabled=True, coordinator_route="auto", decision_stance_enabled=True, transport="proxy", api_key="wc_findings_test_key"),
+            dict(daemons_enabled=True, coordinator_enabled=True, coordinator_route="local", decision_stance_enabled=True, transport="proxy", api_key="wc_findings_test_key"),
+            # Credential-less proxy: EFFECTIVE stdio (#1128 fallback) — the
+            # resolver must agree with the registration decision AT the
+            # effective transport, i.e. the local producer exists.
+            dict(daemons_enabled=True, coordinator_enabled=False, coordinator_route="auto", decision_stance_enabled=True, transport="proxy", api_key="", effective_transport="stdio"),
         ]
         for case in matrix:
-            _patch_config(monkeypatch, **case)
-            expected = self._real_registration_decision(**case)
+            patch_kwargs = {
+                k: v for k, v in case.items() if k != "effective_transport"
+            }
+            mirror_kwargs = {
+                k: v
+                for k, v in case.items()
+                if k not in ("api_key", "effective_transport")
+            }
+            # The mirror models init_daemons, which gates on the EFFECTIVE
+            # transport — substitute it where a case declares one.
+            if "effective_transport" in case:
+                mirror_kwargs["transport"] = case["effective_transport"]
+            _patch_config(monkeypatch, **patch_kwargs)
+            expected = self._real_registration_decision(**mirror_kwargs)
             actual = findings_source.resolve_active_stance_producer()
             assert actual == expected, f"mismatch for {case}: expected {expected}, got {actual}"
 

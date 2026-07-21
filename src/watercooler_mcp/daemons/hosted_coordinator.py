@@ -1077,11 +1077,16 @@ class HostedDaemonCoordinator:
             return self._fleet_scheduler.get_all_findings(**kwargs)
         findings: list[Finding] = []
         with self._lock:
-            entries = (
-                [self._scopes[scope_id]]
-                if scope_id and scope_id in self._scopes
-                else list(self._scopes.values())
-            )
+            if scope_id:
+                # A truthy scope_id NEVER falls through to the all-scope
+                # aggregate (rereview #1131 P1, round 6): a resolved-but-
+                # unregistered scope (e.g. reaped between ensure_scope and
+                # this read) previously took the else-branch below and
+                # returned every tenant's findings. Unknown scope → nothing.
+                entry = self._scopes.get(scope_id)
+                entries = [entry] if entry is not None else []
+            else:
+                entries = list(self._scopes.values())
             # Iterate inside the lock so the reaper cannot teardown a scope
             # between snapshot and read (TOCTOU fix).
             for entry in entries:

@@ -1,0 +1,105 @@
+# Canonical root-cause taxonomy (F3, Commons cluster Decision
+# 01KXQ32Q7Z41F0P7A1JHN0S527; plan workflow-packs-prepare-work-discovery-2026-05-29:85).
+#
+# Purpose: recurrence over raw LLM root-cause strings is noise — the same real
+# cause phrased five ways never counts as recurring. Every durable candidate /
+# promoted-lesson surface stamps `Root-Cause-Canonical: <slug>@<version>`;
+# recurrence counting groups by that canonical slug.
+#
+# Seeded (version 1) by clustering the root_cause strings of the 51 Learning
+# candidates in the 2026-06 harvest (P2a, thread
+# workflow-packs-prepare-work-discovery-2026-05-29). `other` is the fail-open
+# bucket — an unmatched root cause is never dropped, only unclassified.
+#
+# Matching is deliberately dumb and deterministic: lowercase substring hints,
+# first category (in file order) with a hit wins. Evolving the taxonomy bumps
+# `version`; already-stamped surfaces keep their slug@old-version (live records
+# stay unambiguous; see the frozen sidecar for the historical corpus).
+
+version = 1
+
+[[category]]
+slug = "sync-concurrency"
+label = "Concurrent writers / sync races"
+hints = [
+    "concurren", "race", "rebase", "diverge", "async worker", "dirty",
+    "lock", "conflict", "stale state",
+]
+
+[[category]]
+slug = "silent-failure"
+label = "Errors swallowed or masked as success"
+hints = [
+    "swallow", "silent", "ignore", "ignored", "masked", "does not commit",
+    "no error", "returns none", "not surfaced",
+]
+
+[[category]]
+slug = "contract-drift"
+label = "Implicit or violated inter-component contracts"
+hints = [
+    "contract", "drift", "assumed", "assumption", "mismatch between",
+    "incorrectly assumed", "does not enforce", "canonical string",
+]
+
+[[category]]
+slug = "config-fragmentation"
+label = "Configuration spread / precedence ambiguity"
+hints = [
+    "config", "configuration", "env var", "environment variable",
+    "import path", "fragment", "priority system",
+]
+
+[[category]]
+slug = "missing-verification"
+label = "Acting without checking (no preflight/validation)"
+hints = [
+    "lack of", "without checking", "not verified", "no verification",
+    "preflight", "readiness", "validation", "did not set", "fail to handle",
+    "fails to handle", "failed to check",
+]
+
+[[category]]
+slug = "env-dependency"
+label = "Environment / platform / library assumptions"
+hints = [
+    "ssh", "certificate", "windows", "platform", "library", "virtualenv",
+    "instability", "subprocess", "not forward",
+]
+
+[[category]]
+slug = "security-exposure"
+label = "Secrets, unscoped access, weak auth"
+hints = [
+    "secret", "auth", "unscoped", "leak", "exposure", "timingsafeequal",
+    "header-trust", "sensitive",
+]
+
+[[category]]
+slug = "schema-mismatch"
+label = "Data shape / format / limit incompatibilities"
+hints = [
+    "dim", "schema", "format", "boundary", "boundaries", "size", "limit",
+    "incompatib", "over-counting",
+]
+
+[[category]]
+slug = "responsibility-diffusion"
+label = "Duplicated or unclear ownership between components"
+hints = [
+    "duplicated", "duplication", "separation of concern", "bolted on",
+    "spread across", "unclear separation", "responsibilities",
+]
+
+[[category]]
+slug = "missing-provenance"
+label = "No record of who/when/why (tracking gaps)"
+hints = [
+    "provenance", "tracking", "supersession", "observability",
+    "not integrated", "no structured",
+]
+
+[[category]]
+slug = "other"
+label = "Unclassified (fail-open)"
+hints = []

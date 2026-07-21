@@ -12,6 +12,19 @@ import pytest
 from watercooler import stop_hook
 from watercooler_mcp.daemons.findings_source import FindingsSource
 
+# The real per-repo effective-transport gate, saved before the autouse pin
+# below replaces it. TestLocalFindingsGate restores it explicitly.
+_REAL_LOCAL_FINDINGS_GATE = stop_hook._local_findings_apply
+
+
+@pytest.fixture(autouse=True)
+def _pin_local_findings_gate(monkeypatch):
+    """Hermetic default: the suite must not consult THIS machine's real
+    config/credentials (an operator's authenticated-proxy setup would make
+    every source-resolution test return []). Gate tests restore the real
+    function themselves."""
+    monkeypatch.setattr(stop_hook, "_local_findings_apply", lambda: True)
+
 
 def _patch_single_source(monkeypatch, path: Path, daemon_name: str = "decision_extractor"):
     monkeypatch.setattr(
@@ -583,6 +596,166 @@ class TestFindingsSourceFallback:
         with caplog.at_level(logging.DEBUG, logger="watercooler.stop_hook"):
             stop_hook._findings_sources()
         assert any("falling back" in r.message for r in caplog.records)
+
+
+class TestLocalFindingsGate:
+    """Review #1135 P1 (round 3): the hook resolves THIS repo's effective
+    transport reader-side — under effective proxy NO local source applies
+    (decision_extractor included), and the user-global sidecar (possibly
+    owned by another repo's live fleet) is neither consulted nor mutated."""
+
+    def _setup_repo(
+        self, monkeypatch, tmp_path, *, transport, with_creds, sidecar=None
+    ):
+        home = tmp_path / "home"
+        wc = home / ".watercooler"
+        wc.mkdir(parents=True)
+        wc.joinpath("config.toml").write_text(
+            f'[mcp]\ntransport = "{transport}"\n'
+            'url = "https://stop-hook-gate.invalid/mcp/"\n',
+            encoding="utf-8",
+        )
+        if with_creds:
+            wc.joinpath("credentials.toml").write_text(
+                '[hosted]\napi_key = "wc_stop_hook_gate_key"\n', encoding="utf-8"
+            )
+        daemons_dir = wc / "daemons"
+        daemons_dir.mkdir()
+        if sidecar is not None:
+            daemons_dir.joinpath("active_stance_producer").write_text(
+                sidecar, encoding="utf-8"
+            )
+        workdir = home / "repo"
+        workdir.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("WATERCOOLER_MCP_TRANSPORT", raising=False)
+        monkeypatch.delenv("WATERCOOLER_MCP_URL", raising=False)
+        monkeypatch.chdir(workdir)
+        monkeypatch.setattr(stop_hook, "_DAEMONS_DIR", daemons_dir)
+        monkeypatch.setattr(
+            stop_hook,
+            "_ACTIVE_STANCE_PRODUCER_SIDECAR",
+            daemons_dir / "active_stance_producer",
+        )
+        # These tests exercise the REAL gate against the hermetic HOME.
+        monkeypatch.setattr(
+            stop_hook, "_local_findings_apply", _REAL_LOCAL_FINDINGS_GATE
+        )
+        return home
+
+    def test_credentials_without_config_is_authenticated_proxy(
+        self, monkeypatch, tmp_path
+    ):
+        """Review #1135 P1 (round 4): the normal hosted-first login path —
+        `watercooler login` writes credentials.toml and NO config file ever
+        exists. The shipped schema defaults (transport=proxy, baked hosted
+        URL) make that an authenticated proxy; the gate must resolve the
+        SAME defaults, not independent stdio/no-URL fallbacks."""
+        home = self._setup_repo(
+            monkeypatch,
+            tmp_path,
+            transport="proxy",  # placeholder; config removed below
+            with_creds=True,
+            sidecar="decision_stance",
+        )
+        home.joinpath(".watercooler", "config.toml").unlink()
+        assert stop_hook._findings_sources() == []
+
+    def test_no_config_no_credentials_polls_normally(self, monkeypatch, tmp_path):
+        # Default transport is proxy, but with no credentials it is
+        # EFFECTIVELY stdio — local polling proceeds.
+        home = self._setup_repo(
+            monkeypatch,
+            tmp_path,
+            transport="proxy",
+            with_creds=False,
+            sidecar="",
+        )
+        home.joinpath(".watercooler", "config.toml").unlink()
+        names = [s.daemon_name for s in stop_hook._findings_sources()]
+        assert names == ["decision_extractor"]
+
+    def test_effective_proxy_polls_no_local_sources(self, monkeypatch, tmp_path):
+        # Sidecar names a producer (another repo's live fleet) — irrelevant:
+        # this repo is effective proxy, so nothing local is polled.
+        self._setup_repo(
+            monkeypatch,
+            tmp_path,
+            transport="proxy",
+            with_creds=True,
+            sidecar="decision_stance",
+        )
+        assert stop_hook._findings_sources() == []
+
+    def test_credential_less_proxy_keeps_local_sources(self, monkeypatch, tmp_path):
+        # Effective stdio (#1128 fallback): normal fast-path behavior.
+        self._setup_repo(
+            monkeypatch,
+            tmp_path,
+            transport="proxy",
+            with_creds=False,
+            sidecar="decision_stance",
+        )
+        names = [s.daemon_name for s in stop_hook._findings_sources()]
+        assert names == ["decision_extractor", "decision_stance"]
+
+    def test_stdio_repo_unaffected_by_credentials(self, monkeypatch, tmp_path):
+        self._setup_repo(
+            monkeypatch,
+            tmp_path,
+            transport="stdio",
+            with_creds=True,
+            sidecar="",
+        )
+        names = [s.daemon_name for s in stop_hook._findings_sources()]
+        assert names == ["decision_extractor"]
+
+    def test_env_transport_override_wins(self, monkeypatch, tmp_path):
+        # Config says stdio; env says proxy (with creds + env url) → gate.
+        self._setup_repo(
+            monkeypatch,
+            tmp_path,
+            transport="stdio",
+            with_creds=True,
+            sidecar="decision_stance",
+        )
+        monkeypatch.setenv("WATERCOOLER_MCP_TRANSPORT", "proxy")
+        monkeypatch.setenv(
+            "WATERCOOLER_MCP_URL", "https://stop-hook-env.invalid/mcp/"
+        )
+        assert stop_hook._findings_sources() == []
+
+    def test_explicit_empty_env_url_means_effective_stdio(
+        self, monkeypatch, tmp_path
+    ):
+        """Review #1135 P1 (round 5): a PRESENT-but-empty WATERCOOLER_MCP_URL
+        stays empty at runtime (os.getenv(key, default) semantics), so an
+        authenticated configured proxy resolves to effective stdio — local
+        daemons run and their findings must keep flowing. Env-key presence,
+        not truthiness, decides whether config/baked values apply."""
+        self._setup_repo(
+            monkeypatch,
+            tmp_path,
+            transport="proxy",
+            with_creds=True,
+            sidecar="",
+        )
+        monkeypatch.setenv("WATERCOOLER_MCP_URL", "")
+        names = [s.daemon_name for s in stop_hook._findings_sources()]
+        assert names == ["decision_extractor"]
+
+    def test_unreadable_config_fails_open_to_polling(self, monkeypatch, tmp_path):
+        # A corrupt config must not silence the hook: the gate fails OPEN and
+        # normal polling proceeds (pre-existing behavior preserved).
+        home = self._setup_repo(
+            monkeypatch, tmp_path, transport="proxy", with_creds=True, sidecar=""
+        )
+        home.joinpath(".watercooler", "config.toml").write_text(
+            "[mcp\nthis is not toml", encoding="utf-8"
+        )
+        assert stop_hook._local_findings_apply() is True
+        names = [s.daemon_name for s in stop_hook._findings_sources()]
+        assert names == ["decision_extractor"]
 
 
 class TestSidecarFastPath:

@@ -131,12 +131,30 @@ def deployment_context() -> tuple[str, str, bool]:
     from .observability import log_warning
 
     try:
-        transport = str(get_mcp_transport_config().get("transport", "stdio"))
+        tconf = get_mcp_transport_config()
+        transport = str(tconf.get("transport", "stdio"))
     except Exception as exc:
         # Defaulting to stdio is the safe report fallback, but a genuinely
         # broken transport config should be diagnosable, not silent.
         log_warning(f"setup_report: transport config unreadable, assuming stdio: {exc}")
-        transport = "stdio"
+        tconf, transport = {}, "stdio"
+    # A credential-less proxy (incl. the proxy default) actually runs local
+    # stdio — see server._resolve_effective_transport. Reflect that so the
+    # report matches what runs: such a boot HAS a local checkout to bind.
+    if transport == "proxy":
+        try:
+            from .config import effective_transport
+            from watercooler.config_facade import config as _cfg
+
+            transport = effective_transport(
+                transport, tconf.get("url", ""), _cfg.get_hosted_api_key()
+            )
+        except Exception as exc:
+            log_warning(
+                f"setup_report: effective-transport probe failed, assuming "
+                f"stdio: {exc}"
+            )
+            transport = "stdio"
     hosted = False
     try:
         hosted = is_hosted_mode()

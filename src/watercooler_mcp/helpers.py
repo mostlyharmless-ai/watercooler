@@ -514,6 +514,28 @@ def _scan_thread_entries(
 # ============================================================================
 
 
+def ball_target_warning(
+    target_agent: str, entry_authors: set[str], author: str
+) -> str | None:
+    """Advisory when a handoff target has never authored on the thread (#1122).
+
+    A never-seen target is either a new participant (fine) or a typo that
+    will leave the thread in nobody's waiting-on view — surface it at write
+    time so the author can re-point in the same session. Shared by the
+    hosted and local handoff paths so the wording cannot diverge.
+    Case-insensitive membership; returns ``None`` when the target is known.
+    """
+    known = {a for a in entry_authors if a} | {author}
+    if target_agent.lower() in {a.lower() for a in known}:
+        return None
+    return (
+        f"ball handed to {target_agent!r}, which has not authored any "
+        f"entry on this thread — fine for a new participant; if it's a "
+        f"typo, the thread will sit in nobody's queue. Known "
+        f"participants: {', '.join(sorted(known))}."
+    )
+
+
 def _build_commit_footers(
     context: ThreadContext,
     *,

@@ -211,17 +211,31 @@ def format_learning_note_body(result: SynthesisResult, draft: LearningDraft) -> 
 
 
 def format_learning_candidate_body(
-    result: SynthesisResult, *, topic: str, pr_numbers: list[int]
+    result: SynthesisResult,
+    *,
+    topic: str,
+    pr_numbers: list[int],
+    disposition_owner: str | None = None,
 ) -> str:
     """Render a thread-visible *learning candidate* Note body (Phase 2 emission).
 
     Mirrors the decision extractor's candidate-Note shape: a ``needs_human_
     confirmation`` / ``Authority: none`` surface carrying the synthesized draft,
     for human review and promotion. Never an authoritative entry.
+
+    ``disposition_owner`` (F1, Decision 01KXQ32Q7Z41F0P7A1JHN0S527): the source
+    thread's ball-holder at emission time, stamped immutably as
+    ``Disposition-Owner:`` — listings prefer this stamp over read-time
+    ball-holder resolution when reporting who owns dispositioning the candidate.
     """
+    from .learning_extraction import canonical_root_cause_stamp
+
     draft = result.draft
     quotes = "\n".join(f"> {q}" for q in draft.verbatim_quotes) or "(none)"
     prs = ", ".join(f"#{n}" for n in pr_numbers) or "(none)"
+    owner_line = (
+        f"Disposition-Owner: {disposition_owner}\n" if disposition_owner else ""
+    )
     return (
         "Spec: learnings\n"
         "[automated: learnings]\n"
@@ -230,6 +244,8 @@ def format_learning_candidate_body(
         "Surface-Kind: learning\n"
         "Authority: none\n"
         "Status: advisory_until_phase_1a\n"
+        f"{owner_line}"
+        f"Root-Cause-Canonical: {canonical_root_cause_stamp(draft.root_cause)}\n"
         f"Confidence: {draft.confidence}/5\n"
         f"Source-Thread: {topic}\n"
         f"PRs: {prs}\n\n"
